@@ -7,12 +7,13 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
-node_modules
+frontend/node_modules
 keycloak
-.tanstack
+minio
+frontend/.tanstack
 postgres
 oauth2
-dist
+frontend/dist
 dist-ssr
 *.local
 patches

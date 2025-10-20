@@ -33,7 +33,7 @@ if [ "$DOMAIN" == "--dev" ]; then
   openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
     -keyout "$SSL_DIR/key.pem" \
     -out "$SSL_DIR/cert.pem" \
-    -subj "/C=US/ST=New Hampsire/L=Nashua/O=ApolloSFS/CN=localhost" \
+    -subj "/C=US/ST=NH/L=Nashua/O=ApolloSFS/CN=localhost" \
     -addext "subjectAltName=DNS:localhost,DNS:*.localhost,IP:192.168.68.54" 
 
   # change me to actual ip address

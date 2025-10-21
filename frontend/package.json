@@ -12,6 +12,7 @@
   "dependencies": {
     "@tanstack/react-query": "^5.90.3",
     "@tanstack/react-router": "^1.132.47",
+    "browserslist": "^4.26.3",
     "flowbite-react": "^0.12.9",
     "react": "^19.1.1",
     "react-dom": "^19.1.1"

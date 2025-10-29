@@ -17,6 +17,7 @@ frontend/dist
 dist-ssr
 *.local
 patches
+nginx/ssl
 
 # Editor directories and files
 .vscode/*

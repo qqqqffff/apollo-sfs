@@ -25,7 +25,7 @@ services:
       # keytool -genkeypair -alias localhost -keyalg RSA -keysize 2048 -validity 365 -keystore server.keystore -dname "cn=ServerAdministrator,o=Apollo,c=US" -keypass secret -storepass secret
     volumes:
       - "./keycloak:/opt/keycloak/data/"
-      - ${PWD}/server.keystore:/opt/keycloak/certs/server.keystore
+      - "./nginx/ssl:/opt/keycloak/ssl:ro"
     environment:
       KC_PROXY: edge
       KC_HOSTNAME: ${DOMAIN:-localhost}
@@ -37,9 +37,6 @@ services:
       KEYCLOAK_ADMIN: admin@example.com
       KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
       KEYCLOAK_PRODUCTION: true
-      KEYCLOAK_ENABLE_TLS: true
-      KEYCLOAK_TLS_KEYSTORE_FILE: /opt/keycloak/certs/server.keystore
-      KEYCLOAK_TLS_KEYSTORE_PASSWORD: secret
       KC_DB: postgres
       KC_DB_URL: jdbc:postgresql://postgres/keycloak
       KC_DB_USERNAME: postgres
@@ -65,7 +62,7 @@ services:
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
-      MINIO_SERVER_URL: "http://minio:900"
+      MINIO_SERVER_URL: "http://minio:9000"
       MINIO_BROWSER_REDIRECT_URL: "https://${DOMAIN-localhost}/minio-console"
       MINIO_IDENTITY_OPENID_CONFIG_URL: "https://${DOMAIN:-localhost}/auth/realms/${KEYCLOAK_REALM:-master}/.well-known/openid-configuration"
       MINIO_IDENTITY_OPENID_CLIENT_ID: "${MINIO_OIDC_CLIENT_ID:-minio}"
@@ -74,7 +71,7 @@ services:
       MINIO_IDENTITY_OPENID_REDIRECT_URI: "https://${DOMAIN:-localhost}/minio-console/oauth_callback"
       MINIO_IDENTITY_OPENID_DISPLAY_NAME: "Login with keycloak"
     volumes:
-      - minio:/data
+      - minio/nvme-01:/data
     networks:
       - backend
     healthcheck:

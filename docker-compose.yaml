@@ -98,6 +98,34 @@ services:
       timeout: 30s
       retries: 5
       start_period: 30s
+  backend:
+    build:
+      context: .
+      dockerfile: backend.Dockerfile
+    container_name: backend
+    environment:
+      PORT: "8080"
+      FRONTEND_URL: "https://${DOMAIN:-localhost}"
+      KEYCLOAK_URL: "http://keycloak:8080/auth"
+      KEYCLOAK_REALM: "${KEYCLOAK_REALM:-apollo-sfs-realm}"
+      KEYCLOAK_CLIENT_ID: "apollo-sfs-backend"
+      KEYCLOAK_CLIENT_SECRET: "${BACKEND_CLIENT_SECRET}"
+      MINIO_ENDPOINT: "minio:9000"
+      MINIO_ACCESS_KEY: "${MINIO_ROOT_USER:-minioadmin}"
+      MINIO_SECRET_KEY: "${MINIO_ROOT_PASSWORD:-minioadmin}"
+      MINIO_BUCKET: "user-files"
+      MINIO_USE_SSL: "false"
+    depends_on:
+      - keycloak
+      - minio
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 1m30s
+      timeout: 30s
+      retries: 5
+      start_period: 30s
   nginx:
     container_name: nginx
     image: nginx:1.29.2

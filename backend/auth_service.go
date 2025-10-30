@@ -90,6 +90,41 @@ func (s *KeycloakService) Login(username, password string) (*TokenResponse, erro
 	return &tokenResp, nil
 }
 
+func (s *KeycloakService) RefreshToken(refreshToken string) (*TokenResponse, error) {
+	tokenURL := fmt.Sprintf("%s/realms/%s/protocol/openid-connect/token", s.baseURL, s.realm)
+
+	data := url.Values{}
+	data.Set("grant_type", "refresh_token")
+	data.Set("client_id", s.clientID)
+	data.Set("client_secret", s.clientSecret)
+	data.Set("refresh_token", refreshToken)
+
+	req, err := http.NewRequest("POST", tokenURL, bytes.NewBufferString(data.Encode()))
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("token refresh failed: %s", string(body))
+	}
+
+	var tokenResp TokenResponse
+	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
+		return nil, err
+	}
+
+	return &tokenResp, nil
+}
+
 func (s *KeycloakService) GetUserInfo(accessToken string) (*UserInfo, error) {
 	userInfoUrl := fmt.Sprintf("%s/realms/%s/protocol/openid-connect/userinfo", s.baseURL, s.realm)
 

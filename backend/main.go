@@ -44,10 +44,12 @@ func main() {
 			auth.POST("/signup", authHandler.Signup)
 			auth.POST("/refresh", authHandler.RefreshToken)
 			auth.POST("/logout", authHandler.Logout)
+			auth.GET("/verify", authHandler.VerifyToken)
 		}
 
 		files := v1.Group("/files")
 		files.Use(AuthMiddleware(keycloackService))
+		files.Use(ProactiveTokenRefreshMiddleware(keycloackService, 2))
 		{
 			files.POST("/upload", fileHandler.Upload)
 			files.GET("", fileHandler.ListFiles)
@@ -58,6 +60,7 @@ func main() {
 
 		user := v1.Group("/user")
 		user.Use(AuthMiddleware(keycloackService))
+		user.Use(ProactiveTokenRefreshMiddleware(keycloackService, 2))
 		{
 			user.GET("/profile", authHandler.GetProfile)
 		}

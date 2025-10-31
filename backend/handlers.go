@@ -3,6 +3,7 @@ package main
 import (
 	"net/http"
 	"strconv"
+	"time"
 
 	// "time"
 
@@ -106,6 +107,35 @@ func (h *AuthHandler) GetProfile(c *gin.Context) {
 	c.JSON(http.StatusOK, userInfo)
 }
 
+func (h *AuthHandler) VerifyToken(c *gin.Context) {
+	authHeader := c.GetHeader("Authorization")
+
+	if authHeader == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "No token provided"})
+		return
+	}
+
+	token := ""
+	if len(authHeader) > 7 && authHeader[:7] == "Bearer " {
+		token = authHeader[7:]
+	} else {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid authorization format"})
+		return
+	}
+
+	if err := h.service.keycloak.VerifyToken(token); err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"valid": false,
+			"error": err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"valid": true,
+	})
+}
+
 type FileService struct {
 	minio *MinioService
 }
@@ -198,17 +228,22 @@ func (h *FileHandler) GetFile(c *gin.Context) {
 
 	fileID := c.Param("fileId")
 
-	_, metadata, err := h.service.minio.GetFile(
+	url, err := h.service.minio.GetPresignedURL(
 		c.Request.Context(),
 		user.Sub,
 		fileID,
+		time.Hour,
 	)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "File not found"})
 		return
 	}
 
-	c.JSON(http.StatusOK, metadata)
+	c.JSON(http.StatusOK, gin.H{
+		"url":       url,
+		"expiresIn": 3600,
+		"fileId":    fileID,
+	})
 }
 
 func (h *FileHandler) DownloadFile(c *gin.Context) {

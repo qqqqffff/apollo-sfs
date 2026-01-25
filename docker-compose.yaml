@@ -71,7 +71,7 @@ services:
       MINIO_IDENTITY_OPENID_REDIRECT_URI: "https://${DOMAIN:-localhost}/minio-console/oauth_callback"
       MINIO_IDENTITY_OPENID_DISPLAY_NAME: "Login with keycloak"
     volumes:
-      - minio/nvme-01:/data
+      - "./minio/nvme-01:/data"
     networks:
       - backend
     healthcheck:

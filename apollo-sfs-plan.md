@@ -114,13 +114,13 @@ All services communicate over a private Docker bridge network (`app-network`). O
 > **Raspberry Pi / residential ISP note:** Port 25 (direct SMTP delivery) is universally blocked on residential connections. By relaying through SendGrid on port 587, this is a non-issue — no port 25 access is required at all.
 
 **Named Volumes:**
-- `minio-data` → `/minio/nvme-1/data/minio`
-- `db-app-data` → `/minio/nvme-1/data/postgres-app`
-- `db-keycloak-data` → `/minio/nvme-1/data/postgres-keycloak`
+- `minio-data` → `/minio/nvme-01/data`
+- `db-app-data` → `/minio/nvme-01/db/postgres-app`
+- `db-keycloak-data` → `/minio/nvme-01/db/postgres-keycloak`
 - `keycloak-config` → Keycloak realm import files
-- `maddy-data` → `/minio/nvme-1/data/maddy`
+- `maddy-data` → `/maddy`
 
-> **Raspberry Pi storage:** All named volumes must point to paths under `/minio/nvme-1/` on the NVMe drive, not the SD card. SD cards are not rated for the constant random write patterns of a database and will fail prematurely. Move the Docker data directory itself (`/var/lib/docker`) to the NVMe drive as well to capture image layers and container logs.
+> **Raspberry Pi storage:** Large blob paths for minio point to paths under `/minio/nvme-01/data` on the NVMe drive, databases stored at `minio/nvme-01/db` not the SD card. SD cards are not rated for the constant random write patterns of a database and will fail prematurely. Move the Docker data directory itself (`/var/lib/docker`) to the NVMe drive as well to capture image layers and container logs.
 
 ### Environment Variables (`.env`)
 ```
@@ -155,58 +155,72 @@ CLOUDFLARE_RECORD_NAME (= yourdomain.com — the A record to keep updated)
 
 ### Project Structure
 
+Route handler files are organized by feature under `/routes/`, with each auth endpoint in its own file. Services and middleware live as sub-packages of `/routes/`. Data-layer concerns (config, models, DB) stay in `/internal/`. Test files live alongside the code they test (`_test.go`), with integration tests isolated under `/tests/integration/`.
+
 ```
 /api
   /cmd
-    main.go                  ← Entry point
+    main.go                  ← Entry point; wires router, middleware, services, starts server
+  /routes
+    files.go                 ← POST /files/upload; GET|PATCH|DELETE /files/{id}; GET /files/{id}/download; GET /files/{id}/preview
+    folders.go               ← GET /folders; GET|PATCH|DELETE /folders/{id}; POST /folders
+    invitations.go           ← GET /invitations/{token} (public token validation)
+    me.go                    ← GET /me
+    health.go                ← GET /health
+    /auth
+      login.go               ← POST /auth/login
+      register.go            ← POST /auth/register
+      logout.go              ← POST /auth/logout
+      refresh.go             ← POST /auth/refresh
+      forgot-password.go     ← POST /auth/forgot-password
+      reset-password.go      ← POST /auth/reset-password
+    /admin
+      users.go               ← GET /admin/users; GET /admin/users/{id}; PATCH /admin/users/{id}/quota
+      invitations.go         ← POST /admin/invitations; GET /admin/invitations; DELETE /admin/invitations/{id}
+      server-statistics.go   ← GET /admin/system/metrics (REST snapshot); GET /admin/system/metrics/stream (WebSocket live feed)
+    /middleware
+      auth.go                ← HttpOnly cookie → JWT validation; injects userID + exp into Gin context
+      token_refresh.go       ← Proactive token refresh middleware (runs after auth.go)
+      admin.go               ← Admin role guard — checks `admin` realm role in JWT claims; returns 403 if absent
+      rate_limit.go          ← Per-IP rate limiting for auth endpoints
+    /services
+      auth.go        ← ROPC calls to Keycloak, cookie management
+      file.go        ← Business logic: encrypt file, upload to MinIO, quota tracking, quota warning triggers
+      folder.go      ← Folder CRUD business logic
+      encryption.go  ← AES-256-GCM key generation, per-file encrypt/decrypt
+      key_rotation.go        ← Master key rotation scheduler, re-wrap logic, version tracking
+      minio.go       ← MinIO client wrapper: upload blob, download blob, delete blob
+      email.go               ← SMTP client (connects to Maddy), HTML template renderer, queue dispatch
+      invite.go      ← Invitation token generation & validation (admin-only)
+      metrics.go             ← Server metrics via gopsutil: CPU %, memory, net I/O, storage summary; writes snapshots to DB; broadcasts to WebSocket hub
   /internal
     /config                  ← Env/config loading
-    /middleware
-      auth.go                ← HttpOnly cookie → JWT validation middleware
-      token_refresh.go       ← Proactive token refresh middleware (runs after auth.go)
-      admin.go               ← Admin role guard — checks for `admin` realm role in JWT claims; returns 403 if absent
-      rate_limit.go          ← Per-IP rate limiting for auth endpoints
-      logger.go
-    /handlers
-      ── Each file name mirrors the route group it serves ──
-      auth.go                        ← POST /auth/register, /auth/login, /auth/logout, /auth/refresh, /auth/forgot-password, /auth/reset-password
-      me.go                          ← GET /me
-      files.go                       ← GET|POST|PATCH|DELETE /files/* (upload, download, preview, rename, move, delete)
-      folders.go                     ← GET|POST|PATCH|DELETE /folders/*
-      invitations.go                 ← GET /invitations/{token} (public token validation)
-      health.go                      ← GET /health
-      /admin
-        users.go                     ← GET /admin/users, GET /admin/users/{id}, PATCH /admin/users/{id}/quota
-        invitations.go               ← POST /admin/invitations, GET /admin/invitations, DELETE /admin/invitations/{id}
-        metrics.go                   ← GET /admin/system/metrics
-    /services
-      auth_service.go        ← ROPC calls to Keycloak, cookie management
-      file_service.go        ← Business logic for file ops
-      folder_service.go
-      encryption_service.go  ← AES key generation & en/decryption
-      key_rotation_service.go ← Master key rotation scheduler & re-wrap logic
-      minio_service.go       ← MinIO client wrapper
-      email_service.go       ← SMTP client (connects to Maddy), template rendering, queue dispatch
-      invite_service.go      ← User invitation token generation & validation (admin-only)
-      metrics_service.go     ← Server metrics: CPU, memory, network I/O, storage summary
     /models
       user.go
       file.go
       folder.go
+      server-metric.go
     /email
-      templates/
+      /templates
         welcome.html           ← Welcome email template
         password_reset.html    ← Password reset email template
         quota_warning.html     ← Quota warning email template
+        quota_limit.html       ← Quota warning email template
         file_shared.html       ← File shared notification template (future)
-        invitation.html        ← User invitation email template
+        invite.html            ← User invitation email template
     /db
-      postgres.go            ← DB connection & migrations
-      queries.go
-  /migrations                ← SQL migration files
+      postgres.go            ← DB connection & migrations runner
+      queries.go             ← Typed query functions
+  /migrations                ← SQL migration files (golang-migrate)
+  /tests
+    /integration             ← Full-stack tests requiring a real DB + MinIO (build tag: integration)
+      auth_flow_test.go      ← Register → login → refresh → logout end-to-end
+      upload_download_test.go ← Upload encrypted file → download → verify plaintext round-trip
   Dockerfile
   go.mod / go.sum
 ```
+
+> **Note on test placement:** Unit tests (`*_test.go`) live next to the files they test — e.g. `routes/services/file_service_test.go` alongside `file_service.go`. Integration tests under `/tests/integration/` are gated with `//go:build integration` so `go test ./...` skips them by default; run with `-tags integration` when the full stack is up.
 
 ### Middleware
 
@@ -312,7 +326,40 @@ Handles all communication between the Go API and Keycloak. React never talks to 
 - `golang.org/x/time/rate` — Token bucket rate limiter for auth endpoints
 - `net/smtp` (stdlib) — SMTP client for connecting to Maddy submission port
 - `html/template` (stdlib) — Email HTML template rendering
-- `github.com/shirou/gopsutil/v3` — Cross-platform system metrics (CPU percent, virtual memory, network I/O counters) used by `metrics_service.go`
+- `github.com/shirou/gopsutil/v3` — Cross-platform system metrics (CPU percent, virtual memory, network I/O counters) used by `metrics.go`
+- `github.com/gorilla/websocket` — WebSocket upgrade and connection management for the live metrics stream
+
+### Testing Strategy
+
+**Unit tests** live alongside the source files they cover and run with plain `go test ./...`.
+
+| File under test | Test file | What to cover |
+|---|---|---|
+| `routes/services/encryption_service.go` | `encryption_service_test.go` | Key generation entropy; encrypt→decrypt round-trip; wrong-key returns error; nonce uniqueness |
+| `routes/services/file_service.go` | `file_service_test.go` | Upload triggers quota increment; quota-exceeded returns error before MinIO write; 80%/100% thresholds enqueue correct email type; delete decrements quota |
+| `routes/services/key_rotation.go` | `key_rotation_test.go` | Re-wrap correctly re-encrypts user key under new master key; idempotent (already-re-wrapped users skipped); crash-resume re-wraps remaining users only |
+| `routes/services/auth_service.go` | `auth_service_test.go` | Cookie attributes (HttpOnly, Secure, SameSite, domain); logout clears both cookies; refresh sets new cookies |
+| `routes/auth/login.go` | `login_test.go` | 200 + cookies on valid credentials; 401 on bad password; 400 on missing fields |
+| `routes/auth/register.go` | `register_test.go` | 201 on valid body; 409 if user already exists; invite-only enforcement (403 without valid invite token) |
+| `routes/files.go` | `files_test.go` | Upload returns 201 with metadata; download returns correct Content-Type and Content-Disposition; preview returns inline disposition; 404 on missing file; 403 on wrong owner |
+| `routes/folders.go` | `folders_test.go` | Create, rename, delete happy paths; 409 on duplicate name within parent; 400 on delete of non-empty folder |
+| `routes/middleware/auth.go` | `auth_test.go` | Missing cookie → 401; expired token → 401; invalid signature → 401; valid token injects claims |
+| `routes/middleware/token_refresh.go` | `token_refresh_test.go` | Token within threshold triggers refresh call; token outside threshold passes through unchanged; concurrent requests deduplicated |
+| `routes/middleware/admin.go` | `admin_test.go` | Missing `admin` realm role → 403; role present → passes through |
+| `routes/admin/server-statistics.go` | `server_statistics_test.go` | REST response shape matches schema; non-admin → 403; WebSocket upgrade succeeds for admin; non-admin WebSocket upgrade → 403; hub broadcasts to all connected clients; client disconnect cleaned up |
+
+**Integration tests** live under `/tests/integration/` and require the full Docker stack to be running. Gate them with `//go:build integration` and run with `go test -tags integration ./tests/integration/`.
+
+| Test file | Scenario |
+|---|---|
+| `auth_flow_test.go` | Register new user → login → call `/me` → refresh → logout → confirm cookies cleared |
+| `upload_download_test.go` | Upload a known plaintext file → fetch metadata → download → assert decrypted bytes match original; verify `storage_used_bytes` incremented correctly |
+
+**Test helpers to build early (shared across tests):**
+- `testutil.NewTestRouter()` — spins up a Gin engine with all middleware attached, backed by mocked services
+- `testutil.MockMinIO` — in-memory store implementing the MinIO client interface
+- `testutil.MockDB` — in-memory implementation of the DB query interface
+- `testutil.MockKeycloak` — HTTP test server returning configurable JWKS and token responses
 
 ---
 
@@ -471,7 +518,7 @@ The current active master key is now fetched from the `master_keys` DB table at 
 
 ### `key_rotation_service.go`
 
-New service added to `/internal/services/`:
+New service added to `/routes/services/`:
 
 - `StartRotationScheduler()` — launches background goroutine, checks every 24h
 - `RotateMasterKey()` — executes the full rotation sequence above
@@ -646,7 +693,7 @@ The Go API dispatches email **asynchronously** to avoid blocking API responses o
 4. Maddy relays to SendGrid — on success, Go API marks the row `sent`. On SMTP error, it increments `attempts` and marks `failed` after 3 attempts.
 5. Maddy's own queue handles transient SendGrid connectivity failures with automatic retry.
 
-### `email_service.go` Responsibilities
+### `email.go` Responsibilities
 
 - Maintains a `net/smtp` connection to `MADDY_INTERNAL_HOST` (`maddy:587`) — Maddy relays onward to SendGrid
 - Renders `html/template` files from `/internal/email/templates/`
@@ -895,13 +942,14 @@ Route components use `createFileRoute('/<path>')` (or `createRootRoute()` for `_
       UserDetailModal.tsx       ← Expanded user info + quota editor (PATCH /admin/users/{id}/quota)
       InviteForm.tsx            ← Email input + "Send Invite" button (POST /admin/invitations)
       InvitationList.tsx        ← Table of pending/accepted invitations with revoke action
-      ServerMetrics.tsx         ← Live server stats: CPU %, RAM used/total, storage used/total, network in/out
+      ServerMetrics.tsx         ← Real-time server graphs: CPU %, RAM bar, storage bar, network throughput (bytes/s); powered by useMetricsSocket
   /hooks
     useAuth.ts                  ← Login, logout, register, refresh mutations
     useFiles.ts                 ← TanStack Query hooks for file operations
     useFolders.ts
     useUpload.ts                ← Multipart upload logic
-    useAdmin.ts                 ← Admin queries: user list, metrics (polled every 10s), invitations
+    useAdmin.ts                 ← Admin queries: user list, invitations (TanStack Query REST hooks)
+    useMetricsSocket.ts         ← Opens WebSocket to /admin/system/metrics/stream; seeds buffer from /history on mount; exposes rolling snapshot array for graphs; handles reconnect on close
   /lib
     api.ts                      ← Axios instance (withCredentials: true) + 401 interceptor
   /types
@@ -916,7 +964,7 @@ Route components use `createFileRoute('/<path>')` (or `createRootRoute()` for `_
 - `AuthContext` exposes `isAdmin` — used to conditionally render the admin nav link.
 - `_auth.admin.tsx` uses TanStack Router's `beforeLoad` hook to check `isAdmin`; if false it throws a `redirect({ to: '/' })` — the guard runs before the component renders so no flash of admin UI is possible.
 - The server enforces the role independently via the admin middleware — the client check is UX only.
-- `ServerMetrics.tsx` polls `GET /api/v1/admin/system/metrics` every 10 seconds using TanStack Query's `refetchInterval` to display live CPU, memory, storage, and network figures.
+- `ServerMetrics.tsx` uses `useMetricsSocket` instead of REST polling. On mount the hook fetches `/admin/system/metrics/history?limit=60` to seed the initial graph buffer, then opens a WebSocket to `/admin/system/metrics/stream` and appends each incoming snapshot to the buffer (capped at 120 entries — 10 minutes at 5 s intervals). The component renders rolling line graphs for CPU %, memory %, network throughput (derived by diffing adjacent `bytes_sent`/`bytes_recv` values), and storage used vs quota. On unmount the WebSocket is closed cleanly.
 
 ### Auth in React
 
@@ -1047,6 +1095,28 @@ Route components use `createFileRoute('/<path>')` (or `createRootRoute()` for `_
 
 > Unique constraint on `email` where `accepted_at IS NULL` and `revoked_at IS NULL` — prevents duplicate pending invites to the same address. Only admin-role users can insert rows here (enforced by the admin middleware on the route).
 
+### `server_metrics_snapshots`
+
+Stores periodic snapshots of server health metrics. A background goroutine in `metrics.go` samples gopsutil + the app DB every 5 seconds, inserts a row here, and broadcasts the same payload to all active WebSocket clients. This table is the data source for historical trend graphs in the admin dashboard.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | UUID PK | `gen_random_uuid()` |
+| `cpu_percent` | FLOAT | Instantaneous CPU utilisation % |
+| `memory_used_bytes` | BIGINT | RSS memory in use |
+| `memory_total_bytes` | BIGINT | Total physical RAM |
+| `network_bytes_sent` | BIGINT | Cumulative bytes sent since system boot (diff successive rows for throughput) |
+| `network_bytes_recv` | BIGINT | Cumulative bytes received since system boot |
+| `storage_total_used_bytes` | BIGINT | `SUM(storage_used_bytes)` across all users at time of sample |
+| `storage_total_quota_bytes` | BIGINT | `SUM(storage_quota_bytes)` across all users at time of sample |
+| `active_user_count` | INT | Users with `last_seen_at` within the last 5 minutes |
+| `total_user_count` | INT | Total registered users |
+| `sampled_at` | TIMESTAMPTZ | When the snapshot was taken; indexed for range queries |
+
+> **Retention policy:** A background goroutine prunes rows older than 7 days daily to prevent unbounded table growth. At 5-second intervals, 7 days ≈ 120,960 rows — well within PostgreSQL's comfort zone on the Pi.
+
+> **Network throughput graphs:** `network_bytes_sent` and `network_bytes_recv` are cumulative counters. The frontend (or the REST history endpoint) diffs adjacent rows to derive bytes/second for display.
+
 ---
 
 ## 14. API Routes
@@ -1107,7 +1177,9 @@ All routes prefixed with `/api/v1`. Auth routes are unauthenticated (they establ
 | `POST` | `/api/v1/admin/invitations` | Send an invitation email to a new user `{ email }` |
 | `GET` | `/api/v1/admin/invitations` | List all invitations (pending, accepted, revoked) |
 | `DELETE` | `/api/v1/admin/invitations/{id}` | Revoke a pending invitation (sets `revoked_at`) |
-| `GET` | `/api/v1/admin/system/metrics` | Current server metrics: CPU %, memory used/total, network I/O bytes, total storage used across all users |
+| `GET` | `/api/v1/admin/system/metrics` | Latest snapshot from `server_metrics_snapshots` — one-shot REST query |
+| `GET` | `/api/v1/admin/system/metrics/history` | Recent snapshots `?limit=N&before=<timestamp>` for seeding graph on connect |
+| `GET` | `/api/v1/admin/system/metrics/stream` | **WebSocket** — upgrades connection; server pushes a new snapshot message every 5 s |
 
 ### System
 
@@ -1131,7 +1203,7 @@ Response: { "user": { "id": "...", "username": "alice", "email": "...", "storage
 // Sets: access_token (HttpOnly cookie), refresh_token (HttpOnly cookie)
 ```
 
-**`POST /api/v1/auth/forgot-password`**
+**`POST /api/v1/auth/forgot_password`**
 ```json
 Request:  { "email": "alice@example.com" }
 Response: { "message": "If an account with that email exists, a reset link has been sent." }
@@ -1166,21 +1238,45 @@ Fields: file (binary), folder_id (string UUID)
 Response: { "id": "...", "name": "photo.jpg", "size_bytes": 512000, "mime_type": "image/jpeg", ... }
 ```
 
-**`GET /api/v1/admin/system/metrics`**
+**`GET /api/v1/admin/system/metrics`** — latest snapshot (REST)
 ```json
 Response: {
+  "id": "...",
   "cpu_percent": 12.4,
   "memory": { "used_bytes": 1073741824, "total_bytes": 8589934592, "percent": 12.5 },
   "network": { "bytes_sent": 5368709120, "bytes_recv": 2147483648 },
-  "storage": {
-    "total_used_bytes": 42949672960,
-    "user_count": 8
-  },
+  "storage": { "total_used_bytes": 42949672960, "total_quota_bytes": 107374182400 },
+  "users": { "active": 3, "total": 8 },
   "sampled_at": "2025-01-01T12:00:00Z"
 }
 ```
 
-> CPU and memory figures come from `gopsutil`. Network I/O is a cumulative counter since system boot (same as `ifconfig` bytes) — the frontend can diff successive polls to compute throughput. Storage total is a `SUM(storage_used_bytes)` from the app DB, reflecting actual encrypted bytes stored in MinIO.
+**`GET /api/v1/admin/system/metrics/history`** — recent snapshots for graph seeding
+```json
+// Query params: ?limit=60&before=2025-01-01T12:00:00Z
+Response: {
+  "snapshots": [ { /* same shape as single snapshot */ }, ... ]
+}
+```
+
+**`GET /api/v1/admin/system/metrics/stream`** — WebSocket
+```
+// Client sends: GET /api/v1/admin/system/metrics/stream
+// Server upgrades to WebSocket (requires valid access_token cookie + admin role)
+// Server pushes JSON every 5 seconds:
+{
+  "cpu_percent": 14.1,
+  "memory": { "used_bytes": 1100000000, "total_bytes": 8589934592, "percent": 12.8 },
+  "network": { "bytes_sent": 5368800000, "bytes_recv": 2147600000 },
+  "storage": { "total_used_bytes": 42949672960, "total_quota_bytes": 107374182400 },
+  "users": { "active": 3, "total": 8 },
+  "sampled_at": "2025-01-01T12:00:05Z"
+}
+// Client sends: ping frame (keepalive) — server responds with pong
+// On admin auth expiry or role loss: server closes with 4401
+```
+
+> **WebSocket auth:** The upgrade handler validates the `access_token` cookie and checks the `admin` realm role before completing the HTTP→WebSocket handshake. If either check fails the server returns `403` over HTTP before the upgrade occurs. Refreshed cookies set by `token_refresh.go` on earlier requests are already in the browser's cookie jar, so token expiry mid-stream is unlikely; if it does occur, the server closes with `4401` and the client can attempt a reconnect after refreshing.
 
 **`GET /api/v1/admin/users`**
 ```json
@@ -1209,26 +1305,26 @@ Response: {
 - [x] Flash Pi OS (64-bit), enable SSH, configure static local IP via router DHCP reservation
 - [x] Verify NVMe drive is mounted at `/minio/nvme-1` and listed in `/etc/fstab` for auto-mount on boot
 - [x] Create directory structure: `/minio/nvme-1/data/`, `/minio/nvme-1/docker/`, `/minio/nvme-1/backups/`
-- [ ] Move Docker data directory to NVMe — set `data-root: /minio/nvme-1/docker` in `/etc/docker/daemon.json`
-- [ ] Install Docker, Docker Compose, Nginx on host
-- [ ] Configure UFW firewall: allow inbound 80, 443; no inbound port 25 needed
-- [ ] Register domain, set up Cloudflare DNS + Origin Certificate
-- [ ] In SendGrid, verify sending domain under Sender Authentication (if not already done) and add the provided CNAME records in Cloudflare
-- [ ] Generate a SendGrid API key with Mail Send permission only; store in `.env` as `SENDGRID_SMTP_PASSWORD`
-- [ ] Configure Nginx (HTTPS, HTTP→HTTPS redirect, placeholder upstream)
-- [ ] Write `docker-compose.yml` with all services + health checks
-- [ ] Configure Keycloak realm via realm import JSON:
-  - [ ] Create realm, configure confidential client with Direct Access Grants enabled
-  - [ ] Configure realm SMTP to relay through `maddy:587`
-  - [ ] Enable brute-force detection
+- [x] Move Docker data directory to NVMe — set `data-root: /minio/nvme-1/docker` in `/etc/docker/daemon.json`
+- [x] Install Docker, Docker Compose, Nginx on host
+- [x] Configure UFW firewall: allow inbound 80, 443; no inbound port 25 needed
+- [x] Register domain, set up Cloudflare DNS + Origin Certificate
+- [x] In SendGrid, verify sending domain under Sender Authentication (if not already done) and add the provided CNAME records in Cloudflare
+- [x] Generate a SendGrid API key with Mail Send permission only; store in `.env` as `SENDGRID_SMTP_PASSWORD`
+- [x] Configure Nginx (HTTPS, HTTP→HTTPS redirect, placeholder upstream)
+- [x] Write `docker-compose.yml` with all services + health checks
+- [x] Configure Keycloak realm via realm import JSON:
+  - [x] Create realm, configure confidential client with Direct Access Grants enabled
+  - [x] Configure realm SMTP to relay through `maddy:587`
+  - [x] Enable brute-force detection
 - [ ] Verify Go API can reach Keycloak on internal Docker network
-- [ ] Add Maddy service to `docker-compose.yml`, configure `maddy.conf` to relay outbound via `smtp.sendgrid.net:587` using `apikey` + SendGrid API key
-- [ ] Add `cloudflare-ddns` service to `docker-compose.yml` with `CLOUDFLARE_API_TOKEN`, zone ID, and record name
-- [ ] Configure Keycloak JVM heap limits (`JAVA_OPTS=-Xms256m -Xmx512m`) in compose
+- [X] Add Maddy service to `docker-compose.yml`, configure `maddy.conf` to relay outbound via `smtp.sendgrid.net:587` using `apikey` + SendGrid API key
+- [x] Add `cloudflare-ddns` service to `docker-compose.yml` with `CLOUDFLARE_API_TOKEN`, zone ID, and record name
+- [x] Configure Keycloak JVM heap limits (`JAVA_OPTS=-Xms256m -Xmx512m`) in compose
 - [ ] Send test email end-to-end (Go API → Maddy → SendGrid → inbox), verify DKIM pass via mail-tester.com (SendGrid-authenticated mail should score well out of the box)
 
 ### Phase 2 — Backend Core
-- [ ] Initialize Go module, project structure, Dockerfile
+- [x] Initialize Go module, project structure, Dockerfile
 - [ ] Connect to PostgreSQL, write migrations, run via `golang-migrate`
 - [ ] Implement cookie-based JWT validation middleware (JWKS from internal Keycloak URL)
 - [ ] Implement proactive token refresh middleware (`token_refresh.go`) with configurable threshold and concurrent refresh deduplication
@@ -1236,15 +1332,15 @@ Response: {
 - [ ] Implement `POST /auth/login` — ROPC token exchange → HttpOnly cookie response
 - [ ] Implement `POST /auth/logout` — Keycloak session invalidation + cookie clearing
 - [ ] Implement `POST /auth/refresh` — refresh token rotation via Keycloak
-- [ ] Implement `POST /auth/forgot-password` — trigger Keycloak reset email via Admin API
-- [ ] Implement `POST /auth/reset-password` — complete reset via Keycloak Admin API
+- [ ] Implement `POST /auth/forgot_password` — trigger Keycloak reset email via Admin API
+- [ ] Implement `POST /auth/reset_password` — complete reset via Keycloak Admin API
 - [ ] Implement user provisioning (DB record + encryption key) on first login
 - [ ] Implement `key_rotation_service.go` — rotation scheduler, re-wrap logic, version tracking
 - [ ] Add `master_keys` and `key_rotation_log` migrations
 - [ ] Seed initial master key (v1) in DB on first startup, encrypted with KEK
 - [ ] Test rotation end-to-end: trigger rotation manually, verify all users re-wrapped, verify old key material purged
 - [ ] Test crash recovery: simulate mid-rotation failure, verify resume on restart
-- [ ] Implement `email_service.go` — SMTP client, template renderer, queue dispatch
+- [ ] Implement `email.go` — SMTP client, template renderer, queue dispatch
 - [ ] Implement email queue background worker (polling goroutine)
 - [ ] Implement welcome email on registration
 - [ ] Implement quota warning emails (80% and 100% thresholds) triggered on upload
@@ -1254,19 +1350,57 @@ Response: {
 - [ ] Implement `DELETE /admin/invitations/{id}` — revoke pending invite (set `revoked_at`)
 - [ ] Implement `GET /invitations/{token}` — public token validation (expiry and unused status)
 - [ ] Add `last_seen_at` update to auth middleware (stamp on every authenticated request)
-- [ ] Implement `metrics_service.go` using `gopsutil`: CPU percent, virtual memory, net I/O counters
+- [ ] Add `server_metrics_snapshots` migration (UUID PK, cpu, memory, network, storage, user counts, sampled_at; index on `sampled_at`)
+- [ ] Implement `metrics.go` — gopsutil collector; background goroutine samples every 5 s, writes snapshot to DB, broadcasts JSON to WebSocket hub
+- [ ] Implement WebSocket hub in `metrics.go`: register/unregister clients, broadcast to all, clean up on disconnect
+- [ ] Implement `GET /admin/system/metrics` — return latest row from `server_metrics_snapshots`
+- [ ] Implement `GET /admin/system/metrics/history` — return recent rows with `?limit` + `?before` pagination
+- [ ] Implement `GET /admin/system/metrics/stream` — WebSocket upgrade handler (validate cookie + admin role before upgrade; register client with hub; close with `4401` on auth failure)
+- [ ] Implement snapshot pruning goroutine: delete rows older than 7 days, runs daily at startup
 - [ ] Implement `GET /admin/users` — query all users from app DB + file count via join
 - [ ] Implement `GET /admin/users/{id}` — single user detail
 - [ ] Implement `PATCH /admin/users/{id}/quota` — update storage quota
-- [ ] Implement `GET /admin/system/metrics` — serve metrics snapshot from `metrics_service.go`
 - [ ] Add `admin` realm role to Keycloak realm import JSON; assign to initial admin user after first deploy
-- [ ] Integrate MinIO client, verify bucket creation
-- [ ] Implement AES-256-GCM encryption/decryption service
-- [ ] Implement folder CRUD endpoints
-- [ ] Implement file upload + encrypt + store flow
-- [ ] Implement file download + decrypt + stream flow
-- [ ] Implement file/folder rename + delete
-- [ ] Write integration tests for all endpoints
+- [ ] Integrate MinIO client, verify bucket creation on startup (create if not exists)
+- [ ] Implement AES-256-GCM encryption/decryption service (`encryption_service.go`)
+- [ ] Implement folder CRUD endpoints (`folders.go` + `folder_service.go`)
+- [ ] **File upload** (`POST /files/upload`):
+  - [ ] Parse `multipart/form-data`: extract file bytes, filename, MIME type, `folder_id`
+  - [ ] Enforce per-user quota: reject with `413` if `storage_used_bytes + file_size > storage_quota_bytes`
+  - [ ] Generate file UUID and random 96-bit AES-GCM nonce
+  - [ ] Decrypt user's AES key (fetch from DB, unwrap with active master key)
+  - [ ] Encrypt file bytes: AES-256-GCM(user key, nonce) → `nonce‖ciphertext` blob
+  - [ ] Store encrypted blob in MinIO at `{user_id}/{file_uuid}`
+  - [ ] Insert file metadata row: name, mime_type, size_bytes, minio_object_key, nonce, folder_id
+  - [ ] Increment `users.storage_used_bytes` by `size_bytes`
+  - [ ] Enqueue quota warning email if threshold crossed (80% or 100%)
+  - [ ] Return `201` with file metadata JSON
+- [ ] **File download** (`GET /files/{id}/download`):
+  - [ ] Validate JWT → extract user ID; query file row; verify `file.user_id == caller`; `404` if not found, `403` if wrong owner
+  - [ ] Fetch encrypted blob from MinIO using `minio_object_key`
+  - [ ] Strip nonce prefix (first 12 bytes); decrypt with user's AES key → plaintext bytes
+  - [ ] Stream plaintext to client: `Content-Type: {mime_type}`, `Content-Disposition: attachment; filename="{name}"`
+- [ ] **File preview** (`GET /files/{id}/preview`):
+  - [ ] Same decrypt + stream as download; set `Content-Disposition: inline` instead
+  - [ ] Return `415` if MIME type is not in the previewable set (`image/*`, `application/pdf`)
+- [ ] **File metadata** (`GET /files/{id}`): return metadata row as JSON (no file content)
+- [ ] Implement file rename + move (`PATCH /files/{id}`): update `name` and/or `folder_id`; enforce unique-name constraint
+- [ ] **File delete** (`DELETE /files/{id}`):
+  - [ ] Delete blob from MinIO
+  - [ ] Delete metadata row from DB
+  - [ ] Decrement `users.storage_used_bytes` by `size_bytes`
+- [ ] Implement folder delete (`DELETE /folders/{id}`): reject with `409` if folder contains files or subfolders, or cascade-delete (decide and document)
+- [ ] **Build test helpers** (`testutil` package): `NewTestRouter`, `MockMinIO`, `MockDB`, `MockKeycloak`
+- [ ] Write unit tests for `encryption_service.go`: round-trip, wrong key, nonce uniqueness
+- [ ] Write unit tests for `file_service.go`: quota enforcement, quota warning thresholds, storage increment/decrement
+- [ ] Write unit tests for `key_rotation.go`: re-wrap correctness, idempotency, crash-resume
+- [ ] Write unit tests for auth handlers: login 200/401/400, register 201/409, logout cookie clearing
+- [ ] Write unit tests for file handlers: upload 201, download ownership check, preview MIME guard, metadata 404
+- [ ] Write unit tests for folder handlers: create, rename, delete (empty vs non-empty)
+- [ ] Write unit tests for middleware: `auth.go` (missing/expired/invalid token), `token_refresh.go` (threshold logic, deduplication), `admin.go` (role present/absent)
+- [ ] Write unit tests for `server-statistics.go`: REST shape, non-admin 403, WebSocket upgrade + hub broadcast, disconnect cleanup, `4401` on auth failure
+- [ ] Write integration test `auth_flow_test.go`: register → login → `/me` → refresh → logout
+- [ ] Write integration test `upload_download_test.go`: upload known plaintext → download → assert bytes match; verify `storage_used_bytes`
 
 ### Phase 3 — Frontend
 - [ ] Scaffold React app with Vite + TypeScript + Tailwind; install `@tanstack/react-router`, `@tanstack/router-vite-plugin`, `@tanstack/react-query`
@@ -1288,7 +1422,8 @@ Response: {
 - [ ] Build `UserTable` — paginated list of all users with storage, file count, last seen
 - [ ] Build `UserDetailModal` — expand user details + quota editor (PATCH quota endpoint)
 - [ ] Build `InviteForm` + `InvitationList` — send invites, list and revoke pending invitations
-- [ ] Build `ServerMetrics` — polls `/admin/system/metrics` every 10s via TanStack Query `refetchInterval`, displays CPU %, RAM bar, storage bar, network in/out
+- [ ] Build `useMetricsSocket.ts` — fetch `/admin/system/metrics/history?limit=60` on mount to seed buffer; open WebSocket to `/admin/system/metrics/stream`; append each message to rolling 120-entry buffer; exponential back-off reconnect on unexpected close; close cleanly on unmount
+- [ ] Build `ServerMetrics.tsx` — consume `useMetricsSocket`; render rolling line graphs: CPU %, memory %, network throughput (diff adjacent network counters for bytes/s), storage used vs quota; show active / total user counts
 - [ ] Add admin nav link (visible only when `isAdmin === true`)
 - [ ] Build static assets, configure Nginx to serve `dist/`
 
@@ -1334,7 +1469,8 @@ Response: {
 | **DKIM/SPF/DMARC** | All outbound mail signed by Maddy; SPF and DMARC records enforce policy — reduces spoofing risk |
 | **Admin role enforcement** | `admin` realm role checked server-side by `middleware/admin.go` on every admin route — reads `realm_access.roles` from the validated JWT; no client-supplied flag is trusted; returns `403` immediately if role is absent |
 | **Admin role assignment** | Role assigned only via the Keycloak Admin Console (internal Docker network only, never exposed publicly) — no API endpoint can self-elevate a user to admin |
-| **Admin metrics endpoint** | `GET /admin/system/metrics` returns system-level data (CPU, RAM, net I/O); gated by admin middleware so it is never accessible to regular users |
+| **Admin metrics endpoint** | `GET /admin/system/metrics` and the WebSocket stream both validated for `admin` realm role before serving — never accessible to regular users |
+| **WebSocket auth** | Cookie + admin role checked before HTTP→WebSocket upgrade completes; no data is sent over the socket before auth passes; server closes with `4401` if auth expires mid-stream |
 | **Invitation tokens** | Cryptographically random tokens (32 bytes), expire after 72 hours, single-use only; only admin-role users can create invites |
 | **Email queue** | Emails dispatched asynchronously — API responses never block on mail delivery; failures retried up to 3 times |
 | **Maddy exposure** | Maddy submission port (587) is internal Docker only — never exposed to host or internet |

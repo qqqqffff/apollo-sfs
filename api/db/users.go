@@ -1,0 +1,246 @@
+package db
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+
+	"apollo-sfs.com/api/models"
+)
+
+const userColumns = `
+	username, email, encrypted_key, key_nonce, master_key_version,
+	storage_used_bytes, storage_quota_bytes, last_seen_at, created_at, is_admin`
+
+func scanUser(row *sql.Row) (*models.User, error) {
+	var u models.User
+	var lastSeenAt sql.NullTime
+	err := row.Scan(
+		&u.Username, &u.Email, &u.EncryptedKey, &u.KeyNonce, &u.MasterKeyVersion,
+		&u.StorageUsedBytes, &u.StorageQuotaBytes, &lastSeenAt, &u.CreatedAt, &u.IsAdmin,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if lastSeenAt.Valid {
+		u.LastSeenAt = &lastSeenAt.Time
+	}
+	return &u, nil
+}
+
+func scanUserRow(rows *sql.Rows) (*models.User, error) {
+	var u models.User
+	var lastSeenAt sql.NullTime
+	err := rows.Scan(
+		&u.Username, &u.Email, &u.EncryptedKey, &u.KeyNonce, &u.MasterKeyVersion,
+		&u.StorageUsedBytes, &u.StorageQuotaBytes, &lastSeenAt, &u.CreatedAt, &u.IsAdmin,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if lastSeenAt.Valid {
+		u.LastSeenAt = &lastSeenAt.Time
+	}
+	return &u, nil
+}
+
+// GetUserByUsername returns a user by their unique username.
+// Returns sql.ErrNoRows if the user does not exist.
+func (q *Queries) GetUserByUsername(ctx context.Context, username string) (*models.User, error) {
+	row := q.db.QueryRowContext(ctx, `
+		SELECT`+userColumns+`
+		FROM users WHERE username = $1
+	`, username)
+	u, err := scanUser(row)
+	if err != nil {
+		return nil, fmt.Errorf("GetUserByUsername %q: %w", username, err)
+	}
+	return u, nil
+}
+
+// CreateUser inserts a new user row. The caller is responsible for generating
+// the encrypted_key and key_nonce before calling this.
+func (q *Queries) CreateUser(ctx context.Context, u *models.User) error {
+	_, err := q.db.ExecContext(ctx, `
+		INSERT INTO users (
+			username, email, encrypted_key, key_nonce, master_key_version,
+			storage_used_bytes, storage_quota_bytes, created_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+	`, u.Username, u.Email, u.EncryptedKey, u.KeyNonce, u.MasterKeyVersion,
+		u.StorageUsedBytes, u.StorageQuotaBytes,
+	)
+	if err != nil {
+		return fmt.Errorf("CreateUser %q: %w", u.Username, err)
+	}
+	return nil
+}
+
+// ListUsers returns a page of registered users ordered by creation time descending.
+func (q *Queries) ListUsers(ctx context.Context, in PageInput) (*PageResult[models.User], error) {
+	limit := clampLimit(in.Limit)
+	offset, err := decodeOffsetCursor(in.Cursor)
+	if err != nil {
+		return nil, fmt.Errorf("ListUsers: %w", err)
+	}
+
+	rows, err := q.db.QueryContext(ctx, `
+		SELECT`+userColumns+`
+		FROM users
+		ORDER BY created_at DESC
+		LIMIT $1 OFFSET $2
+	`, limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("ListUsers: %w", err)
+	}
+	defer rows.Close()
+
+	var users []models.User
+	for rows.Next() {
+		u, err := scanUserRow(rows)
+		if err != nil {
+			return nil, fmt.Errorf("ListUsers scan: %w", err)
+		}
+		users = append(users, *u)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("ListUsers: %w", err)
+	}
+	return &PageResult[models.User]{
+		Items:     users,
+		NextToken: offsetNextToken(len(users), limit, offset),
+	}, nil
+}
+
+// UpdateLastSeenAt stamps the current time onto the user's last_seen_at column.
+// Called by the auth middleware on every authenticated request.
+func (q *Queries) UpdateLastSeenAt(ctx context.Context, username string) error {
+	_, err := q.db.ExecContext(ctx,
+		`UPDATE users SET last_seen_at = NOW() WHERE username = $1`,
+		username,
+	)
+	if err != nil {
+		return fmt.Errorf("UpdateLastSeenAt %q: %w", username, err)
+	}
+	return nil
+}
+
+// AddStorageUsed atomically adjusts storage_used_bytes by delta (negative to subtract).
+// Used after a file upload (+size) or deletion (-size).
+func (q *Queries) AddStorageUsed(ctx context.Context, username string, delta int64) error {
+	_, err := q.db.ExecContext(ctx,
+		`UPDATE users SET storage_used_bytes = storage_used_bytes + $2 WHERE username = $1`,
+		username, delta,
+	)
+	if err != nil {
+		return fmt.Errorf("AddStorageUsed %q: %w", username, err)
+	}
+	return nil
+}
+
+// ListUsersOnKeyVersion returns a page of users whose encryption key is still
+// wrapped under the given master key version. Used during key rotation to
+// identify users that have not yet been re-wrapped.
+func (q *Queries) ListUsersOnKeyVersion(ctx context.Context, version string, p PageInput) (*PageResult[models.User], error) {
+	limit := clampLimit(p.Limit)
+	offset, err := decodeOffsetCursor(p.Cursor)
+	if err != nil {
+		return nil, fmt.Errorf("ListUsersOnKeyVersion: %w", err)
+	}
+
+	rows, err := q.db.QueryContext(ctx, `
+		SELECT`+userColumns+`
+		FROM users
+		WHERE master_key_version = $1
+		ORDER BY created_at ASC
+		LIMIT $2 OFFSET $3
+	`, version, limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("ListUsersOnKeyVersion: %w", err)
+	}
+	defer rows.Close()
+
+	var users []models.User
+	for rows.Next() {
+		u, err := scanUserRow(rows)
+		if err != nil {
+			return nil, fmt.Errorf("ListUsersOnKeyVersion scan: %w", err)
+		}
+		users = append(users, *u)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("ListUsersOnKeyVersion: %w", err)
+	}
+	return &PageResult[models.User]{
+		Items:     users,
+		NextToken: offsetNextToken(len(users), limit, offset),
+	}, nil
+}
+
+// UpdateUserEncryptionKey replaces a user's wrapped encryption key, nonce, and
+// master key version in a single update. Called during key rotation re-wrap.
+func (q *Queries) UpdateUserEncryptionKey(ctx context.Context, username string, encKey, nonce []byte, masterKeyVersion string) error {
+	_, err := q.db.ExecContext(ctx, `
+		UPDATE users
+		SET encrypted_key = $2, key_nonce = $3, master_key_version = $4
+		WHERE username = $1
+	`, username, encKey, nonce, masterKeyVersion)
+	if err != nil {
+		return fmt.Errorf("UpdateUserEncryptionKey %q: %w", username, err)
+	}
+	return nil
+}
+
+// CountUsersByKeyVersion returns the number of users still on the given master
+// key version. Used to verify that re-wrapping is complete before purging the
+// old key.
+func (q *Queries) CountUsersByKeyVersion(ctx context.Context, version string) (int, error) {
+	var n int
+	err := q.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM users WHERE master_key_version = $1`,
+		version,
+	).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("CountUsersByKeyVersion: %w", err)
+	}
+	return n, nil
+}
+
+// UserStats holds aggregated values sampled once per metrics snapshot.
+type UserStats struct {
+	TotalUsers        int
+	ActiveUsersLast5m int
+	StorageUsedBytes  int64
+	StorageQuotaBytes int64
+}
+
+// GetUserStats returns aggregate storage totals and user counts in a single
+// query. Called every 5 seconds by the metrics sampler; uses COALESCE so it
+// returns zeros on an empty users table.
+func (q *Queries) GetUserStats(ctx context.Context) (*UserStats, error) {
+	var s UserStats
+	err := q.db.QueryRowContext(ctx, `
+		SELECT
+			COUNT(*)                                                          AS total_users,
+			COUNT(*) FILTER (WHERE last_seen_at > NOW() - INTERVAL '5 minutes') AS active_users,
+			COALESCE(SUM(storage_used_bytes),  0)                            AS storage_used,
+			COALESCE(SUM(storage_quota_bytes), 0)                            AS storage_quota
+		FROM users
+	`).Scan(&s.TotalUsers, &s.ActiveUsersLast5m, &s.StorageUsedBytes, &s.StorageQuotaBytes)
+	if err != nil {
+		return nil, fmt.Errorf("GetUserStats: %w", err)
+	}
+	return &s, nil
+}
+
+// UpdateUserQuota sets a new storage_quota_bytes for the given user.
+// Admin-only operation.
+func (q *Queries) UpdateUserQuota(ctx context.Context, username string, quotaBytes int64) error {
+	_, err := q.db.ExecContext(ctx,
+		`UPDATE users SET storage_quota_bytes = $2 WHERE username = $1`,
+		username, quotaBytes,
+	)
+	if err != nil {
+		return fmt.Errorf("UpdateUserQuota %q: %w", username, err)
+	}
+	return nil
+}

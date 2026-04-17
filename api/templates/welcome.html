@@ -1,0 +1,54 @@
+{{/*
+  Template name : "welcome"
+  Trigger       : User completes registration
+  Data fields   :
+    AppName  string
+    AppURL   string
+    Email    string
+    Username string — the new user's username
+*/}}
+{{define "welcome"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <title>Welcome to {{.AppName}}</title>
+</head>
+<body>
+  <div class="email-wrapper">
+    <div class="email-card">
+
+      {{template "header" .}}
+
+      <div class="email-body">
+        <h1>Welcome, {{.Username}}</h1>
+        <p>
+          Your <strong>{{.AppName}}</strong> account is ready. You can now securely
+          upload, organise, and access your files from anywhere.
+        </p>
+        <p>
+          All files are encrypted end-to-end — only you hold the keys. Your storage
+          quota and usage are always visible from your account dashboard.
+        </p>
+
+        <div class="btn-wrapper">
+          <a href="{{.AppURL}}" class="btn-primary">Go to your files</a>
+        </div>
+
+        <hr class="email-divider" />
+
+        <p>
+          If you did not create this account, please ignore this email — no action
+          is required and the account will remain inactive.
+        </p>
+      </div>
+
+      {{template "footer" .}}
+
+    </div>
+  </div>
+</body>
+</html>
+{{end}}

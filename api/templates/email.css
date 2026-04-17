@@ -1,0 +1,283 @@
+/* ============================================================
+   apollo-sfs — Email Template Stylesheet
+   ============================================================
+   Designed for maximum email client compatibility:
+   - No flexbox or CSS grid (not supported in Outlook)
+   - No CSS custom properties (limited support in older clients)
+   - Table-based layout for structural elements
+   - All critical styles are also applied inline on elements
+     that must render in Gmail (which strips <style> blocks)
+
+   This file is parsed by Go's html/template engine.
+   The service must include it when building the template set:
+     template.ParseGlob("templates/*")
+   ============================================================ */
+
+/* ── Reset ──────────────────────────────────────────────────── */
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body,
+table,
+td,
+a {
+  -webkit-text-size-adjust: 100%;
+  -ms-text-size-adjust: 100%;
+}
+
+table,
+td {
+  mso-table-lspace: 0pt;
+  mso-table-rspace: 0pt;
+}
+
+img {
+  border: 0;
+  height: auto;
+  line-height: 100%;
+  outline: none;
+  text-decoration: none;
+  -ms-interpolation-mode: bicubic;
+}
+
+/* ── Page background ─────────────────────────────────────────── */
+
+body {
+  background-color: #f4f4f5;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  font-size: 16px;
+  line-height: 1.6;
+  color: #18181b;
+  width: 100%;
+  height: 100%;
+}
+
+/* ── Outer wrapper ───────────────────────────────────────────── */
+
+.email-wrapper {
+  width: 100%;
+  background-color: #f4f4f5;
+  padding: 40px 16px;
+}
+
+/* ── Card container ──────────────────────────────────────────── */
+
+.email-card {
+  max-width: 560px;
+  margin: 0 auto;
+  background-color: #ffffff;
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+
+/* ── Header ──────────────────────────────────────────────────── */
+
+.email-header {
+  background-color: #09090b;
+  padding: 28px 40px;
+  text-align: center;
+}
+
+.email-header .app-name {
+  color: #ffffff;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.3px;
+  text-decoration: none;
+}
+
+.email-header .app-name span {
+  color: #a1a1aa;
+  font-weight: 400;
+}
+
+/* ── Body ────────────────────────────────────────────────────── */
+
+.email-body {
+  padding: 40px 40px 32px;
+}
+
+/* ── Typography ──────────────────────────────────────────────── */
+
+.email-body h1 {
+  font-size: 22px;
+  font-weight: 700;
+  color: #09090b;
+  letter-spacing: -0.3px;
+  margin-bottom: 12px;
+}
+
+.email-body p {
+  font-size: 15px;
+  color: #3f3f46;
+  line-height: 1.65;
+  margin-bottom: 20px;
+}
+
+.email-body p:last-child {
+  margin-bottom: 0;
+}
+
+.email-body a {
+  color: #2563eb;
+  text-decoration: underline;
+}
+
+.email-body strong {
+  color: #09090b;
+  font-weight: 600;
+}
+
+/* ── Divider ─────────────────────────────────────────────────── */
+
+.email-divider {
+  border: none;
+  border-top: 1px solid #e4e4e7;
+  margin: 28px 0;
+}
+
+/* ── Primary CTA button ──────────────────────────────────────── */
+
+.btn-primary {
+  display: inline-block;
+  background-color: #09090b;
+  color: #ffffff !important;
+  font-size: 15px;
+  font-weight: 600;
+  text-decoration: none !important;
+  padding: 12px 28px;
+  border-radius: 6px;
+  letter-spacing: 0.1px;
+  mso-padding-alt: 12px 28px;
+}
+
+.btn-primary:hover {
+  background-color: #27272a;
+}
+
+.btn-wrapper {
+  text-align: center;
+  margin: 28px 0;
+}
+
+/* ── Token / code block ──────────────────────────────────────── */
+
+.token-block {
+  background-color: #f4f4f5;
+  border: 1px solid #e4e4e7;
+  border-radius: 6px;
+  padding: 14px 18px;
+  font-family: "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono",
+    Consolas, "Courier New", monospace;
+  font-size: 14px;
+  color: #09090b;
+  letter-spacing: 0.5px;
+  word-break: break-all;
+  margin: 20px 0;
+}
+
+/* ── Alert banners ───────────────────────────────────────────── */
+
+.alert {
+  border-radius: 6px;
+  padding: 14px 18px;
+  margin: 20px 0;
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.alert-warning {
+  background-color: #fffbeb;
+  border: 1px solid #fcd34d;
+  color: #78350f;
+}
+
+.alert-danger {
+  background-color: #fef2f2;
+  border: 1px solid #fca5a5;
+  color: #7f1d1d;
+}
+
+.alert-info {
+  background-color: #eff6ff;
+  border: 1px solid #93c5fd;
+  color: #1e3a5f;
+}
+
+/* ── Storage usage bar ───────────────────────────────────────── */
+
+.usage-bar-wrapper {
+  background-color: #e4e4e7;
+  border-radius: 9999px;
+  height: 8px;
+  overflow: hidden;
+  margin: 8px 0 16px;
+}
+
+.usage-bar-fill {
+  height: 8px;
+  border-radius: 9999px;
+  background-color: #f59e0b;
+}
+
+.usage-bar-fill.danger {
+  background-color: #ef4444;
+}
+
+.usage-label {
+  font-size: 13px;
+  color: #71717a;
+  margin-bottom: 4px;
+}
+
+/* ── Footer ──────────────────────────────────────────────────── */
+
+.email-footer {
+  background-color: #fafafa;
+  border-top: 1px solid #e4e4e7;
+  padding: 24px 40px;
+  text-align: center;
+}
+
+.email-footer p {
+  font-size: 12px;
+  color: #a1a1aa;
+  line-height: 1.6;
+  margin-bottom: 4px;
+}
+
+.email-footer a {
+  color: #71717a;
+  text-decoration: underline;
+}
+
+/* ── Responsive ──────────────────────────────────────────────── */
+
+@media only screen and (max-width: 600px) {
+  .email-card {
+    border-radius: 0;
+  }
+
+  .email-header {
+    padding: 22px 24px;
+  }
+
+  .email-body {
+    padding: 28px 24px 24px;
+  }
+
+  .email-footer {
+    padding: 20px 24px;
+  }
+
+  .btn-primary {
+    display: block;
+    text-align: center;
+  }
+}

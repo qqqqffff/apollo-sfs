@@ -1,0 +1,32 @@
+{{/*
+  email_base.html — shared named template blocks used by all email templates.
+
+  Stylesheet injection is handled by the EmailService at send time — email.css
+  is read as a plain file and embedded into each message by buildMessage.
+  Templates only need to parse *.html files.
+
+  The service parses all HTML templates together:
+    tmpl := template.Must(template.ParseGlob("templates/*.html"))
+
+  Render a specific email with:
+    tmpl.ExecuteTemplate(buf, "<template-name>", data)
+
+  All templates expect at minimum:
+    AppName string  — display name (e.g. "apollo-sfs")
+    AppURL  string  — public base URL (e.g. "https://files.example.com")
+    Email   string  — recipient address (used in footer)
+*/}}
+
+{{define "header"}}
+<div class="email-header">
+  <a href="{{.AppURL}}" class="app-name">apollo<span>-sfs</span></a>
+</div>
+{{end}}
+
+{{define "footer"}}
+<div class="email-footer">
+  <p>This email was sent to <strong>{{.Email}}</strong> because an action was taken on your {{.AppName}} account.</p>
+  <p>This is an automated message — please do not reply directly to this email.</p>
+  <p><a href="{{.AppURL}}">{{.AppURL}}</a></p>
+</div>
+{{end}}

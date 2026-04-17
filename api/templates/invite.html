@@ -1,0 +1,61 @@
+{{/*
+  Template name : "invite"
+  Trigger       : Admin creates an invitation for an email address
+  Data fields   :
+    AppName          string
+    AppURL           string
+    Email            string — the invitee's address
+    InvitedByUsername string — the admin who sent the invite
+    InvitationURL    string — full URL containing the invitation token
+    ExpiresIn        string — human-readable expiry e.g. "72 hours"
+*/}}
+{{define "invite"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <title>You have been invited to {{.AppName}}</title>
+</head>
+<body>
+  <div class="email-wrapper">
+    <div class="email-card">
+
+      {{template "header" .}}
+
+      <div class="email-body">
+        <h1>You&#39;ve been invited</h1>
+        <p>
+          <strong>{{.InvitedByUsername}}</strong> has invited you to join
+          <strong>{{.AppName}}</strong> — a private, end-to-end encrypted file
+          storage service.
+        </p>
+        <p>
+          Click the button below to create your account. This invitation is
+          personal to <strong>{{.Email}}</strong> and expires in
+          <strong>{{.ExpiresIn}}</strong>.
+        </p>
+
+        <div class="btn-wrapper">
+          <a href="{{.InvitationURL}}" class="btn-primary">Accept invitation</a>
+        </div>
+
+        <p>If the button does not work, copy and paste this link into your browser:</p>
+        <div class="token-block">{{.InvitationURL}}</div>
+
+        <hr class="email-divider" />
+
+        <p>
+          If you were not expecting this invitation or do not wish to join,
+          you can safely ignore this email. The link will expire automatically.
+        </p>
+      </div>
+
+      {{template "footer" .}}
+
+    </div>
+  </div>
+</body>
+</html>
+{{end}}

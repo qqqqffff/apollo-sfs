@@ -96,6 +96,7 @@ func main() {
 		QuotaWarnPct: cfg.QuotaWarningThresholdPct,
 	})
 	folderSvc := services.NewFolderService(queries)
+	favSvc := services.NewFavoriteService(queries)
 	inviteSvc := services.NewInviteService(queries, nil, cfg.AppBaseURL, 0)
 	// TODO: replace nil with emailSvc once EmailService is wired:
 	//   inviteSvc = services.NewInviteService(queries, emailSvc, cfg.AppBaseURL, 0)
@@ -111,7 +112,7 @@ func main() {
 	go rotationSvc.StartScheduler(context.Background())
 	go metricsSvc.Start(context.Background())
 
-	r := setupRouter(cfg, queries, oidcVerifier, authSvc, fileSvc, folderSvc, inviteSvc, metricsSvc)
+	r := setupRouter(cfg, queries, oidcVerifier, authSvc, fileSvc, folderSvc, favSvc, inviteSvc, metricsSvc)
 
 	addr := ":" + cfg.Port
 	log.Printf("apollo-sfs API listening on %s", addr)
@@ -120,7 +121,7 @@ func main() {
 	}
 }
 
-func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVerifier, authSvc *services.AuthService, fileSvc *services.FileService, folderSvc *services.FolderService, inviteSvc *services.InviteService, metricsSvc *services.MetricsService) *gin.Engine {
+func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVerifier, authSvc *services.AuthService, fileSvc *services.FileService, folderSvc *services.FolderService, favSvc *services.FavoriteService, inviteSvc *services.InviteService, metricsSvc *services.MetricsService) *gin.Engine {
 	r := gin.New()
 	r.Use(gin.Logger())
 	r.Use(gin.Recovery())
@@ -152,7 +153,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		cfg.CookieSecure,
 	)
 
-	h := routes.NewHandler(queries, fileSvc, folderSvc, inviteSvc)
+	h := routes.NewHandler(queries, fileSvc, folderSvc, inviteSvc, favSvc)
 	authHandler := auth.NewHandler(authSvc)
 	adminHandler := admin.NewHandler(queries, inviteSvc, metricsSvc)
 
@@ -188,8 +189,20 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		protected.GET("/files/:file_id", h.GetFile)
 		protected.GET("/files/:file_id/download", h.DownloadFile)
 		protected.GET("/files/:file_id/preview", h.PreviewFile)
+		protected.GET("/files/:file_id/stream", h.StreamFile)
 		protected.PATCH("/files/:file_id", h.UpdateFile)
+		protected.PATCH("/files/:file_id/move", h.MoveFile)
 		protected.DELETE("/files/:file_id", h.DeleteFile)
+
+		// Search
+		protected.GET("/search", h.Search)
+
+		// Favorites
+		protected.GET("/favorites", h.ListFavorites)
+		protected.POST("/favorites/files/:file_id", h.FavoriteFile)
+		protected.DELETE("/favorites/files/:file_id", h.UnfavoriteFile)
+		protected.POST("/favorites/folders/:folder_id", h.FavoriteFolder)
+		protected.DELETE("/favorites/folders/:folder_id", h.UnfavoriteFolder)
 
 		// Folders
 		protected.GET("/folders", h.ListFolders)

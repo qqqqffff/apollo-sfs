@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -13,7 +14,7 @@ import (
 )
 
 type createInvitationRequest struct {
-	Email string `json:"email" binding:"required,email"`
+	Email string `json:"email" binding:"required,email,max=254"`
 }
 
 // CreateInvitation handles POST /api/v1/admin/invitations.
@@ -51,7 +52,7 @@ func (h *Handler) CreateInvitation(c *gin.Context) {
 // Returns a paginated list of all invitations ordered by creation time descending.
 func (h *Handler) GetInvitations(c *gin.Context) {
 	page := db.PageInput{
-		Cursor: c.Query("cursor"),
+		Cursor: strings.TrimSpace(c.Query("cursor")),
 	}
 	if err := parseLimit(c, &page.Limit); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "limit must be a positive integer"})

@@ -173,6 +173,46 @@ func (q *Queries) ListSnapshotsByDate(ctx context.Context, date string, in PageI
 	}, nil
 }
 
+// ListSnapshotsByHours returns at most maxPoints evenly-distributed snapshots
+// from the past hours hours, ordered oldest-first. Uses NTILE downsampling so
+// the returned points cover the full interval regardless of data density.
+func (q *Queries) ListSnapshotsByHours(ctx context.Context, hours, maxPoints int) ([]models.ServerMetricSnapshot, error) {
+	cutoff := time.Now().UTC().Add(-time.Duration(hours) * time.Hour)
+
+	rows, err := q.db.QueryContext(ctx, `
+		SELECT DISTINCT ON (bucket)
+			id, cpu_percent, memory_used_bytes, memory_total_bytes,
+			network_bytes_sent, network_bytes_recv,
+			storage_total_used_bytes, storage_total_quota_bytes,
+			active_user_count, total_user_count, sampled_at
+		FROM (
+			SELECT
+				id, cpu_percent, memory_used_bytes, memory_total_bytes,
+				network_bytes_sent, network_bytes_recv,
+				storage_total_used_bytes, storage_total_quota_bytes,
+				active_user_count, total_user_count, sampled_at,
+				NTILE($1) OVER (ORDER BY sampled_at ASC) AS bucket
+			FROM server_metrics_snapshots
+			WHERE sampled_at >= $2
+		) sub
+		ORDER BY bucket, sampled_at ASC
+	`, maxPoints, cutoff)
+	if err != nil {
+		return nil, fmt.Errorf("ListSnapshotsByHours: %w", err)
+	}
+	defer rows.Close()
+
+	var snaps []models.ServerMetricSnapshot
+	for rows.Next() {
+		s, err := scanSnapshot(rows)
+		if err != nil {
+			return nil, fmt.Errorf("ListSnapshotsByHours scan: %w", err)
+		}
+		snaps = append(snaps, *s)
+	}
+	return snaps, rows.Err()
+}
+
 // PruneOldSnapshots deletes all snapshots sampled before the given time.
 // Called daily by a background goroutine to enforce the 7-day retention policy.
 func (q *Queries) PruneOldSnapshots(ctx context.Context, before time.Time) error {

@@ -154,6 +154,45 @@ func (q *Queries) ListRootFolders(ctx context.Context, userID uuid.UUID, in Page
 	}, nil
 }
 
+// SearchFoldersByUser returns a page of folders owned by userID whose name
+// contains term (case-insensitive), ordered by name. Searches across all
+// folders regardless of parent — intended for the global search endpoint.
+func (q *Queries) SearchFoldersByUser(ctx context.Context, userID uuid.UUID, term string, in PageInput) (*PageResult[models.Folder], error) {
+	limit := clampLimit(in.Limit)
+	offset, err := decodeOffsetCursor(in.Cursor)
+	if err != nil {
+		return nil, fmt.Errorf("SearchFoldersByUser: %w", err)
+	}
+
+	rows, err := q.db.QueryContext(ctx, `
+		SELECT id, user_id, parent_id, name, created_at, updated_at
+		FROM folders
+		WHERE user_id = $1 AND name ILIKE '%' || $2 || '%'
+		ORDER BY name ASC
+		LIMIT $3 OFFSET $4
+	`, userID, term, limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("SearchFoldersByUser: %w", err)
+	}
+	defer rows.Close()
+
+	var folders []models.Folder
+	for rows.Next() {
+		f, err := scanFolderRow(rows)
+		if err != nil {
+			return nil, fmt.Errorf("SearchFoldersByUser scan: %w", err)
+		}
+		folders = append(folders, *f)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("SearchFoldersByUser: %w", err)
+	}
+	return &PageResult[models.Folder]{
+		Items:     folders,
+		NextToken: offsetNextToken(len(folders), limit, offset),
+	}, nil
+}
+
 // ListFoldersByParent returns a page of direct child folders of parentID
 // owned by userID, ordered by name.
 func (q *Queries) ListFoldersByParent(ctx context.Context, userID, parentID uuid.UUID, in PageInput) (*PageResult[models.Folder], error) {

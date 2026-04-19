@@ -9,13 +9,14 @@ import (
 // Methods on Handler implement the individual endpoint logic.
 // Sub-packages (auth, admin) define their own equivalent structs.
 type Handler struct {
-	queries *db.Queries
-	files   *services.FileService
-	folders *services.FolderService
-	invites *services.InviteService
+	queries   *db.Queries
+	files     *services.FileService
+	folders   *services.FolderService
+	invites   *services.InviteService
+	favorites *services.FavoriteService
 }
 
 // NewHandler constructs a Handler with the given dependencies.
-func NewHandler(q *db.Queries, fileSvc *services.FileService, folderSvc *services.FolderService, inviteSvc *services.InviteService) *Handler {
-	return &Handler{queries: q, files: fileSvc, folders: folderSvc, invites: inviteSvc}
+func NewHandler(q *db.Queries, fileSvc *services.FileService, folderSvc *services.FolderService, inviteSvc *services.InviteService, favSvc *services.FavoriteService) *Handler {
+	return &Handler{queries: q, files: fileSvc, folders: folderSvc, invites: inviteSvc, favorites: favSvc}
 }

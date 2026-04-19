@@ -16,6 +16,25 @@ name: apollo-sfs
 
 services:
 
+  # ── Frontend ───────────────────────────────────────────────────────────────
+  # Vite build output served by nginx:alpine.
+  # Bound to 127.0.0.1 only — the host nginx proxies inbound HTTPS traffic here.
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: apollo-sfs-frontend
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:80"
+    networks:
+      - app-network
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   # ── App API ────────────────────────────────────────────────────────────────
   api:
     build:
@@ -209,6 +228,7 @@ services:
       POSTGRES_DB: ${POSTGRES_APP_DB}
     volumes:
       - ./docker/postgresql-app:/var/lib/postgresql/data
+      - ./db:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_APP_USER} -d ${POSTGRES_APP_DB}"]
       interval: 10s

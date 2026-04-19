@@ -106,6 +106,46 @@ func (q *Queries) ListFilesByFolder(ctx context.Context, folderID uuid.UUID, in 
 	}, nil
 }
 
+// SearchFilesByUser returns a page of files owned by userID whose name
+// contains term (case-insensitive), ordered by name. Searches across all
+// folders — intended for the global search endpoint.
+func (q *Queries) SearchFilesByUser(ctx context.Context, userID uuid.UUID, term string, in PageInput) (*PageResult[models.File], error) {
+	limit := clampLimit(in.Limit)
+	offset, err := decodeOffsetCursor(in.Cursor)
+	if err != nil {
+		return nil, fmt.Errorf("SearchFilesByUser: %w", err)
+	}
+
+	rows, err := q.db.QueryContext(ctx, `
+		SELECT id, user_id, folder_id, name, mime_type,
+		       size_bytes, minio_object_key, nonce, created_at, updated_at
+		FROM files
+		WHERE user_id = $1 AND name ILIKE '%' || $2 || '%'
+		ORDER BY name ASC
+		LIMIT $3 OFFSET $4
+	`, userID, term, limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("SearchFilesByUser: %w", err)
+	}
+	defer rows.Close()
+
+	var files []models.File
+	for rows.Next() {
+		f, err := scanFileRow(rows)
+		if err != nil {
+			return nil, fmt.Errorf("SearchFilesByUser scan: %w", err)
+		}
+		files = append(files, *f)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("SearchFilesByUser: %w", err)
+	}
+	return &PageResult[models.File]{
+		Items:     files,
+		NextToken: offsetNextToken(len(files), limit, offset),
+	}, nil
+}
+
 // ListFilesByUser returns a page of all files owned by userID across all folders,
 // ordered by name. Secondary index: files.user_id should be indexed in the DB migration.
 func (q *Queries) ListFilesByUser(ctx context.Context, userID uuid.UUID, in PageInput) (*PageResult[models.File], error) {
@@ -155,6 +195,22 @@ func (q *Queries) UpdateFileName(ctx context.Context, id uuid.UUID, name string)
 	f, err := scanFile(row)
 	if err != nil {
 		return nil, fmt.Errorf("UpdateFileName %s: %w", id, err)
+	}
+	return f, nil
+}
+
+// MoveFile updates a file's folder_id. Ownership is enforced at the service
+// layer before this is called.
+func (q *Queries) MoveFile(ctx context.Context, fileID, newFolderID uuid.UUID) (*models.File, error) {
+	row := q.db.QueryRowContext(ctx, `
+		UPDATE files SET folder_id = $2, updated_at = NOW()
+		WHERE id = $1
+		RETURNING id, user_id, folder_id, name, mime_type,
+		          size_bytes, minio_object_key, nonce, created_at, updated_at
+	`, fileID, newFolderID)
+	f, err := scanFile(row)
+	if err != nil {
+		return nil, fmt.Errorf("MoveFile %s: %w", fileID, err)
 	}
 	return f, nil
 }

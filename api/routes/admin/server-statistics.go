@@ -6,6 +6,8 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -47,10 +49,25 @@ func (h *Handler) GetMetrics(c *gin.Context) {
 // Pass ?date=mm-dd-yyyy to scope results to a single calendar day.
 func (h *Handler) GetMetricsHistory(c *gin.Context) {
 	page := db.PageInput{
-		Cursor: c.Query("cursor"),
+		Cursor: strings.TrimSpace(c.Query("cursor")),
 	}
 	if err := parseLimit(c, &page.Limit); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "limit must be a positive integer"})
+		return
+	}
+
+	if hoursStr := c.Query("hours"); hoursStr != "" {
+		hours, err := strconv.Atoi(hoursStr)
+		if err != nil || hours <= 0 || hours > 72 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "hours must be a positive integer ≤ 72"})
+			return
+		}
+		snaps, err := h.metrics.GetHistoryByHours(c.Request.Context(), hours)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "could not retrieve metrics history"})
+			return
+		}
+		c.JSON(http.StatusOK, snaps)
 		return
 	}
 

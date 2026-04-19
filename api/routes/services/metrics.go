@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -120,6 +122,12 @@ func (s *MetricsService) GetHistory(ctx context.Context, page db.PageInput) (*db
 	return s.queries.ListSnapshots(ctx, page)
 }
 
+// GetHistoryByHours returns ~120 evenly-distributed snapshots from the past
+// hours hours, ordered oldest-first. Used by the admin line graph.
+func (s *MetricsService) GetHistoryByHours(ctx context.Context, hours int) ([]models.ServerMetricSnapshot, error) {
+	return s.queries.ListSnapshotsByHours(ctx, hours, 120)
+}
+
 // GetHistoryByDate returns snapshots for a specific day in mm-dd-yyyy format.
 func (s *MetricsService) GetHistoryByDate(ctx context.Context, date string, page db.PageInput) (*db.PageResult[models.ServerMetricSnapshot], error) {
 	return s.queries.ListSnapshotsByDate(ctx, date, page)
@@ -190,12 +198,26 @@ func (s *MetricsService) collectSnapshot(ctx context.Context) (*models.ServerMet
 		MemoryTotalBytes:       sys.memTotal,
 		NetworkBytesSent:       sys.netSent,
 		NetworkBytesRecv:       sys.netRecv,
-		StorageTotalUsedBytes:  app.StorageUsedBytes,
+		StorageTotalUsedBytes:  minioStorageBytes("../minio"),
 		StorageTotalQuotaBytes: app.StorageQuotaBytes,
 		ActiveUserCount:        app.ActiveUsersLast5m,
 		TotalUserCount:         app.TotalUsers,
 		SampledAt:              time.Now().UTC(),
 	}, nil
+}
+
+// minioStorageBytes walks dir and sums the sizes of all regular files.
+// Unreadable entries are skipped so a permission error never fails a metric sample.
+func minioStorageBytes(dir string) int64 {
+	var total int64
+	_ = filepath.Walk(dir, func(_ string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		total += info.Size()
+		return nil
+	})
+	return total
 }
 
 // sysMetrics holds the raw gopsutil readings for one sample.

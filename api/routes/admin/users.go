@@ -4,10 +4,12 @@ import (
 	"database/sql"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
 	"apollo-sfs.com/api/db"
+	"apollo-sfs.com/api/sanitize"
 )
 
 type updateQuotaRequest struct {
@@ -17,7 +19,7 @@ type updateQuotaRequest struct {
 // GetUsers handles GET /api/v1/admin/users
 func (h *Handler) GetUsers(c *gin.Context) {
 	page := db.PageInput{
-		Cursor: c.Query("cursor"),
+		Cursor: strings.TrimSpace(c.Query("cursor")),
 	}
 	if err := parseLimit(c, &page.Limit); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "limit must be a positive integer"})
@@ -35,7 +37,11 @@ func (h *Handler) GetUsers(c *gin.Context) {
 
 // GetUser handles GET /api/v1/admin/users/:user_id
 func (h *Handler) GetUser(c *gin.Context) {
-	username := c.Param("user_id")
+	username := sanitize.String(c.Param("user_id"))
+	if username == "" || len(username) > 150 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user_id"})
+		return
+	}
 
 	user, err := h.queries.GetUserByUsername(c.Request.Context(), username)
 	if err != nil {
@@ -52,7 +58,11 @@ func (h *Handler) GetUser(c *gin.Context) {
 
 // UpdateUserQuota handles PATCH /api/v1/admin/users/:user_id/quota
 func (h *Handler) UpdateUserQuota(c *gin.Context) {
-	username := c.Param("user_id")
+	username := sanitize.String(c.Param("user_id"))
+	if username == "" || len(username) > 150 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user_id"})
+		return
+	}
 
 	var req updateQuotaRequest
 	if err := c.ShouldBindJSON(&req); err != nil {

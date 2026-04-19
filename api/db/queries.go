@@ -16,9 +16,12 @@ const (
 // PageInput is passed to every paginated list query.
 // Cursor is the opaque token returned by the previous call; leave empty for the first page.
 // Limit is capped at MaxPageLimit (128); zero falls back to DefaultPageLimit (50).
+// Skip = true means "return an empty page without hitting the database" (used when
+// the caller knows this list is exhausted and only the other list needs advancing).
 type PageInput struct {
 	Cursor string
 	Limit  int
+	Skip   bool
 }
 
 // PageResult is returned by every paginated list query.

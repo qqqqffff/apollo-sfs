@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -352,6 +353,278 @@ func aesGCMDecrypt(key, nonce, ciphertext []byte) ([]byte, error) {
 		return nil, fmt.Errorf("authentication failed — data may be corrupt or tampered: %w", err)
 	}
 	return plaintext, nil
+}
+
+// ── Chunked file encryption ───────────────────────────────────────────────────
+//
+// Video files are split into fixed-size plaintext chunks, each encrypted
+// independently with AES-256-GCM and a fresh random nonce. The stored blob is
+// the concatenation of (nonce || ciphertext+tag) for every chunk in order.
+//
+// Stored chunk layout:
+//
+//	[nonce 12 B][AES-GCM ciphertext + 16 B tag] ...repeated for each chunk
+//
+// The file metadata row stores an empty Nonce (len==0) to signal chunked mode;
+// the nonce for each chunk is embedded inline in the blob. All existing files
+// keep their original 12-byte Nonce and are decrypted via the single-blob path.
+//
+// Chunked encryption enables efficient range requests: to serve bytes [A,B] the
+// backend fetches only the MinIO chunks that overlap the range, decrypts them
+// concurrently, and trims the result. This avoids downloading and decrypting the
+// entire file for every seek or partial-play request.
+
+const (
+	// ChunkSize is the plaintext byte length of each chunk (1 MiB).
+	ChunkSize = 1 << 20
+	// chunkNonceSize is the 12-byte AES-GCM nonce prepended to each stored chunk.
+	chunkNonceSize = 12
+	// chunkTagSize is the 16-byte AES-GCM authentication tag appended to each chunk.
+	chunkTagSize = 16
+	// ChunkOverhead is the total per-chunk storage overhead (nonce + tag).
+	ChunkOverhead = chunkNonceSize + chunkTagSize
+	// StoredChunkSize is the stored byte length of a full-size chunk.
+	// The last chunk of a file may be smaller if the plaintext does not evenly divide.
+	StoredChunkSize = ChunkSize + ChunkOverhead
+)
+
+// EncryptChunked encrypts plaintext by splitting it into ChunkSize-byte chunks
+// and encrypting each with AES-256-GCM using a fresh random nonce.
+// Encryption runs concurrently (up to GOMAXPROCS workers).
+// Returns the concatenated stored blob; the caller saves an empty Nonce in the
+// DB to signal that this file uses chunked mode.
+func (s *EncryptionService) EncryptChunked(userKey, plaintext []byte) ([]byte, error) {
+	numChunks := (len(plaintext) + ChunkSize - 1) / ChunkSize
+	if numChunks == 0 {
+		numChunks = 1
+	}
+
+	results := make([][]byte, numChunks)
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var firstErr error
+
+	// Semaphore limits concurrent goroutines to GOMAXPROCS.
+	sem := make(chan struct{}, runtime.GOMAXPROCS(0))
+
+	for i := 0; i < numChunks; i++ {
+		start := i * ChunkSize
+		end := start + ChunkSize
+		if end > len(plaintext) {
+			end = len(plaintext)
+		}
+		chunk := make([]byte, end-start)
+		copy(chunk, plaintext[start:end])
+
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(idx int, data []byte) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			ciphertext, nonce, err := aesGCMEncrypt(userKey, data)
+			if err != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = fmt.Errorf("encrypt chunk %d: %w", idx, err)
+				}
+				mu.Unlock()
+				return
+			}
+			// stored = nonce || ciphertext (ciphertext already has the GCM tag appended)
+			stored := make([]byte, chunkNonceSize+len(ciphertext))
+			copy(stored, nonce)
+			copy(stored[chunkNonceSize:], ciphertext)
+			results[idx] = stored // each goroutine writes its own index — no mutex needed
+		}(i, chunk)
+	}
+
+	wg.Wait()
+	if firstErr != nil {
+		return nil, firstErr
+	}
+
+	var total int
+	for _, r := range results {
+		total += len(r)
+	}
+	out := make([]byte, 0, total)
+	for _, r := range results {
+		out = append(out, r...)
+	}
+	return out, nil
+}
+
+// DecryptChunked decrypts a full blob produced by EncryptChunked.
+// Chunks are decrypted concurrently (up to GOMAXPROCS workers).
+func (s *EncryptionService) DecryptChunked(userKey, blob []byte) ([]byte, error) {
+	if len(blob) == 0 {
+		return nil, nil
+	}
+
+	// Parse chunk boundaries. All chunks except the last are StoredChunkSize bytes;
+	// the last chunk is whatever bytes remain.
+	type span struct{ start, end int }
+	var spans []span
+	for off := 0; off < len(blob); {
+		size := StoredChunkSize
+		if off+size > len(blob) {
+			size = len(blob) - off
+		}
+		spans = append(spans, span{off, off + size})
+		off += size
+	}
+
+	results := make([][]byte, len(spans))
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var firstErr error
+
+	sem := make(chan struct{}, runtime.GOMAXPROCS(0))
+
+	for i, sp := range spans {
+		data := blob[sp.start:sp.end]
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(idx int, d []byte) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			if len(d) <= chunkNonceSize {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = fmt.Errorf("chunk %d too short (%d bytes)", idx, len(d))
+				}
+				mu.Unlock()
+				return
+			}
+			plain, err := aesGCMDecrypt(userKey, d[:chunkNonceSize], d[chunkNonceSize:])
+			if err != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = fmt.Errorf("decrypt chunk %d: %w", idx, err)
+				}
+				mu.Unlock()
+				return
+			}
+			results[idx] = plain
+		}(i, data)
+	}
+
+	wg.Wait()
+	if firstErr != nil {
+		return nil, firstErr
+	}
+
+	var total int
+	for _, r := range results {
+		total += len(r)
+	}
+	out := make([]byte, 0, total)
+	for _, r := range results {
+		out = append(out, r...)
+	}
+	return out, nil
+}
+
+// DecryptChunkedRange decrypts a MinIO blob slice covering chunks
+// [firstChunkIdx, rangeEnd/ChunkSize] and returns exactly the plaintext bytes
+// [rangeStart, rangeEnd].
+//
+// blobSlice must be the raw bytes fetched from MinIO starting at the stored
+// offset of firstChunkIdx. numTotalChunks and totalPlaintextSize are required
+// to determine the stored size of the last chunk in the file.
+// Decryption runs concurrently (up to GOMAXPROCS workers).
+func (s *EncryptionService) DecryptChunkedRange(
+	userKey, blobSlice []byte,
+	firstChunkIdx, numTotalChunks, totalPlaintextSize, rangeStart, rangeEnd int64,
+) ([]byte, error) {
+	lastChunkIdx := rangeEnd / int64(ChunkSize)
+	count := int(lastChunkIdx - firstChunkIdx + 1)
+
+	results := make([][]byte, count)
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var firstErr error
+
+	sem := make(chan struct{}, runtime.GOMAXPROCS(0))
+
+	// Walk the blob slice, extracting each stored chunk.
+	blobOff := int64(0)
+	for j := 0; j < count; j++ {
+		absIdx := firstChunkIdx + int64(j)
+
+		var storedSize int64
+		if absIdx == numTotalChunks-1 {
+			// Last chunk of the file may have less than ChunkSize plaintext bytes.
+			lastPlain := totalPlaintextSize - absIdx*int64(ChunkSize)
+			storedSize = lastPlain + int64(ChunkOverhead)
+		} else {
+			storedSize = int64(StoredChunkSize)
+		}
+
+		data := blobSlice[blobOff : blobOff+storedSize]
+		blobOff += storedSize
+
+		relIdx := j
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(idx int, d []byte, abs int64) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			if int64(len(d)) <= int64(chunkNonceSize) {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = fmt.Errorf("chunk %d too short (%d bytes)", abs, len(d))
+				}
+				mu.Unlock()
+				return
+			}
+			plain, err := aesGCMDecrypt(userKey, d[:chunkNonceSize], d[chunkNonceSize:])
+			if err != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = fmt.Errorf("decrypt chunk %d: %w", abs, err)
+				}
+				mu.Unlock()
+				return
+			}
+			results[idx] = plain
+		}(relIdx, data, absIdx)
+	}
+
+	wg.Wait()
+	if firstErr != nil {
+		return nil, firstErr
+	}
+
+	// Assemble exactly [rangeStart, rangeEnd] from the decrypted chunks.
+	out := make([]byte, 0, rangeEnd-rangeStart+1)
+	for j, plain := range results {
+		absIdx := firstChunkIdx + int64(j)
+		chunkPlainStart := absIdx * int64(ChunkSize)
+		chunkPlainEnd := chunkPlainStart + int64(len(plain)) - 1
+
+		copyFrom := clampedSub(rangeStart, chunkPlainStart, chunkPlainEnd)
+		copyTo := clampedSub(rangeEnd, chunkPlainStart, chunkPlainEnd) + 1
+		out = append(out, plain[copyFrom:copyTo]...)
+	}
+	return out, nil
+}
+
+// clampedSub returns max(pos, lo) - lo, clamped so the result stays within [0, hi-lo].
+func clampedSub(pos, lo, hi int64) int64 {
+	if pos < lo {
+		return 0
+	}
+	if pos > hi {
+		return hi - lo
+	}
+	return pos - lo
 }
 
 // zeroBytes overwrites a byte slice with zeros to prevent key material from

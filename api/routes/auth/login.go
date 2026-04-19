@@ -2,6 +2,7 @@ package auth
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/gin-contrib/sessions"
 	"github.com/gin-gonic/gin"
@@ -10,8 +11,8 @@ import (
 )
 
 type loginRequest struct {
-	Username string `json:"username" binding:"required"`
-	Password string `json:"password" binding:"required"`
+	Username string `json:"username" binding:"required,max=150"`
+	Password string `json:"password" binding:"required,max=1024"`
 }
 
 // Login handles POST /api/v1/auth/login.
@@ -21,6 +22,12 @@ type loginRequest struct {
 func (h *Handler) Login(c *gin.Context) {
 	var req loginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "username and password are required"})
+		return
+	}
+
+	req.Username = strings.TrimSpace(req.Username)
+	if req.Username == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "username and password are required"})
 		return
 	}

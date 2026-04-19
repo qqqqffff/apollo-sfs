@@ -4,12 +4,14 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
 	"apollo-sfs.com/api/db"
 	"apollo-sfs.com/api/routes/services"
+	"apollo-sfs.com/api/sanitize"
 )
 
 // ── ListFolders ───────────────────────────────────────────────────────────────
@@ -76,7 +78,7 @@ func (h *Handler) GetFolder(c *gin.Context) {
 // ── CreateFolder ──────────────────────────────────────────────────────────────
 
 type createFolderRequest struct {
-	Name     string  `json:"name"      binding:"required"`
+	Name     string  `json:"name"      binding:"required,max=255"`
 	ParentID *string `json:"parent_id"` // omit or null → root
 }
 
@@ -87,6 +89,12 @@ func (h *Handler) CreateFolder(c *gin.Context) {
 	var req createFolderRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
+		return
+	}
+
+	req.Name = sanitize.Name(req.Name, 255)
+	if req.Name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name must not be blank"})
 		return
 	}
 
@@ -121,7 +129,7 @@ func (h *Handler) CreateFolder(c *gin.Context) {
 // ── UpdateFolder ──────────────────────────────────────────────────────────────
 
 type updateFolderRequest struct {
-	Name string `json:"name" binding:"required"`
+	Name string `json:"name" binding:"required,max=255"`
 }
 
 // UpdateFolder handles PATCH /api/v1/folders/:folder_id.
@@ -136,6 +144,12 @@ func (h *Handler) UpdateFolder(c *gin.Context) {
 	var req updateFolderRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
+		return
+	}
+
+	req.Name = sanitize.Name(req.Name, 255)
+	if req.Name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name must not be blank"})
 		return
 	}
 
@@ -189,15 +203,21 @@ func (h *Handler) DeleteFolder(c *gin.Context) {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 // parsePage reads ?{prefix}_cursor and ?{prefix}_limit from the query string
-// and returns a PageInput. Unknown or out-of-range limits are left at 0
-// (service applies DefaultPageLimit).
+// and returns a PageInput.
+// A limit of exactly 0 sets Skip=true (caller signals this list is exhausted).
+// Unknown or negative limits are left at 0 (service applies DefaultPageLimit).
 func parsePage(c *gin.Context, prefix string) db.PageInput {
 	p := db.PageInput{
-		Cursor: c.Query(prefix + "_cursor"),
+		Cursor: strings.TrimSpace(c.Query(prefix + "_cursor")),
 	}
 	if raw := c.Query(prefix + "_limit"); raw != "" {
-		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
-			p.Limit = n
+		if n, err := strconv.Atoi(raw); err == nil {
+			switch {
+			case n == 0:
+				p.Skip = true
+			case n > 0:
+				p.Limit = n
+			}
 		}
 	}
 	return p

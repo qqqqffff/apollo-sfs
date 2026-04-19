@@ -41,19 +41,33 @@ func NewFolderService(q *db.Queries) *FolderService {
 
 // ListRoot returns the top-level folders (parent_id IS NULL) and root-level
 // files for the given userID, with independent pagination for each list.
+// When folderPage.Skip or filePage.Skip is true the corresponding list is
+// returned as an empty page without hitting the database.
 func (s *FolderService) ListRoot(
 	ctx context.Context,
 	userID uuid.UUID,
 	folderPage, filePage db.PageInput,
 ) (*FolderContents, error) {
-	subfolders, err := s.queries.ListRootFolders(ctx, userID, folderPage)
-	if err != nil {
-		return nil, fmt.Errorf("list root folders: %w", err)
+	var subfolders *db.PageResult[models.Folder]
+	if folderPage.Skip {
+		subfolders = emptyFolders()
+	} else {
+		var err error
+		subfolders, err = s.queries.ListRootFolders(ctx, userID, folderPage)
+		if err != nil {
+			return nil, fmt.Errorf("list root folders: %w", err)
+		}
 	}
 
-	files, err := s.listRootFiles(ctx, userID, filePage)
-	if err != nil {
-		return nil, fmt.Errorf("list root files: %w", err)
+	var files *db.PageResult[models.File]
+	if filePage.Skip {
+		files = emptyFiles()
+	} else {
+		var err error
+		files, err = s.listRootFiles(ctx, userID, filePage)
+		if err != nil {
+			return nil, fmt.Errorf("list root files: %w", err)
+		}
 	}
 
 	return &FolderContents{
@@ -66,6 +80,8 @@ func (s *FolderService) ListRoot(
 // GetContents returns a folder's metadata and its direct children (subfolders
 // and files). Returns ErrFolderNotFound if the folder does not exist or is not
 // owned by userID.
+// When folderPage.Skip or filePage.Skip is true the corresponding list is
+// returned as an empty page without hitting the database.
 func (s *FolderService) GetContents(
 	ctx context.Context,
 	folderID, userID uuid.UUID,
@@ -76,14 +92,24 @@ func (s *FolderService) GetContents(
 		return nil, err
 	}
 
-	subfolders, err := s.queries.ListFoldersByParent(ctx, userID, folderID, folderPage)
-	if err != nil {
-		return nil, fmt.Errorf("list subfolders: %w", err)
+	var subfolders *db.PageResult[models.Folder]
+	if folderPage.Skip {
+		subfolders = emptyFolders()
+	} else {
+		subfolders, err = s.queries.ListFoldersByParent(ctx, userID, folderID, folderPage)
+		if err != nil {
+			return nil, fmt.Errorf("list subfolders: %w", err)
+		}
 	}
 
-	files, err := s.queries.ListFilesByFolder(ctx, folderID, filePage)
-	if err != nil {
-		return nil, fmt.Errorf("list files: %w", err)
+	var files *db.PageResult[models.File]
+	if filePage.Skip {
+		files = emptyFiles()
+	} else {
+		files, err = s.queries.ListFilesByFolder(ctx, folderID, filePage)
+		if err != nil {
+			return nil, fmt.Errorf("list files: %w", err)
+		}
 	}
 
 	return &FolderContents{
@@ -171,6 +197,14 @@ func (s *FolderService) Delete(ctx context.Context, folderID, userID uuid.UUID) 
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
+
+func emptyFolders() *db.PageResult[models.Folder] {
+	return &db.PageResult[models.Folder]{Items: []models.Folder{}}
+}
+
+func emptyFiles() *db.PageResult[models.File] {
+	return &db.PageResult[models.File]{Items: []models.File{}}
+}
 
 // getOwned fetches a folder and verifies it belongs to userID.
 // Returns ErrFolderNotFound for both missing and foreign-owned folders so the

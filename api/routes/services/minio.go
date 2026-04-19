@@ -79,6 +79,22 @@ func (s *MinIOService) GetObject(ctx context.Context, key string) (io.ReadCloser
 	return obj, nil
 }
 
+// GetObjectRange returns a streaming reader for [start, end] (inclusive) of the
+// object at key. This avoids downloading the full object when only a byte range
+// is needed — critical for efficient chunked-encrypted video streaming.
+// The caller must close the returned ReadCloser after reading.
+func (s *MinIOService) GetObjectRange(ctx context.Context, key string, start, end int64) (io.ReadCloser, error) {
+	opts := minio.GetObjectOptions{}
+	if err := opts.SetRange(start, end); err != nil {
+		return nil, fmt.Errorf("minio: set range [%d-%d] on %q: %w", start, end, key, err)
+	}
+	obj, err := s.client.GetObject(ctx, s.bucket, key, opts)
+	if err != nil {
+		return nil, fmt.Errorf("minio: get range [%d-%d] on %q: %w", start, end, key, err)
+	}
+	return obj, nil
+}
+
 // RemoveObject deletes the object at key. Silently succeeds if the object does
 // not exist (idempotent).
 func (s *MinIOService) RemoveObject(ctx context.Context, key string) error {

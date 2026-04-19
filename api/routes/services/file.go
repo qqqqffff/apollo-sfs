@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/gabriel-vasile/mimetype"
 	"github.com/google/uuid"
@@ -103,9 +104,22 @@ func (s *FileService) Upload(ctx context.Context, in UploadInput) (*models.File,
 	defer zeroBytes(userKey)
 
 	// 5. Encrypt the file.
-	ciphertext, nonce, err := s.enc.EncryptFile(userKey, plaintext)
-	if err != nil {
-		return nil, fmt.Errorf("upload: encrypt: %w", err)
+	// Video files use chunked AES-256-GCM: each 1 MiB chunk gets its own nonce,
+	// enabling efficient range-based streaming (only needed chunks are fetched and
+	// decrypted). The DB nonce is stored empty to signal chunked mode.
+	// All other files use single-blob AES-256-GCM as before.
+	var ciphertext, nonce []byte
+	if strings.HasPrefix(mimeType, "video/") {
+		ciphertext, err = s.enc.EncryptChunked(userKey, plaintext)
+		if err != nil {
+			return nil, fmt.Errorf("upload: encrypt chunks: %w", err)
+		}
+		nonce = []byte{} // empty nonce signals chunked mode; per-chunk nonces are embedded inline
+	} else {
+		ciphertext, nonce, err = s.enc.EncryptFile(userKey, plaintext)
+		if err != nil {
+			return nil, fmt.Errorf("upload: encrypt: %w", err)
+		}
 	}
 
 	// 6. Stream ciphertext to MinIO. Object key: {userID}/{fileID}.
@@ -190,6 +204,34 @@ func (s *FileService) Rename(ctx context.Context, fileID, userID uuid.UUID, name
 	return updated, nil
 }
 
+// Move transfers a file to a different folder owned by the same user.
+// Returns ErrNotFound if the file does not belong to userID.
+// Returns ErrFolderNotFound if the target folder does not belong to userID.
+func (s *FileService) Move(ctx context.Context, fileID, userID, newFolderID uuid.UUID) (*models.File, error) {
+	file, err := s.GetMetadata(ctx, fileID, userID)
+	if err != nil {
+		return nil, err
+	}
+	if file.FolderID == newFolderID {
+		return file, nil
+	}
+	folder, err := s.queries.GetFolderByID(ctx, newFolderID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrFolderNotFound
+		}
+		return nil, fmt.Errorf("move: get target folder: %w", err)
+	}
+	if folder.UserID != userID {
+		return nil, ErrFolderNotFound
+	}
+	moved, err := s.queries.MoveFile(ctx, fileID, newFolderID)
+	if err != nil {
+		return nil, fmt.Errorf("move: %w", err)
+	}
+	return moved, nil
+}
+
 // Delete removes the encrypted blob from MinIO, deletes the metadata row, and
 // decrements the user's storage counter.
 // Returns ErrNotFound if the file does not belong to userID.
@@ -212,36 +254,116 @@ func (s *FileService) Delete(ctx context.Context, fileID, userID uuid.UUID, user
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
-// decryptBlob fetches the ciphertext from MinIO and decrypts it with the user's key.
-func (s *FileService) decryptBlob(ctx context.Context, username string, file *models.File) ([]byte, error) {
-	user, err := s.queries.GetUserByUsername(ctx, username)
-	if err != nil {
-		return nil, fmt.Errorf("get user: %w", err)
-	}
+// IsChunked reports whether f was encrypted with chunked AES-256-GCM.
+// Chunked files store an empty Nonce; per-chunk nonces are embedded in the blob.
+func IsChunked(f *models.File) bool {
+	return len(f.Nonce) == 0
+}
 
-	userKey, err := s.enc.DecryptUserKey(user.EncryptedKey, user.KeyNonce, user.MasterKeyVersion)
+// DownloadChunked fetches the full blob for a chunked-encrypted file and
+// decrypts all chunks concurrently. Use this when no byte range is required.
+func (s *FileService) DownloadChunked(ctx context.Context, file *models.File, username string) ([]byte, error) {
+	userKey, err := s.userKey(ctx, username)
 	if err != nil {
-		return nil, fmt.Errorf("decrypt user key: %w", err)
+		return nil, fmt.Errorf("download chunked: %w", err)
 	}
 	defer zeroBytes(userKey)
 
-	// Stream the ciphertext from MinIO.
+	rc, err := s.storage.GetObject(ctx, file.MinIOObjectKey)
+	if err != nil {
+		return nil, fmt.Errorf("download chunked: fetch blob: %w", err)
+	}
+	defer rc.Close()
+
+	blob, err := io.ReadAll(rc)
+	if err != nil {
+		return nil, fmt.Errorf("download chunked: read blob: %w", err)
+	}
+	return s.enc.DecryptChunked(userKey, blob)
+}
+
+// DownloadRange fetches only the MinIO chunks covering plaintext [rangeStart, rangeEnd]
+// for a chunked-encrypted file and decrypts them concurrently. Only the bytes
+// that fall within the requested range are returned, minimising both MinIO
+// bandwidth and memory usage for large video files.
+func (s *FileService) DownloadRange(ctx context.Context, file *models.File, username string, rangeStart, rangeEnd int64) ([]byte, error) {
+	userKey, err := s.userKey(ctx, username)
+	if err != nil {
+		return nil, fmt.Errorf("download range: %w", err)
+	}
+	defer zeroBytes(userKey)
+
+	totalSize := file.SizeBytes
+	numChunks := (totalSize + int64(ChunkSize) - 1) / int64(ChunkSize)
+
+	firstChunkIdx := rangeStart / int64(ChunkSize)
+	lastChunkIdx := rangeEnd / int64(ChunkSize)
+
+	// Byte offset of the first needed chunk's start in the MinIO blob.
+	blobStart := firstChunkIdx * int64(StoredChunkSize)
+
+	// Stored size of the last needed chunk (may be smaller for the last file chunk).
+	var lastStoredSize int64
+	if lastChunkIdx == numChunks-1 {
+		lastPlain := totalSize - lastChunkIdx*int64(ChunkSize)
+		lastStoredSize = lastPlain + int64(ChunkOverhead)
+	} else {
+		lastStoredSize = int64(StoredChunkSize)
+	}
+	blobEnd := blobStart + (lastChunkIdx-firstChunkIdx)*int64(StoredChunkSize) + lastStoredSize - 1
+
+	rc, err := s.storage.GetObjectRange(ctx, file.MinIOObjectKey, blobStart, blobEnd)
+	if err != nil {
+		return nil, fmt.Errorf("download range: fetch chunk blob: %w", err)
+	}
+	defer rc.Close()
+
+	blobSlice, err := io.ReadAll(rc)
+	if err != nil {
+		return nil, fmt.Errorf("download range: read chunk blob: %w", err)
+	}
+
+	return s.enc.DecryptChunkedRange(userKey, blobSlice, firstChunkIdx, numChunks, totalSize, rangeStart, rangeEnd)
+}
+
+// decryptBlob fetches the ciphertext from MinIO and decrypts it with the user's key.
+// Handles both legacy single-blob files and chunked-encrypted files transparently.
+func (s *FileService) decryptBlob(ctx context.Context, username string, file *models.File) ([]byte, error) {
+	userKey, err := s.userKey(ctx, username)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt blob: %w", err)
+	}
+	defer zeroBytes(userKey)
+
 	rc, err := s.storage.GetObject(ctx, file.MinIOObjectKey)
 	if err != nil {
 		return nil, fmt.Errorf("fetch blob: %w", err)
 	}
 	defer rc.Close()
 
-	ciphertext, err := io.ReadAll(rc)
+	data, err := io.ReadAll(rc)
 	if err != nil {
 		return nil, fmt.Errorf("read blob: %w", err)
 	}
 
-	plaintext, err := s.enc.DecryptFile(userKey, file.Nonce, ciphertext)
-	if err != nil {
-		return nil, fmt.Errorf("decrypt: %w", err)
+	if IsChunked(file) {
+		return s.enc.DecryptChunked(userKey, data)
 	}
-	return plaintext, nil
+	return s.enc.DecryptFile(userKey, file.Nonce, data)
+}
+
+// userKey is a helper that resolves and unwraps the plaintext AES key for username.
+// The caller is responsible for zeroing the returned slice after use.
+func (s *FileService) userKey(ctx context.Context, username string) ([]byte, error) {
+	user, err := s.queries.GetUserByUsername(ctx, username)
+	if err != nil {
+		return nil, fmt.Errorf("get user: %w", err)
+	}
+	key, err := s.enc.DecryptUserKey(user.EncryptedKey, user.KeyNonce, user.MasterKeyVersion)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt user key: %w", err)
+	}
+	return key, nil
 }
 
 // objectKeyFor builds the MinIO object key: {userID}/{fileID}.

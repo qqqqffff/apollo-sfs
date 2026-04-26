@@ -12,7 +12,7 @@ import (
 type File struct {
 	ID             uuid.UUID `json:"id" db:"id"`
 	UserID         uuid.UUID `json:"user_id" db:"user_id"`
-	FolderID       uuid.UUID `json:"folder_id" db:"folder_id"`
+	FolderID       *uuid.UUID `json:"folder_id" db:"folder_id"`
 	Name           string    `json:"name" db:"name"`
 	MimeType       string    `json:"mime_type" db:"mime_type"`
 	SizeBytes      int64     `json:"size_bytes" db:"size_bytes"`

@@ -23,6 +23,7 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+    platform: linux/arm64
     container_name: apollo-sfs-frontend
     restart: unless-stopped
     ports:
@@ -40,6 +41,7 @@ services:
     build:
       context: ./api
       dockerfile: Dockerfile
+    platform: linux/arm64
     container_name: apollo-sfs-api
     restart: unless-stopped
     ports:
@@ -66,6 +68,9 @@ services:
       KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
       # Encryption
       KEY_ENCRYPTION_KEY: ${KEY_ENCRYPTION_KEY}
+      GIN_MODE: release
+      # Session
+      SESSION_KEY: ${SESSION_KEY}
       # Cookies & session
       COOKIE_DOMAIN: ${COOKIE_DOMAIN}
       COOKIE_SECURE: ${COOKIE_SECURE:-true}
@@ -76,11 +81,14 @@ services:
       MAIL_FROM: ${MAIL_FROM}
       MAIL_DOMAIN: ${MAIL_DOMAIN}
       QUOTA_WARNING_THRESHOLD_PERCENT: ${QUOTA_WARNING_THRESHOLD_PERCENT:-80}
+      DISK_STATS_PATH: /data
+    volumes:
+      - /home/apollo/apollo-sfs/minio/nvme-01:/data:ro
     depends_on:
       db-app:
         condition: service_healthy
       keycloak:
-        condition: service_healthy
+        condition: service_started
       minio:
         condition: service_healthy
       maddy:
@@ -101,6 +109,7 @@ services:
   # during setup if needed: ssh -L 9001:localhost:9001 <pi>
   minio:
     image: minio/minio:latest
+    platform: linux/arm64
     container_name: apollo-sfs-minio
     restart: unless-stopped
     command: server /data --console-address ":9001"
@@ -127,9 +136,15 @@ services:
   # Never exposed publicly — the API communicates with it on the internal network.
   # Realm import: place realm JSON files in ./keycloak/import/ before first boot.
   keycloak:
-    image: quay.io/keycloak/keycloak:26
+    # Keycloak does not publish floating major-version tags — always use a full
+    # semver. Check the latest release at https://www.keycloak.org/downloads
+    image: quay.io/keycloak/keycloak:26.0.7
+    platform: linux/arm64
     container_name: apollo-sfs-keycloak
     restart: unless-stopped
+    # Bound to 127.0.0.1 only — access via SSH tunnel, never exposed publicly
+    ports:
+      - "127.0.0.1:8180:8180"
     command: start --import-realm
     environment:
       # Database backend
@@ -141,9 +156,10 @@ services:
       KC_HTTP_ENABLED: "true"
       KC_HTTP_PORT: 8180
       KC_HTTPS_ENABLED: "false"
-      # Hostname — must match the public-facing domain so token issuers are correct
-      KC_HOSTNAME: ${COOKIE_DOMAIN}
-      KC_HOSTNAME_STRICT: "false"
+      # Full URL including protocol — KC 26 requires this, not a bare hostname
+      KC_HOSTNAME: ${APP_BASE_URL}
+      KC_HOSTNAME_STRICT: "true"
+      KC_HOSTNAME_ADMIN: http://localhost:8180
       # Trust X-Forwarded-* headers set by Nginx
       KC_PROXY_HEADERS: xforwarded
       # Bootstrap admin credentials (Keycloak 26+)
@@ -158,12 +174,14 @@ services:
       db-keycloak:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8180/health/ready"]
+      # Port 9000 is Keycloak 26's dedicated management port — health endpoints
+      # are always available here regardless of any KC_HEALTH_ENABLED setting
+      test: ["CMD-SHELL", "curl -sf http://localhost:9000/health/ready"]
       interval: 30s
       timeout: 15s
-      retries: 5
-      # Keycloak JVM startup is slow — give it time before marking unhealthy
-      start_period: 90s
+      retries: 10
+      # Keycloak JVM startup is slow on a Pi — give it plenty of time
+      start_period: 180s
     networks:
       - app-network
     logging:
@@ -172,21 +190,28 @@ services:
         max-size: "10m"
         max-file: "3"
 
-  # ── Maddy SMTP ─────────────────────────────────────────────────────────────
+  # ── Postfix SMTP relay ─────────────────────────────────────────────────────
   # Internal submission hub only — accepts mail from the API and Keycloak on
   # port 587, then relays outbound through SendGrid. Never exposed to the host.
-  # Mount your maddy.conf at ./maddy/maddy.conf before starting.
+  # boky/postfix is multi-arch (amd64 + arm64) and configures Postfix as a
+  # pure relay via environment variables — no config file needed.
   maddy:
-    image: foxcpp/maddy:latest
+    image: boky/postfix:latest
+    platform: linux/arm64
     container_name: apollo-sfs-maddy
     restart: unless-stopped
+    environment:
+      # Accept submissions from the internal Docker network only
+      ALLOWED_SENDER_DOMAINS: ${MAIL_DOMAIN}
+      RELAYHOST: smtp.sendgrid.net:587
+      RELAYHOST_USERNAME: apikey
+      RELAYHOST_PASSWORD: ${SENDGRID_SMTP_PASSWORD}
+      # Match the From address used by the API
+      POSTFIX_myhostname: ${MAIL_DOMAIN}
     volumes:
-      - ./docker/maddy:/data
-      - ./maddy/maddy.conf:/etc/maddy/maddy.conf:ro
+      - ./docker/postfix:/var/spool/postfix
     networks:
       - app-network
-    environment:
-      SENDGRID_SMTP_PASSWORD: ${SENDGRID_SMTP_PASSWORD}
     logging:
       driver: json-file
       options:
@@ -198,6 +223,7 @@ services:
   # Uses a scoped API token with DNS-edit-only permission (never full zone access).
   ddns:
     image: favonia/cloudflare-ddns:latest
+    platform: linux/arm64
     container_name: apollo-sfs-ddns
     restart: unless-stopped
     read_only: true
@@ -220,6 +246,7 @@ services:
   # ── PostgreSQL — app metadata DB ───────────────────────────────────────────
   db-app:
     image: postgres:16-alpine
+    platform: linux/arm64
     container_name: apollo-sfs-postgresql-app
     restart: unless-stopped
     environment:
@@ -246,6 +273,7 @@ services:
   # ── PostgreSQL — Keycloak DB ───────────────────────────────────────────────
   db-keycloak:
     image: postgres:16-alpine
+    platform: linux/arm64
     container_name: apollo-sfs-postgresql-keycloak
     restart: unless-stopped
     environment:
@@ -281,5 +309,5 @@ volumes:
     driver_opts:
       type: none
       o: bind
-      device: /minio/nvme-1/data
+      device: /home/apollo/apollo-sfs/minio/nvme-01/data
 

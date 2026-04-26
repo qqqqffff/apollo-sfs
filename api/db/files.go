@@ -12,24 +12,32 @@ import (
 
 func scanFile(row *sql.Row) (*models.File, error) {
 	var f models.File
+	var folderID uuid.NullUUID
 	err := row.Scan(
-		&f.ID, &f.UserID, &f.FolderID, &f.Name, &f.MimeType,
+		&f.ID, &f.UserID, &folderID, &f.Name, &f.MimeType,
 		&f.SizeBytes, &f.MinIOObjectKey, &f.Nonce, &f.CreatedAt, &f.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
+	}
+	if folderID.Valid {
+		f.FolderID = &folderID.UUID
 	}
 	return &f, nil
 }
 
 func scanFileRow(rows *sql.Rows) (*models.File, error) {
 	var f models.File
+	var folderID uuid.NullUUID
 	err := rows.Scan(
-		&f.ID, &f.UserID, &f.FolderID, &f.Name, &f.MimeType,
+		&f.ID, &f.UserID, &folderID, &f.Name, &f.MimeType,
 		&f.SizeBytes, &f.MinIOObjectKey, &f.Nonce, &f.CreatedAt, &f.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
+	}
+	if folderID.Valid {
+		f.FolderID = &folderID.UUID
 	}
 	return &f, nil
 }
@@ -38,6 +46,10 @@ func scanFileRow(rows *sql.Rows) (*models.File, error) {
 // server-generated id and timestamps. The encrypted blob must already be
 // written to MinIO before calling this.
 func (q *Queries) CreateFile(ctx context.Context, f *models.File) (*models.File, error) {
+	var folderID uuid.NullUUID
+	if f.FolderID != nil {
+		folderID = uuid.NullUUID{UUID: *f.FolderID, Valid: true}
+	}
 	row := q.db.QueryRowContext(ctx, `
 		INSERT INTO files (
 			id, user_id, folder_id, name, mime_type,
@@ -45,7 +57,7 @@ func (q *Queries) CreateFile(ctx context.Context, f *models.File) (*models.File,
 		) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
 		RETURNING id, user_id, folder_id, name, mime_type,
 		          size_bytes, minio_object_key, nonce, created_at, updated_at
-	`, f.UserID, f.FolderID, f.Name, f.MimeType,
+	`, f.UserID, folderID, f.Name, f.MimeType,
 		f.SizeBytes, f.MinIOObjectKey, f.Nonce,
 	)
 	out, err := scanFile(row)
@@ -89,7 +101,7 @@ func (q *Queries) ListFilesByFolder(ctx context.Context, folderID uuid.UUID, in 
 	}
 	defer rows.Close()
 
-	var files []models.File
+	files := make([]models.File, 0)
 	for rows.Next() {
 		f, err := scanFileRow(rows)
 		if err != nil {
@@ -99,6 +111,45 @@ func (q *Queries) ListFilesByFolder(ctx context.Context, folderID uuid.UUID, in 
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("ListFilesByFolder: %w", err)
+	}
+	return &PageResult[models.File]{
+		Items:     files,
+		NextToken: offsetNextToken(len(files), limit, offset),
+	}, nil
+}
+
+// ListRootFiles returns a page of files owned by userID that have no containing
+// folder (folder_id IS NULL), ordered by name.
+func (q *Queries) ListRootFiles(ctx context.Context, userID uuid.UUID, in PageInput) (*PageResult[models.File], error) {
+	limit := clampLimit(in.Limit)
+	offset, err := decodeOffsetCursor(in.Cursor)
+	if err != nil {
+		return nil, fmt.Errorf("ListRootFiles: %w", err)
+	}
+
+	rows, err := q.db.QueryContext(ctx, `
+		SELECT id, user_id, folder_id, name, mime_type,
+		       size_bytes, minio_object_key, nonce, created_at, updated_at
+		FROM files
+		WHERE user_id = $1 AND folder_id IS NULL
+		ORDER BY name ASC
+		LIMIT $2 OFFSET $3
+	`, userID, limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("ListRootFiles: %w", err)
+	}
+	defer rows.Close()
+
+	files := make([]models.File, 0)
+	for rows.Next() {
+		f, err := scanFileRow(rows)
+		if err != nil {
+			return nil, fmt.Errorf("ListRootFiles scan: %w", err)
+		}
+		files = append(files, *f)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("ListRootFiles: %w", err)
 	}
 	return &PageResult[models.File]{
 		Items:     files,
@@ -129,7 +180,7 @@ func (q *Queries) SearchFilesByUser(ctx context.Context, userID uuid.UUID, term 
 	}
 	defer rows.Close()
 
-	var files []models.File
+	files := make([]models.File, 0)
 	for rows.Next() {
 		f, err := scanFileRow(rows)
 		if err != nil {
@@ -167,7 +218,7 @@ func (q *Queries) ListFilesByUser(ctx context.Context, userID uuid.UUID, in Page
 	}
 	defer rows.Close()
 
-	var files []models.File
+	files := make([]models.File, 0)
 	for rows.Next() {
 		f, err := scanFileRow(rows)
 		if err != nil {

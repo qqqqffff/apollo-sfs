@@ -35,6 +35,7 @@ type Config struct {
 
 	KeyEncryptionKey         string
 	QuotaWarningThresholdPct int
+	DiskStatsPath            string
 
 	// SessionKey is the secret used to sign and encrypt the session cookie.
 	// Must be 32 or 64 bytes (AES-128 or AES-256). Set via SESSION_KEY env var.
@@ -78,6 +79,7 @@ func loadConfig() Config {
 
 		KeyEncryptionKey:         requireEnv("KEY_ENCRYPTION_KEY"),
 		QuotaWarningThresholdPct: quotaPct,
+		DiskStatsPath:            getEnv("DISK_STATS_PATH", "/mnt/data"),
 
 		SessionKey: requireEnv("SESSION_KEY"),
 	}

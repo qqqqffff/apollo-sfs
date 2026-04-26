@@ -10,11 +10,19 @@ import (
 	"github.com/google/uuid"
 
 	"apollo-sfs.com/api/db"
+	"apollo-sfs.com/api/models"
 	"apollo-sfs.com/api/routes/services"
 )
 
+// invitationResponse wraps Invitation and adds the invitation URL for pending invites.
+type invitationResponse struct {
+	models.Invitation
+	InvitationURL *string `json:"invitation_url,omitempty"`
+}
+
 type createInvitationRequest struct {
-	Email string `json:"email" binding:"required,email,max=254"`
+	Email             string `json:"email" binding:"required,email,max=254"`
+	InitialQuotaBytes int64  `json:"initial_quota_bytes"`
 }
 
 // CreateInvitation handles POST /api/v1/admin/invitations.
@@ -35,7 +43,7 @@ func (h *Handler) CreateInvitation(c *gin.Context) {
 		return
 	}
 
-	inv, err := h.invites.Create(c.Request.Context(), userID, invitedByUsername.(string), req.Email)
+	inv, err := h.invites.Create(c.Request.Context(), userID, invitedByUsername.(string), req.Email, req.InitialQuotaBytes)
 	if err != nil {
 		if errors.Is(err, services.ErrInviteAlreadyPending) {
 			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
@@ -65,7 +73,47 @@ func (h *Handler) GetInvitations(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, result)
+	// Build response: include invitation_url for pending (not accepted, not revoked) invites.
+	items := make([]invitationResponse, len(result.Items))
+	for i, inv := range result.Items {
+		r := invitationResponse{Invitation: inv}
+		if inv.AcceptedAt == nil && inv.RevokedAt == nil {
+			u := h.invites.InvitationURL(inv.Token)
+			r.InvitationURL = &u
+		}
+		items[i] = r
+	}
+	c.JSON(http.StatusOK, db.PageResult[invitationResponse]{
+		Items:     items,
+		NextToken: result.NextToken,
+	})
+}
+
+// ResendInvitation handles POST /api/v1/admin/invitations/:id/resend.
+// Re-sends the invitation email for a pending, unexpired invitation.
+func (h *Handler) ResendInvitation(c *gin.Context) {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid invitation id"})
+		return
+	}
+
+	byUsername, _ := c.Get("username")
+
+	if err := h.invites.Resend(c.Request.Context(), id, byUsername.(string)); err != nil {
+		if errors.Is(err, services.ErrInviteNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "invitation not found or no longer pending"})
+			return
+		}
+		if errors.Is(err, services.ErrInviteExpired) {
+			c.JSON(http.StatusGone, gin.H{"error": "invitation has expired"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not resend invitation"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "invitation resent"})
 }
 
 // RevokeInvitation handles DELETE /api/v1/admin/invitations/:id.

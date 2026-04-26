@@ -77,3 +77,40 @@ func (h *Handler) UpdateUserQuota(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{"message": "quota updated"})
 }
+
+type updateUsernameRequest struct {
+	NewUsername string `json:"new_username" binding:"required,min=3,max=150"`
+}
+
+// UpdateUsername handles PATCH /api/v1/admin/users/:user_id/username.
+// Renames the user in both Keycloak and the app DB.
+func (h *Handler) UpdateUsername(c *gin.Context) {
+	oldUsername := sanitize.String(c.Param("user_id"))
+	if oldUsername == "" || len(oldUsername) > 150 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user_id"})
+		return
+	}
+
+	var req updateUsernameRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "new_username is required (3–150 characters)"})
+		return
+	}
+
+	newUsername := sanitize.String(req.NewUsername)
+	if newUsername == oldUsername {
+		c.JSON(http.StatusOK, gin.H{"message": "username unchanged"})
+		return
+	}
+
+	if err := h.auth.RenameUser(c.Request.Context(), oldUsername, newUsername); err != nil {
+		if strings.Contains(err.Error(), "already taken") || strings.Contains(err.Error(), "not found") {
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "username updated"})
+}

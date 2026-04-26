@@ -231,19 +231,8 @@ func (s *FolderService) getOwned(ctx context.Context, folderID, userID uuid.UUID
 // NOTE: The current schema requires every file to have a folder_id — there is
 // no concept of truly folder-less files. Root-level files are those whose
 // containing folder has parent_id IS NULL. This query fetches them via a join.
-func (s *FolderService) listRootFiles(_ context.Context, _ uuid.UUID, _ db.PageInput) (*db.PageResult[models.File], error) {
-	// Delegate to the user-scoped file list and filter to root folders in the
-	// service layer. For now we return an empty result as a placeholder; a
-	// dedicated root-files DB query should be added when the file handler is
-	// implemented to avoid the N+1 pattern.
-	//
-	// TODO: add ListRootFilesByUser(ctx, userID, PageInput) to db/files.go
-	// that does:
-	//   SELECT f.* FROM files f
-	//   JOIN folders fo ON fo.id = f.folder_id
-	//   WHERE f.user_id = $1 AND fo.parent_id IS NULL
-	//   ORDER BY f.name ASC LIMIT $2 OFFSET $3
-	return &db.PageResult[models.File]{Items: []models.File{}}, nil
+func (s *FolderService) listRootFiles(ctx context.Context, userID uuid.UUID, page db.PageInput) (*db.PageResult[models.File], error) {
+	return s.queries.ListRootFiles(ctx, userID, page)
 }
 
 // isDuplicateKeyError checks whether a DB error is a PostgreSQL unique

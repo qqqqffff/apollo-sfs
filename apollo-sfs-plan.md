@@ -1325,71 +1325,53 @@ Response: {
 
 ### Phase 2 — Backend Core
 - [x] Initialize Go module, project structure, Dockerfile
-- [ ] Connect to PostgreSQL, write migrations, run via `golang-migrate`
-- [ ] Implement cookie-based JWT validation middleware (JWKS from internal Keycloak URL)
-- [ ] Implement proactive token refresh middleware (`token_refresh.go`) with configurable threshold and concurrent refresh deduplication
-- [ ] Implement `POST /auth/register` — Keycloak Admin API user creation + auto-login
-- [ ] Implement `POST /auth/login` — ROPC token exchange → HttpOnly cookie response
-- [ ] Implement `POST /auth/logout` — Keycloak session invalidation + cookie clearing
-- [ ] Implement `POST /auth/refresh` — refresh token rotation via Keycloak
-- [ ] Implement `POST /auth/forgot_password` — trigger Keycloak reset email via Admin API
-- [ ] Implement `POST /auth/reset_password` — complete reset via Keycloak Admin API
-- [ ] Implement user provisioning (DB record + encryption key) on first login
-- [ ] Implement `key_rotation_service.go` — rotation scheduler, re-wrap logic, version tracking
-- [ ] Add `master_keys` and `key_rotation_log` migrations
+- [x] Connect to PostgreSQL — DB connection layer (`db/postgres.go`, `db/queries.go`); schema SQL files in `/db/`
+- [ ] Wire migrations to run via `golang-migrate` (SQL files exist in `/db/` but `/api/migrations/` is empty — not yet hooked up)
+- [x] Implement cookie-based JWT validation middleware (`middleware/auth.go`)
+- [x] Implement proactive token refresh middleware (`middleware/token_refresh.go`) with configurable threshold and concurrent refresh deduplication
+- [x] Implement `POST /auth/register` — Keycloak Admin API user creation + auto-login (`routes/auth/register.go`)
+- [x] Implement `POST /auth/login` — ROPC token exchange → HttpOnly cookie response (`routes/auth/login.go`)
+- [x] Implement `POST /auth/logout` — Keycloak session invalidation + cookie clearing (`routes/auth/logout.go`)
+- [x] Implement `POST /auth/refresh` — refresh token rotation via Keycloak (`routes/auth/refresh.go`)
+- [x] Implement `POST /auth/forgot_password` — trigger Keycloak reset email via Admin API (`routes/auth/forgot_password.go`)
+- [x] Implement `POST /auth/reset_password` — complete reset via Keycloak Admin API (`routes/auth/reset_password.go`)
+- [x] Implement user provisioning (DB record + encryption key) on first login (`routes/services/auth.go`)
+- [x] Implement `key_rotation_service.go` — rotation scheduler, re-wrap logic, version tracking (`routes/services/key_rotation.go`)
+- [x] Add `master_keys` and `key_rotation_log` migrations (`db/01_master_keys.sql`, `db/02_key_rotation_log.sql`)
 - [ ] Seed initial master key (v1) in DB on first startup, encrypted with KEK
 - [ ] Test rotation end-to-end: trigger rotation manually, verify all users re-wrapped, verify old key material purged
 - [ ] Test crash recovery: simulate mid-rotation failure, verify resume on restart
-- [ ] Implement `email.go` — SMTP client, template renderer, queue dispatch
-- [ ] Implement email queue background worker (polling goroutine)
-- [ ] Implement welcome email on registration
-- [ ] Implement quota warning emails (80% and 100% thresholds) triggered on upload
-- [ ] Implement admin middleware (`admin.go`) — checks `realm_access.roles` JWT claim for `admin`; returns `403` if absent
-- [ ] Implement `POST /admin/invitations` — generate token, insert to DB, enqueue invitation email (admin-only)
-- [ ] Implement `GET /admin/invitations` — list all invitations with status
-- [ ] Implement `DELETE /admin/invitations/{id}` — revoke pending invite (set `revoked_at`)
-- [ ] Implement `GET /invitations/{token}` — public token validation (expiry and unused status)
-- [ ] Add `last_seen_at` update to auth middleware (stamp on every authenticated request)
-- [ ] Add `server_metrics_snapshots` migration (UUID PK, cpu, memory, network, storage, user counts, sampled_at; index on `sampled_at`)
-- [ ] Implement `metrics.go` — gopsutil collector; background goroutine samples every 5 s, writes snapshot to DB, broadcasts JSON to WebSocket hub
-- [ ] Implement WebSocket hub in `metrics.go`: register/unregister clients, broadcast to all, clean up on disconnect
-- [ ] Implement `GET /admin/system/metrics` — return latest row from `server_metrics_snapshots`
-- [ ] Implement `GET /admin/system/metrics/history` — return recent rows with `?limit` + `?before` pagination
-- [ ] Implement `GET /admin/system/metrics/stream` — WebSocket upgrade handler (validate cookie + admin role before upgrade; register client with hub; close with `4401` on auth failure)
-- [ ] Implement snapshot pruning goroutine: delete rows older than 7 days, runs daily at startup
-- [ ] Implement `GET /admin/users` — query all users from app DB + file count via join
-- [ ] Implement `GET /admin/users/{id}` — single user detail
-- [ ] Implement `PATCH /admin/users/{id}/quota` — update storage quota
+- [x] Implement `email.go` — SMTP client, template renderer, queue dispatch (`routes/services/email.go`)
+- [x] Implement email queue background worker (polling goroutine) (`db/email_queue.go`)
+- [x] Implement welcome email on registration
+- [x] Implement quota warning emails (80% and 100% thresholds) triggered on upload
+- [x] Implement admin middleware (`middleware/admin.go`) — checks `realm_access.roles` JWT claim for `admin`; returns `403` if absent
+- [x] Implement `POST /admin/invitations` — generate token, insert to DB, enqueue invitation email (`routes/admin/invitations.go`)
+- [x] Implement `GET /admin/invitations` — list all invitations with status
+- [x] Implement `DELETE /admin/invitations/{id}` — revoke pending invite (set `revoked_at`)
+- [x] Implement `GET /invitations/{token}` — public token validation (`routes/invitations.go`)
+- [x] Add `last_seen_at` update to auth middleware
+- [x] Add `server_metrics_snapshots` migration (`db/08_server_metrics_snapshots.sql`)
+- [x] Implement `metrics.go` — gopsutil collector; background goroutine samples every 5 s, writes snapshot to DB, broadcasts JSON to WebSocket hub (`routes/services/metrics.go`)
+- [x] Implement WebSocket hub in `metrics.go`: register/unregister clients, broadcast to all, clean up on disconnect
+- [x] Implement `GET /admin/system/metrics` — return latest row from `server_metrics_snapshots` (`routes/admin/server-statistics.go`)
+- [x] Implement `GET /admin/system/metrics/history` — return recent rows with `?limit` + `?before` pagination
+- [x] Implement `GET /admin/system/metrics/stream` — WebSocket upgrade handler
+- [x] Implement snapshot pruning goroutine: delete rows older than 7 days, runs daily at startup
+- [x] Implement `GET /admin/users` — query all users from app DB (`routes/admin/users.go`)
+- [x] Implement `GET /admin/users/{id}` — single user detail
+- [x] Implement `PATCH /admin/users/{id}/quota` — update storage quota
 - [ ] Add `admin` realm role to Keycloak realm import JSON; assign to initial admin user after first deploy
-- [ ] Integrate MinIO client, verify bucket creation on startup (create if not exists)
-- [ ] Implement AES-256-GCM encryption/decryption service (`encryption_service.go`)
-- [ ] Implement folder CRUD endpoints (`folders.go` + `folder_service.go`)
-- [ ] **File upload** (`POST /files/upload`):
-  - [ ] Parse `multipart/form-data`: extract file bytes, filename, MIME type, `folder_id`
-  - [ ] Enforce per-user quota: reject with `413` if `storage_used_bytes + file_size > storage_quota_bytes`
-  - [ ] Generate file UUID and random 96-bit AES-GCM nonce
-  - [ ] Decrypt user's AES key (fetch from DB, unwrap with active master key)
-  - [ ] Encrypt file bytes: AES-256-GCM(user key, nonce) → `nonce‖ciphertext` blob
-  - [ ] Store encrypted blob in MinIO at `{user_id}/{file_uuid}`
-  - [ ] Insert file metadata row: name, mime_type, size_bytes, minio_object_key, nonce, folder_id
-  - [ ] Increment `users.storage_used_bytes` by `size_bytes`
-  - [ ] Enqueue quota warning email if threshold crossed (80% or 100%)
-  - [ ] Return `201` with file metadata JSON
-- [ ] **File download** (`GET /files/{id}/download`):
-  - [ ] Validate JWT → extract user ID; query file row; verify `file.user_id == caller`; `404` if not found, `403` if wrong owner
-  - [ ] Fetch encrypted blob from MinIO using `minio_object_key`
-  - [ ] Strip nonce prefix (first 12 bytes); decrypt with user's AES key → plaintext bytes
-  - [ ] Stream plaintext to client: `Content-Type: {mime_type}`, `Content-Disposition: attachment; filename="{name}"`
-- [ ] **File preview** (`GET /files/{id}/preview`):
-  - [ ] Same decrypt + stream as download; set `Content-Disposition: inline` instead
-  - [ ] Return `415` if MIME type is not in the previewable set (`image/*`, `application/pdf`)
-- [ ] **File metadata** (`GET /files/{id}`): return metadata row as JSON (no file content)
-- [ ] Implement file rename + move (`PATCH /files/{id}`): update `name` and/or `folder_id`; enforce unique-name constraint
-- [ ] **File delete** (`DELETE /files/{id}`):
-  - [ ] Delete blob from MinIO
-  - [ ] Delete metadata row from DB
-  - [ ] Decrement `users.storage_used_bytes` by `size_bytes`
-- [ ] Implement folder delete (`DELETE /folders/{id}`): reject with `409` if folder contains files or subfolders, or cascade-delete (decide and document)
+- [x] Integrate MinIO client, verify bucket creation on startup (`routes/services/minio.go`)
+- [x] Implement AES-256-GCM encryption/decryption service (`routes/services/encryption.go`)
+- [x] Implement folder CRUD endpoints (`routes/folders.go` + `routes/services/folder.go`)
+- [x] **File upload** (`POST /files/upload`) — `routes/files.go` + `routes/services/file.go`
+- [x] **File download** (`GET /files/{id}/download`)
+- [x] **File preview** (`GET /files/{id}/preview`)
+- [x] **File metadata** (`GET /files/{id}`)
+- [x] Implement file rename + move (`PATCH /files/{id}`)
+- [x] **File delete** (`DELETE /files/{id}`)
+- [x] Implement folder delete (`DELETE /folders/{id}`)
 - [ ] **Build test helpers** (`testutil` package): `NewTestRouter`, `MockMinIO`, `MockDB`, `MockKeycloak`
 - [ ] Write unit tests for `encryption_service.go`: round-trip, wrong key, nonce uniqueness
 - [ ] Write unit tests for `file_service.go`: quota enforcement, quota warning thresholds, storage increment/decrement
@@ -1403,28 +1385,33 @@ Response: {
 - [ ] Write integration test `upload_download_test.go`: upload known plaintext → download → assert bytes match; verify `storage_used_bytes`
 
 ### Phase 3 — Frontend
-- [ ] Scaffold React app with Vite + TypeScript + Tailwind; install `@tanstack/react-router`, `@tanstack/router-vite-plugin`, `@tanstack/react-query`
-- [ ] Configure `@tanstack/router-vite-plugin` in `vite.config.ts` — enables file-based route auto-generation into `routeTree.gen.ts`
-- [ ] Configure Axios with `withCredentials: true` + 401 refresh interceptor
-- [ ] Build `AuthContext` — load current user via `GET /me` on app start; expose `isAdmin` from `is_admin` field
-- [ ] Build `__root.tsx` — root layout with global providers (`QueryClientProvider`, `RouterProvider`, nav shell)
-- [ ] Build `index.tsx` — redirect to `/files` if authenticated, else `/login`
-- [ ] Build `_auth.tsx` pathless layout — validates session on load, redirects to `/login` if no valid session
-- [ ] Build `login.tsx` — email/password form → `POST /auth/login`
-- [ ] Build `register.tsx` — registration form; reads `?invite=` search param for invite token validation
+- [x] Scaffold React app with Vite + TypeScript + Tailwind; install `@tanstack/react-router`, `@tanstack/router-vite-plugin`, `@tanstack/react-query`
+- [x] Configure `@tanstack/router-vite-plugin` in `vite.config.ts` — enables file-based route auto-generation into `routeTree.gen.ts`
+- [x] API calls use `fetch` with `credentials: 'include'` (no Axios); 401 handling via API client wrapper
+- [x] Build `AuthContext` (`src/auth.tsx`) — `useQuery(meQueryOptions)` as source of truth; exposes `user`, `isAuthenticated`, `isLoading`, `admin`, `login`, `logout`, `confirmLogin`, `validateAuth`, `updateProfile`
+- [x] Build `__root.tsx` — `createRootRouteWithContext` wrapping `AuthProvider` + `QueryClientProvider`
+- [x] Build `index.tsx` — redirect to `/client` if authenticated, else `/login`
+- [x] Build `_auth.tsx` pathless layout — `beforeLoad` calls `context.auth.validateAuth()`, redirects to `/login` if unauthenticated; renders top nav with active link styling and sign-out button
+- [x] Build `login.tsx` — Tailwind card form → `useAuth().login()`; navigates to `/admin/users` or `/client` based on result
+- [x] Build `register.tsx` — registration form; reads `?invite=` search param for invite token; `beforeLoad` validates invite token
 - [ ] Build `forgot-password.tsx` — email form → `POST /auth/forgot-password`
 - [ ] Build `reset-password.tsx` — reads `?token=` search param → `POST /auth/reset-password`
-- [ ] Build `_auth.files.tsx` — root folder view (files + subfolders at root)
-- [ ] Build `_auth.files.$folderId.tsx` — subfolder view using `$folderId` path param
-- [ ] Add shared components: `FileList`, `FileItem`, `FolderItem`, `UploadButton`, `UploadProgress`, `Breadcrumb`, `PreviewModal`, `ContextMenu`, `CreateFolderModal`, `RenameModal`
-- [ ] Add quota display to UI
-- [ ] Build `_auth.admin.tsx` — uses `beforeLoad` to redirect non-admins to `/`; renders admin dashboard
-- [ ] Build `UserTable` — paginated list of all users with storage, file count, last seen
-- [ ] Build `UserDetailModal` — expand user details + quota editor (PATCH quota endpoint)
-- [ ] Build `InviteForm` + `InvitationList` — send invites, list and revoke pending invitations
-- [ ] Build `useMetricsSocket.ts` — fetch `/admin/system/metrics/history?limit=60` on mount to seed buffer; open WebSocket to `/admin/system/metrics/stream`; append each message to rolling 120-entry buffer; exponential back-off reconnect on unexpected close; close cleanly on unmount
-- [ ] Build `ServerMetrics.tsx` — consume `useMetricsSocket`; render rolling line graphs: CPU %, memory %, network throughput (diff adjacent network counters for bytes/s), storage used vs quota; show active / total user counts
-- [ ] Add admin nav link (visible only when `isAdmin === true`)
+- [x] Build `_auth.client/index.tsx` — file browser with `?file=` and `?folder=` search params (mutually exclusive); `FileView` for file preview/download, `FolderView` for folder contents
+- [x] Drag-and-drop file move between folders (`useFileDrag` hook)
+- [x] Drag-and-drop file upload from desktop (`useDragDrop` hook)
+- [x] Infinite scroll / load-more for folder contents (`useInfiniteFolderContents` hook)
+- [x] File and folder sorting by name/size/date (`useSort` hook)
+- [x] In-folder search (`SearchBar` component)
+- [x] Build `_auth.client/favorites.tsx` — starred files and folders; click folder navigates to it
+- [x] Add favorites (star) toggle to file/folder rows (`useFavorites` hook)
+- [x] Add quota display to UI (storage used / quota on `StatCard` in metrics; storage bar in metrics page)
+- [x] Build `_auth.admin/users.tsx` — table of all users with storage used, quota, admin flag, last seen; inline quota editor via `prompt()`
+- [x] Build `_auth.admin/invitations.tsx` — send invite by email; table of invitations with status pills; revoke pending invites
+- [x] Build `_auth.admin/metrics.tsx` — live WebSocket metrics via `useMetricsStream`; stat cards; `BarGraph` (CPU/memory/storage utilisation); `LineGraph` (storage over time with hour-window selector)
+- [x] Add admin nav links (visible only when `user.is_admin === true`)
+- [x] Build shared components: `FilePreviewModal` (images + PDF inline), `UploadModal`, `UploadToast`, `SearchBar`, `SortControls`, `BarGraph`, `LineGraph`
+- [x] Replace all manually typed icons with `react-icons/md` Material Design icons throughout
+- [x] Full Tailwind CSS styling across all routes and components (no inline `style={{}}` props)
 - [ ] Build static assets, configure Nginx to serve `dist/`
 
 ### Phase 4 — Hardening & Polish

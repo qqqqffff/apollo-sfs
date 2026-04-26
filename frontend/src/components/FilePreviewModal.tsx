@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { MdClose, MdDownload } from 'react-icons/md'
 import type { File } from '../types/api'
 import { previewUrl, streamUrl, downloadUrl } from '../api/files'
 
@@ -56,35 +57,21 @@ function DocxViewer({ file }: { file: File }) {
   }, [file.id])
 
   if (state.status === 'loading') {
-    return (
-      <div style={{ padding: 40, color: '#888', fontSize: 14 }}>
-        Converting document…
-      </div>
-    )
+    return <div className="p-10 text-sm text-gray-400">Converting document…</div>
   }
 
   if (state.status === 'error') {
     return (
-      <div style={{ padding: '40px 60px', textAlign: 'center', color: '#555' }}>
-        <p style={{ marginBottom: 12 }}>Could not render this document.</p>
-        <a href={downloadUrl(file.id)}>Download instead</a>
+      <div className="p-10 text-center text-gray-500 text-sm">
+        <p className="mb-3">Could not render this document.</p>
+        <a href={downloadUrl(file.id)} className="text-blue-600 hover:underline">Download instead</a>
       </div>
     )
   }
 
   return (
     <div
-      style={{
-        width: '80vw',
-        maxWidth: 820,
-        maxHeight: '80vh',
-        overflow: 'auto',
-        padding: '32px 48px',
-        fontSize: 15,
-        lineHeight: 1.6,
-        color: '#1a1a1a',
-      }}
-      // mammoth output is basic structural HTML with no scripts
+      className="w-[80vw] max-w-3xl max-h-[80vh] overflow-auto px-12 py-8 text-sm leading-relaxed text-gray-900 prose"
       dangerouslySetInnerHTML={{ __html: state.html }}
     />
   )
@@ -103,97 +90,46 @@ export function FilePreviewModal({ file, onClose }: Props) {
 
   const kind = previewKind(file.mime_type)
   const url = previewUrl(file.id)
-
-  // Text and DOCX need a wider/taller body that scrolls internally; other types
-  // are centered in a flex container.
   const bodyIsScrollable = kind === 'text' || kind === 'docx' || kind === 'pdf'
 
   return (
     <div
       onClick={onClose}
-      style={{
-        position: 'fixed',
-        inset: 0,
-        background: 'rgba(0,0,0,0.75)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        zIndex: 1000,
-      }}
+      className="fixed inset-0 bg-black/75 flex items-center justify-center z-50"
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        style={{
-          background: '#fff',
-          borderRadius: 8,
-          display: 'flex',
-          flexDirection: 'column',
-          maxWidth: '92vw',
-          maxHeight: '92vh',
-          overflow: 'hidden',
-          boxShadow: '0 8px 32px rgba(0,0,0,0.4)',
-        }}
+        className="bg-white rounded-xl flex flex-col max-w-[92vw] max-h-[92vh] overflow-hidden shadow-2xl"
       >
         {/* header */}
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            padding: '10px 14px',
-            borderBottom: '1px solid #ddd',
-            gap: 16,
-            minWidth: 0,
-          }}
-        >
-          <span
-            style={{
-              fontWeight: 500,
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap',
-              minWidth: 0,
-            }}
-          >
-            {file.name}
-          </span>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexShrink: 0 }}>
-            <a href={downloadUrl(file.id)} style={{ fontSize: 13 }}>
-              Download
+        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 gap-4 min-w-0">
+          <span className="font-medium text-gray-900 text-sm truncate min-w-0">{file.name}</span>
+          <div className="flex items-center gap-3 shrink-0">
+            <a
+              href={downloadUrl(file.id)}
+              className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-900 transition-colors"
+            >
+              <MdDownload className="text-base" /> Download
             </a>
             <button
               onClick={onClose}
               aria-label="Close preview"
-              style={{
-                background: 'none',
-                border: 'none',
-                cursor: 'pointer',
-                fontSize: 20,
-                lineHeight: 1,
-                padding: '0 2px',
-                color: '#555',
-              }}
+              className="text-gray-400 hover:text-gray-700 cursor-pointer transition-colors"
             >
-              ✕
+              <MdClose className="text-xl" />
             </button>
           </div>
         </div>
 
         {/* body */}
         <div
-          style={{
-            overflow: bodyIsScrollable ? 'hidden' : 'auto',
-            display: 'flex',
-            alignItems: bodyIsScrollable ? 'stretch' : 'center',
-            justifyContent: 'center',
-            flex: 1,
-          }}
+          className={`flex-1 flex items-center justify-center ${bodyIsScrollable ? 'overflow-hidden items-stretch' : 'overflow-auto'}`}
         >
           {kind === 'image' && (
             <img
               src={url}
               alt={file.name}
-              style={{ maxWidth: '88vw', maxHeight: '80vh', objectFit: 'contain', display: 'block' }}
+              className="max-w-[88vw] max-h-[80vh] object-contain block"
             />
           )}
 
@@ -201,7 +137,7 @@ export function FilePreviewModal({ file, onClose }: Props) {
             <iframe
               src={url}
               title={file.name}
-              style={{ width: '88vw', height: '82vh', border: 'none', display: 'block' }}
+              className="w-[88vw] h-[82vh] border-0 block"
             />
           )}
 
@@ -210,27 +146,25 @@ export function FilePreviewModal({ file, onClose }: Props) {
               src={streamUrl(file.id)}
               controls
               preload="metadata"
-              style={{ maxWidth: '88vw', maxHeight: '80vh', display: 'block' }}
+              className="max-w-[88vw] max-h-[80vh] block"
             />
           )}
 
           {kind === 'text' && (
-            // sandbox blocks script execution; allow-same-origin lets the
-            // auth cookie pass through so the API can serve the file.
             <iframe
               src={url}
               title={file.name}
               sandbox="allow-same-origin"
-              style={{ width: '88vw', height: '82vh', border: 'none', display: 'block' }}
+              className="w-[88vw] h-[82vh] border-0 block"
             />
           )}
 
           {kind === 'docx' && <DocxViewer file={file} />}
 
           {kind === 'unsupported' && (
-            <div style={{ padding: '40px 60px', textAlign: 'center', color: '#555' }}>
-              <p style={{ marginBottom: 12 }}>Preview not available for this file type.</p>
-              <a href={downloadUrl(file.id)}>Download instead</a>
+            <div className="p-16 text-center text-gray-500 text-sm">
+              <p className="mb-3">Preview not available for this file type.</p>
+              <a href={downloadUrl(file.id)} className="text-blue-600 hover:underline">Download instead</a>
             </div>
           )}
         </div>

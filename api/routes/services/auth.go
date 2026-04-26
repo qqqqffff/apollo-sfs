@@ -2,8 +2,10 @@ package services
 
 import (
 	"context"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -104,6 +106,8 @@ func NewAuthService(q *db.Queries, cfg AuthServiceConfig) *AuthService {
 
 // Login performs a Keycloak ROPC grant and returns the token pair on success.
 // Returns a non-nil error if credentials are invalid or Keycloak is unreachable.
+// As a side-effect, it provisions an app DB record for users created directly in
+// Keycloak (e.g. the bootstrap admin) who have never gone through Register.
 func (s *AuthService) Login(ctx context.Context, username, password string) (*TokenPair, error) {
 	body := url.Values{
 		"grant_type":    {"password"},
@@ -117,7 +121,47 @@ func (s *AuthService) Login(ctx context.Context, username, password string) (*To
 	if err != nil {
 		return nil, fmt.Errorf("login: %w", err)
 	}
+
+	if s.ProvisionUserKey != nil {
+		if err := s.ensureUserProvisioned(ctx, tokens.AccessToken); err != nil {
+			return nil, fmt.Errorf("login: provision user: %w", err)
+		}
+	}
+
 	return tokens, nil
+}
+
+// ensureUserProvisioned creates an app DB record for the user identified by the
+// access token if one does not already exist. This handles users bootstrapped
+// directly in Keycloak who bypassed the normal Register flow.
+func (s *AuthService) ensureUserProvisioned(ctx context.Context, accessToken string) error {
+	claims, err := decodeTokenClaims(accessToken)
+	if err != nil {
+		return fmt.Errorf("decode token claims: %w", err)
+	}
+
+	_, err = s.queries.GetUserByUsername(ctx, claims.PreferredUsername)
+	if err == nil {
+		return nil // record already exists
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("check user: %w", err)
+	}
+
+	encKey, nonce, masterKeyVer, err := s.ProvisionUserKey(ctx)
+	if err != nil {
+		return fmt.Errorf("provision key: %w", err)
+	}
+
+	return s.queries.CreateUser(ctx, &models.User{
+		Username:          claims.PreferredUsername,
+		Email:             claims.Email,
+		EncryptedKey:      encKey,
+		KeyNonce:          nonce,
+		MasterKeyVersion:  masterKeyVer,
+		StorageUsedBytes:  0,
+		StorageQuotaBytes: defaultQuotaBytes,
+	})
 }
 
 // Register creates a user in Keycloak via the Admin API, provisions an app DB
@@ -156,7 +200,12 @@ func (s *AuthService) Register(ctx context.Context, username, email, password, i
 		return nil, fmt.Errorf("register: provision key: %w", err)
 	}
 
-	// 4. Create app DB record.
+	// 4. Create app DB record. Use the quota set on the invitation, falling back
+	// to the server default if the invitation pre-dates the quota field.
+	quotaBytes := inv.InitialQuotaBytes
+	if quotaBytes <= 0 {
+		quotaBytes = defaultQuotaBytes
+	}
 	if err := s.queries.CreateUser(ctx, &models.User{
 		Username:          username,
 		Email:             email,
@@ -164,7 +213,7 @@ func (s *AuthService) Register(ctx context.Context, username, email, password, i
 		KeyNonce:          nonce,
 		MasterKeyVersion:  masterKeyVer,
 		StorageUsedBytes:  0,
-		StorageQuotaBytes: defaultQuotaBytes,
+		StorageQuotaBytes: quotaBytes,
 	}); err != nil {
 		return nil, fmt.Errorf("register: create db user: %w", err)
 	}
@@ -475,6 +524,34 @@ func (s *AuthService) kcResetPassword(ctx context.Context, adminToken, userID, n
 	return nil
 }
 
+// kcTokenClaims holds the subset of JWT claims needed for user provisioning.
+type kcTokenClaims struct {
+	PreferredUsername string `json:"preferred_username"`
+	Email             string `json:"email"`
+}
+
+// decodeTokenClaims base64-decodes the JWT payload without verifying the
+// signature. Safe here because the token was just issued by Keycloak directly
+// over the internal Docker network via the ROPC grant.
+func decodeTokenClaims(token string) (*kcTokenClaims, error) {
+	parts := strings.SplitN(token, ".", 3)
+	if len(parts) != 3 {
+		return nil, fmt.Errorf("not a valid JWT")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return nil, fmt.Errorf("decode payload: %w", err)
+	}
+	var claims kcTokenClaims
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return nil, fmt.Errorf("parse claims: %w", err)
+	}
+	if claims.PreferredUsername == "" {
+		return nil, fmt.Errorf("token missing preferred_username claim")
+	}
+	return &claims, nil
+}
+
 // parseActionToken decodes the payload of a Keycloak action token JWT (without
 // verifying the signature) and returns the subject (Keycloak user UUID) and the
 // expiry Unix timestamp. A zero exp means the token carries no expiry claim.
@@ -498,5 +575,165 @@ func parseActionToken(token string) (sub string, exp int64, err error) {
 		return "", 0, fmt.Errorf("token is missing subject claim")
 	}
 	return claims.Sub, claims.Exp, nil
+}
+
+// ChangePassword verifies the user's current password via an ROPC grant, then
+// uses the Keycloak Admin API to set the new password. Returns a sentinel error
+// if the current password is wrong so the handler can return 401.
+func (s *AuthService) ChangePassword(ctx context.Context, username, currentPassword, newPassword string) error {
+	// Verify current password by attempting a token grant.
+	body := url.Values{
+		"grant_type":    {"password"},
+		"client_id":     {s.kcClientID},
+		"client_secret": {s.kcSecret},
+		"username":      {username},
+		"password":      {currentPassword},
+		"scope":         {"openid"},
+	}
+	if _, err := s.tokenRequest(ctx, body); err != nil {
+		return ErrWrongPassword
+	}
+
+	adminToken, err := s.adminToken(ctx)
+	if err != nil {
+		return fmt.Errorf("change password: get admin token: %w", err)
+	}
+
+	kcID, err := s.kcFindUserByUsername(ctx, adminToken, username)
+	if err != nil {
+		return fmt.Errorf("change password: look up user: %w", err)
+	}
+	if kcID == "" {
+		return fmt.Errorf("change password: user %q not found in keycloak", username)
+	}
+
+	if err := s.kcResetPassword(ctx, adminToken, kcID, newPassword); err != nil {
+		return fmt.Errorf("change password: %w", err)
+	}
+	return nil
+}
+
+// ErrWrongPassword is returned by ChangePassword when the current password is incorrect.
+var ErrWrongPassword = errors.New("current password is incorrect")
+
+// RenameUser updates the username in both Keycloak and the app DB atomically
+// from the caller's perspective — Keycloak is updated first, then the DB.
+// If the DB update fails after a successful Keycloak update the error is returned
+// so the caller can surface it; the Keycloak change will stand but admins can
+// retry the DB rename.
+func (s *AuthService) RenameUser(ctx context.Context, oldUsername, newUsername string) error {
+	adminToken, err := s.adminToken(ctx)
+	if err != nil {
+		return fmt.Errorf("rename user: get admin token: %w", err)
+	}
+
+	kcID, err := s.kcFindUserByUsername(ctx, adminToken, oldUsername)
+	if err != nil {
+		return fmt.Errorf("rename user: look up keycloak user: %w", err)
+	}
+	if kcID == "" {
+		return fmt.Errorf("rename user: user %q not found in keycloak", oldUsername)
+	}
+
+	if err := s.kcUpdateUsername(ctx, adminToken, kcID, newUsername); err != nil {
+		return fmt.Errorf("rename user: update keycloak: %w", err)
+	}
+
+	if err := s.queries.UpdateUsername(ctx, oldUsername, newUsername); err != nil {
+		return fmt.Errorf("rename user: update db: %w", err)
+	}
+	return nil
+}
+
+// kcFindUserByUsername looks up a Keycloak user ID by exact username match.
+// Returns an empty string (no error) when the username is not found.
+func (s *AuthService) kcFindUserByUsername(ctx context.Context, adminToken, username string) (string, error) {
+	endpoint := fmt.Sprintf("%s/admin/realms/%s/users?username=%s&exact=true",
+		s.kcURL, s.kcRealm, url.QueryEscape(username))
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+
+	resp, err := s.http.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("keycloak request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("keycloak returned %s", resp.Status)
+	}
+
+	var users []kcUserResult
+	if err := json.NewDecoder(resp.Body).Decode(&users); err != nil {
+		return "", err
+	}
+	if len(users) == 0 {
+		return "", nil
+	}
+	return users[0].ID, nil
+}
+
+// kcUpdateUsername fetches the current Keycloak UserRepresentation, sets the new
+// username in-place, and PUTs the full object back. PUT /users/{id} is a full
+// replacement — sending only {"username":"x"} would wipe other fields.
+func (s *AuthService) kcUpdateUsername(ctx context.Context, adminToken, userID, newUsername string) error {
+	endpoint := fmt.Sprintf("%s/admin/realms/%s/users/%s", s.kcURL, s.kcRealm, userID)
+
+	// Fetch current representation.
+	getReq, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return err
+	}
+	getReq.Header.Set("Authorization", "Bearer "+adminToken)
+
+	getResp, err := s.http.Do(getReq)
+	if err != nil {
+		return fmt.Errorf("keycloak get user: %w", err)
+	}
+	defer getResp.Body.Close()
+	if getResp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(getResp.Body)
+		return fmt.Errorf("keycloak get user returned %s: %s", getResp.Status, string(b))
+	}
+
+	var rep map[string]json.RawMessage
+	if err := json.NewDecoder(getResp.Body).Decode(&rep); err != nil {
+		return fmt.Errorf("keycloak decode user: %w", err)
+	}
+
+	// Update only the username field.
+	newUsernameJSON, _ := json.Marshal(newUsername)
+	rep["username"] = newUsernameJSON
+
+	body, err := json.Marshal(rep)
+	if err != nil {
+		return err
+	}
+
+	putReq, err := http.NewRequestWithContext(ctx, http.MethodPut, endpoint, strings.NewReader(string(body)))
+	if err != nil {
+		return err
+	}
+	putReq.Header.Set("Content-Type", "application/json")
+	putReq.Header.Set("Authorization", "Bearer "+adminToken)
+
+	putResp, err := s.http.Do(putReq)
+	if err != nil {
+		return fmt.Errorf("keycloak put user: %w", err)
+	}
+	defer putResp.Body.Close()
+
+	if putResp.StatusCode == http.StatusConflict {
+		return fmt.Errorf("username %q is already taken", newUsername)
+	}
+	if putResp.StatusCode != http.StatusNoContent {
+		b, _ := io.ReadAll(putResp.Body)
+		return fmt.Errorf("keycloak put user returned %s: %s", putResp.Status, string(b))
+	}
+	return nil
 }
 

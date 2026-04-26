@@ -27,7 +27,7 @@ export function useFavorites() {
 
   const addFileMutation = useMutation({
     mutationFn: favoriteFile,
-    onMutate: (fileId) => {
+    onMutate: () => {
       // We don't have the full File object here so we just invalidate after.
       return optimisticToggle((prev) => prev) // no-op optimistic; invalidate on settle
     },

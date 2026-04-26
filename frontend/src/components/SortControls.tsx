@@ -1,4 +1,5 @@
 import type { SortKey, SortState } from '../hooks/useSort'
+import { MdArrowUpward, MdArrowDownward } from 'react-icons/md'
 
 interface Props {
   sort: SortState
@@ -13,27 +14,26 @@ const KEYS: { key: SortKey; label: string }[] = [
 
 export function SortControls({ sort, onSort }: Props) {
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 16 }}>
-      <span style={{ fontSize: 12, color: '#888', marginRight: 4 }}>Sort:</span>
+    <div className="flex items-center gap-1.5 mb-4">
+      <span className="text-xs text-gray-400 mr-1">Sort:</span>
       {KEYS.map(({ key, label }) => {
         const active = sort.key === key
         return (
           <button
             key={key}
             onClick={() => onSort(key)}
-            style={{
-              padding: '3px 10px',
-              borderRadius: 999,
-              border: `1px solid ${active ? '#222' : '#ddd'}`,
-              background: active ? '#222' : 'none',
-              color: active ? '#fff' : '#555',
-              fontSize: 12,
-              cursor: 'pointer',
-              lineHeight: 1.5,
-            }}
+            className={`inline-flex items-center gap-0.5 px-3 py-1 rounded-full text-xs border cursor-pointer transition-colors ${
+              active
+                ? 'bg-gray-900 text-white border-gray-900'
+                : 'bg-white text-gray-600 border-gray-200 hover:border-gray-400'
+            }`}
           >
             {label}
-            {active && (sort.dir === 'asc' ? ' ↑' : ' ↓')}
+            {active && (
+              sort.dir === 'asc'
+                ? <MdArrowUpward className="text-sm" />
+                : <MdArrowDownward className="text-sm" />
+            )}
           </button>
         )
       })}

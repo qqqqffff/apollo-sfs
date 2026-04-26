@@ -1,18 +1,16 @@
-import { createRoute, Link } from '@tanstack/react-router'
+import { createFileRoute, Link } from '@tanstack/react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Route as AuthLayout } from './AuthLayout'
-import { favoritesQueryOptions, unfavoriteFile, unfavoriteFolder } from '../api/favorites'
-import { canPreview, FilePreviewModal } from '../components/FilePreviewModal'
+import { MdFolder, MdInsertDriveFile, MdStar } from 'react-icons/md'
+import { favoritesQueryOptions, unfavoriteFile, unfavoriteFolder } from '../../api/favorites'
+import { canPreview, FilePreviewModal } from '../../components/FilePreviewModal'
 import { useState } from 'react'
-import type { File as ApiFile } from '../types/api'
+import type { File as ApiFile } from '../../types/api'
 
-export const Route = createRoute({
-  getParentRoute: () => AuthLayout,
-  path: '/favorites',
-  component: FavoritesPage,
+export const Route = createFileRoute('/_auth/client/favorites')({
+  component: RouteComponent,
 })
 
-function FavoritesPage() {
+function RouteComponent() {
   const queryClient = useQueryClient()
   const { data, isLoading } = useQuery(favoritesQueryOptions)
   const [previewFile, setPreviewFile] = useState<ApiFile | null>(null)
@@ -27,7 +25,7 @@ function FavoritesPage() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: favoritesQueryOptions.queryKey }),
   })
 
-  if (isLoading) return <p>Loading…</p>
+  if (isLoading) return <p className="text-sm text-gray-500">Loading…</p>
 
   const files = data?.files ?? []
   const folders = data?.folders ?? []
@@ -35,36 +33,25 @@ function FavoritesPage() {
 
   return (
     <div>
-      <h2 style={{ marginTop: 0 }}>Favorites</h2>
+      <h2 className="text-lg font-semibold text-gray-900 mb-6 mt-0">Favorites</h2>
 
       {isEmpty && (
-        <p style={{ color: '#888' }}>
+        <p className="text-sm text-gray-400">
           No favorites yet. Star files or folders to find them here quickly.
         </p>
       )}
 
       {folders.length > 0 && (
-        <section style={{ marginBottom: 24 }}>
-          <h3 style={{ fontSize: 14, color: '#6b7280', fontWeight: 600, marginBottom: 8 }}>
-            FOLDERS
-          </h3>
-          <ul style={{ listStyle: 'none', margin: 0, padding: 0 }}>
+        <section className="mb-6">
+          <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Folders</h3>
+          <ul className="list-none m-0 p-0 divide-y divide-gray-100">
             {folders.map((folder) => (
-              <li
-                key={folder.id}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 8,
-                  padding: '6px 0',
-                  borderBottom: '1px solid #f3f4f6',
-                }}
-              >
-                <span style={{ fontSize: 16 }}>📁</span>
+              <li key={folder.id} className="flex items-center gap-2 py-2">
+                <MdFolder className="text-blue-400 text-lg shrink-0" />
                 <Link
-                  to="/folders/$folderId"
-                  params={{ folderId: folder.id }}
-                  style={{ flexGrow: 1, textDecoration: 'none', color: '#111827' }}
+                  to="/client"
+                  search={{ file: undefined, folder: folder.id }}
+                  className="flex-1 text-sm text-gray-800 no-underline hover:text-blue-600 transition-colors"
                 >
                   {folder.name}
                 </Link>
@@ -72,9 +59,9 @@ function FavoritesPage() {
                   onClick={() => removeFolderMutation.mutate(folder.id)}
                   disabled={removeFolderMutation.isPending}
                   title="Remove from favorites"
-                  style={starButtonStyle(true)}
+                  className="text-amber-400 hover:text-amber-500 cursor-pointer disabled:opacity-50 bg-transparent border-0 p-0.5"
                 >
-                  ★
+                  <MdStar className="text-lg" />
                 </button>
               </li>
             ))}
@@ -84,35 +71,22 @@ function FavoritesPage() {
 
       {files.length > 0 && (
         <section>
-          <h3 style={{ fontSize: 14, color: '#6b7280', fontWeight: 600, marginBottom: 8 }}>
-            FILES
-          </h3>
-          <ul style={{ listStyle: 'none', margin: 0, padding: 0 }}>
+          <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Files</h3>
+          <ul className="list-none m-0 p-0 divide-y divide-gray-100">
             {files.map((file) => (
-              <li
-                key={file.id}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 8,
-                  padding: '6px 0',
-                  borderBottom: '1px solid #f3f4f6',
-                }}
-              >
-                <span style={{ fontSize: 16 }}>📄</span>
+              <li key={file.id} className="flex items-center gap-2 py-2">
+                <MdInsertDriveFile className="text-gray-400 text-lg shrink-0" />
                 <a
                   href={`/api/v1/files/${file.id}/download`}
-                  style={{ flexGrow: 1, textDecoration: 'none', color: '#111827' }}
+                  className="flex-1 text-sm text-gray-800 no-underline hover:text-blue-600 transition-colors"
                 >
                   {file.name}
                 </a>
-                <span style={{ color: '#9ca3af', fontSize: 12 }}>
-                  {formatSize(file.size_bytes)}
-                </span>
+                <span className="text-xs text-gray-400">{formatSize(file.size_bytes)}</span>
                 {canPreview(file.mime_type) && (
                   <button
                     onClick={() => setPreviewFile(file)}
-                    style={{ fontSize: 12, cursor: 'pointer' }}
+                    className="text-xs text-gray-500 hover:text-gray-900 cursor-pointer bg-transparent border border-gray-200 rounded px-2 py-0.5 hover:border-gray-400 transition-colors"
                   >
                     Preview
                   </button>
@@ -121,9 +95,9 @@ function FavoritesPage() {
                   onClick={() => removeFileMutation.mutate(file.id)}
                   disabled={removeFileMutation.isPending}
                   title="Remove from favorites"
-                  style={starButtonStyle(true)}
+                  className="text-amber-400 hover:text-amber-500 cursor-pointer disabled:opacity-50 bg-transparent border-0 p-0.5"
                 >
-                  ★
+                  <MdStar className="text-lg" />
                 </button>
               </li>
             ))}
@@ -136,18 +110,6 @@ function FavoritesPage() {
       )}
     </div>
   )
-}
-
-function starButtonStyle(active: boolean): React.CSSProperties {
-  return {
-    background: 'none',
-    border: 'none',
-    cursor: 'pointer',
-    fontSize: 18,
-    lineHeight: 1,
-    padding: '0 2px',
-    color: active ? '#f59e0b' : '#d1d5db',
-  }
 }
 
 function formatSize(bytes: number): string {

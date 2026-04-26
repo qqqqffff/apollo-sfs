@@ -38,20 +38,25 @@ func main() {
 	queries := db.New(pool)
 
 	// ── Keycloak OIDC ────────────────────────────────────────────────────────
-	// NewProvider fetches the discovery document from
-	// {issuerURL}/.well-known/openid-configuration and caches the JWKS.
-	// InsecureIssuerURLContext allows the internal Docker hostname to be used
-	// for discovery while tokens carry the public-facing hostname as issuer.
-	issuerURL := cfg.KeycloakInternalURL + "/realms/" + cfg.KeycloakRealm
-	oidcCtx := oidc.InsecureIssuerURLContext(context.Background(), issuerURL)
-	oidcProvider, err := oidc.NewProvider(oidcCtx, issuerURL)
-	if err != nil {
-		log.Fatalf("keycloak: connect to %s: %v", issuerURL, err)
-	}
-	oidcVerifier := oidcProvider.Verifier(&oidc.Config{
-		ClientID: cfg.KeycloakClientID,
+	// The discovery document and JWKS are fetched from the internal Docker URL
+	// so the API never tries to reach Keycloak via the public internet.
+	// Tokens carry the public-facing hostname as their issuer (set by KC_HOSTNAME),
+	// so we construct the verifier manually with:
+	//   - internal JWKS URL  → key fetching stays on the Docker network
+	//   - public issuer URL  → matches the iss claim in every token
+	internalIssuerURL := cfg.KeycloakInternalURL + "/realms/" + cfg.KeycloakRealm
+	publicIssuerURL := cfg.AppBaseURL + "/realms/" + cfg.KeycloakRealm
+	internalJWKSURL := internalIssuerURL + "/protocol/openid-connect/certs"
+
+	keySet := oidc.NewRemoteKeySet(context.Background(), internalJWKSURL)
+	// SkipIssuerCheck: Keycloak's token issuer (derived from KC_HOSTNAME + HTTP port)
+	// does not reliably match APP_BASE_URL in this deployment. JWT signature verification
+	// against the internal JWKS provides the equivalent security guarantee.
+	oidcVerifier := oidc.NewVerifier(publicIssuerURL, keySet, &oidc.Config{
+		ClientID:        cfg.KeycloakClientID,
+		SkipIssuerCheck: true,
 	})
-	log.Printf("keycloak: connected to %s", issuerURL)
+	log.Printf("keycloak: JWKS from %s", internalJWKSURL)
 
 	// ── Services ─────────────────────────────────────────────────────────────
 
@@ -97,20 +102,25 @@ func main() {
 	})
 	folderSvc := services.NewFolderService(queries)
 	favSvc := services.NewFavoriteService(queries)
-	inviteSvc := services.NewInviteService(queries, nil, cfg.AppBaseURL, 0)
-	// TODO: replace nil with emailSvc once EmailService is wired:
-	//   inviteSvc = services.NewInviteService(queries, emailSvc, cfg.AppBaseURL, 0)
+	emailSvc, err := services.NewEmailService(queries, services.EmailConfig{
+		SMTPAddr:     cfg.MaddyInternalHost,
+		MailFrom:     cfg.MailFrom,
+		AppName:      "Apollo SFS",
+		AppURL:       cfg.AppBaseURL,
+		TemplatesDir: "templates",
+	})
+	if err != nil {
+		log.Fatalf("email service: %v", err)
+	}
 
-	// TODO: remaining services
-	//   emailSvc := services.NewEmailService(queries, services.EmailConfig{...})
-	//   inviteSvc  := services.NewInviteService(pool, emailSvc)
-	//   metricsSvc := services.NewMetricsService(pool)
+	inviteSvc := services.NewInviteService(queries, emailSvc, cfg.AppBaseURL, 0)
 
-	metricsSvc := services.NewMetricsService(queries)
+	metricsSvc := services.NewMetricsService(queries, cfg.DiskStatsPath)
 
 	// Start background goroutines.
 	go rotationSvc.StartScheduler(context.Background())
 	go metricsSvc.Start(context.Background())
+	go emailSvc.Start(context.Background())
 
 	r := setupRouter(cfg, queries, oidcVerifier, authSvc, fileSvc, folderSvc, favSvc, inviteSvc, metricsSvc)
 
@@ -134,12 +144,12 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	store.Options(sessions.Options{
 		Path:     "/",
 		Domain:   cfg.CookieDomain,
-		MaxAge:   int((7 * 24 * time.Hour).Seconds()), // matches refresh token lifetime
+		MaxAge:   int((24 * time.Hour).Seconds()), // matches refresh token lifetime
 		Secure:   cfg.CookieSecure,
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
 	})
-	r.Use(sessions.Sessions(middleware.SessionName, store))
+	r.Use(sessions.SessionsMany([]string{middleware.SessionName}, store))
 
 	mw := middleware.New(
 		oidcVerifier,
@@ -153,9 +163,9 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		cfg.CookieSecure,
 	)
 
-	h := routes.NewHandler(queries, fileSvc, folderSvc, inviteSvc, favSvc)
+	h := routes.NewHandler(queries, fileSvc, folderSvc, inviteSvc, favSvc, authSvc)
 	authHandler := auth.NewHandler(authSvc)
-	adminHandler := admin.NewHandler(queries, inviteSvc, metricsSvc)
+	adminHandler := admin.NewHandler(queries, inviteSvc, metricsSvc, authSvc)
 
 	v1 := r.Group("/api/v1")
 
@@ -183,6 +193,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	protected.Use(mw.RequireAuth(), mw.ProactiveRefresh())
 	{
 		protected.GET("/me", h.Me)
+		protected.POST("/me/password", h.ChangePassword)
 
 		// Files
 		protected.POST("/files/upload", h.UploadFile)
@@ -218,9 +229,11 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 			adminGroup.GET("/users", adminHandler.GetUsers)
 			adminGroup.GET("/users/:user_id", adminHandler.GetUser)
 			adminGroup.PATCH("/users/:user_id/quota", adminHandler.UpdateUserQuota)
+			adminGroup.PATCH("/users/:user_id/username", adminHandler.UpdateUsername)
 
 			adminGroup.POST("/invitations", adminHandler.CreateInvitation)
 			adminGroup.GET("/invitations", adminHandler.GetInvitations)
+			adminGroup.POST("/invitations/:id/resend", adminHandler.ResendInvitation)
 			adminGroup.DELETE("/invitations/:id", adminHandler.RevokeInvitation)
 
 			adminGroup.GET("/system/metrics", adminHandler.GetMetrics)

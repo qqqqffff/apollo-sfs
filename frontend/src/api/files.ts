@@ -5,10 +5,10 @@ export function getFile(fileId: string) {
   return get<File>(`/files/${fileId}`)
 }
 
-export function uploadFile(folderId: string, file: globalThis.File, name?: string) {
+export function uploadFile(folderId: string | null, file: globalThis.File, name?: string) {
   const form = new FormData()
   form.append('file', file)
-  form.append('folder_id', folderId)
+  if (folderId) form.append('folder_id', folderId)
   if (name) form.append('name', name)
   return upload<UploadResponse>('/files/upload', form)
 }

@@ -89,16 +89,24 @@ func (m *AuthMiddleware) RequireAuth() gin.HandlerFunc {
 			return
 		}
 
-		// InsecureIssuerURLContext lets the verifier accept tokens whose issuer
-		// claim contains the public hostname while JWKS were fetched from the
-		// internal Docker URL. Without this, issuer validation fails when the
-		// Keycloak internal URL differs from the public-facing hostname.
-		ctx := oidc.InsecureIssuerURLContext(c.Request.Context(), m.issuerURL)
-
-		idToken, err := m.verifier.Verify(ctx, accessToken)
+		idToken, err := m.verifier.Verify(c.Request.Context(), accessToken)
 		if err != nil {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid or expired token"})
-			return
+			// Access token expired — attempt a silent refresh before giving up.
+			// This handles the case where the user was idle longer than the access
+			// token TTL; ProactiveRefresh only runs after this middleware succeeds.
+			if refreshToken, ok := session.Get("refresh_token").(string); ok && refreshToken != "" {
+				if tokens, refreshErr := m.callRefreshGrant(c.Request.Context(), refreshToken); refreshErr == nil {
+					session.Set("access_token", tokens.AccessToken)
+					session.Set("refresh_token", tokens.RefreshToken)
+					if saveErr := session.Save(); saveErr == nil {
+						idToken, err = m.verifier.Verify(c.Request.Context(), tokens.AccessToken)
+					}
+				}
+			}
+			if err != nil {
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid or expired token"})
+				return
+			}
 		}
 
 		var claims keycloakClaims
@@ -112,8 +120,15 @@ func (m *AuthMiddleware) RequireAuth() gin.HandlerFunc {
 		c.Set("exp", claims.Exp)
 		c.Set("roles", claims.RealmAccess.Roles)
 
-		// Update last_seen_at best-effort — a DB hiccup should never block a request.
-		if err := m.queries.UpdateLastSeenAt(c.Request.Context(), claims.PreferredUsername); err != nil {
+		// Update last_seen_at and sync is_admin from JWT — best-effort, non-blocking.
+		isAdmin := false
+		for _, r := range claims.RealmAccess.Roles {
+			if r == "admin" {
+				isAdmin = true
+				break
+			}
+		}
+		if err := m.queries.UpdateLastSeenAt(c.Request.Context(), claims.PreferredUsername, isAdmin); err != nil {
 			log.Printf("RequireAuth: update last_seen_at for %q: %v", claims.PreferredUsername, err)
 		}
 

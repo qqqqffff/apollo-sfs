@@ -1,18 +1,27 @@
 import { useEffect } from 'react'
+import { MdClose } from 'react-icons/md'
 import type { UploadProgress, UploadStatus } from '../hooks/useFileUpload'
 
 const AUTO_DISMISS_MS = 4000
 
 interface StatusConfig {
   label: string
-  color: string
+  bar: string
+  accent: string
 }
 
 const STATUS_CONFIG: Record<Exclude<UploadStatus, 'idle'>, StatusConfig> = {
-  uploading: { label: 'Uploading', color: '#4a90e2' },
-  complete:  { label: 'Complete',  color: '#38a169' },
-  partial:   { label: 'Partial failure', color: '#dd6b20' },
-  allFailed: { label: 'Failed',    color: '#e53e3e' },
+  uploading: { label: 'Uploading',       bar: 'bg-blue-500',   accent: 'border-blue-500'   },
+  complete:  { label: 'Complete',        bar: 'bg-green-500',  accent: 'border-green-500'  },
+  partial:   { label: 'Partial failure', bar: 'bg-orange-400', accent: 'border-orange-400' },
+  allFailed: { label: 'Failed',          bar: 'bg-red-500',    accent: 'border-red-500'    },
+}
+
+const LABEL_COLOR: Record<Exclude<UploadStatus, 'idle'>, string> = {
+  uploading: 'text-blue-600',
+  complete:  'text-green-600',
+  partial:   'text-orange-500',
+  allFailed: 'text-red-500',
 }
 
 function statusMessage(progress: UploadProgress): string {
@@ -44,75 +53,32 @@ export function UploadToast({ progress, onDismiss }: Props) {
   const done = succeeded + failed
   const total = progress.total
   const progressPct = total > 0 ? (done / total) * 100 : 0
-  const barColor =
-    status === 'uploading' ? '#4a90e2' :
-    status === 'complete'  ? '#38a169' :
-    status === 'partial'   ? '#dd6b20' :
-    '#e53e3e'
 
   return (
-    <div
-      style={{
-        position: 'fixed',
-        bottom: 24,
-        right: 24,
-        width: 320,
-        background: '#fff',
-        border: '1px solid #ddd',
-        borderLeft: `4px solid ${config.color}`,
-        borderRadius: 6,
-        boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
-        zIndex: 1001,
-        overflow: 'hidden',
-      }}
-    >
-      <div
-        style={{
-          padding: '12px 14px',
-          display: 'flex',
-          alignItems: 'flex-start',
-          justifyContent: 'space-between',
-          gap: 8,
-        }}
-      >
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontWeight: 600, fontSize: 13, color: config.color, marginBottom: 3 }}>
+    <div className={`fixed bottom-6 right-6 w-80 bg-white rounded-lg border-l-4 ${config.accent} border border-gray-200 shadow-lg z-50 overflow-hidden`}>
+      <div className="px-4 py-3 flex items-start justify-between gap-2">
+        <div className="flex-1 min-w-0">
+          <div className={`text-xs font-semibold mb-0.5 ${LABEL_COLOR[status]}`}>
             {config.label}
           </div>
-          <div style={{ fontSize: 13, color: '#444' }}>
+          <div className="text-sm text-gray-600">
             {statusMessage(progress)}
           </div>
         </div>
-
         {status !== 'uploading' && (
           <button
             onClick={onDismiss}
             aria-label="Dismiss"
-            style={{
-              background: 'none',
-              border: 'none',
-              cursor: 'pointer',
-              color: '#888',
-              fontSize: 16,
-              lineHeight: 1,
-              padding: '0 2px',
-              flexShrink: 0,
-            }}
+            className="text-gray-400 hover:text-gray-600 cursor-pointer shrink-0 mt-0.5"
           >
-            ✕
+            <MdClose className="text-base" />
           </button>
         )}
       </div>
-
-      {/* Progress bar */}
-      <div style={{ height: 4, background: '#eee' }}>
+      <div className="h-1 bg-gray-100">
         <div
-          style={{
-            height: '100%',
-            width: status === 'uploading' ? `${progressPct}%` : '100%',
-            background: barColor,
-            transition: 'width 0.3s ease',
-          }}
+          className={`h-full ${config.bar} transition-all duration-300`}
+          style={{ width: status === 'uploading' ? `${progressPct}%` : '100%' }}
         />
       </div>
     </div>

@@ -7,7 +7,37 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+
+	"apollo-sfs.com/api/routes/services"
 )
+
+type changePasswordRequest struct {
+	CurrentPassword string `json:"current_password" binding:"required"`
+	NewPassword     string `json:"new_password" binding:"required"`
+}
+
+// ChangePassword handles POST /api/v1/me/password.
+// Verifies the current password then sets the new one via Keycloak.
+func (h *Handler) ChangePassword(c *gin.Context) {
+	username := c.GetString("username")
+
+	var req changePasswordRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "current_password and new_password are required"})
+		return
+	}
+
+	if err := h.auth.ChangePassword(c.Request.Context(), username, req.CurrentPassword, req.NewPassword); err != nil {
+		if errors.Is(err, services.ErrWrongPassword) {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "current password is incorrect"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not change password"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "password changed"})
+}
 
 // meResponse is the JSON shape returned by GET /api/v1/me.
 // Sensitive fields (encrypted_key, nonce, master_key_version) are never
@@ -43,6 +73,18 @@ func (h *Handler) Me(c *gin.Context) {
 		return
 	}
 
+	// Derive admin status from the JWT realm roles set by RequireAuth,
+	// so it always reflects the current Keycloak role without a DB update.
+	isAdmin := false
+	if roles, ok := c.Get("roles"); ok {
+		for _, r := range roles.([]string) {
+			if r == "admin" {
+				isAdmin = true
+				break
+			}
+		}
+	}
+
 	var usedPct float64
 	if user.StorageQuotaBytes > 0 {
 		usedPct = float64(user.StorageUsedBytes) / float64(user.StorageQuotaBytes) * 100
@@ -56,6 +98,6 @@ func (h *Handler) Me(c *gin.Context) {
 		StorageUsedPct:    usedPct,
 		LastSeenAt:        user.LastSeenAt,
 		CreatedAt:         user.CreatedAt,
-		IsAdmin:           user.IsAdmin,
+		IsAdmin:           isAdmin,
 	})
 }

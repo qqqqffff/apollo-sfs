@@ -17,7 +17,7 @@ import (
 	"apollo-sfs.com/api/models"
 )
 
-const defaultInviteTokenTTL = 72 * time.Hour
+const defaultInviteTokenTTL = 7 * 24 * time.Hour
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -70,19 +70,25 @@ func (s *InviteService) Create(
 	invitedByUserID uuid.UUID,
 	invitedByUsername string,
 	email string,
+	initialQuotaBytes int64,
 ) (*models.Invitation, error) {
 	token, err := generateInviteToken()
 	if err != nil {
 		return nil, fmt.Errorf("create invitation: generate token: %w", err)
 	}
 
+	if initialQuotaBytes <= 0 {
+		initialQuotaBytes = defaultQuotaBytes
+	}
+
 	expiresAt := time.Now().UTC().Add(s.tokenTTL)
 
 	inv := &models.Invitation{
-		InvitedByUserID: invitedByUserID,
-		Email:           email,
-		Token:           token,
-		TokenExpiresAt:  expiresAt,
+		InvitedByUserID:   invitedByUserID,
+		Email:             email,
+		Token:             token,
+		TokenExpiresAt:    expiresAt,
+		InitialQuotaBytes: initialQuotaBytes,
 	}
 
 	if err := s.queries.CreateInvitation(ctx, inv); err != nil {
@@ -145,6 +151,50 @@ func (s *InviteService) List(ctx context.Context, page db.PageInput) (*db.PageRe
 		return nil, fmt.Errorf("list invitations: %w", err)
 	}
 	return result, nil
+}
+
+// InvitationURL builds the full registration URL for the given token.
+func (s *InviteService) InvitationURL(token string) string {
+	return s.appURL + "/register?token=" + token
+}
+
+// Resend generates a fresh token and expiry for an existing pending invitation,
+// then re-sends the invitation email with the new link.
+// Returns ErrInviteNotFound if the invitation does not exist, is accepted, or revoked.
+func (s *InviteService) Resend(ctx context.Context, id uuid.UUID, byUsername string) error {
+	inv, err := s.queries.GetInvitationByID(ctx, id)
+	if err != nil {
+		return ErrInviteNotFound
+	}
+	if inv.AcceptedAt != nil || inv.RevokedAt != nil {
+		return ErrInviteNotFound
+	}
+
+	newToken, err := generateInviteToken()
+	if err != nil {
+		return fmt.Errorf("resend invitation: generate token: %w", err)
+	}
+	newExpiry := time.Now().UTC().Add(s.tokenTTL)
+
+	if err := s.queries.RefreshInvitationToken(ctx, id, newToken, newExpiry); err != nil {
+		return fmt.Errorf("resend invitation: %w", err)
+	}
+
+	invitationURL := s.InvitationURL(newToken)
+	if s.email != nil {
+		if err := s.email.SendInvitation(
+			ctx,
+			inv.Email,
+			byUsername,
+			invitationURL,
+			humanizeDuration(s.tokenTTL),
+		); err != nil {
+			log.Printf("invite: resend email to %q: %v", inv.Email, err)
+		}
+	} else {
+		log.Printf("invite: email service not configured — invitation URL: %s", invitationURL)
+	}
+	return nil
 }
 
 // Revoke marks a pending invitation as revoked. Silently succeeds if the

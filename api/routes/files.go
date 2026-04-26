@@ -18,11 +18,11 @@ import (
 // ── Upload ────────────────────────────────────────────────────────────────────
 
 type uploadResponse struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	MimeType  string `json:"mime_type"`
-	SizeBytes int64  `json:"size_bytes"`
-	FolderID  string `json:"folder_id"`
+	ID        string  `json:"id"`
+	Name      string  `json:"name"`
+	MimeType  string  `json:"mime_type"`
+	SizeBytes int64   `json:"size_bytes"`
+	FolderID  *string `json:"folder_id"`
 }
 
 // UploadFile handles POST /api/v1/files/upload.
@@ -37,10 +37,14 @@ func (h *Handler) UploadFile(c *gin.Context) {
 		return
 	}
 
-	folderID, err := uuid.Parse(c.PostForm("folder_id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "folder_id must be a valid UUID"})
-		return
+	var folderID *uuid.UUID
+	if raw := c.PostForm("folder_id"); raw != "" {
+		parsed, err := uuid.Parse(raw)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "folder_id must be a valid UUID"})
+			return
+		}
+		folderID = &parsed
 	}
 
 	name := sanitize.Name(c.PostForm("name"), 255)
@@ -84,12 +88,17 @@ func (h *Handler) UploadFile(c *gin.Context) {
 		return
 	}
 
+	var folderIDStr *string
+	if file.FolderID != nil {
+		s := file.FolderID.String()
+		folderIDStr = &s
+	}
 	c.JSON(http.StatusCreated, uploadResponse{
 		ID:        file.ID.String(),
 		Name:      file.Name,
 		MimeType:  file.MimeType,
 		SizeBytes: file.SizeBytes,
-		FolderID:  file.FolderID.String(),
+		FolderID:  folderIDStr,
 	})
 }
 

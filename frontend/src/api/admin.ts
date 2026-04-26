@@ -19,6 +19,10 @@ export function updateUserQuota(username: string, quota_bytes: number) {
   return patch<{ message: string }>(`/admin/users/${username}/quota`, { quota_bytes })
 }
 
+export function updateUsername(username: string, newUsername: string) {
+  return patch<{ message: string }>(`/admin/users/${username}/username`, { new_username: newUsername })
+}
+
 // ── Invitations ────────────────────────────────────────────────────────────────
 
 export function listInvitations(cursor?: string) {
@@ -28,12 +32,16 @@ export function listInvitations(cursor?: string) {
   return get<PageResult<Invitation>>(`/admin/invitations${qs}`)
 }
 
-export function createInvitation(email: string) {
-  return post<Invitation>('/admin/invitations', { email })
+export function createInvitation(email: string, initialQuotaBytes: number) {
+  return post<Invitation>('/admin/invitations', { email, initial_quota_bytes: initialQuotaBytes })
 }
 
 export function revokeInvitation(id: string) {
   return del<{ message: string }>(`/admin/invitations/${id}`)
+}
+
+export function resendInvitation(id: string) {
+  return post<{ message: string }>(`/admin/invitations/${id}/resend`)
 }
 
 // ── Metrics ────────────────────────────────────────────────────────────────────
@@ -48,6 +56,8 @@ export interface MetricsSnapshot {
   network_bytes_recv: number
   storage_total_used_bytes: number
   storage_total_quota_bytes: number
+  disk_total_bytes: number
+  disk_free_bytes: number
   active_user_count: number
   total_user_count: number
 }
@@ -62,14 +72,22 @@ export function getMetricsHistoryByHours(hours: number) {
 
 // ── Query options ──────────────────────────────────────────────────────────────
 
-export const adminUsersQueryOptions = {
+export const adminUsersInfiniteQueryOptions = {
   queryKey: ['admin', 'users'] as const,
-  queryFn: () => listUsers(),
+  queryFn: ({ pageParam }: { pageParam: string | undefined }) =>
+    listUsers(pageParam),
+  initialPageParam: undefined as string | undefined,
+  getNextPageParam: (lastPage: PageResult<User>) =>
+    lastPage.next_token || undefined,
 }
 
-export const adminInvitationsQueryOptions = {
+export const adminInvitationsInfiniteQueryOptions = {
   queryKey: ['admin', 'invitations'] as const,
-  queryFn: () => listInvitations(),
+  queryFn: ({ pageParam }: { pageParam: string | undefined }) =>
+    listInvitations(pageParam),
+  initialPageParam: undefined as string | undefined,
+  getNextPageParam: (lastPage: PageResult<Invitation>) =>
+    lastPage.next_token || undefined,
 }
 
 export const adminMetricsQueryOptions = {

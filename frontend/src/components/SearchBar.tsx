@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { MdClose, MdSearch } from 'react-icons/md'
 
 interface Props {
   value: string
@@ -10,7 +11,6 @@ export function SearchBar({ value, onChange, placeholder = 'Search files and fol
   const [local, setLocal] = useState(value)
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  // Sync external resets (e.g. navigating to a new folder clears search)
   useEffect(() => {
     setLocal(value)
   }, [value])
@@ -22,37 +22,22 @@ export function SearchBar({ value, onChange, placeholder = 'Search files and fol
   }
 
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 12 }}>
+    <div className="relative flex items-center mb-3">
+      <MdSearch className="absolute left-3 text-gray-400 text-lg pointer-events-none" />
       <input
         type="search"
         value={local}
         onChange={(e) => handleChange(e.target.value)}
         placeholder={placeholder}
-        style={{
-          flex: 1,
-          padding: '6px 10px',
-          borderRadius: 6,
-          border: '1px solid #ddd',
-          fontSize: 13,
-          outline: 'none',
-          minWidth: 0,
-        }}
+        className="w-full pl-9 pr-8 py-2 text-sm border border-gray-200 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
       />
       {local && (
         <button
           onClick={() => handleChange('')}
           aria-label="Clear search"
-          style={{
-            background: 'none',
-            border: 'none',
-            cursor: 'pointer',
-            fontSize: 16,
-            color: '#888',
-            padding: '0 4px',
-            lineHeight: 1,
-          }}
+          className="absolute right-2 text-gray-400 hover:text-gray-600 cursor-pointer"
         >
-          ✕
+          <MdClose className="text-base" />
         </button>
       )}
     </div>

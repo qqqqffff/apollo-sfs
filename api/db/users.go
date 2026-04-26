@@ -111,15 +111,32 @@ func (q *Queries) ListUsers(ctx context.Context, in PageInput) (*PageResult[mode
 	}, nil
 }
 
-// UpdateLastSeenAt stamps the current time onto the user's last_seen_at column.
+// UpdateLastSeenAt stamps the current time and syncs is_admin from the JWT.
 // Called by the auth middleware on every authenticated request.
-func (q *Queries) UpdateLastSeenAt(ctx context.Context, username string) error {
+func (q *Queries) UpdateLastSeenAt(ctx context.Context, username string, isAdmin bool) error {
 	_, err := q.db.ExecContext(ctx,
-		`UPDATE users SET last_seen_at = NOW() WHERE username = $1`,
-		username,
+		`UPDATE users SET last_seen_at = NOW(), is_admin = $2 WHERE username = $1`,
+		username, isAdmin,
 	)
 	if err != nil {
 		return fmt.Errorf("UpdateLastSeenAt %q: %w", username, err)
+	}
+	return nil
+}
+
+// UpdateUsername renames a user in the app DB. The caller must also rename the
+// user in Keycloak so the preferred_username claim stays in sync.
+func (q *Queries) UpdateUsername(ctx context.Context, oldUsername, newUsername string) error {
+	res, err := q.db.ExecContext(ctx,
+		`UPDATE users SET username = $2 WHERE username = $1`,
+		oldUsername, newUsername,
+	)
+	if err != nil {
+		return fmt.Errorf("UpdateUsername %q→%q: %w", oldUsername, newUsername, err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("UpdateUsername: user %q not found", oldUsername)
 	}
 	return nil
 }

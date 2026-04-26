@@ -31,8 +31,8 @@ type UploadInput struct {
 	Username string
 	// UserID is the Keycloak sub UUID (stored as files.user_id FK).
 	UserID uuid.UUID
-	// FolderID is the target folder.
-	FolderID uuid.UUID
+	// FolderID is the target folder. Nil means the file is placed at root.
+	FolderID *uuid.UUID
 	// Name is the display filename stored in the metadata table.
 	Name string
 	// MimeType is provided by the client. If empty the service detects it from
@@ -212,7 +212,7 @@ func (s *FileService) Move(ctx context.Context, fileID, userID, newFolderID uuid
 	if err != nil {
 		return nil, err
 	}
-	if file.FolderID == newFolderID {
+	if file.FolderID != nil && *file.FolderID == newFolderID {
 		return file, nil
 	}
 	folder, err := s.queries.GetFolderByID(ctx, newFolderID)

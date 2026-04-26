@@ -9,6 +9,7 @@ export function useMetricsStream() {
   const [connected, setConnected] = useState(false)
   const reconnectDelay = useRef(1_000)
   const cancelledRef = useRef(false)
+  const wsRef = useRef<WebSocket | null>(null)
 
   useEffect(() => {
     cancelledRef.current = false
@@ -20,6 +21,7 @@ export function useMetricsStream() {
       const ws = new WebSocket(
         `${protocol}//${location.host}/api/v1/admin/system/metrics/stream`,
       )
+      wsRef.current = ws
 
       ws.onopen = () => {
         if (!cancelledRef.current) {
@@ -59,6 +61,10 @@ export function useMetricsStream() {
 
     return () => {
       cancelledRef.current = true
+      if (wsRef.current) {
+        wsRef.current.close()
+        wsRef.current = null
+      }
     }
   }, [])
 

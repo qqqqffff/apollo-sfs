@@ -19,6 +19,8 @@ type ServerMetricSnapshot struct {
 	NetworkBytesRecv       int64     `json:"network_bytes_recv" db:"network_bytes_recv"`
 	StorageTotalUsedBytes  int64     `json:"storage_total_used_bytes" db:"storage_total_used_bytes"`
 	StorageTotalQuotaBytes int64     `json:"storage_total_quota_bytes" db:"storage_total_quota_bytes"`
+	DiskTotalBytes         int64     `json:"disk_total_bytes" db:"disk_total_bytes"`
+	DiskFreeBytes          int64     `json:"disk_free_bytes" db:"disk_free_bytes"`
 	ActiveUserCount        int       `json:"active_user_count" db:"active_user_count"`
 	TotalUserCount         int       `json:"total_user_count" db:"total_user_count"`
 	SampledAt              time.Time `json:"sampled_at" db:"sampled_at"`

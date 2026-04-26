@@ -11,6 +11,7 @@ import (
 
 	"github.com/shirou/gopsutil/v4/cpu"
 	"github.com/shirou/gopsutil/v4/mem"
+	psdisk "github.com/shirou/gopsutil/v4/disk"
 	psnet "github.com/shirou/gopsutil/v4/net"
 
 	"apollo-sfs.com/api/db"
@@ -84,15 +85,19 @@ func (h *Hub) ClientCount() int {
 // snapshot to the DB, and broadcasts it to all active WebSocket clients. A
 // separate daily goroutine prunes rows older than 7 days.
 type MetricsService struct {
-	queries *db.Queries
-	hub     *Hub
+	queries       *db.Queries
+	hub           *Hub
+	diskStatsPath string
 }
 
 // NewMetricsService constructs a MetricsService.
-func NewMetricsService(q *db.Queries) *MetricsService {
+// diskStatsPath is the filesystem path used to report disk capacity — it should
+// be the mount point of the storage volume (e.g. "/mnt/data").
+func NewMetricsService(q *db.Queries, diskStatsPath string) *MetricsService {
 	return &MetricsService{
-		queries: q,
-		hub:     newHub(),
+		queries:       q,
+		hub:           newHub(),
+		diskStatsPath: diskStatsPath,
 	}
 }
 
@@ -192,6 +197,14 @@ func (s *MetricsService) collectSnapshot(ctx context.Context) (*models.ServerMet
 		return nil, err
 	}
 
+	var diskTotal, diskFree int64
+	if usage, err := psdisk.Usage(s.diskStatsPath); err == nil {
+		diskTotal = int64(usage.Total)
+		diskFree = int64(usage.Free)
+	} else {
+		log.Printf("metrics: disk stats for %q: %v", s.diskStatsPath, err)
+	}
+
 	return &models.ServerMetricSnapshot{
 		CPUPercent:             sys.cpuPercent,
 		MemoryUsedBytes:        sys.memUsed,
@@ -200,6 +213,8 @@ func (s *MetricsService) collectSnapshot(ctx context.Context) (*models.ServerMet
 		NetworkBytesRecv:       sys.netRecv,
 		StorageTotalUsedBytes:  minioStorageBytes("../minio"),
 		StorageTotalQuotaBytes: app.StorageQuotaBytes,
+		DiskTotalBytes:         diskTotal,
+		DiskFreeBytes:          diskFree,
 		ActiveUserCount:        app.ActiveUsersLast5m,
 		TotalUserCount:         app.TotalUsers,
 		SampledAt:              time.Now().UTC(),

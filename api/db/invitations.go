@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -16,6 +17,7 @@ func scanInvitation(row *sql.Row) (*models.Invitation, error) {
 	err := row.Scan(
 		&inv.ID, &inv.InvitedByUserID, &inv.Email, &inv.Token,
 		&inv.TokenExpiresAt, &acceptedAt, &revokedAt, &inv.CreatedAt,
+		&inv.InitialQuotaBytes,
 	)
 	if err != nil {
 		return nil, err
@@ -35,6 +37,7 @@ func scanInvitationRow(rows *sql.Rows) (*models.Invitation, error) {
 	err := rows.Scan(
 		&inv.ID, &inv.InvitedByUserID, &inv.Email, &inv.Token,
 		&inv.TokenExpiresAt, &acceptedAt, &revokedAt, &inv.CreatedAt,
+		&inv.InitialQuotaBytes,
 	)
 	if err != nil {
 		return nil, err
@@ -52,13 +55,30 @@ func scanInvitationRow(rows *sql.Rows) (*models.Invitation, error) {
 func (q *Queries) CreateInvitation(ctx context.Context, inv *models.Invitation) error {
 	_, err := q.db.ExecContext(ctx, `
 		INSERT INTO invitations (
-			id, invited_by_user_id, email, token, token_expires_at, created_at
-		) VALUES (gen_random_uuid(), $1, $2, $3, $4, NOW())
-	`, inv.InvitedByUserID, inv.Email, inv.Token, inv.TokenExpiresAt)
+			id, invited_by_user_id, email, token, token_expires_at,
+			initial_quota_bytes, created_at
+		) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, NOW())
+	`, inv.InvitedByUserID, inv.Email, inv.Token, inv.TokenExpiresAt, inv.InitialQuotaBytes)
 	if err != nil {
 		return fmt.Errorf("CreateInvitation: %w", err)
 	}
 	return nil
+}
+
+// GetInvitationByID returns an invitation by its UUID regardless of status.
+// Returns sql.ErrNoRows if not found.
+func (q *Queries) GetInvitationByID(ctx context.Context, id uuid.UUID) (*models.Invitation, error) {
+	row := q.db.QueryRowContext(ctx, `
+		SELECT id, invited_by_user_id, email, token,
+		       token_expires_at, accepted_at, revoked_at, created_at,
+		       initial_quota_bytes
+		FROM invitations WHERE id = $1
+	`, id)
+	inv, err := scanInvitation(row)
+	if err != nil {
+		return nil, fmt.Errorf("GetInvitationByID: %w", err)
+	}
+	return inv, nil
 }
 
 // GetInvitationByToken returns a pending invitation matching the given token.
@@ -66,7 +86,8 @@ func (q *Queries) CreateInvitation(ctx context.Context, inv *models.Invitation) 
 func (q *Queries) GetInvitationByToken(ctx context.Context, token string) (*models.Invitation, error) {
 	row := q.db.QueryRowContext(ctx, `
 		SELECT id, invited_by_user_id, email, token,
-		       token_expires_at, accepted_at, revoked_at, created_at
+		       token_expires_at, accepted_at, revoked_at, created_at,
+		       initial_quota_bytes
 		FROM invitations
 		WHERE token = $1
 		  AND accepted_at IS NULL
@@ -89,7 +110,8 @@ func (q *Queries) ListInvitations(ctx context.Context, in PageInput) (*PageResul
 
 	rows, err := q.db.QueryContext(ctx, `
 		SELECT id, invited_by_user_id, email, token,
-		       token_expires_at, accepted_at, revoked_at, created_at
+		       token_expires_at, accepted_at, revoked_at, created_at,
+		       initial_quota_bytes
 		FROM invitations
 		ORDER BY created_at DESC
 		LIMIT $1 OFFSET $2
@@ -114,6 +136,22 @@ func (q *Queries) ListInvitations(ctx context.Context, in PageInput) (*PageResul
 		Items:     invs,
 		NextToken: offsetNextToken(len(invs), limit, offset),
 	}, nil
+}
+
+// RefreshInvitationToken replaces the token and expiry for a pending (not
+// accepted or revoked) invitation. Used by Resend to issue a fresh link.
+func (q *Queries) RefreshInvitationToken(ctx context.Context, id uuid.UUID, newToken string, expiresAt time.Time) error {
+	_, err := q.db.ExecContext(ctx, `
+		UPDATE invitations
+		   SET token = $2, token_expires_at = $3
+		 WHERE id = $1
+		   AND accepted_at IS NULL
+		   AND revoked_at IS NULL
+	`, id, newToken, expiresAt)
+	if err != nil {
+		return fmt.Errorf("RefreshInvitationToken %s: %w", id, err)
+	}
+	return nil
 }
 
 // RevokeInvitation sets revoked_at to NOW() for a pending invitation.

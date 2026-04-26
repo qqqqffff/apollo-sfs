@@ -39,11 +39,11 @@ cd /home/<user>/apollo-sfs
 
 ## 2 — Create the MinIO data directory
 
-The compose file bind-mounts MinIO's data to `/minio/nvme-1/data`. Create it before the first `docker compose up`:
+The compose file bind-mounts MinIO's data to `./minio/nvme-01/data` (relative to the project root). Create it before the first `docker compose up`:
 
 ```bash
-sudo mkdir -p /minio/nvme-1/data
-sudo chown -R 1000:1000 /minio/nvme-1/data
+mkdir -p /home/apollo/apollo-sfs/minio/nvme-01/data
+sudo chown -R 1000:1000 /home/apollo/apollo-sfs/minio/nvme-01/data
 ```
 
 If your NVMe is mounted elsewhere, update the `device` path in the `minio-data` volume at the bottom of `docker-compose.yml`.
@@ -71,23 +71,19 @@ sudo chmod 600 /etc/ssl/cloudflare/origin.key
 
 ## 4 — Host nginx configuration
 
-Copy the site config and enable it:
+The project ships a complete `nginx.conf` (with gzip, rate-limiting, and logging already configured) and a site config. Replace the system defaults entirely — do not merge:
 
 ```bash
-sudo cp nginx/conf.d/apollo-sfs.conf /etc/nginx/sites-available/apollo-sfs
-sudo ln -s /etc/nginx/sites-available/apollo-sfs /etc/nginx/sites-enabled/apollo-sfs
-sudo rm -f /etc/nginx/sites-enabled/default
-```
+# Replace the main nginx config (includes the rate-limit zone the site config needs)
+sudo cp nginx/nginx.conf /etc/nginx/nginx.conf
 
-Add the rate-limit zone to `/etc/nginx/nginx.conf` inside the `http {}` block (before `include sites-enabled/*`):
+# Drop the site config into conf.d (it is already included by nginx.conf)
+sudo cp nginx/conf.d/apollo-sfs.conf /etc/nginx/conf.d/apollo-sfs.conf
 
-```nginx
-limit_req_zone $binary_remote_addr zone=auth_limit:10m rate=10r/m;
-```
+# Remove the default placeholder site if present
+sudo rm -f /etc/nginx/conf.d/default.conf /etc/nginx/sites-enabled/default
 
-Test and reload:
-
-```bash
+# Test config and reload
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
@@ -179,45 +175,18 @@ cp your-realm-export.json keycloak/import/realm-export.json
 
 ---
 
-## 7 — Maddy SMTP configuration
+## 7 — SMTP relay configuration
 
-Maddy acts as a local SMTP submission hub that relays outbound mail through SendGrid.
+The `maddy` service in the compose file uses `boky/postfix` — a multi-arch Postfix image that relays outbound mail through SendGrid. It is fully configured via the environment variables already set in your `.env` file (`MAIL_DOMAIN`, `SENDGRID_SMTP_PASSWORD`). No extra config file is needed.
+
+The Go API connects to this relay at `maddy:587` (the container is named `maddy` to keep the environment variable `MADDY_INTERNAL_HOST=maddy:587` unchanged).
+
+If you want to verify the relay is working after first launch:
 
 ```bash
-mkdir -p maddy
-cp maddy/maddy.conf.example maddy/maddy.conf   # if an example is provided
-# or create maddy/maddy.conf manually — see https://maddy.email/reference/config/
-```
-
-A minimal `maddy.conf` that relays to SendGrid:
-
-```
-$(hostname) = files.example.com
-$(local_domains) = $(hostname)
-
-smtp tcp://0.0.0.0:587 {
-    auth plain {
-        # No auth needed — only internal Docker services submit here
-        insecure_skip_auth true
-    }
-    deliver_to &remote_queue
-}
-
-target.remote outbound_delivery { }
-
-queue remote_queue {
-    target &outbound_delivery
-
-    smtp_relay {
-        hostname smtp.sendgrid.net
-        port 587
-        auth plain {
-            username apikey
-            password env:SENDGRID_SMTP_PASSWORD
-        }
-        starttls required
-    }
-}
+docker exec -it apollo-sfs-maddy sh -c \
+  "echo 'Test body' | mail -s 'Test' your@email.com"
+docker compose logs maddy
 ```
 
 ---
@@ -251,19 +220,75 @@ All services should show `healthy` or `running`.
 
 ## 9 — Create the first admin user
 
-There is no admin account seeded by default. To promote the first user:
+Registration is invite-only, so there is no way to sign up through the app until an admin exists. The first admin user must be created directly in the Keycloak admin console.
 
-1. Register an account through the app at `https://files.example.com`
-2. Find the username (the Keycloak subject UUID printed in the API logs, or shown in the Keycloak admin console under Users)
-3. Connect to the app database and set the flag:
+### 9.1 — Create the user via the Keycloak CLI
+
+Keycloak 26 production mode enforces strict hostname rules that prevent the browser admin console from being reached via SSH tunnel. Use `kcadm.sh` instead — it runs inside the container and connects directly to the local port, bypassing all hostname redirects.
+
+All four commands below can be run from the Pi over your normal SSH session (no tunnel needed).
+
+**Authenticate as the bootstrap admin:**
 
 ```bash
-docker exec -it apollo-sfs-postgresql-app \
-  psql -U $POSTGRES_APP_USER -d $POSTGRES_APP_DB \
-  -c "UPDATE users SET is_admin = true WHERE username = '<keycloak-subject-uuid>';"
+set -a && source .env  && set +a
 ```
 
-4. Sign out and back in — the admin nav links (Users, Invitations, Metrics) will appear.
+```bash
+docker exec -it apollo-sfs-keycloak /opt/keycloak/bin/kcadm.sh config credentials \
+  --server http://localhost:8180 \
+  --realm master \
+  --user "$KEYCLOAK_ADMIN" \
+  --password "$KEYCLOAK_ADMIN_PASSWORD"
+```
+
+**Create the user** (replace values as appropriate):
+
+```bash
+docker exec -it apollo-sfs-keycloak /opt/keycloak/bin/kcadm.sh create users \
+  -r apollo-sfs-realm \
+  -s username=<your-username> \
+  -s email=<your-email> \
+  -s enabled=true \
+  -s emailVerified=true
+```
+
+**Set a password:**
+
+```bash
+docker exec -it apollo-sfs-keycloak /opt/keycloak/bin/kcadm.sh set-password \
+  -r apollo-sfs-realm \
+  --username <your-username> \
+  --new-password '<your-password>'
+```
+
+**Get the user's ID** (copy the `id` value from the output):
+
+```bash
+docker exec -it apollo-sfs-keycloak /opt/keycloak/bin/kcadm.sh get users \
+  -r apollo-sfs-realm \
+  -q username=<your-username> \
+  --fields id,username
+```
+
+**Assign the admin realm role:**
+
+```bash
+docker exec -it apollo-sfs-keycloak /opt/keycloak/bin/kcadm.sh add-roles \
+  -r apollo-sfs-realm \
+  --uid <user-id-from-above> \
+  --rolename admin
+```
+
+### 9.3 — First login and app-DB provisioning
+
+Open `https://apollo-sfs.com` and sign in with the credentials you just set. On the first successful login the API automatically creates the user's record in the app database, generates their encryption key, and reads the `admin` role from the JWT claims. The **Users**, **Invitations**, and **Metrics** nav links should appear immediately.
+
+> If the admin links do not appear, confirm the `admin` role is present in the JWT by checking the API logs (`docker compose logs api`). Also verify `KEYCLOAK_REALM` in `.env` matches the realm name exactly (`apollo-sfs-realm`).
+
+### 9.7 — Invite subsequent users
+
+Once logged in as admin, go to **Invitations** in the nav. Enter an email address and click **Invite** — a time-limited invite link will be emailed to the recipient. They follow the link to the registration page and create their account from there.
 
 ---
 

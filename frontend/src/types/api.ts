@@ -11,7 +11,7 @@ export interface User {
 export interface File {
   id: string
   user_id: string
-  folder_id: string
+  folder_id: string | null
   name: string
   mime_type: string
   size_bytes: number
@@ -47,6 +47,8 @@ export interface Invitation {
   accepted_at: string | null
   revoked_at: string | null
   created_at: string
+  initial_quota_bytes: number
+  invitation_url?: string
 }
 
 export interface UploadResponse {

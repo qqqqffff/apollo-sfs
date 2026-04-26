@@ -84,7 +84,7 @@ func (q *Queries) ListFoldersByUser(ctx context.Context, userID uuid.UUID, in Pa
 	}
 	defer rows.Close()
 
-	var folders []models.Folder
+	folders := make([]models.Folder, 0)
 	for rows.Next() {
 		f, err := scanFolderRow(rows)
 		if err != nil {
@@ -137,7 +137,7 @@ func (q *Queries) ListRootFolders(ctx context.Context, userID uuid.UUID, in Page
 	}
 	defer rows.Close()
 
-	var folders []models.Folder
+	folders := make([]models.Folder, 0)
 	for rows.Next() {
 		f, err := scanFolderRow(rows)
 		if err != nil {
@@ -176,7 +176,7 @@ func (q *Queries) SearchFoldersByUser(ctx context.Context, userID uuid.UUID, ter
 	}
 	defer rows.Close()
 
-	var folders []models.Folder
+	folders := make([]models.Folder, 0)
 	for rows.Next() {
 		f, err := scanFolderRow(rows)
 		if err != nil {
@@ -214,7 +214,7 @@ func (q *Queries) ListFoldersByParent(ctx context.Context, userID, parentID uuid
 	}
 	defer rows.Close()
 
-	var folders []models.Folder
+	folders := make([]models.Folder, 0)
 	for rows.Next() {
 		f, err := scanFolderRow(rows)
 		if err != nil {

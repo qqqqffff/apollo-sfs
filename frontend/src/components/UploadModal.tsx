@@ -1,4 +1,5 @@
 import { useEffect } from 'react'
+import { MdFolder } from 'react-icons/md'
 import type { User } from '../types/api'
 
 interface Props {
@@ -38,84 +39,47 @@ export function UploadModal({ files, folderName, user, onConfirm, onCancel }: Pr
   return (
     <div
       onClick={onCancel}
-      style={{
-        position: 'fixed',
-        inset: 0,
-        background: 'rgba(0,0,0,0.6)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        zIndex: 1000,
-      }}
+      className="fixed inset-0 bg-black/60 flex items-center justify-center z-50"
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        style={{
-          background: '#fff',
-          borderRadius: 8,
-          padding: 24,
-          width: 500,
-          maxWidth: '92vw',
-          maxHeight: '85vh',
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 16,
-          boxShadow: '0 8px 32px rgba(0,0,0,0.3)',
-        }}
+        className="bg-white rounded-xl shadow-xl w-125 max-w-[92vw] max-h-[85vh] flex flex-col gap-5 p-6"
       >
-        <h3 style={{ margin: 0 }}>Upload files</h3>
+        <h3 className="text-base font-semibold text-gray-900 m-0">Upload files</h3>
 
-        {/* Destination */}
-        <div style={{ fontSize: 13, color: '#555' }}>
-          Uploading to: <strong style={{ color: '#222' }}>📁 {folderName}</strong>
+        <div className="text-sm text-gray-500 flex items-center gap-1.5">
+          Uploading to:
+          <span className="font-medium text-gray-900 flex items-center gap-1">
+            <MdFolder className="text-blue-500" /> {folderName}
+          </span>
         </div>
 
-        {/* File list */}
-        <div
-          style={{
-            border: '1px solid #ddd',
-            borderRadius: 4,
-            overflow: 'auto',
-            maxHeight: 240,
-            flex: '0 1 auto',
-          }}
-        >
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+        <div className="border border-gray-200 rounded-lg overflow-auto max-h-60 flex-none">
+          <table className="w-full text-sm border-collapse">
             <thead>
-              <tr style={{ background: '#f5f5f5', position: 'sticky', top: 0 }}>
-                <th style={{ padding: '7px 10px', fontWeight: 600, textAlign: 'left' }}>File</th>
-                <th style={{ padding: '7px 10px', fontWeight: 600, textAlign: 'right', whiteSpace: 'nowrap' }}>
-                  Size
-                </th>
+              <tr className="bg-gray-50 sticky top-0">
+                <th className="text-left px-3 py-2 font-medium text-gray-600 text-xs">File</th>
+                <th className="text-right px-3 py-2 font-medium text-gray-600 text-xs whitespace-nowrap">Size</th>
               </tr>
             </thead>
             <tbody>
               {files.map((f, i) => (
-                <tr key={i} style={{ borderTop: '1px solid #eee' }}>
-                  <td
-                    style={{
-                      padding: '6px 10px',
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap',
-                      maxWidth: 320,
-                    }}
-                    title={f.name}
-                  >
+                <tr key={i} className="border-t border-gray-100">
+                  <td className="px-3 py-1.5 overflow-hidden text-ellipsis whitespace-nowrap max-w-xs text-gray-800" title={f.name}>
                     {f.name}
                   </td>
-                  <td style={{ padding: '6px 10px', textAlign: 'right', color: '#555', whiteSpace: 'nowrap' }}>
+                  <td className="px-3 py-1.5 text-right text-gray-500 whitespace-nowrap">
                     {formatSize(f.size)}
                   </td>
                 </tr>
               ))}
             </tbody>
             <tfoot>
-              <tr style={{ borderTop: '2px solid #ddd', background: '#fafafa' }}>
-                <td style={{ padding: '6px 10px', fontWeight: 600 }}>
+              <tr className="border-t-2 border-gray-200 bg-gray-50">
+                <td className="px-3 py-1.5 font-semibold text-gray-800">
                   {files.length} file{files.length !== 1 ? 's' : ''}
                 </td>
-                <td style={{ padding: '6px 10px', textAlign: 'right', fontWeight: 600, whiteSpace: 'nowrap' }}>
+                <td className="px-3 py-1.5 text-right font-semibold text-gray-800 whitespace-nowrap">
                   {formatSize(totalBytes)}
                 </td>
               </tr>
@@ -123,52 +87,42 @@ export function UploadModal({ files, folderName, user, onConfirm, onCancel }: Pr
           </table>
         </div>
 
-        {/* Quota */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <div
-            style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: '#555' }}
-          >
+        <div className="flex flex-col gap-2">
+          <div className="flex justify-between text-xs text-gray-500">
             <span>Storage</span>
-            <span>
-              {formatSize(usedBytes)} of {formatSize(quotaBytes)} used
-            </span>
+            <span>{formatSize(usedBytes)} of {formatSize(quotaBytes)} used</span>
           </div>
-
-          {/* Bar */}
-          <div
-            style={{
-              height: 10,
-              borderRadius: 5,
-              background: '#e5e5e5',
-              overflow: 'hidden',
-              display: 'flex',
-            }}
-          >
-            <div style={{ width: `${usedPct}%`, background: '#4a90e2' }} />
+          <div className="h-2 rounded-full bg-gray-100 overflow-hidden flex">
+            <div className="h-full bg-blue-500 transition-all" style={{ width: `${usedPct}%` }} />
             <div
-              style={{
-                width: `${uploadPct}%`,
-                background: exceedsQuota ? '#e53e3e' : '#f6ad55',
-              }}
+              className="h-full transition-all"
+              style={{ width: `${uploadPct}%`, background: exceedsQuota ? '#ef4444' : '#f97316' }}
             />
           </div>
-
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
-            <span style={{ color: '#555' }}>After upload: {formatSize(afterBytes)}</span>
+          <div className="flex justify-between text-xs">
+            <span className="text-gray-500">After upload: {formatSize(afterBytes)}</span>
             {exceedsQuota ? (
-              <span style={{ color: '#e53e3e', fontWeight: 600 }}>
+              <span className="text-red-500 font-semibold">
                 Exceeds quota by {formatSize(afterBytes - quotaBytes)}
               </span>
             ) : (
-              <span style={{ color: '#555' }}>{formatSize(remainingAfter)} remaining</span>
+              <span className="text-gray-500">{formatSize(remainingAfter)} remaining</span>
             )}
           </div>
         </div>
 
-        {/* Actions */}
-        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 4 }}>
-          <button onClick={onCancel}>Cancel</button>
-          <button onClick={onConfirm} disabled={exceedsQuota}>
+        <div className="flex justify-end gap-2 mt-auto">
+          <button
+            onClick={onCancel}
+            className="px-4 py-2 text-sm rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 cursor-pointer transition-colors"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={onConfirm}
+            disabled={exceedsQuota}
+            className="px-4 py-2 text-sm rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-medium disabled:opacity-40 cursor-pointer transition-colors"
+          >
             {`Upload ${files.length > 1 ? `${files.length} files` : 'file'}`}
           </button>
         </div>

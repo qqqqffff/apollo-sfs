@@ -17,6 +17,8 @@ export interface File {
   size_bytes: number
   created_at: string
   updated_at: string
+  // Only present on the single-file GET endpoint; undefined in list responses.
+  has_low_variant?: boolean
 }
 
 export interface Folder {

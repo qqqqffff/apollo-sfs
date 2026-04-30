@@ -59,27 +59,78 @@ func NewKeyRotationService(q *db.Queries, enc *EncryptionService, rotationAge ti
 // ── Public methods ────────────────────────────────────────────────────────────
 
 // StartScheduler launches the rotation background goroutine. It checks on
-// startup whether any incomplete rotation needs to be resumed, then ticks every
-// 24 hours to check whether a new rotation is due. Returns when ctx is cancelled.
+// startup whether any incomplete rotation needs to be resumed, then loops
+// sleeping until the next rotation is due — computed from the active key's
+// creation timestamp in the DB so container restarts do not reset the schedule.
+// Returns when ctx is cancelled.
 func (s *KeyRotationService) StartScheduler(ctx context.Context) {
-	log.Printf("key rotation: scheduler started (rotation age %s, check interval %s)",
-		s.rotationAge, rotationCheckInterval)
+	log.Printf("key rotation: scheduler started (rotation age %s)", s.rotationAge)
 
-	// Immediately check for incomplete rotation from a previous crash.
+	// Resume any rotation that was interrupted by a previous crash.
 	s.resumeIncomplete(ctx)
 
-	ticker := time.NewTicker(rotationCheckInterval)
-	defer ticker.Stop()
-
 	for {
+		// nextCheckDelay reads the active key's created_at from the DB and
+		// returns how long to sleep before the next check is warranted.
+		// This survives container restarts because the timestamp is persisted.
+		delay := s.nextCheckDelay(ctx)
+
 		select {
 		case <-ctx.Done():
 			log.Printf("key rotation: scheduler stopped")
 			return
-		case <-ticker.C:
-			s.checkAndRotate(ctx)
+		case <-time.After(delay):
+		}
+
+		s.checkAndRotate(ctx)
+
+		// If the check fired because rotation was already overdue (delay == 0),
+		// add a cooldown before recalculating to prevent a tight retry loop on
+		// repeated failures (e.g. DB unavailable during rotation).
+		if delay == 0 {
+			select {
+			case <-ctx.Done():
+				log.Printf("key rotation: scheduler stopped")
+				return
+			case <-time.After(rotationCheckInterval):
+			}
 		}
 	}
+}
+
+// nextCheckDelay returns how long to sleep before running the next rotation
+// check. It bases the calculation on the active key's created_at in the DB so
+// the schedule is preserved across container restarts.
+//
+//   - If the key is already past rotationAge: returns 0 (check immediately).
+//   - If the key will reach rotationAge in less than rotationCheckInterval:
+//     returns the exact remaining duration so we fire right on time.
+//   - Otherwise: returns rotationCheckInterval (24 h) so we check daily without
+//     sleeping the full remaining 30 days between restarts.
+func (s *KeyRotationService) nextCheckDelay(ctx context.Context) time.Duration {
+	active, err := s.queries.GetActiveMasterKey(ctx)
+	if err != nil {
+		log.Printf("key rotation: cannot read active key for scheduling: %v — retrying in 1h", err)
+		return time.Hour
+	}
+
+	remaining := time.Until(active.CreatedAt.Add(s.rotationAge))
+	if remaining <= 0 {
+		log.Printf("key rotation: active key %s is overdue by %s — checking now",
+			active.ID, (-remaining).Round(time.Hour))
+		return 0
+	}
+
+	delay := remaining
+	if delay > rotationCheckInterval {
+		delay = rotationCheckInterval
+	}
+	log.Printf("key rotation: active key %s is %s old — next check in %s",
+		active.ID,
+		time.Since(active.CreatedAt).Round(time.Hour),
+		delay.Round(time.Minute),
+	)
+	return delay
 }
 
 // RotateMasterKey executes a full key rotation synchronously. Can be called

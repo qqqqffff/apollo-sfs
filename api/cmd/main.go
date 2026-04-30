@@ -96,12 +96,6 @@ func main() {
 	}
 	log.Printf("minio: connected to %s (bucket: %s)", cfg.MinIOEndpoint, cfg.MinIOBucketName)
 
-	minioSvc := services.NewMinIOService(minioClient, cfg.MinIOBucketName)
-	fileSvc := services.NewFileService(queries, minioSvc, encSvc, services.FileServiceConfig{
-		QuotaWarnPct: cfg.QuotaWarningThresholdPct,
-	})
-	folderSvc := services.NewFolderService(queries)
-	favSvc := services.NewFavoriteService(queries)
 	emailSvc, err := services.NewEmailService(queries, services.EmailConfig{
 		SMTPAddr:     cfg.MaddyInternalHost,
 		MailFrom:     cfg.MailFrom,
@@ -112,6 +106,21 @@ func main() {
 	if err != nil {
 		log.Fatalf("email service: %v", err)
 	}
+
+	minioSvc := services.NewMinIOService(minioClient, cfg.MinIOBucketName)
+
+	transcodeSvc := services.NewTranscodeService()
+	if transcodeSvc.Available() {
+		log.Printf("transcode: ffmpeg found — background 480p variants enabled")
+	} else {
+		log.Printf("transcode: ffmpeg not found — video variants disabled")
+	}
+
+	fileSvc := services.NewFileService(queries, minioSvc, encSvc, emailSvc, transcodeSvc, services.FileServiceConfig{
+		QuotaWarnPct: cfg.QuotaWarningThresholdPct,
+	})
+	folderSvc := services.NewFolderService(queries)
+	favSvc := services.NewFavoriteService(queries)
 
 	inviteSvc := services.NewInviteService(queries, emailSvc, cfg.AppBaseURL, 0)
 
@@ -126,7 +135,17 @@ func main() {
 
 	addr := ":" + cfg.Port
 	log.Printf("apollo-sfs API listening on %s", addr)
-	if err := r.Run(addr); err != nil {
+	srv := &http.Server{
+		Addr:    addr,
+		Handler: r,
+		// Protect against slowloris on header reads without killing upload bodies.
+		// ReadTimeout is intentionally omitted (zero = no timeout) so long-running
+		// uploads and streaming downloads are never cut off by the server itself.
+		ReadHeaderTimeout: 30 * time.Second,
+		// Idle connections are reclaimed after 2 minutes of inactivity.
+		IdleTimeout: 2 * time.Minute,
+	}
+	if err := srv.ListenAndServe(); err != nil {
 		log.Fatalf("server error: %v", err)
 	}
 }
@@ -163,7 +182,9 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		cfg.CookieSecure,
 	)
 
-	h := routes.NewHandler(queries, fileSvc, folderSvc, inviteSvc, favSvc, authSvc)
+	uploadStore := services.NewUploadSessionStore()
+
+	h := routes.NewHandler(queries, fileSvc, folderSvc, inviteSvc, favSvc, authSvc, uploadStore)
 	authHandler := auth.NewHandler(authSvc)
 	adminHandler := admin.NewHandler(queries, inviteSvc, metricsSvc, authSvc)
 
@@ -195,8 +216,12 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		protected.GET("/me", h.Me)
 		protected.POST("/me/password", h.ChangePassword)
 
-		// Files
+		// Files — single upload (small files ≤ 5 MB)
 		protected.POST("/files/upload", h.UploadFile)
+		// Chunked upload (large files > 5 MB)
+		protected.POST("/files/upload/init", h.InitUpload)
+		protected.POST("/files/upload/:upload_id/chunk", h.UploadChunk)
+		protected.POST("/files/upload/:upload_id/complete", h.CompleteUpload)
 		protected.GET("/files/:file_id", h.GetFile)
 		protected.GET("/files/:file_id/download", h.DownloadFile)
 		protected.GET("/files/:file_id/preview", h.PreviewFile)

@@ -18,6 +18,7 @@ import { deleteFile, downloadUrl, fileQueryOptions, moveFile } from '../../api/f
 import { meQueryOptions } from '../../api/me'
 import { FilePreviewModal, canPreview } from '../../components/FilePreviewModal'
 import { UploadModal } from '../../components/UploadModal'
+import { DeleteConfirmModal, readSkipDeleteCookie } from '../../components/DeleteConfirmModal'
 import { UploadToast } from '../../components/UploadToast'
 import { SortControls } from '../../components/SortControls'
 import { SearchBar } from '../../components/SearchBar'
@@ -97,6 +98,7 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
   const { data: user } = useQuery(meQueryOptions)
   const fileRef = useRef<HTMLInputElement>(null)
   const [pendingFiles, setPendingFiles] = useState<globalThis.File[]>([])
+  const [pendingDelete, setPendingDelete] = useState<{ type: 'file' | 'folder'; id: string; name: string } | null>(null)
   const [search, setSearch] = useState('')
   const [creatingFolder, setCreatingFolder] = useState(false)
   const [newFolderName, setNewFolderName] = useState('')
@@ -146,13 +148,28 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
 
   const deleteFolderMutation = useMutation({
     mutationFn: deleteFolder,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['folders'] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['folders'] })
+      queryClient.invalidateQueries({ queryKey: ['me'] })
+    },
   })
 
   const deleteFileMutation = useMutation({
     mutationFn: deleteFile,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['folders', folderId] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['folders', folderId] })
+      queryClient.invalidateQueries({ queryKey: ['me'] })
+    },
   })
+
+  function handleDeleteClick(type: 'file' | 'folder', id: string, name: string) {
+    if (user && readSkipDeleteCookie(user.username)) {
+      if (type === 'file') deleteFileMutation.mutate(id)
+      else deleteFolderMutation.mutate(id)
+    } else {
+      setPendingDelete({ type, id, name })
+    }
+  }
 
   function openFolder(id: string) {
     navigate({ to: '/client', search: { file: undefined, folder: id } })
@@ -285,7 +302,7 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
                 </button>
                 <StarButton active={favoriteFolderIds.has(f.id)} onClick={() => toggleFolder(f.id)} title={favoriteFolderIds.has(f.id) ? 'Remove from favorites' : 'Add to favorites'} />
                 <button
-                  onClick={() => { if (confirm(`Delete folder "${f.name}"?`)) deleteFolderMutation.mutate(f.id) }}
+                  onClick={() => handleDeleteClick('folder', f.id, f.name)}
                   className="text-xs text-gray-400 hover:text-red-500 cursor-pointer bg-transparent border-0 px-1 transition-colors"
                 >
                   Delete
@@ -316,7 +333,7 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
                 <span className="text-xs text-gray-400 shrink-0">{formatSize(f.size_bytes)}</span>
                 <StarButton active={favoriteFileIds.has(f.id)} onClick={() => toggleFile(f.id)} title={favoriteFileIds.has(f.id) ? 'Remove from favorites' : 'Add to favorites'} />
                 <button
-                  onClick={() => { if (confirm(`Delete "${f.name}"?`)) deleteFileMutation.mutate(f.id) }}
+                  onClick={() => handleDeleteClick('file', f.id, f.name)}
                   className="text-xs text-gray-400 hover:text-red-500 cursor-pointer bg-transparent border-0 px-1 transition-colors"
                 >
                   Delete
@@ -355,6 +372,19 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
       )}
 
       <UploadToast progress={progress} onDismiss={dismiss} />
+
+      {pendingDelete && (
+        <DeleteConfirmModal
+          name={pendingDelete.name}
+          username={user?.username ?? ''}
+          onConfirm={() => {
+            if (pendingDelete.type === 'file') deleteFileMutation.mutate(pendingDelete.id)
+            else deleteFolderMutation.mutate(pendingDelete.id)
+            setPendingDelete(null)
+          }}
+          onCancel={() => setPendingDelete(null)}
+        />
+      )}
 
       {isDragging && (
         <div className="fixed inset-0 bg-blue-500/10 border-4 border-dashed border-blue-400 flex items-center justify-center z-999 pointer-events-none">

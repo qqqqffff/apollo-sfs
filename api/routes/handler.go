@@ -15,9 +15,10 @@ type Handler struct {
 	invites   *services.InviteService
 	favorites *services.FavoriteService
 	auth      *services.AuthService
+	uploads   *services.UploadSessionStore
 }
 
 // NewHandler constructs a Handler with the given dependencies.
-func NewHandler(q *db.Queries, fileSvc *services.FileService, folderSvc *services.FolderService, inviteSvc *services.InviteService, favSvc *services.FavoriteService, authSvc *services.AuthService) *Handler {
-	return &Handler{queries: q, files: fileSvc, folders: folderSvc, invites: inviteSvc, favorites: favSvc, auth: authSvc}
+func NewHandler(q *db.Queries, fileSvc *services.FileService, folderSvc *services.FolderService, inviteSvc *services.InviteService, favSvc *services.FavoriteService, authSvc *services.AuthService, uploadStore *services.UploadSessionStore) *Handler {
+	return &Handler{queries: q, files: fileSvc, folders: folderSvc, invites: inviteSvc, favorites: favSvc, auth: authSvc, uploads: uploadStore}
 }

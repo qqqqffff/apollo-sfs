@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { MdClose, MdDownload } from 'react-icons/md'
 import type { File } from '../types/api'
 import { previewUrl, streamUrl, downloadUrl } from '../api/files'
@@ -71,7 +71,7 @@ function DocxViewer({ file }: { file: File }) {
 
   return (
     <div
-      className="w-[80vw] max-w-3xl max-h-[80vh] overflow-auto px-12 py-8 text-sm leading-relaxed text-gray-900 prose"
+      className="w-full overflow-auto px-6 sm:px-12 py-8 text-sm leading-relaxed text-gray-900 prose max-w-none"
       dangerouslySetInnerHTML={{ __html: state.html }}
     />
   )
@@ -80,15 +80,38 @@ function DocxViewer({ file }: { file: File }) {
 // ── Modal ─────────────────────────────────────────────────────────────────────
 
 export function FilePreviewModal({ file, onClose }: Props) {
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
+  const kind = previewKind(file.mime_type)
+
+  // Auto-select 480p on slow connections when a low-quality variant is ready.
+  const [quality, setQuality] = useState<'original' | 'low'>(() => {
+    if (kind !== 'video' || !file.has_low_variant) return 'original'
+    const conn = (navigator as any).connection
+    if (conn) {
+      if (conn.effectiveType === '2g' || conn.effectiveType === 'slow-2g') return 'low'
+      if (typeof conn.downlink === 'number' && conn.downlink < 5) return 'low'
     }
+    return 'original'
+  })
+
+  // Re-load video when quality changes by remounting via key.
+  const videoKey = useRef(0)
+  const prevQuality = useRef(quality)
+  if (prevQuality.current !== quality) {
+    videoKey.current++
+    prevQuality.current = quality
+  }
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
     document.addEventListener('keydown', handler)
     return () => document.removeEventListener('keydown', handler)
   }, [onClose])
 
-  const kind = previewKind(file.mime_type)
+  useEffect(() => {
+    document.body.style.overflow = 'hidden'
+    return () => { document.body.style.overflow = '' }
+  }, [])
+
   const url = previewUrl(file.id)
   const bodyIsScrollable = kind === 'text' || kind === 'docx' || kind === 'pdf'
 
@@ -99,12 +122,21 @@ export function FilePreviewModal({ file, onClose }: Props) {
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="bg-white rounded-xl flex flex-col max-w-[92vw] max-h-[92vh] overflow-hidden shadow-2xl"
+        className="bg-white rounded-xl flex flex-col w-[92vw] max-w-4xl h-[92vh] overflow-hidden shadow-2xl"
       >
         {/* header */}
-        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 gap-4 min-w-0">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 gap-4 min-w-0 shrink-0">
           <span className="font-medium text-gray-900 text-sm truncate min-w-0">{file.name}</span>
           <div className="flex items-center gap-3 shrink-0">
+            {kind === 'video' && file.has_low_variant && (
+              <button
+                onClick={() => setQuality(q => q === 'low' ? 'original' : 'low')}
+                title={quality === 'low' ? 'Switch to original quality' : 'Switch to 480p (lower data usage)'}
+                className="text-xs border border-gray-200 rounded px-2 py-1 cursor-pointer transition-colors text-gray-500 hover:text-gray-900 hover:border-gray-400"
+              >
+                {quality === 'low' ? '480p' : 'Original'}
+              </button>
+            )}
             <a
               href={downloadUrl(file.id)}
               className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-900 transition-colors"
@@ -123,13 +155,13 @@ export function FilePreviewModal({ file, onClose }: Props) {
 
         {/* body */}
         <div
-          className={`flex-1 flex items-center justify-center ${bodyIsScrollable ? 'overflow-hidden items-stretch' : 'overflow-auto'}`}
+          className={`flex-1 min-h-0 flex ${bodyIsScrollable ? 'items-stretch' : 'items-center justify-center overflow-auto'}`}
         >
           {kind === 'image' && (
             <img
               src={url}
               alt={file.name}
-              className="max-w-[88vw] max-h-[80vh] object-contain block"
+              className="max-w-full max-h-full object-contain block"
             />
           )}
 
@@ -137,16 +169,17 @@ export function FilePreviewModal({ file, onClose }: Props) {
             <iframe
               src={url}
               title={file.name}
-              className="w-[88vw] h-[82vh] border-0 block"
+              className="w-full h-full border-0 block"
             />
           )}
 
           {kind === 'video' && (
             <video
-              src={streamUrl(file.id)}
+              key={videoKey.current}
+              src={streamUrl(file.id, quality === 'low' ? 'low' : undefined)}
               controls
               preload="metadata"
-              className="max-w-[88vw] max-h-[80vh] block"
+              className="max-w-full max-h-full block"
             />
           )}
 
@@ -155,7 +188,7 @@ export function FilePreviewModal({ file, onClose }: Props) {
               src={url}
               title={file.name}
               sandbox="allow-same-origin"
-              className="w-[88vw] h-[82vh] border-0 block"
+              className="w-full h-full border-0 block"
             />
           )}
 

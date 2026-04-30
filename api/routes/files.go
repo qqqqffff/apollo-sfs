@@ -2,8 +2,11 @@ package routes
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -11,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	"apollo-sfs.com/api/models"
 	"apollo-sfs.com/api/routes/services"
 	"apollo-sfs.com/api/sanitize"
 )
@@ -33,7 +37,14 @@ type uploadResponse struct {
 func (h *Handler) UploadFile(c *gin.Context) {
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "file field is required"})
+		if errors.Is(err, http.ErrMissingFile) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "file field is required"})
+		} else {
+			// ParseMultipartForm failed mid-body — usually a network interruption
+			// (e.g. nginx closing the upstream connection due to a timeout).
+			log.Printf("upload: read multipart body: %v", err)
+			c.JSON(http.StatusBadRequest, gin.H{"error": "upload interrupted — please retry"})
+		}
 		return
 	}
 
@@ -84,6 +95,7 @@ func (h *Handler) UploadFile(c *gin.Context) {
 			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 			return
 		}
+		log.Printf("upload: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "upload failed"})
 		return
 	}
@@ -104,6 +116,13 @@ func (h *Handler) UploadFile(c *gin.Context) {
 
 // ── Get metadata ──────────────────────────────────────────────────────────────
 
+// fileResponse wraps File metadata with variant availability flags so the
+// frontend can render a quality toggle without a separate API call.
+type fileResponse struct {
+	*models.File
+	HasLowVariant bool `json:"has_low_variant"`
+}
+
 // GetFile handles GET /api/v1/files/:file_id.
 // Returns the file metadata (name, type, size, timestamps) without content.
 func (h *Handler) GetFile(c *gin.Context) {
@@ -114,8 +133,9 @@ func (h *Handler) GetFile(c *gin.Context) {
 	}
 
 	userID, _ := uuid.Parse(c.GetString("userID"))
+	ctx := c.Request.Context()
 
-	file, err := h.files.GetMetadata(c.Request.Context(), fileID, userID)
+	file, err := h.files.GetMetadata(ctx, fileID, userID)
 	if err != nil {
 		if errors.Is(err, services.ErrNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "file not found"})
@@ -125,7 +145,10 @@ func (h *Handler) GetFile(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, file)
+	c.JSON(http.StatusOK, &fileResponse{
+		File:          file,
+		HasLowVariant: h.files.HasReadyVariant(ctx, file.ID),
+	})
 }
 
 // ── Download ──────────────────────────────────────────────────────────────────
@@ -206,6 +229,24 @@ func (h *Handler) StreamFile(c *gin.Context) {
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not stream file"})
 		return
+	}
+
+	// If ?quality=low is requested, swap in the transcoded 480p variant.
+	// 404 is returned when the variant does not exist or is not yet ready.
+	if c.Query("quality") == services.LowQualityLabel {
+		variant, err := h.files.GetVariant(ctx, file.ID, services.LowQualityLabel)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "low-quality variant not available"})
+			return
+		}
+		file = &models.File{
+			ID:             file.ID,
+			UserID:         file.UserID,
+			MimeType:       "video/mp4",
+			SizeBytes:      variant.SizeBytes,
+			MinIOObjectKey: variant.MinIOObjectKey,
+			Nonce:          []byte{}, // always chunked
+		}
 	}
 
 	c.Writer.Header().Set("Content-Type", file.MimeType)
@@ -418,4 +459,188 @@ func (h *Handler) DeleteFile(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "file deleted"})
+}
+
+// ── Chunked upload ────────────────────────────────────────────────────────────
+
+// InitUpload handles POST /api/v1/files/upload/init.
+// Creates a chunked-upload session and returns its ID. The client must supply
+// the final filename, total number of chunks, and total file size so a quota
+// pre-check can reject oversized uploads before any bytes are transferred.
+func (h *Handler) InitUpload(c *gin.Context) {
+	var req struct {
+		Name        string  `json:"name"         binding:"required"`
+		TotalChunks int     `json:"total_chunks" binding:"required,min=1"`
+		TotalSize   int64   `json:"total_size"   binding:"required,min=1"`
+		FolderID    *string `json:"folder_id"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	name := sanitize.Name(req.Name, 255)
+	if name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid file name"})
+		return
+	}
+
+	var folderID *uuid.UUID
+	if req.FolderID != nil && *req.FolderID != "" {
+		parsed, err := uuid.Parse(*req.FolderID)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "folder_id must be a valid UUID"})
+			return
+		}
+		folderID = &parsed
+	}
+
+	username := c.GetString("username")
+	if err := h.files.CheckQuota(c.Request.Context(), username, req.TotalSize); err != nil {
+		if errors.Is(err, services.ErrQuotaExceeded) {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "quota check failed"})
+		return
+	}
+
+	userID, _ := uuid.Parse(c.GetString("userID"))
+	sess, err := h.uploads.Create(userID, username, name, folderID, req.TotalChunks, req.TotalSize)
+	if err != nil {
+		log.Printf("init upload: create session: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not create upload session"})
+		return
+	}
+
+	if err := h.files.BeginChunkedUpload(c.Request.Context(), sess); err != nil {
+		h.uploads.Delete(sess.ID)
+		log.Printf("init upload: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not initialise upload"})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{"upload_id": sess.ID.String()})
+}
+
+// UploadChunk handles POST /api/v1/files/upload/:upload_id/chunk.
+// Accepts a multipart form with a "chunk" file field and a "chunk_index" field.
+// Chunks may arrive and be retried in any order; duplicates overwrite safely.
+func (h *Handler) UploadChunk(c *gin.Context) {
+	uploadID, err := uuid.Parse(c.Param("upload_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid upload_id"})
+		return
+	}
+
+	sess, ok := h.uploads.Get(uploadID)
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": "upload session not found or expired"})
+		return
+	}
+
+	userID, _ := uuid.Parse(c.GetString("userID"))
+	if sess.UserID != userID {
+		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+		return
+	}
+
+	index, err := strconv.Atoi(c.PostForm("chunk_index"))
+	if err != nil || index < 0 || index >= sess.TotalChunks {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid chunk_index"})
+		return
+	}
+
+	fileHeader, err := c.FormFile("chunk")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "chunk field is required"})
+		return
+	}
+
+	src, err := fileHeader.Open()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not open chunk"})
+		return
+	}
+	defer src.Close()
+
+	data, err := io.ReadAll(src)
+	if err != nil {
+		log.Printf("upload chunk %d for %s: read: %v", index, uploadID, err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "upload interrupted — please retry"})
+		return
+	}
+
+	// Dispatch goroutine: encrypts and uploads to MinIO in the background so this
+	// response is returned immediately, allowing the next chunk to begin transferring
+	// while the current chunk's encryption+upload runs in parallel.
+	sess.DispatchChunk(index)
+	go h.files.EncryptAndUploadPart(context.Background(), sess, index, data)
+
+	c.JSON(http.StatusOK, gin.H{
+		"chunk_index": index,
+		"dispatched":  sess.DispatchedCount(),
+		"total":       sess.TotalChunks,
+	})
+}
+
+// CompleteUpload handles POST /api/v1/files/upload/:upload_id/complete.
+// Assembles all chunks, encrypts, stores in MinIO, and creates the DB record.
+func (h *Handler) CompleteUpload(c *gin.Context) {
+	uploadID, err := uuid.Parse(c.Param("upload_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid upload_id"})
+		return
+	}
+
+	sess, ok := h.uploads.Get(uploadID)
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": "upload session not found or expired"})
+		return
+	}
+
+	userID, _ := uuid.Parse(c.GetString("userID"))
+	if sess.UserID != userID {
+		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+		return
+	}
+
+	if !sess.AllDispatched() {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":      "not all chunks dispatched",
+			"dispatched": sess.DispatchedCount(),
+			"total":      sess.TotalChunks,
+		})
+		return
+	}
+
+	// FinalizeChunkedUpload blocks until all background goroutines complete,
+	// then completes the MinIO multipart upload and writes the DB record.
+	file, err := h.files.FinalizeChunkedUpload(c.Request.Context(), sess)
+	if err != nil {
+		if errors.Is(err, services.ErrQuotaExceeded) {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": err.Error()})
+		} else if errors.Is(err, services.ErrDuplicateName) {
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		} else {
+			log.Printf("complete upload %s: %v", uploadID, err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "upload failed"})
+		}
+		return
+	}
+
+	go h.uploads.Delete(uploadID)
+
+	var folderIDStr *string
+	if file.FolderID != nil {
+		s := file.FolderID.String()
+		folderIDStr = &s
+	}
+	c.JSON(http.StatusCreated, uploadResponse{
+		ID:        file.ID.String(),
+		Name:      file.Name,
+		MimeType:  file.MimeType,
+		SizeBytes: file.SizeBytes,
+		FolderID:  folderIDStr,
+	})
 }

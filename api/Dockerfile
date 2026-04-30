@@ -18,10 +18,12 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
       ./cmd
 
 # ── Stage 2: Runtime ──────────────────────────────────────────────────────────
-# distroless/static contains only CA certificates and timezone data.
-# No shell, no package manager, no OS utilities — minimal attack surface.
-# The :nonroot variant runs the process as uid 65532 instead of root.
-FROM gcr.io/distroless/static-debian12:nonroot
+# Alpine provides FFmpeg (for background video transcoding) while staying
+# minimal. uid 65532 matches the distroless nonroot convention.
+FROM alpine:3.21
+
+RUN apk add --no-cache ca-certificates ffmpeg tzdata \
+    && adduser -D -H -u 65532 -s /sbin/nologin nonroot
 
 WORKDIR /app
 
@@ -33,5 +35,7 @@ COPY --from=builder /build/api .
 COPY --from=builder /build/templates ./templates
 
 EXPOSE 8080
+
+USER nonroot
 
 ENTRYPOINT ["/app/api"]

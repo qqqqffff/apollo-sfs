@@ -183,8 +183,8 @@ function RouteComponent() {
       </form>
       {createError && <p className="text-sm text-red-500 mb-4">{createError}</p>}
 
-      <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-        <table className="w-full text-sm border-collapse">
+      <div className="bg-white rounded-xl border border-gray-200 overflow-x-auto">
+        <table className="w-full min-w-[640px] text-sm border-collapse">
           <thead>
             <tr className="bg-gray-50 border-b border-gray-200">
               {['Email', 'Quota', 'Expires', 'Status', ''].map((h) => (
@@ -196,7 +196,8 @@ function RouteComponent() {
           </thead>
           <tbody className="divide-y divide-gray-100">
             {invitations.map((inv) => {
-              const status = inv.accepted_at ? 'Accepted' : inv.revoked_at ? 'Revoked' : 'Pending'
+              const isExpired = !inv.accepted_at && !inv.revoked_at && new Date() > new Date(inv.token_expires_at)
+              const status = inv.accepted_at ? 'Accepted' : inv.revoked_at ? 'Revoked' : isExpired ? 'Expired' : 'Pending'
               const isPending = status === 'Pending'
               const cooldown = resendCooldownRemaining(inv.id)
               const onCooldown = cooldown > 0
@@ -213,15 +214,16 @@ function RouteComponent() {
                     <span className={`inline-block text-xs font-medium px-2 py-0.5 rounded-full ${
                       status === 'Accepted' ? 'bg-green-100 text-green-700' :
                       status === 'Revoked'  ? 'bg-gray-100 text-gray-500' :
+                      status === 'Expired'  ? 'bg-red-50 text-red-500' :
                                              'bg-amber-100 text-amber-700'
                     }`}>
                       {status}
                     </span>
                   </td>
                   <td className="px-4 py-3">
-                    {isPending && (
+                    {(isPending || isExpired) && (
                       <div className="flex items-center gap-2">
-                        {inv.invitation_url && (
+                        {isPending && inv.invitation_url && (
                           <button
                             onClick={() => handleCopy(inv.id, inv.invitation_url!)}
                             title="Copy invite link"

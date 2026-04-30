@@ -65,3 +65,80 @@ export async function upload<T>(path: string, form: FormData): Promise<T> {
 
   return res.json() as Promise<T>
 }
+
+// How long the upload may stall (no new bytes sent) before it is aborted.
+// This timer resets on every XHR progress event that advances bytes, so a slow
+// but active upload will never be killed. 10 minutes covers TCP retransmits,
+// congestion backoff, and server-side flow control on the worst real connections.
+const STALL_TIMEOUT_MS = 600_000
+
+// XHR-based upload that fires onProgress(loaded, total) as bytes are sent.
+// Automatically aborts and rejects if no bytes are transferred for STALL_TIMEOUT_MS.
+export function uploadWithProgress<T>(
+  path: string,
+  form: FormData,
+  onProgress: (loaded: number, total: number) => void,
+): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    let lastLoaded = 0
+    let stallTimer: ReturnType<typeof setTimeout> | null = null
+    // Prevents the abort event handler from double-rejecting after a stall abort.
+    let stalledOut = false
+
+    function clearStall() {
+      if (stallTimer) { clearTimeout(stallTimer); stallTimer = null }
+    }
+
+    function resetStall() {
+      clearStall()
+      stallTimer = setTimeout(() => {
+        stalledOut = true
+        xhr.abort()
+        reject(new ApiError(0, 'Upload stalled — no data transferred for 10 minutes'))
+      }, STALL_TIMEOUT_MS)
+    }
+
+    // Start the stall timer as soon as the browser begins sending the body.
+    xhr.upload.addEventListener('loadstart', () => resetStall())
+
+    xhr.upload.addEventListener('progress', (e) => {
+      if (e.lengthComputable) {
+        // Only reset the timer when bytes actually advance.
+        if (e.loaded > lastLoaded) {
+          lastLoaded = e.loaded
+          resetStall()
+        }
+        onProgress(e.loaded, e.total)
+      }
+    })
+
+    // Upload body fully sent — server is now processing. No stall risk here.
+    xhr.upload.addEventListener('load', () => clearStall())
+
+    xhr.addEventListener('load', () => {
+      clearStall()
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          resolve(JSON.parse(xhr.responseText) as T)
+        } catch {
+          reject(new ApiError(xhr.status, 'Invalid response'))
+        }
+      } else {
+        try {
+          const body = JSON.parse(xhr.responseText) as { error?: string }
+          reject(new ApiError(xhr.status, body.error ?? xhr.statusText))
+        } catch {
+          reject(new ApiError(xhr.status, xhr.statusText))
+        }
+      }
+    })
+
+    xhr.addEventListener('error', () => { clearStall(); reject(new ApiError(0, 'Network error')) })
+    xhr.addEventListener('abort', () => { clearStall(); if (!stalledOut) reject(new ApiError(0, 'Cancelled')) })
+
+    xhr.open('POST', BASE + path)
+    xhr.withCredentials = true
+    xhr.send(form)
+  })
+}

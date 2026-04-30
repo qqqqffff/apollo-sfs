@@ -7,10 +7,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
+	"os"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/gabriel-vasile/mimetype"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
+	"github.com/minio/minio-go/v7"
 
 	"apollo-sfs.com/api/db"
 	"apollo-sfs.com/api/models"
@@ -39,12 +45,25 @@ type UploadInput struct {
 	// the file contents. Always treat as a hint; server-detected type is preferred.
 	MimeType string
 	// Reader is the raw plaintext byte stream (multipart file reader).
-	// The service reads it fully into memory for AES-GCM encryption.
-	// TODO: replace with chunked AES-GCM for large-file streaming support.
+	// The service reads it fully into memory before encrypting; this is required
+	// for single-blob AES-256-GCM and for MIME detection. Video files use chunked
+	// AES-256-GCM (1 MiB chunks with independent nonces) for range-based streaming.
 	Reader io.Reader
 }
 
 // ── Service ───────────────────────────────────────────────────────────────────
+
+// userCacheTTL is how long a fetched user record (encrypted key material) is
+// kept in memory before the next Range request re-fetches it from Postgres.
+// 30 seconds eliminates the DB round-trip on rapid sequential Range requests
+// (video seeks, buffer fills) while keeping the window short enough that a
+// key-rotation re-wrap is visible within one rotation batch cycle.
+const userCacheTTL = 30 * time.Second
+
+type cachedUser struct {
+	user      models.User
+	expiresAt time.Time
+}
 
 // FileService handles encrypted file upload, download, metadata retrieval,
 // rename, and deletion. All blobs are AES-256-GCM encrypted before being
@@ -53,16 +72,24 @@ type FileService struct {
 	queries      *db.Queries
 	storage      *MinIOService
 	enc          *EncryptionService
+	email        *EmailService
+	transcode    *TranscodeService
 	quotaWarnPct int
+
+	userCacheMu sync.RWMutex
+	userCache   map[string]cachedUser
 }
 
 // NewFileService constructs a FileService.
-func NewFileService(q *db.Queries, storage *MinIOService, enc *EncryptionService, cfg FileServiceConfig) *FileService {
+func NewFileService(q *db.Queries, storage *MinIOService, enc *EncryptionService, email *EmailService, transcode *TranscodeService, cfg FileServiceConfig) *FileService {
 	return &FileService{
 		queries:      q,
 		storage:      storage,
 		enc:          enc,
+		email:        email,
+		transcode:    transcode,
 		quotaWarnPct: cfg.QuotaWarnPct,
+		userCache:    make(map[string]cachedUser),
 	}
 }
 
@@ -148,6 +175,10 @@ func (s *FileService) Upload(ctx context.Context, in UploadInput) (*models.File,
 	if err != nil {
 		// Best-effort cleanup: delete the orphaned MinIO object.
 		_ = s.storage.RemoveObject(ctx, objectKey)
+		var pqErr *pq.Error
+		if errors.As(err, &pqErr) && pqErr.Code == "23505" {
+			return nil, ErrDuplicateName
+		}
 		return nil, fmt.Errorf("upload: save metadata: %w", err)
 	}
 
@@ -156,9 +187,45 @@ func (s *FileService) Upload(ctx context.Context, in UploadInput) (*models.File,
 		return nil, fmt.Errorf("upload: update storage: %w", err)
 	}
 
-	// TODO: check quota warning threshold and enqueue email via EmailService.
+	// 9. Send quota warning / limit email if the upload crossed a threshold.
+	// Failures are non-fatal and logged; they must not block the upload response.
+	if s.email != nil && s.quotaWarnPct > 0 {
+		newUsed := user.StorageUsedBytes + fileSize
+		pct := int(newUsed * 100 / user.StorageQuotaBytes)
+		prevPct := int(user.StorageUsedBytes * 100 / user.StorageQuotaBytes)
+		usedFmt := fmtBytes(newUsed)
+		quotaFmt := fmtBytes(user.StorageQuotaBytes)
+		switch {
+		case pct >= 100 && prevPct < 100:
+			if err := s.email.SendQuotaLimit(ctx, user, usedFmt, quotaFmt); err != nil {
+				log.Printf("upload: send quota-limit email for %q: %v", in.Username, err)
+			}
+		case pct >= s.quotaWarnPct && prevPct < s.quotaWarnPct:
+			if err := s.email.SendQuotaWarning(ctx, user, pct, usedFmt, quotaFmt); err != nil {
+				log.Printf("upload: send quota-warning email for %q: %v", in.Username, err)
+			}
+		}
+	}
+
+	// 10. Kick off background 480p transcoding for video files.
+	if strings.HasPrefix(mimeType, "video/") && s.transcode != nil && s.transcode.Available() {
+		go s.createVariant(file, in.Username)
+	}
 
 	return file, nil
+}
+
+// CheckQuota returns ErrQuotaExceeded when adding additionalBytes would push the
+// user over their storage limit. Used by InitUpload for an early rejection.
+func (s *FileService) CheckQuota(ctx context.Context, username string, additionalBytes int64) error {
+	user, err := s.queries.GetUserByUsername(ctx, username)
+	if err != nil {
+		return fmt.Errorf("get user: %w", err)
+	}
+	if user.StorageUsedBytes+additionalBytes > user.StorageQuotaBytes {
+		return ErrQuotaExceeded
+	}
+	return nil
 }
 
 // GetMetadata returns a file's metadata from the DB without fetching the blob.
@@ -233,13 +300,22 @@ func (s *FileService) Move(ctx context.Context, fileID, userID, newFolderID uuid
 }
 
 // Delete removes the encrypted blob from MinIO, deletes the metadata row, and
-// decrements the user's storage counter.
+// decrements the user's storage counter. Any video variant blobs are also
+// removed from MinIO (DB rows are cascade-deleted with the parent file row).
 // Returns ErrNotFound if the file does not belong to userID.
 func (s *FileService) Delete(ctx context.Context, fileID, userID uuid.UUID, username string) error {
 	file, err := s.GetMetadata(ctx, fileID, userID)
 	if err != nil {
 		return err
 	}
+
+	// Best-effort: remove any transcoded variant blobs before the parent row is deleted.
+	if variants, err := s.queries.ListVideoVariants(ctx, fileID); err == nil {
+		for _, v := range variants {
+			_ = s.storage.RemoveObject(ctx, v.MinIOObjectKey)
+		}
+	}
+
 	if err := s.storage.RemoveObject(ctx, file.MinIOObjectKey); err != nil {
 		return fmt.Errorf("delete: remove blob: %w", err)
 	}
@@ -250,6 +326,159 @@ func (s *FileService) Delete(ctx context.Context, fileID, userID uuid.UUID, user
 		return fmt.Errorf("delete: update storage: %w", err)
 	}
 	return nil
+}
+
+// GetVariant returns the video_variants row for fileID/quality.
+// Returns ErrNotFound if no variant exists or it is not yet ready.
+func (s *FileService) GetVariant(ctx context.Context, fileID uuid.UUID, quality string) (*models.VideoVariant, error) {
+	v, err := s.queries.GetVideoVariant(ctx, fileID, quality)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("get variant: %w", err)
+	}
+	if v.Status != models.VideoVariantStatusReady {
+		return nil, ErrNotFound
+	}
+	return v, nil
+}
+
+// HasReadyVariant reports whether a ready low-quality variant exists for fileID.
+func (s *FileService) HasReadyVariant(ctx context.Context, fileID uuid.UUID) bool {
+	v, err := s.queries.GetVideoVariant(ctx, fileID, LowQualityLabel)
+	return err == nil && v.Status == models.VideoVariantStatusReady
+}
+
+// createVariant decrypts the source video, transcodes it to 480p with FFmpeg,
+// re-encrypts the result, and stores it in MinIO. Runs as a background goroutine
+// after a successful video upload. Panics are recovered and logged.
+func (s *FileService) createVariant(file *models.File, username string) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("transcode: recovered panic for %s: %v", file.ID, r)
+			_ = s.queries.MarkVideoVariantFailed(context.Background(), file.ID, LowQualityLabel)
+		}
+	}()
+
+	ctx := context.Background()
+	variantKey := objectKeyFor(file.UserID, uuid.New())
+
+	if _, err := s.queries.CreateVideoVariant(ctx, file.ID, LowQualityLabel, variantKey); err != nil {
+		log.Printf("transcode: create record for %s: %v", file.ID, err)
+		return
+	}
+
+	markFailed := func() { _ = s.queries.MarkVideoVariantFailed(ctx, file.ID, LowQualityLabel) }
+
+	log.Printf("transcode: start %s (%.1f MB)", file.ID, float64(file.SizeBytes)/(1024*1024))
+
+	// Decrypt source.
+	var (
+		plaintext []byte
+		err       error
+	)
+	if IsChunked(file) {
+		plaintext, err = s.DownloadChunked(ctx, file, username)
+	} else {
+		_, plaintext, err = s.Download(ctx, file.ID, file.UserID, username)
+	}
+	if err != nil {
+		log.Printf("transcode: download source for %s: %v", file.ID, err)
+		markFailed()
+		return
+	}
+
+	// Write plaintext to a temp input file so FFmpeg can seek in it.
+	ext := mimeToExt(file.MimeType)
+	inFile, err := os.CreateTemp("", "transcode-in-*."+ext)
+	if err != nil {
+		log.Printf("transcode: create temp input for %s: %v", file.ID, err)
+		markFailed()
+		return
+	}
+	defer os.Remove(inFile.Name())
+	if _, err := inFile.Write(plaintext); err != nil {
+		inFile.Close()
+		log.Printf("transcode: write temp input for %s: %v", file.ID, err)
+		markFailed()
+		return
+	}
+	inFile.Close()
+	plaintext = nil // allow GC before allocating output
+
+	// Prepare output temp file.
+	outFile, err := os.CreateTemp("", "transcode-out-*.mp4")
+	if err != nil {
+		log.Printf("transcode: create temp output for %s: %v", file.ID, err)
+		markFailed()
+		return
+	}
+	outPath := outFile.Name()
+	outFile.Close()
+	defer os.Remove(outPath)
+
+	if err := s.transcode.TranscodeTo480p(ctx, inFile.Name(), outPath); err != nil {
+		log.Printf("transcode: ffmpeg for %s: %v", file.ID, err)
+		markFailed()
+		return
+	}
+
+	transcoded, err := os.ReadFile(outPath)
+	if err != nil {
+		log.Printf("transcode: read output for %s: %v", file.ID, err)
+		markFailed()
+		return
+	}
+	variantPlaintextSize := int64(len(transcoded))
+
+	userKey, err := s.userKey(ctx, username)
+	if err != nil {
+		log.Printf("transcode: get user key for %s: %v", file.ID, err)
+		markFailed()
+		return
+	}
+	defer zeroBytes(userKey)
+
+	ciphertext, err := s.enc.EncryptChunked(userKey, transcoded)
+	transcoded = nil
+	if err != nil {
+		log.Printf("transcode: encrypt variant for %s: %v", file.ID, err)
+		markFailed()
+		return
+	}
+
+	if err := s.storage.PutObject(ctx, variantKey, bytes.NewReader(ciphertext), int64(len(ciphertext)), "application/octet-stream"); err != nil {
+		log.Printf("transcode: upload variant for %s: %v", file.ID, err)
+		markFailed()
+		return
+	}
+
+	if err := s.queries.MarkVideoVariantReady(ctx, file.ID, LowQualityLabel, variantPlaintextSize); err != nil {
+		log.Printf("transcode: mark ready for %s: %v", file.ID, err)
+		_ = s.storage.RemoveObject(ctx, variantKey)
+		return
+	}
+	log.Printf("transcode: done %s → 480p (%.1f MB)", file.ID, float64(variantPlaintextSize)/(1024*1024))
+}
+
+// mimeToExt returns a file extension for a video MIME type so FFmpeg can
+// auto-detect the input container format from the filename.
+func mimeToExt(mimeType string) string {
+	switch mimeType {
+	case "video/mp4":
+		return "mp4"
+	case "video/x-matroska":
+		return "mkv"
+	case "video/webm":
+		return "webm"
+	case "video/quicktime":
+		return "mov"
+	case "video/x-msvideo":
+		return "avi"
+	default:
+		return "mp4"
+	}
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
@@ -352,14 +581,31 @@ func (s *FileService) decryptBlob(ctx context.Context, username string, file *mo
 	return s.enc.DecryptFile(userKey, file.Nonce, data)
 }
 
-// userKey is a helper that resolves and unwraps the plaintext AES key for username.
+// userKey resolves and unwraps the plaintext AES key for username.
+// The user record (encrypted key material) is cached for userCacheTTL so that
+// rapid sequential Range requests during video playback do not each pay a full
+// Postgres round-trip. The plaintext key is derived fresh on every call.
 // The caller is responsible for zeroing the returned slice after use.
 func (s *FileService) userKey(ctx context.Context, username string) ([]byte, error) {
-	user, err := s.queries.GetUserByUsername(ctx, username)
-	if err != nil {
-		return nil, fmt.Errorf("get user: %w", err)
+	s.userCacheMu.RLock()
+	entry, ok := s.userCache[username]
+	s.userCacheMu.RUnlock()
+
+	var u models.User
+	if ok && time.Now().Before(entry.expiresAt) {
+		u = entry.user
+	} else {
+		fetched, err := s.queries.GetUserByUsername(ctx, username)
+		if err != nil {
+			return nil, fmt.Errorf("get user: %w", err)
+		}
+		u = *fetched
+		s.userCacheMu.Lock()
+		s.userCache[username] = cachedUser{user: u, expiresAt: time.Now().Add(userCacheTTL)}
+		s.userCacheMu.Unlock()
 	}
-	key, err := s.enc.DecryptUserKey(user.EncryptedKey, user.KeyNonce, user.MasterKeyVersion)
+
+	key, err := s.enc.DecryptUserKey(u.EncryptedKey, u.KeyNonce, u.MasterKeyVersion)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt user key: %w", err)
 	}
@@ -369,6 +615,161 @@ func (s *FileService) userKey(ctx context.Context, username string) ([]byte, err
 // objectKeyFor builds the MinIO object key: {userID}/{fileID}.
 func objectKeyFor(userID, fileID uuid.UUID) string {
 	return userID.String() + "/" + fileID.String()
+}
+
+// fmtBytes formats a byte count as a human-readable string (e.g. "1.2 GB").
+func fmtBytes(n int64) string {
+	const (
+		KB = 1024
+		MB = 1024 * KB
+		GB = 1024 * MB
+	)
+	switch {
+	case n >= GB:
+		return fmt.Sprintf("%.1f GB", float64(n)/GB)
+	case n >= MB:
+		return fmt.Sprintf("%.1f MB", float64(n)/MB)
+	case n >= KB:
+		return fmt.Sprintf("%d KB", n/KB)
+	default:
+		return fmt.Sprintf("%d B", n)
+	}
+}
+
+// ── Chunked multipart upload pipeline ────────────────────────────────────────
+
+// BeginChunkedUpload prepares the MinIO multipart upload for sess. It decrypts
+// the user's AES key (stored in sess.UserKey), assigns a new file ID and object
+// key, and opens a MinIO multipart upload (stored in sess.MinioUploadID).
+// Must be called once on a fresh session before any chunks are dispatched.
+func (s *FileService) BeginChunkedUpload(ctx context.Context, sess *UploadSession) error {
+	user, err := s.queries.GetUserByUsername(ctx, sess.Username)
+	if err != nil {
+		return fmt.Errorf("begin chunked upload: get user: %w", err)
+	}
+	userKey, err := s.enc.DecryptUserKey(user.EncryptedKey, user.KeyNonce, user.MasterKeyVersion)
+	if err != nil {
+		return fmt.Errorf("begin chunked upload: decrypt user key: %w", err)
+	}
+	fileID := uuid.New()
+	objectKey := objectKeyFor(sess.UserID, fileID)
+	uploadID, err := s.storage.CreateMultipartUpload(ctx, objectKey)
+	if err != nil {
+		zeroBytes(userKey)
+		return fmt.Errorf("begin chunked upload: create multipart: %w", err)
+	}
+	sess.FileID = fileID
+	sess.ObjectKey = objectKey
+	sess.MinioUploadID = uploadID
+	sess.UserKey = userKey
+	return nil
+}
+
+// EncryptAndUploadPart encrypts data using chunked AES-256-GCM and uploads it
+// as MinIO multipart part (index+1). Calls sess.RecordPart when done (success
+// or failure). Designed to run in a goroutine so the HTTP response for the chunk
+// request can be sent immediately while encryption and upload run in the background.
+//
+// For the first chunk (index==0) the MIME type is detected and stored in sess.
+func (s *FileService) EncryptAndUploadPart(ctx context.Context, sess *UploadSession, index int, data []byte) {
+	if index == 0 {
+		if detected := mimetype.Detect(data); detected != nil {
+			sess.mu.Lock()
+			sess.MimeType = detected.String()
+			sess.mu.Unlock()
+		}
+	}
+
+	// Encrypt with the same chunked AES-256-GCM format used by EncryptChunked:
+	// the data is split into 1 MiB sub-chunks, each stored as (nonce || ciphertext).
+	// Concatenating all parts' bytes produces the identical format as a single-blob
+	// EncryptChunked call, so the existing Download/Stream paths work unchanged.
+	ciphertext, err := s.enc.EncryptChunked(sess.UserKey, data)
+	if err != nil {
+		sess.RecordPart(index, minio.CompletePart{}, fmt.Errorf("encrypt part %d: %w", index, err))
+		return
+	}
+
+	part, err := s.storage.UploadPart(ctx, sess.ObjectKey, sess.MinioUploadID, index+1, ciphertext)
+	if err != nil {
+		sess.RecordPart(index, minio.CompletePart{}, fmt.Errorf("upload part %d: %w", index, err))
+		return
+	}
+	sess.RecordPart(index, part, nil)
+}
+
+// FinalizeChunkedUpload waits for all in-flight encryption goroutines, completes
+// the MinIO multipart upload, and inserts the file metadata into the DB.
+// sess.Zero is always called before returning to clear key material.
+func (s *FileService) FinalizeChunkedUpload(ctx context.Context, sess *UploadSession) (*models.File, error) {
+	defer sess.Zero()
+
+	parts, err := sess.Wait()
+	if err != nil {
+		_ = s.storage.AbortMultipartUpload(ctx, sess.ObjectKey, sess.MinioUploadID)
+		return nil, fmt.Errorf("finalize: part upload failed: %w", err)
+	}
+
+	if err := s.storage.CompleteMultipartUpload(ctx, sess.ObjectKey, sess.MinioUploadID, parts); err != nil {
+		_ = s.storage.AbortMultipartUpload(ctx, sess.ObjectKey, sess.MinioUploadID)
+		return nil, fmt.Errorf("finalize: complete multipart: %w", err)
+	}
+
+	mimeType := sess.MimeType
+	if mimeType == "" {
+		mimeType = "application/octet-stream"
+	}
+
+	// Read current usage before updating so we can compute threshold crossings below.
+	user, userErr := s.queries.GetUserByUsername(ctx, sess.Username)
+
+	file, err := s.queries.CreateFile(ctx, &models.File{
+		ID:             sess.FileID,
+		UserID:         sess.UserID,
+		FolderID:       sess.FolderID,
+		Name:           sess.Name,
+		MimeType:       mimeType,
+		SizeBytes:      sess.TotalSize,
+		MinIOObjectKey: sess.ObjectKey,
+		Nonce:          []byte{}, // empty nonce signals chunked encryption mode
+	})
+	if err != nil {
+		_ = s.storage.RemoveObject(ctx, sess.ObjectKey)
+		var pqErr *pq.Error
+		if errors.As(err, &pqErr) && pqErr.Code == "23505" {
+			return nil, ErrDuplicateName
+		}
+		return nil, fmt.Errorf("finalize: save metadata: %w", err)
+	}
+
+	if err := s.queries.AddStorageUsed(ctx, sess.Username, sess.TotalSize); err != nil {
+		return nil, fmt.Errorf("finalize: update storage: %w", err)
+	}
+
+	if userErr == nil && s.email != nil && s.quotaWarnPct > 0 {
+		newUsed := user.StorageUsedBytes + sess.TotalSize
+		pct := int(newUsed * 100 / user.StorageQuotaBytes)
+		prevPct := int(user.StorageUsedBytes * 100 / user.StorageQuotaBytes)
+		usedFmt := fmtBytes(newUsed)
+		quotaFmt := fmtBytes(user.StorageQuotaBytes)
+		switch {
+		case pct >= 100 && prevPct < 100:
+			if err := s.email.SendQuotaLimit(ctx, user, usedFmt, quotaFmt); err != nil {
+				log.Printf("finalize upload: send quota-limit email for %q: %v", sess.Username, err)
+			}
+		case pct >= s.quotaWarnPct && prevPct < s.quotaWarnPct:
+			if err := s.email.SendQuotaWarning(ctx, user, pct, usedFmt, quotaFmt); err != nil {
+				log.Printf("finalize upload: send quota-warning email for %q: %v", sess.Username, err)
+			}
+		}
+	}
+
+	// Kick off background 480p transcoding for video files.
+	if strings.HasPrefix(mimeType, "video/") && s.transcode != nil && s.transcode.Available() {
+		go s.createVariant(file, sess.Username)
+	}
+
+	return file, nil
 }
 
 // ── Sentinel errors ───────────────────────────────────────────────────────────

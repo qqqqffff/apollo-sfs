@@ -700,25 +700,36 @@ func (s *FileService) schedulePrefetch(file *models.File, username string, offse
 func (s *FileService) decryptBlob(ctx context.Context, username string, file *models.File) ([]byte, error) {
 	userKey, err := s.userKey(ctx, username)
 	if err != nil {
+		log.Printf("decryptBlob: userKey(%s) file=%s: %v", username, file.ID, err)
 		return nil, fmt.Errorf("decrypt blob: %w", err)
 	}
 	defer zeroBytes(userKey)
 
 	rc, err := s.storage.GetObject(ctx, file.MinIOObjectKey)
 	if err != nil {
+		log.Printf("decryptBlob: GetObject(%s) file=%s: %v", file.MinIOObjectKey, file.ID, err)
 		return nil, fmt.Errorf("fetch blob: %w", err)
 	}
 	defer rc.Close()
 
 	data, err := io.ReadAll(rc)
 	if err != nil {
+		log.Printf("decryptBlob: ReadAll(%s) file=%s: %v", file.MinIOObjectKey, file.ID, err)
 		return nil, fmt.Errorf("read blob: %w", err)
 	}
 
-	if IsChunked(file) {
-		return s.enc.DecryptChunked(userKey, data)
+	chunked := IsChunked(file)
+	var plaintext []byte
+	if chunked {
+		plaintext, err = s.enc.DecryptChunked(userKey, data)
+	} else {
+		plaintext, err = s.enc.DecryptFile(userKey, file.Nonce, data)
 	}
-	return s.enc.DecryptFile(userKey, file.Nonce, data)
+	if err != nil {
+		log.Printf("decryptBlob: decrypt(chunked=%v) file=%s nonceLen=%d blobLen=%d: %v", chunked, file.ID, len(file.Nonce), len(data), err)
+		return nil, err
+	}
+	return plaintext, nil
 }
 
 // userKey resolves and unwraps the plaintext AES key for username.

@@ -184,6 +184,7 @@ func (h *Handler) serveDecrypted(c *gin.Context, inline bool) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "file not found"})
 			return
 		}
+		log.Printf("serveDecrypted: file=%s user=%s err=%v", fileID, username, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not retrieve file"})
 		return
 	}
@@ -279,6 +280,7 @@ func (h *Handler) StreamFile(c *gin.Context) {
 
 		chunk, err := h.files.DownloadRange(ctx, file, username, rangeStart, rangeEnd)
 		if err != nil {
+			log.Printf("StreamFile: DownloadRange file=%s user=%s range=%d-%d: %v", fileID, username, rangeStart, rangeEnd, err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "could not stream range"})
 			return
 		}
@@ -304,6 +306,7 @@ func (h *Handler) StreamFile(c *gin.Context) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "file not found"})
 			return
 		}
+		log.Printf("StreamFile: download file=%s user=%s: %v", fileID, username, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not stream file"})
 		return
 	}

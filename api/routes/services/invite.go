@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -51,7 +52,7 @@ func NewInviteService(q *db.Queries, emailSvc *EmailService, appURL string, toke
 	return &InviteService{
 		queries:  q,
 		email:    emailSvc,
-		appURL:   appURL,
+		appURL:   strings.TrimRight(appURL, "/"),
 		tokenTTL: tokenTTL,
 	}
 }

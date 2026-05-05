@@ -264,6 +264,19 @@ func (h *Handler) StreamFile(c *gin.Context) {
 			return
 		}
 
+		// Expand small ranges to at least 4 MiB so that probe requests (≤256 KB)
+		// and early-playback requests amortise the MinIO round-trip cost across
+		// more data. The Content-Range header will report the actual byte span
+		// returned, which is valid per RFC 9110 §14.4.
+		const minRangeResponse int64 = 4 * services.ChunkSize
+		if rangeEnd-rangeStart+1 < minRangeResponse {
+			expanded := rangeStart + minRangeResponse - 1
+			if expanded > file.SizeBytes-1 {
+				expanded = file.SizeBytes - 1
+			}
+			rangeEnd = expanded
+		}
+
 		chunk, err := h.files.DownloadRange(ctx, file, username, rangeStart, rangeEnd)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "could not stream range"})

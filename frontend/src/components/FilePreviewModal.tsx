@@ -122,7 +122,7 @@ export function FilePreviewModal({ file, onClose }: Props) {
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="bg-white rounded-xl flex flex-col w-[92vw] max-w-4xl h-[92vh] overflow-hidden shadow-2xl"
+        className="bg-white rounded-xl flex flex-col w-[92vw] max-w-4xl h-[92svh] overflow-hidden shadow-2xl"
       >
         {/* header */}
         <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 gap-4 min-w-0 shrink-0">
@@ -178,6 +178,7 @@ export function FilePreviewModal({ file, onClose }: Props) {
               key={videoKey.current}
               src={streamUrl(file.id, quality === 'low' ? 'low' : undefined)}
               controls
+              playsInline
               preload="metadata"
               className="max-w-full max-h-full block"
             />

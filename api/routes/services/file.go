@@ -65,6 +65,33 @@ type cachedUser struct {
 	expiresAt time.Time
 }
 
+// ── Read-ahead cache ──────────────────────────────────────────────────────────
+
+// readAheadSize is the number of plaintext bytes prefetched after each served
+// range. Aligned to ChunkSize so we always work on complete encryption chunks.
+const readAheadSize = 4 * ChunkSize
+
+// readAheadTTL is how long a prefetched segment lives in the cache before
+// expiry. Sequential playback consumes entries well within this window.
+const readAheadTTL = 30 * time.Second
+
+// readAheadMaxEntries caps the number of live cache entries. At 4 MiB each
+// this bounds read-ahead memory to ~64 MiB across all concurrent streams.
+const readAheadMaxEntries = 16
+
+// raKey uniquely identifies a cached plaintext segment.
+// objectKey (not file ID) is used so original-quality and variant streams
+// for the same file do not collide in the cache.
+type raKey struct {
+	objectKey string // MinIO object key
+	offset    int64  // byte offset of the first plaintext byte in the slice
+}
+
+type raEntry struct {
+	data      []byte
+	expiresAt time.Time
+}
+
 // FileService handles encrypted file upload, download, metadata retrieval,
 // rename, and deletion. All blobs are AES-256-GCM encrypted before being
 // written to MinIO; plaintext never leaves the service boundary.
@@ -78,6 +105,10 @@ type FileService struct {
 
 	userCacheMu sync.RWMutex
 	userCache   map[string]cachedUser
+
+	raMu       sync.Mutex
+	raCache    map[raKey]*raEntry
+	raInflight map[raKey]struct{} // keys with an active prefetch goroutine
 }
 
 // NewFileService constructs a FileService.
@@ -90,6 +121,8 @@ func NewFileService(q *db.Queries, storage *MinIOService, enc *EncryptionService
 		transcode:    transcode,
 		quotaWarnPct: cfg.QuotaWarnPct,
 		userCache:    make(map[string]cachedUser),
+		raCache:      make(map[raKey]*raEntry),
+		raInflight:   make(map[raKey]struct{}),
 	}
 }
 
@@ -511,14 +544,13 @@ func (s *FileService) DownloadChunked(ctx context.Context, file *models.File, us
 	return s.enc.DecryptChunked(userKey, blob)
 }
 
-// DownloadRange fetches only the MinIO chunks covering plaintext [rangeStart, rangeEnd]
-// for a chunked-encrypted file and decrypts them concurrently. Only the bytes
-// that fall within the requested range are returned, minimising both MinIO
-// bandwidth and memory usage for large video files.
-func (s *FileService) DownloadRange(ctx context.Context, file *models.File, username string, rangeStart, rangeEnd int64) ([]byte, error) {
+// fetchRange fetches and decrypts plaintext bytes [rangeStart, rangeEnd] for a
+// chunked-encrypted file, bypassing the read-ahead cache. It is the inner
+// implementation shared by DownloadRange and the prefetch goroutine.
+func (s *FileService) fetchRange(ctx context.Context, file *models.File, username string, rangeStart, rangeEnd int64) ([]byte, error) {
 	userKey, err := s.userKey(ctx, username)
 	if err != nil {
-		return nil, fmt.Errorf("download range: %w", err)
+		return nil, fmt.Errorf("fetch range: %w", err)
 	}
 	defer zeroBytes(userKey)
 
@@ -528,10 +560,8 @@ func (s *FileService) DownloadRange(ctx context.Context, file *models.File, user
 	firstChunkIdx := rangeStart / int64(ChunkSize)
 	lastChunkIdx := rangeEnd / int64(ChunkSize)
 
-	// Byte offset of the first needed chunk's start in the MinIO blob.
 	blobStart := firstChunkIdx * int64(StoredChunkSize)
 
-	// Stored size of the last needed chunk (may be smaller for the last file chunk).
 	var lastStoredSize int64
 	if lastChunkIdx == numChunks-1 {
 		lastPlain := totalSize - lastChunkIdx*int64(ChunkSize)
@@ -543,16 +573,126 @@ func (s *FileService) DownloadRange(ctx context.Context, file *models.File, user
 
 	rc, err := s.storage.GetObjectRange(ctx, file.MinIOObjectKey, blobStart, blobEnd)
 	if err != nil {
-		return nil, fmt.Errorf("download range: fetch chunk blob: %w", err)
+		return nil, fmt.Errorf("fetch range: get object: %w", err)
 	}
 	defer rc.Close()
 
 	blobSlice, err := io.ReadAll(rc)
 	if err != nil {
-		return nil, fmt.Errorf("download range: read chunk blob: %w", err)
+		return nil, fmt.Errorf("fetch range: read: %w", err)
 	}
 
 	return s.enc.DecryptChunkedRange(userKey, blobSlice, firstChunkIdx, numChunks, totalSize, rangeStart, rangeEnd)
+}
+
+// DownloadRange fetches only the MinIO chunks covering plaintext [rangeStart, rangeEnd]
+// for a chunked-encrypted file and decrypts them concurrently. Only the bytes
+// that fall within the requested range are returned. A cache hit serves the
+// response from RAM; on a miss, fetchRange is called and a prefetch goroutine
+// is scheduled for the next segment to hide the latency of the following request.
+func (s *FileService) DownloadRange(ctx context.Context, file *models.File, username string, rangeStart, rangeEnd int64) ([]byte, error) {
+	key := raKey{objectKey: file.MinIOObjectKey, offset: rangeStart}
+
+	if cached, ok := s.raCacheGet(key); ok {
+		need := rangeEnd - rangeStart + 1
+		if int64(len(cached)) >= need {
+			// Prefetch the segment that follows the full cached window, not just rangeEnd.
+			s.schedulePrefetch(file, username, rangeStart+int64(len(cached)))
+			return cached[:need], nil
+		}
+		// Cache holds fewer bytes than needed (e.g. near EOF) — fall through.
+	}
+
+	data, err := s.fetchRange(ctx, file, username, rangeStart, rangeEnd)
+	if err != nil {
+		return nil, err
+	}
+	s.schedulePrefetch(file, username, rangeEnd+1)
+	return data, nil
+}
+
+// raCacheGet returns the cached slice for key and removes it from the cache.
+// Returns (nil, false) on miss or expiry.
+func (s *FileService) raCacheGet(key raKey) ([]byte, bool) {
+	s.raMu.Lock()
+	defer s.raMu.Unlock()
+	e, ok := s.raCache[key]
+	if !ok {
+		return nil, false
+	}
+	if time.Now().After(e.expiresAt) {
+		delete(s.raCache, key)
+		return nil, false
+	}
+	data := e.data
+	delete(s.raCache, key)
+	return data, true
+}
+
+// raCachePut inserts data into the read-ahead cache under key.
+// Expired entries are evicted first; if still at capacity the entry with the
+// nearest expiry (oldest) is evicted to make room.
+func (s *FileService) raCachePut(key raKey, data []byte) {
+	s.raMu.Lock()
+	defer s.raMu.Unlock()
+	now := time.Now()
+	for k, e := range s.raCache {
+		if now.After(e.expiresAt) {
+			delete(s.raCache, k)
+		}
+	}
+	if len(s.raCache) >= readAheadMaxEntries {
+		var (
+			oldestKey raKey
+			oldestExp time.Time
+		)
+		for k, e := range s.raCache {
+			if oldestExp.IsZero() || e.expiresAt.Before(oldestExp) {
+				oldestKey, oldestExp = k, e.expiresAt
+			}
+		}
+		delete(s.raCache, oldestKey)
+	}
+	s.raCache[key] = &raEntry{data: data, expiresAt: now.Add(readAheadTTL)}
+}
+
+// schedulePrefetch launches a background goroutine to fetch and cache the
+// segment starting at offset, unless one is already in-flight or cached.
+func (s *FileService) schedulePrefetch(file *models.File, username string, offset int64) {
+	if offset >= file.SizeBytes {
+		return
+	}
+	key := raKey{objectKey: file.MinIOObjectKey, offset: offset}
+	s.raMu.Lock()
+	_, inCache := s.raCache[key]
+	_, inFlight := s.raInflight[key]
+	if inCache || inFlight {
+		s.raMu.Unlock()
+		return
+	}
+	s.raInflight[key] = struct{}{}
+	s.raMu.Unlock()
+
+	// Snapshot fields needed by the goroutine; do not capture the pointer
+	// since the caller may replace file (e.g., StreamFile swaps in a variant).
+	fileCopy := *file
+	go func() {
+		defer func() {
+			s.raMu.Lock()
+			delete(s.raInflight, key)
+			s.raMu.Unlock()
+		}()
+		end := offset + int64(readAheadSize) - 1
+		if end >= fileCopy.SizeBytes {
+			end = fileCopy.SizeBytes - 1
+		}
+		data, err := s.fetchRange(context.Background(), &fileCopy, username, offset, end)
+		if err != nil {
+			log.Printf("read-ahead: prefetch %s@%d: %v", fileCopy.MinIOObjectKey, offset, err)
+			return
+		}
+		s.raCachePut(key, data)
+	}()
 }
 
 // decryptBlob fetches the ciphertext from MinIO and decrypts it with the user's key.

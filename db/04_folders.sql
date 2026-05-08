@@ -19,3 +19,8 @@ CREATE TABLE folders (
 
 CREATE INDEX folders_user_id_idx   ON folders (user_id);
 CREATE INDEX folders_parent_id_idx ON folders (parent_id);
+
+-- ── Applied migrations ────────────────────────────────────────────────────────
+-- 004_rls_files_folders.sql
+--   ENABLE ROW LEVEL SECURITY / FORCE ROW LEVEL SECURITY
+--   CREATE POLICY folders_owned_by_current_user (USING + WITH CHECK on app.current_user_id)

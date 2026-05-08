@@ -21,3 +21,8 @@ CREATE TABLE server_metrics_snapshots (
 -- Range scans and downsampled history queries filter on sampled_at.
 CREATE INDEX server_metrics_snapshots_sampled_at_idx
     ON server_metrics_snapshots (sampled_at DESC);
+
+-- ── Applied migrations ────────────────────────────────────────────────────────
+-- 001_quota_and_disk_metrics.sql
+--   ADD COLUMN disk_total_bytes BIGINT NOT NULL DEFAULT 0
+--   ADD COLUMN disk_free_bytes  BIGINT NOT NULL DEFAULT 0

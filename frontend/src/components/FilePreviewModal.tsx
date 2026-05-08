@@ -46,8 +46,9 @@ function DocxViewer({ file }: { file: File }) {
         if (!res.ok) throw new Error('fetch failed')
         const buf = await res.arrayBuffer()
         const mammoth = await import('mammoth')
+        const DOMPurify = (await import('dompurify')).default
         const result = await mammoth.convertToHtml({ arrayBuffer: buf })
-        if (!cancelled) setState({ status: 'ready', html: result.value })
+        if (!cancelled) setState({ status: 'ready', html: DOMPurify.sanitize(result.value) })
       } catch {
         if (!cancelled) setState({ status: 'error' })
       }

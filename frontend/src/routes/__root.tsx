@@ -1,6 +1,9 @@
-import { createRootRouteWithContext, Link, Outlet } from '@tanstack/react-router'
+import { createRootRouteWithContext, Link, Outlet, useNavigate } from '@tanstack/react-router'
+import { useEffect } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import type { QueryClient } from '@tanstack/react-query'
 import { AuthContext, AuthProvider, useAuth } from '../auth'
+import { clearSkipDeleteCookie } from '../components/DeleteConfirmModal'
 
 export const Route = createRootRouteWithContext<{ queryClient: QueryClient; auth: AuthContext }>()({
   component: Root,
@@ -24,6 +27,20 @@ function Root() {
 
 function RootLayout() {
   const { isAuthenticated } = useAuth()
+  const navigate = useNavigate()
+  const queryClient = useQueryClient()
+
+  useEffect(() => {
+    function handleSessionExpired() {
+      if (window.location.pathname === '/login') return
+      clearSkipDeleteCookie()
+      queryClient.clear()
+      navigate({ to: '/login' })
+    }
+    window.addEventListener('apollo:session-expired', handleSessionExpired)
+    return () => window.removeEventListener('apollo:session-expired', handleSessionExpired)
+  }, [navigate, queryClient])
+
   return (
     <>
       {!isAuthenticated && <PublicHeader />}

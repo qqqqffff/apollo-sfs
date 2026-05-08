@@ -18,3 +18,7 @@ CREATE TABLE invitations (
 CREATE UNIQUE INDEX invitations_pending_email_unique_idx
     ON invitations (email)
     WHERE accepted_at IS NULL AND revoked_at IS NULL;
+
+-- ── Applied migrations ────────────────────────────────────────────────────────
+-- 001_quota_and_disk_metrics.sql
+--   ADD COLUMN initial_quota_bytes BIGINT NOT NULL DEFAULT 10737418240

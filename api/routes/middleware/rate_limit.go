@@ -17,6 +17,13 @@ const (
 	// rateLimitBurst is the maximum number of requests allowed in a single burst.
 	rateLimitBurst = 10
 
+	// apiRateLimitRPS is the sustained rate for authenticated API endpoints.
+	// 120 requests per minute = 2 r/s.
+	apiRateLimitRPS = rate.Limit(120.0 / 60.0)
+
+	// apiRateLimitBurst is the burst allowance for authenticated API endpoints.
+	apiRateLimitBurst = 20
+
 	// rateLimitTTL is how long an IP's limiter is kept after its last request.
 	// Entries not seen within this window are evicted by the background cleaner.
 	rateLimitTTL = 10 * time.Minute
@@ -31,18 +38,14 @@ type ipEntry struct {
 	lastSeen time.Time
 }
 
-// RateLimit returns a per-IP token-bucket rate limiter for auth endpoints.
-// Sustained rate: 10 requests per minute. Burst: 10 requests.
-// Client IP is derived from X-Forwarded-For set by Nginx; falls back to
-// RemoteAddr when the header is absent (direct connections / local dev).
-// Stale IP entries are evicted every 5 minutes to bound memory use.
-func (m *AuthMiddleware) RateLimit() gin.HandlerFunc {
+// newIPLimiter builds a gin middleware with a per-IP token-bucket rate limiter.
+// A background goroutine evicts entries not seen within rateLimitTTL.
+func newIPLimiter(rps rate.Limit, burst int) gin.HandlerFunc {
 	var (
 		mu      sync.Mutex
 		entries = make(map[string]*ipEntry)
 	)
 
-	// Background goroutine: evict entries not seen within rateLimitTTL.
 	go func() {
 		ticker := time.NewTicker(rateLimitCleanInterval)
 		defer ticker.Stop()
@@ -63,7 +66,7 @@ func (m *AuthMiddleware) RateLimit() gin.HandlerFunc {
 		defer mu.Unlock()
 		e, ok := entries[ip]
 		if !ok {
-			e = &ipEntry{limiter: rate.NewLimiter(rateLimitRPS, rateLimitBurst)}
+			e = &ipEntry{limiter: rate.NewLimiter(rps, burst)}
 			entries[ip] = e
 		}
 		e.lastSeen = time.Now()
@@ -71,17 +74,24 @@ func (m *AuthMiddleware) RateLimit() gin.HandlerFunc {
 	}
 
 	return func(c *gin.Context) {
-		// X-Forwarded-For is set by Nginx; c.ClientIP() reads it and falls back
-		// to RemoteAddr, honouring gin's trusted proxy configuration.
-		ip := c.ClientIP()
-
-		if !limiterFor(ip).Allow() {
+		if !limiterFor(c.ClientIP()).Allow() {
 			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
 				"error": "too many requests — please wait before trying again",
 			})
 			return
 		}
-
 		c.Next()
 	}
+}
+
+// RateLimit returns a per-IP token-bucket rate limiter for auth endpoints.
+// Sustained rate: 10 req/min. Burst: 10 requests.
+func (m *AuthMiddleware) RateLimit() gin.HandlerFunc {
+	return newIPLimiter(rateLimitRPS, rateLimitBurst)
+}
+
+// APIRateLimit returns a per-IP token-bucket rate limiter for authenticated API endpoints.
+// Sustained rate: 120 req/min. Burst: 20 requests.
+func (m *AuthMiddleware) APIRateLimit() gin.HandlerFunc {
+	return newIPLimiter(apiRateLimitRPS, apiRateLimitBurst)
 }

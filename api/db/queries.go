@@ -1,11 +1,14 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 const (
@@ -101,12 +104,45 @@ func offsetNextToken(resultsLen, limit, currentOffset int) string {
 	return encodeOffsetCursor(currentOffset + limit)
 }
 
-// Queries wraps the connection pool and exposes all application query methods.
+// DBTX is satisfied by both *sql.DB and *sql.Tx, allowing Queries to be
+// backed by either a connection pool or an open transaction.
+type DBTX interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+// Queries wraps a DBTX and exposes all application query methods.
 // Create one at startup via New and inject it into services that need it.
+// To execute queries under RLS call ForUser, which opens a transaction with
+// app.current_user_id set for the duration of that transaction.
 type Queries struct {
-	db *sql.DB
+	db   DBTX
+	pool *sql.DB
 }
 
 func New(db *sql.DB) *Queries {
-	return &Queries{db: db}
+	return &Queries{db: db, pool: db}
+}
+
+// ForUser begins a transaction with SET LOCAL app.current_user_id = userID
+// and returns a Queries backed by that transaction together with the
+// underlying *sql.Tx. The caller must always defer tx.Rollback() (it is a
+// no-op after a successful Commit) and call tx.Commit() for write operations.
+//
+//	q, tx, err := queries.ForUser(ctx, userID)
+//	if err != nil { return err }
+//	defer func() { _ = tx.Rollback() }()
+//	// ... use q for queries ...
+//	return tx.Commit() // omit for read-only operations
+func (q *Queries) ForUser(ctx context.Context, userID uuid.UUID) (*Queries, *sql.Tx, error) {
+	tx, err := q.pool.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, nil, fmt.Errorf("ForUser: begin tx: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `SET LOCAL app.current_user_id = $1`, userID.String()); err != nil {
+		_ = tx.Rollback()
+		return nil, nil, fmt.Errorf("ForUser: set user: %w", err)
+	}
+	return &Queries{db: tx, pool: q.pool}, tx, nil
 }

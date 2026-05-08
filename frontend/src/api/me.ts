@@ -17,4 +17,8 @@ export const meQueryOptions = {
   queryFn: getMe,
   retry: false,
   staleTime: 5 * 60 * 1000,
+  // Re-validate the session every 4 minutes on active tabs so an expiring
+  // session is caught before the user triggers an action that would fail.
+  refetchInterval: 4 * 60 * 1000,
+  refetchIntervalInBackground: false,
 }

@@ -1,5 +1,9 @@
 const BASE = '/api/v1'
 
+function dispatchSessionExpired() {
+  window.dispatchEvent(new CustomEvent('apollo:session-expired'))
+}
+
 export class ApiError extends Error {
   constructor(
     public readonly status: number,
@@ -21,6 +25,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   })
 
   if (!res.ok) {
+    if (res.status === 401) dispatchSessionExpired()
     const body = await res.json().catch(() => ({})) as { error?: string }
     throw new ApiError(res.status, body.error ?? res.statusText)
   }
@@ -59,6 +64,7 @@ export async function upload<T>(path: string, form: FormData): Promise<T> {
   })
 
   if (!res.ok) {
+    if (res.status === 401) dispatchSessionExpired()
     const body = await res.json().catch(() => ({})) as { error?: string }
     throw new ApiError(res.status, body.error ?? res.statusText)
   }
@@ -125,6 +131,7 @@ export function uploadWithProgress<T>(
           reject(new ApiError(xhr.status, 'Invalid response'))
         }
       } else {
+        if (xhr.status === 401) dispatchSessionExpired()
         try {
           const body = JSON.parse(xhr.responseText) as { error?: string }
           reject(new ApiError(xhr.status, body.error ?? xhr.statusText))

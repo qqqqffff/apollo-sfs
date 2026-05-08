@@ -32,11 +32,17 @@ func NewFavoriteService(q *db.Queries) *FavoriteService {
 // List returns all files and folders favorited by userID, each ordered newest
 // favorite first.
 func (s *FavoriteService) List(ctx context.Context, userID uuid.UUID) (*FavoriteList, error) {
-	files, err := s.queries.ListFavoritedFiles(ctx, userID)
+	q, tx, err := s.queries.ForUser(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list favorites: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	files, err := q.ListFavoritedFiles(ctx, userID)
 	if err != nil {
 		return nil, fmt.Errorf("list favorite files: %w", err)
 	}
-	folders, err := s.queries.ListFavoritedFolders(ctx, userID)
+	folders, err := q.ListFavoritedFolders(ctx, userID)
 	if err != nil {
 		return nil, fmt.Errorf("list favorite folders: %w", err)
 	}
@@ -55,20 +61,25 @@ func (s *FavoriteService) List(ctx context.Context, userID uuid.UUID) (*Favorite
 // AddFile favorites a file for userID. Returns ErrNotFound if the file does
 // not exist. Returns ErrAlreadyFavorited if the user has already favorited it.
 func (s *FavoriteService) AddFile(ctx context.Context, userID, fileID uuid.UUID) error {
-	if _, err := s.queries.GetFileByID(ctx, fileID); err != nil {
+	q, tx, err := s.queries.ForUser(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("add file favorite: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := q.GetFileByID(ctx, fileID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrNotFound
 		}
 		return fmt.Errorf("get file: %w", err)
 	}
-
-	if err := s.queries.AddFileFavorite(ctx, userID, fileID); err != nil {
+	if err := q.AddFileFavorite(ctx, userID, fileID); err != nil {
 		if isDuplicateKeyError(err) {
 			return ErrAlreadyFavorited
 		}
 		return fmt.Errorf("add file favorite: %w", err)
 	}
-	return nil
+	return tx.Commit()
 }
 
 // RemoveFile removes the favorite for a file. A no-op (not an error) if the
@@ -84,24 +95,25 @@ func (s *FavoriteService) RemoveFile(ctx context.Context, userID, fileID uuid.UU
 // folder does not exist or is not owned by userID. Returns ErrAlreadyFavorited
 // if the user has already favorited the folder.
 func (s *FavoriteService) AddFolder(ctx context.Context, userID, folderID uuid.UUID) error {
-	folder, err := s.queries.GetFolderByID(ctx, folderID)
+	q, tx, err := s.queries.ForUser(ctx, userID)
 	if err != nil {
+		return fmt.Errorf("add folder favorite: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := q.GetFolderByID(ctx, folderID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrFolderNotFound
 		}
 		return fmt.Errorf("get folder: %w", err)
 	}
-	if folder.UserID != userID {
-		return ErrFolderNotFound
-	}
-
-	if err := s.queries.AddFolderFavorite(ctx, userID, folderID); err != nil {
+	if err := q.AddFolderFavorite(ctx, userID, folderID); err != nil {
 		if isDuplicateKeyError(err) {
 			return ErrAlreadyFavorited
 		}
 		return fmt.Errorf("add folder favorite: %w", err)
 	}
-	return nil
+	return tx.Commit()
 }
 
 // RemoveFolder removes the favorite for a folder. A no-op (not an error) if

@@ -211,7 +211,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	// RequireAuth validates the token and injects userID + exp into Gin context.
 	// ProactiveRefresh silently refreshes the token when it is close to expiring.
 	protected := v1.Group("")
-	protected.Use(mw.RequireAuth(), mw.ProactiveRefresh())
+	protected.Use(mw.RequireAuth(), mw.ProactiveRefresh(), mw.APIRateLimit())
 	{
 		protected.GET("/me", h.Me)
 		protected.POST("/me/password", h.ChangePassword)

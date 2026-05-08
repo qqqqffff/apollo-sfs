@@ -194,8 +194,14 @@ func (s *FileService) Upload(ctx context.Context, in UploadInput) (*models.File,
 		return nil, fmt.Errorf("upload: store: %w", err)
 	}
 
-	// 7. Insert file metadata into DB.
-	file, err := s.queries.CreateFile(ctx, &models.File{
+	// 7. Insert file metadata into DB within a user-scoped transaction.
+	uq, utx, err := s.queries.ForUser(ctx, in.UserID)
+	if err != nil {
+		_ = s.storage.RemoveObject(ctx, objectKey)
+		return nil, fmt.Errorf("upload: begin tx: %w", err)
+	}
+	defer func() { _ = utx.Rollback() }()
+	file, err := uq.CreateFile(ctx, &models.File{
 		ID:             fileID,
 		UserID:         in.UserID,
 		FolderID:       in.FolderID,
@@ -214,8 +220,12 @@ func (s *FileService) Upload(ctx context.Context, in UploadInput) (*models.File,
 		}
 		return nil, fmt.Errorf("upload: save metadata: %w", err)
 	}
+	if err := utx.Commit(); err != nil {
+		_ = s.storage.RemoveObject(ctx, objectKey)
+		return nil, fmt.Errorf("upload: commit: %w", err)
+	}
 
-	// 8. Update the user's running storage total.
+	// 8. Update the user's running storage total (users table has no RLS).
 	if err := s.queries.AddStorageUsed(ctx, in.Username, fileSize); err != nil {
 		return nil, fmt.Errorf("upload: update storage: %w", err)
 	}
@@ -264,7 +274,12 @@ func (s *FileService) CheckQuota(ctx context.Context, username string, additiona
 // GetMetadata returns a file's metadata from the DB without fetching the blob.
 // Returns ErrNotFound when the file does not exist or is not owned by userID.
 func (s *FileService) GetMetadata(ctx context.Context, fileID, userID uuid.UUID) (*models.File, error) {
-	file, err := s.queries.GetFileByID(ctx, fileID)
+	q, tx, err := s.queries.ForUser(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("get metadata: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	file, err := q.GetFileByID(ctx, fileID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
@@ -272,7 +287,7 @@ func (s *FileService) GetMetadata(ctx context.Context, fileID, userID uuid.UUID)
 		return nil, fmt.Errorf("get metadata: %w", err)
 	}
 	if file.UserID != userID {
-		return nil, ErrNotFound // unified 404 — never reveal foreign files
+		return nil, ErrNotFound
 	}
 	return file, nil
 }
@@ -294,42 +309,54 @@ func (s *FileService) Download(ctx context.Context, fileID, userID uuid.UUID, us
 // Rename changes a file's display name.
 // Returns ErrNotFound if the file does not belong to userID.
 func (s *FileService) Rename(ctx context.Context, fileID, userID uuid.UUID, name string) (*models.File, error) {
-	if _, err := s.GetMetadata(ctx, fileID, userID); err != nil {
-		return nil, err
+	q, tx, err := s.queries.ForUser(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("rename: begin tx: %w", err)
 	}
-	updated, err := s.queries.UpdateFileName(ctx, fileID, name)
+	defer func() { _ = tx.Rollback() }()
+	if _, err := q.GetFileByID(ctx, fileID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("rename: get file: %w", err)
+	}
+	updated, err := q.UpdateFileName(ctx, fileID, name)
 	if err != nil {
 		return nil, fmt.Errorf("rename: %w", err)
 	}
-	return updated, nil
+	return updated, tx.Commit()
 }
 
 // Move transfers a file to a different folder owned by the same user.
 // Returns ErrNotFound if the file does not belong to userID.
 // Returns ErrFolderNotFound if the target folder does not belong to userID.
 func (s *FileService) Move(ctx context.Context, fileID, userID, newFolderID uuid.UUID) (*models.File, error) {
-	file, err := s.GetMetadata(ctx, fileID, userID)
+	q, tx, err := s.queries.ForUser(ctx, userID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("move: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	file, err := q.GetFileByID(ctx, fileID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("move: get file: %w", err)
 	}
 	if file.FolderID != nil && *file.FolderID == newFolderID {
 		return file, nil
 	}
-	folder, err := s.queries.GetFolderByID(ctx, newFolderID)
-	if err != nil {
+	if _, err := q.GetFolderByID(ctx, newFolderID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrFolderNotFound
 		}
 		return nil, fmt.Errorf("move: get target folder: %w", err)
 	}
-	if folder.UserID != userID {
-		return nil, ErrFolderNotFound
-	}
-	moved, err := s.queries.MoveFile(ctx, fileID, newFolderID)
+	moved, err := q.MoveFile(ctx, fileID, newFolderID)
 	if err != nil {
 		return nil, fmt.Errorf("move: %w", err)
 	}
-	return moved, nil
+	return moved, tx.Commit()
 }
 
 // Delete removes the encrypted blob from MinIO, deletes the metadata row, and
@@ -337,13 +364,21 @@ func (s *FileService) Move(ctx context.Context, fileID, userID, newFolderID uuid
 // removed from MinIO (DB rows are cascade-deleted with the parent file row).
 // Returns ErrNotFound if the file does not belong to userID.
 func (s *FileService) Delete(ctx context.Context, fileID, userID uuid.UUID, username string) error {
-	file, err := s.GetMetadata(ctx, fileID, userID)
+	q, tx, err := s.queries.ForUser(ctx, userID)
 	if err != nil {
-		return err
+		return fmt.Errorf("delete: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	file, err := q.GetFileByID(ctx, fileID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		return fmt.Errorf("delete: get file: %w", err)
 	}
 
 	// Best-effort: remove any transcoded variant blobs before the parent row is deleted.
-	if variants, err := s.queries.ListVideoVariants(ctx, fileID); err == nil {
+	if variants, err := q.ListVideoVariants(ctx, fileID); err == nil {
 		for _, v := range variants {
 			_ = s.storage.RemoveObject(ctx, v.MinIOObjectKey)
 		}
@@ -352,9 +387,13 @@ func (s *FileService) Delete(ctx context.Context, fileID, userID uuid.UUID, user
 	if err := s.storage.RemoveObject(ctx, file.MinIOObjectKey); err != nil {
 		return fmt.Errorf("delete: remove blob: %w", err)
 	}
-	if err := s.queries.DeleteFile(ctx, fileID); err != nil {
+	if err := q.DeleteFile(ctx, fileID); err != nil {
 		return fmt.Errorf("delete: remove metadata: %w", err)
 	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("delete: commit: %w", err)
+	}
+	// AddStorageUsed touches the users table (no RLS) — use the pool directly.
 	if err := s.queries.AddStorageUsed(ctx, username, -file.SizeBytes); err != nil {
 		return fmt.Errorf("delete: update storage: %w", err)
 	}
@@ -874,7 +913,13 @@ func (s *FileService) FinalizeChunkedUpload(ctx context.Context, sess *UploadSes
 	// Read current usage before updating so we can compute threshold crossings below.
 	user, userErr := s.queries.GetUserByUsername(ctx, sess.Username)
 
-	file, err := s.queries.CreateFile(ctx, &models.File{
+	uq, utx, err := s.queries.ForUser(ctx, sess.UserID)
+	if err != nil {
+		_ = s.storage.RemoveObject(ctx, sess.ObjectKey)
+		return nil, fmt.Errorf("finalize: begin tx: %w", err)
+	}
+	defer func() { _ = utx.Rollback() }()
+	file, err := uq.CreateFile(ctx, &models.File{
 		ID:             sess.FileID,
 		UserID:         sess.UserID,
 		FolderID:       sess.FolderID,
@@ -891,6 +936,10 @@ func (s *FileService) FinalizeChunkedUpload(ctx context.Context, sess *UploadSes
 			return nil, ErrDuplicateName
 		}
 		return nil, fmt.Errorf("finalize: save metadata: %w", err)
+	}
+	if err := utx.Commit(); err != nil {
+		_ = s.storage.RemoveObject(ctx, sess.ObjectKey)
+		return nil, fmt.Errorf("finalize: commit: %w", err)
 	}
 
 	if err := s.queries.AddStorageUsed(ctx, sess.Username, sess.TotalSize); err != nil {

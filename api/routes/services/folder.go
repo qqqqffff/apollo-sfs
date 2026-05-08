@@ -48,12 +48,17 @@ func (s *FolderService) ListRoot(
 	userID uuid.UUID,
 	folderPage, filePage db.PageInput,
 ) (*FolderContents, error) {
+	q, tx, err := s.queries.ForUser(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list root: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	var subfolders *db.PageResult[models.Folder]
 	if folderPage.Skip {
 		subfolders = emptyFolders()
 	} else {
-		var err error
-		subfolders, err = s.queries.ListRootFolders(ctx, userID, folderPage)
+		subfolders, err = q.ListRootFolders(ctx, userID, folderPage)
 		if err != nil {
 			return nil, fmt.Errorf("list root folders: %w", err)
 		}
@@ -63,8 +68,7 @@ func (s *FolderService) ListRoot(
 	if filePage.Skip {
 		files = emptyFiles()
 	} else {
-		var err error
-		files, err = s.listRootFiles(ctx, userID, filePage)
+		files, err = q.ListRootFiles(ctx, userID, filePage)
 		if err != nil {
 			return nil, fmt.Errorf("list root files: %w", err)
 		}
@@ -87,7 +91,13 @@ func (s *FolderService) GetContents(
 	folderID, userID uuid.UUID,
 	folderPage, filePage db.PageInput,
 ) (*FolderContents, error) {
-	folder, err := s.getOwned(ctx, folderID, userID)
+	q, tx, err := s.queries.ForUser(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("get contents: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	folder, err := s.getOwned(ctx, q, folderID, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -96,7 +106,7 @@ func (s *FolderService) GetContents(
 	if folderPage.Skip {
 		subfolders = emptyFolders()
 	} else {
-		subfolders, err = s.queries.ListFoldersByParent(ctx, userID, folderID, folderPage)
+		subfolders, err = q.ListFoldersByParent(ctx, userID, folderID, folderPage)
 		if err != nil {
 			return nil, fmt.Errorf("list subfolders: %w", err)
 		}
@@ -106,7 +116,7 @@ func (s *FolderService) GetContents(
 	if filePage.Skip {
 		files = emptyFiles()
 	} else {
-		files, err = s.queries.ListFilesByFolder(ctx, folderID, filePage)
+		files, err = q.ListFilesByFolder(ctx, folderID, filePage)
 		if err != nil {
 			return nil, fmt.Errorf("list files: %w", err)
 		}
@@ -130,27 +140,31 @@ func (s *FolderService) Create(
 	parentID *uuid.UUID,
 	name string,
 ) (*models.Folder, error) {
+	q, tx, err := s.queries.ForUser(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("create folder: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	// Verify the parent folder exists and belongs to this user.
 	if parentID != nil {
-		if _, err := s.getOwned(ctx, *parentID, userID); err != nil {
+		if _, err := s.getOwned(ctx, q, *parentID, userID); err != nil {
 			return nil, err
 		}
 	}
 
-	folder, err := s.queries.CreateFolder(ctx, &models.Folder{
+	folder, err := q.CreateFolder(ctx, &models.Folder{
 		UserID:   userID,
 		ParentID: parentID,
 		Name:     name,
 	})
 	if err != nil {
-		// The DB unique constraint on (user_id, parent_id, name) produces a
-		// duplicate key error when a sibling with the same name already exists.
 		if isDuplicateKeyError(err) {
 			return nil, ErrDuplicateFolderName
 		}
 		return nil, fmt.Errorf("create folder: %w", err)
 	}
-	return folder, nil
+	return folder, tx.Commit()
 }
 
 // Rename changes a folder's display name. Returns ErrFolderNotFound if the
@@ -160,40 +174,49 @@ func (s *FolderService) Rename(
 	folderID, userID uuid.UUID,
 	name string,
 ) (*models.Folder, error) {
-	if _, err := s.getOwned(ctx, folderID, userID); err != nil {
+	q, tx, err := s.queries.ForUser(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("rename folder: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := s.getOwned(ctx, q, folderID, userID); err != nil {
 		return nil, err
 	}
-
-	updated, err := s.queries.UpdateFolderName(ctx, folderID, name)
+	updated, err := q.UpdateFolderName(ctx, folderID, name)
 	if err != nil {
 		if isDuplicateKeyError(err) {
 			return nil, ErrDuplicateFolderName
 		}
 		return nil, fmt.Errorf("rename folder: %w", err)
 	}
-	return updated, nil
+	return updated, tx.Commit()
 }
 
 // Delete removes an empty folder. Returns ErrFolderNotFound if the folder does
 // not belong to userID, and ErrFolderNotEmpty if it still contains files or
 // subfolders (the caller must delete children first).
 func (s *FolderService) Delete(ctx context.Context, folderID, userID uuid.UUID) error {
-	if _, err := s.getOwned(ctx, folderID, userID); err != nil {
+	q, tx, err := s.queries.ForUser(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("delete folder: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := s.getOwned(ctx, q, folderID, userID); err != nil {
 		return err
 	}
-
-	hasChildren, err := s.queries.HasFolderChildren(ctx, folderID)
+	hasChildren, err := q.HasFolderChildren(ctx, folderID)
 	if err != nil {
 		return fmt.Errorf("delete folder: check children: %w", err)
 	}
 	if hasChildren {
 		return ErrFolderNotEmpty
 	}
-
-	if err := s.queries.DeleteFolder(ctx, folderID); err != nil {
+	if err := q.DeleteFolder(ctx, folderID); err != nil {
 		return fmt.Errorf("delete folder: %w", err)
 	}
-	return nil
+	return tx.Commit()
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
@@ -206,11 +229,12 @@ func emptyFiles() *db.PageResult[models.File] {
 	return &db.PageResult[models.File]{Items: []models.File{}}
 }
 
-// getOwned fetches a folder and verifies it belongs to userID.
+// getOwned fetches a folder via a user-scoped query and verifies ownership.
 // Returns ErrFolderNotFound for both missing and foreign-owned folders so the
 // caller cannot distinguish the two cases (prevents existence leaking).
-func (s *FolderService) getOwned(ctx context.Context, folderID, userID uuid.UUID) (*models.Folder, error) {
-	folder, err := s.queries.GetFolderByID(ctx, folderID)
+// q must be a Queries returned by ForUser so RLS is enforced at the DB level.
+func (s *FolderService) getOwned(ctx context.Context, q *db.Queries, folderID, userID uuid.UUID) (*models.Folder, error) {
+	folder, err := q.GetFolderByID(ctx, folderID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrFolderNotFound
@@ -223,17 +247,6 @@ func (s *FolderService) getOwned(ctx context.Context, folderID, userID uuid.UUID
 	return folder, nil
 }
 
-// listRootFiles returns files that are directly in the root (their folder_id
-// references a root folder owned by this user). Since files always belong to
-// a specific folder in the schema, "root files" means files in any root-level
-// folder. This queries files by user across all root folders.
-//
-// NOTE: The current schema requires every file to have a folder_id — there is
-// no concept of truly folder-less files. Root-level files are those whose
-// containing folder has parent_id IS NULL. This query fetches them via a join.
-func (s *FolderService) listRootFiles(ctx context.Context, userID uuid.UUID, page db.PageInput) (*db.PageResult[models.File], error) {
-	return s.queries.ListRootFiles(ctx, userID, page)
-}
 
 // isDuplicateKeyError checks whether a DB error is a PostgreSQL unique
 // constraint violation (SQLSTATE 23505).

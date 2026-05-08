@@ -189,6 +189,22 @@ func (h *Handler) serveDecrypted(c *gin.Context, inline bool) {
 		return
 	}
 
+	mimeType := file.MimeType
+	if inline {
+		switch {
+		case strings.HasPrefix(mimeType, "image/"),
+			strings.HasPrefix(mimeType, "video/"),
+			strings.HasPrefix(mimeType, "audio/"),
+			mimeType == "application/pdf":
+			// safe to render inline as-is
+		case strings.HasPrefix(mimeType, "text/"):
+			mimeType = "text/plain; charset=utf-8"
+		default:
+			// unknown type — force download instead of inline rendering
+			inline = false
+		}
+	}
+
 	if inline {
 		c.Header("Content-Disposition", "inline")
 	} else {
@@ -196,7 +212,7 @@ func (h *Handler) serveDecrypted(c *gin.Context, inline bool) {
 			fmt.Sprintf(`attachment; filename="%s"`, sanitize.ContentDispositionFilename(file.Name)))
 	}
 
-	c.Data(http.StatusOK, file.MimeType, plaintext)
+	c.Data(http.StatusOK, mimeType, plaintext)
 }
 
 // ── Stream ────────────────────────────────────────────────────────────────────
@@ -487,7 +503,7 @@ func (h *Handler) InitUpload(c *gin.Context) {
 	var req struct {
 		Name        string  `json:"name"         binding:"required"`
 		TotalChunks int     `json:"total_chunks" binding:"required,min=1"`
-		TotalSize   int64   `json:"total_size"   binding:"required,min=1"`
+		TotalSize   int64   `json:"total_size"   binding:"required,min=1,max=107374182400"`
 		FolderID    *string `json:"folder_id"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {

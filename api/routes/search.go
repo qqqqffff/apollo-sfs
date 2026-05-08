@@ -26,6 +26,10 @@ func (h *Handler) Search(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "q is required"})
 		return
 	}
+	if len(q) > 200 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "q must be 200 characters or fewer"})
+		return
+	}
 
 	userID, _ := uuid.Parse(c.GetString("userID"))
 	folderPage := parsePage(c, "folder")

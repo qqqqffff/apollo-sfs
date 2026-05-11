@@ -197,7 +197,7 @@ function RouteComponent() {
       {createError && <p className="text-sm text-red-500 mb-4">{createError}</p>}
 
       <div className="bg-white rounded-xl border border-gray-200 overflow-x-auto">
-        <table className="w-full min-w-[640px] text-sm border-collapse">
+        <table className="w-full min-w-160 text-sm border-collapse">
           <thead>
             <tr className="bg-gray-50 border-b border-gray-200">
               {['Email', 'Quota', 'Expires', 'Status', ''].map((h) => (

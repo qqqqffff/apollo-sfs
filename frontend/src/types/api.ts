@@ -65,3 +65,14 @@ export interface FavoriteList {
   files: File[]
   folders: Folder[]
 }
+
+export interface BannedIP {
+  id: number
+  ip: string
+  jail: string
+  banned_at: string
+  unbanned_at: string | null
+  ban_count: number
+  country: string
+  city: string
+}

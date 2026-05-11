@@ -19,6 +19,7 @@ import { Route as AuthClientFavoritesRouteImport } from './routes/_auth.client/f
 import { Route as AuthAdminUsersRouteImport } from './routes/_auth.admin/users'
 import { Route as AuthAdminMetricsRouteImport } from './routes/_auth.admin/metrics'
 import { Route as AuthAdminInvitationsRouteImport } from './routes/_auth.admin/invitations'
+import { Route as AuthAdminBannedIpsRouteImport } from './routes/_auth.admin/banned-ips'
 
 const RegisterRoute = RegisterRouteImport.update({
   id: '/register',
@@ -69,11 +70,17 @@ const AuthAdminInvitationsRoute = AuthAdminInvitationsRouteImport.update({
   path: '/admin/invitations',
   getParentRoute: () => AuthRoute,
 } as any)
+const AuthAdminBannedIpsRoute = AuthAdminBannedIpsRouteImport.update({
+  id: '/admin/banned-ips',
+  path: '/admin/banned-ips',
+  getParentRoute: () => AuthRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/login': typeof LoginRoute
   '/register': typeof RegisterRoute
+  '/admin/banned-ips': typeof AuthAdminBannedIpsRoute
   '/admin/invitations': typeof AuthAdminInvitationsRoute
   '/admin/metrics': typeof AuthAdminMetricsRoute
   '/admin/users': typeof AuthAdminUsersRoute
@@ -85,6 +92,7 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/login': typeof LoginRoute
   '/register': typeof RegisterRoute
+  '/admin/banned-ips': typeof AuthAdminBannedIpsRoute
   '/admin/invitations': typeof AuthAdminInvitationsRoute
   '/admin/metrics': typeof AuthAdminMetricsRoute
   '/admin/users': typeof AuthAdminUsersRoute
@@ -98,6 +106,7 @@ export interface FileRoutesById {
   '/_auth': typeof AuthRouteWithChildren
   '/login': typeof LoginRoute
   '/register': typeof RegisterRoute
+  '/_auth/admin/banned-ips': typeof AuthAdminBannedIpsRoute
   '/_auth/admin/invitations': typeof AuthAdminInvitationsRoute
   '/_auth/admin/metrics': typeof AuthAdminMetricsRoute
   '/_auth/admin/users': typeof AuthAdminUsersRoute
@@ -111,6 +120,7 @@ export interface FileRouteTypes {
     | '/'
     | '/login'
     | '/register'
+    | '/admin/banned-ips'
     | '/admin/invitations'
     | '/admin/metrics'
     | '/admin/users'
@@ -122,6 +132,7 @@ export interface FileRouteTypes {
     | '/'
     | '/login'
     | '/register'
+    | '/admin/banned-ips'
     | '/admin/invitations'
     | '/admin/metrics'
     | '/admin/users'
@@ -134,6 +145,7 @@ export interface FileRouteTypes {
     | '/_auth'
     | '/login'
     | '/register'
+    | '/_auth/admin/banned-ips'
     | '/_auth/admin/invitations'
     | '/_auth/admin/metrics'
     | '/_auth/admin/users'
@@ -221,10 +233,18 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthAdminInvitationsRouteImport
       parentRoute: typeof AuthRoute
     }
+    '/_auth/admin/banned-ips': {
+      id: '/_auth/admin/banned-ips'
+      path: '/admin/banned-ips'
+      fullPath: '/admin/banned-ips'
+      preLoaderRoute: typeof AuthAdminBannedIpsRouteImport
+      parentRoute: typeof AuthRoute
+    }
   }
 }
 
 interface AuthRouteChildren {
+  AuthAdminBannedIpsRoute: typeof AuthAdminBannedIpsRoute
   AuthAdminInvitationsRoute: typeof AuthAdminInvitationsRoute
   AuthAdminMetricsRoute: typeof AuthAdminMetricsRoute
   AuthAdminUsersRoute: typeof AuthAdminUsersRoute
@@ -234,6 +254,7 @@ interface AuthRouteChildren {
 }
 
 const AuthRouteChildren: AuthRouteChildren = {
+  AuthAdminBannedIpsRoute: AuthAdminBannedIpsRoute,
   AuthAdminInvitationsRoute: AuthAdminInvitationsRoute,
   AuthAdminMetricsRoute: AuthAdminMetricsRoute,
   AuthAdminUsersRoute: AuthAdminUsersRoute,

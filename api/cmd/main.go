@@ -11,6 +11,7 @@ import (
 	"github.com/gin-contrib/sessions/cookie"
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
+	"github.com/oschwald/geoip2-golang"
 
 	"apollo-sfs.com/api/db"
 	"apollo-sfs.com/api/routes"
@@ -126,12 +127,30 @@ func main() {
 
 	metricsSvc := services.NewMetricsService(queries, cfg.DiskStatsPath)
 
+	// ── GeoIP MMDB ───────────────────────────────────────────────────────────
+	var geoReader *geoip2.Reader
+	for _, path := range []string{
+		"/var/lib/GeoIP/GeoLite2-City.mmdb",
+		"/var/lib/GeoIP/GeoLite2-Country.mmdb",
+	} {
+		r, err := geoip2.Open(path)
+		if err == nil {
+			geoReader = r
+			defer r.Close()
+			log.Printf("geoip: opened %s", path)
+			break
+		}
+	}
+	if geoReader == nil {
+		log.Printf("geoip: no MMDB found — geo lookup disabled")
+	}
+
 	// Start background goroutines.
 	go rotationSvc.StartScheduler(context.Background())
 	go metricsSvc.Start(context.Background())
 	go emailSvc.Start(context.Background())
 
-	r := setupRouter(cfg, queries, oidcVerifier, authSvc, fileSvc, folderSvc, favSvc, inviteSvc, metricsSvc)
+	r := setupRouter(cfg, queries, oidcVerifier, authSvc, fileSvc, folderSvc, favSvc, inviteSvc, metricsSvc, geoReader)
 
 	addr := ":" + cfg.Port
 	log.Printf("apollo-sfs API listening on %s", addr)
@@ -150,7 +169,7 @@ func main() {
 	}
 }
 
-func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVerifier, authSvc *services.AuthService, fileSvc *services.FileService, folderSvc *services.FolderService, favSvc *services.FavoriteService, inviteSvc *services.InviteService, metricsSvc *services.MetricsService) *gin.Engine {
+func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVerifier, authSvc *services.AuthService, fileSvc *services.FileService, folderSvc *services.FolderService, favSvc *services.FavoriteService, inviteSvc *services.InviteService, metricsSvc *services.MetricsService, geoReader *geoip2.Reader) *gin.Engine {
 	r := gin.New()
 	r.Use(gin.Logger())
 	r.Use(gin.Recovery())
@@ -186,7 +205,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 
 	h := routes.NewHandler(queries, fileSvc, folderSvc, inviteSvc, favSvc, authSvc, uploadStore)
 	authHandler := auth.NewHandler(authSvc)
-	adminHandler := admin.NewHandler(queries, inviteSvc, metricsSvc, authSvc)
+	adminHandler := admin.NewHandler(queries, inviteSvc, metricsSvc, authSvc, geoReader)
 
 	v1 := r.Group("/api/v1")
 
@@ -265,6 +284,10 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 			adminGroup.GET("/system/metrics", adminHandler.GetMetrics)
 			adminGroup.GET("/system/metrics/history", adminHandler.GetMetricsHistory)
 			adminGroup.GET("/system/metrics/stream", adminHandler.StreamMetrics)
+
+			adminGroup.GET("/banned-ips", adminHandler.ListBannedIPs)
+			adminGroup.POST("/banned-ips/:id/unban", adminHandler.UnbanIP)
+			adminGroup.POST("/banned-ips/:id/extend", adminHandler.ExtendBan)
 		}
 	}
 

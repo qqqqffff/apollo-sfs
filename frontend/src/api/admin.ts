@@ -1,5 +1,5 @@
 import { del, get, patch, post } from './client'
-import type { Invitation, PageResult, User } from '../types/api'
+import type { BannedIP, Invitation, PageResult, User } from '../types/api'
 
 // ── Users ──────────────────────────────────────────────────────────────────────
 
@@ -68,6 +68,25 @@ export function getMetrics() {
 
 export function getMetricsHistoryByHours(hours: number) {
   return get<MetricsSnapshot[]>(`/admin/system/metrics/history?hours=${hours}`)
+}
+
+// ── Banned IPs ─────────────────────────────────────────────────────────────────
+
+export type BanStatus = 'active' | 'all'
+
+export function listBannedIPs(status: BanStatus, cursor?: string, limit?: number) {
+  const params = new URLSearchParams({ status })
+  if (cursor) params.set('cursor', cursor)
+  if (limit) params.set('limit', String(limit))
+  return get<PageResult<BannedIP>>(`/admin/banned-ips?${params}`)
+}
+
+export function unbanIP(id: number) {
+  return post<{ message: string }>(`/admin/banned-ips/${id}/unban`)
+}
+
+export function extendBan(id: number) {
+  return post<{ message: string }>(`/admin/banned-ips/${id}/extend`)
 }
 
 // ── Query options ──────────────────────────────────────────────────────────────

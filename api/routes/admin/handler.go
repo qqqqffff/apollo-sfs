@@ -1,6 +1,8 @@
 package admin
 
 import (
+	"github.com/oschwald/geoip2-golang"
+
 	"apollo-sfs.com/api/db"
 	"apollo-sfs.com/api/routes/services"
 )
@@ -11,9 +13,10 @@ type Handler struct {
 	invites *services.InviteService
 	metrics *services.MetricsService
 	auth    *services.AuthService
+	geo     *geoip2.Reader
 }
 
 // NewHandler constructs an admin Handler.
-func NewHandler(queries *db.Queries, inviteSvc *services.InviteService, metricsSvc *services.MetricsService, authSvc *services.AuthService) *Handler {
-	return &Handler{queries: queries, invites: inviteSvc, metrics: metricsSvc, auth: authSvc}
+func NewHandler(queries *db.Queries, inviteSvc *services.InviteService, metricsSvc *services.MetricsService, authSvc *services.AuthService, geoReader *geoip2.Reader) *Handler {
+	return &Handler{queries: queries, invites: inviteSvc, metrics: metricsSvc, auth: authSvc, geo: geoReader}
 }

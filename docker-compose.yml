@@ -84,6 +84,7 @@ services:
       DISK_STATS_PATH: /data
     volumes:
       - /home/apollo/apollo-sfs/minio/nvme-01:/data:ro
+      - /var/lib/GeoIP:/var/lib/GeoIP:ro
     depends_on:
       db-app:
         condition: service_healthy

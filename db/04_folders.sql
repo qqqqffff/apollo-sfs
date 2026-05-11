@@ -20,7 +20,11 @@ CREATE TABLE folders (
 CREATE INDEX folders_user_id_idx   ON folders (user_id);
 CREATE INDEX folders_parent_id_idx ON folders (parent_id);
 
--- ── Applied migrations ────────────────────────────────────────────────────────
--- 004_rls_files_folders.sql
---   ENABLE ROW LEVEL SECURITY / FORCE ROW LEVEL SECURITY
---   CREATE POLICY folders_owned_by_current_user (USING + WITH CHECK on app.current_user_id)
+-- Row-level security: queries must run inside a transaction that sets
+-- app.current_user_id to the requesting user's UUID via db.Queries.ForUser().
+ALTER TABLE folders ENABLE ROW LEVEL SECURITY;
+ALTER TABLE folders FORCE  ROW LEVEL SECURITY;
+
+CREATE POLICY folders_owned_by_current_user ON folders
+    USING      (user_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid)
+    WITH CHECK (user_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid);

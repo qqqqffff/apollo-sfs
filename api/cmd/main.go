@@ -245,6 +245,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		protected.GET("/folders/:folder_id", h.GetFolder)
 		protected.POST("/folders", h.CreateFolder)
 		protected.PATCH("/folders/:folder_id", h.UpdateFolder)
+		protected.PATCH("/folders/:folder_id/move", h.MoveFolder)
 		protected.DELETE("/folders/:folder_id", h.DeleteFolder)
 
 		// ── Admin — JWT + admin realm role ───────────────────────────────────

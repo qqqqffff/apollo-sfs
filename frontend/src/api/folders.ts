@@ -33,6 +33,10 @@ export function renameFolder(folderId: string, name: string) {
   return patch<Folder>(`/folders/${folderId}`, { name })
 }
 
+export function moveFolder(folderId: string, targetFolderId: string) {
+  return patch<Folder>(`/folders/${folderId}/move`, { target_folder_id: targetFolderId })
+}
+
 export function deleteFolder(folderId: string) {
   return del<{ message: string }>(`/folders/${folderId}`)
 }

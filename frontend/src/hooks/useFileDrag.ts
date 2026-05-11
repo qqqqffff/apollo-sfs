@@ -1,11 +1,12 @@
 import { useState } from 'react'
 import type { File as ApiFile, Folder } from '../types/api'
 
-const DRAG_TYPE = 'application/x-apollo-file'
+const FILE_DRAG_TYPE = 'application/x-apollo-file'
+const FOLDER_DRAG_TYPE = 'application/x-apollo-folder'
 
-function createGhost(name: string): HTMLElement {
+function createGhost(name: string, isFolder = false): HTMLElement {
   const el = document.createElement('div')
-  el.textContent = `📄 ${name}`
+  el.textContent = `${isFolder ? '📁' : '📄'} ${name}`
   el.style.cssText = [
     'position:fixed',
     'top:-9999px',
@@ -24,8 +25,12 @@ function createGhost(name: string): HTMLElement {
   return el
 }
 
-export function useFileDrag(onMove: (fileId: string, targetFolderId: string) => void) {
+export function useFileDrag(
+  onMoveFile: (fileId: string, targetFolderId: string) => void,
+  onMoveFolder: (folderId: string, targetFolderId: string) => void,
+) {
   const [draggingFileId, setDraggingFileId] = useState<string | null>(null)
+  const [draggingFolderId, setDraggingFolderId] = useState<string | null>(null)
   const [dragOverFolderId, setDragOverFolderId] = useState<string | null>(null)
 
   function getFileDragHandlers(file: ApiFile) {
@@ -34,7 +39,7 @@ export function useFileDrag(onMove: (fileId: string, targetFolderId: string) => 
       onDragStart(e: React.DragEvent) {
         setDraggingFileId(file.id)
         e.dataTransfer.effectAllowed = 'move'
-        e.dataTransfer.setData(DRAG_TYPE, file.id)
+        e.dataTransfer.setData(FILE_DRAG_TYPE, file.id)
         const ghost = createGhost(file.name)
         e.dataTransfer.setDragImage(ghost, 14, 16)
         requestAnimationFrame(() => ghost.remove())
@@ -46,15 +51,39 @@ export function useFileDrag(onMove: (fileId: string, targetFolderId: string) => 
     }
   }
 
+  function getFolderDragHandlers(folder: Folder) {
+    return {
+      draggable: true as const,
+      onDragStart(e: React.DragEvent) {
+        setDraggingFolderId(folder.id)
+        e.dataTransfer.effectAllowed = 'move'
+        e.dataTransfer.setData(FOLDER_DRAG_TYPE, folder.id)
+        const ghost = createGhost(folder.name, true)
+        e.dataTransfer.setDragImage(ghost, 14, 16)
+        requestAnimationFrame(() => ghost.remove())
+      },
+      onDragEnd() {
+        setDraggingFolderId(null)
+        setDragOverFolderId(null)
+      },
+    }
+  }
+
   function getFolderDropHandlers(folder: Folder) {
     return {
       onDragEnter(e: React.DragEvent) {
-        if (!e.dataTransfer.types.includes(DRAG_TYPE)) return
+        const hasFile = e.dataTransfer.types.includes(FILE_DRAG_TYPE)
+        const hasFolder = e.dataTransfer.types.includes(FOLDER_DRAG_TYPE)
+        if (!hasFile && !hasFolder) return
+        if (hasFolder && draggingFolderId === folder.id) return
         e.preventDefault()
         setDragOverFolderId(folder.id)
       },
       onDragOver(e: React.DragEvent) {
-        if (!e.dataTransfer.types.includes(DRAG_TYPE)) return
+        const hasFile = e.dataTransfer.types.includes(FILE_DRAG_TYPE)
+        const hasFolder = e.dataTransfer.types.includes(FOLDER_DRAG_TYPE)
+        if (!hasFile && !hasFolder) return
+        if (hasFolder && draggingFolderId === folder.id) return
         e.preventDefault()
         e.dataTransfer.dropEffect = 'move'
       },
@@ -66,11 +95,20 @@ export function useFileDrag(onMove: (fileId: string, targetFolderId: string) => 
       onDrop(e: React.DragEvent) {
         e.preventDefault()
         setDragOverFolderId(null)
-        const fileId = e.dataTransfer.getData(DRAG_TYPE)
-        if (fileId) onMove(fileId, folder.id)
+        const fileId = e.dataTransfer.getData(FILE_DRAG_TYPE)
+        if (fileId) { onMoveFile(fileId, folder.id); return }
+        const folderId = e.dataTransfer.getData(FOLDER_DRAG_TYPE)
+        if (folderId && folderId !== folder.id) onMoveFolder(folderId, folder.id)
       },
     }
   }
 
-  return { draggingFileId, dragOverFolderId, getFileDragHandlers, getFolderDropHandlers }
+  return {
+    draggingFileId,
+    draggingFolderId,
+    dragOverFolderId,
+    getFileDragHandlers,
+    getFolderDragHandlers,
+    getFolderDropHandlers,
+  }
 }

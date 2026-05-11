@@ -193,6 +193,45 @@ func (s *FolderService) Rename(
 	return updated, tx.Commit()
 }
 
+// Move reparents folderID under targetID. Both folders must be owned by
+// userID. Returns ErrFolderCycle if the move would create a cycle (including
+// dropping a folder onto itself). Returns ErrDuplicateFolderName if a sibling
+// with the same name already exists in the target.
+func (s *FolderService) Move(
+	ctx context.Context,
+	folderID, targetID, userID uuid.UUID,
+) (*models.Folder, error) {
+	q, tx, err := s.queries.ForUser(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("move folder: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := s.getOwned(ctx, q, folderID, userID); err != nil {
+		return nil, err
+	}
+	if _, err := s.getOwned(ctx, q, targetID, userID); err != nil {
+		return nil, ErrFolderNotFound
+	}
+
+	cycle, err := s.queries.FolderWouldCreateCycle(ctx, folderID, targetID)
+	if err != nil {
+		return nil, fmt.Errorf("move folder: cycle check: %w", err)
+	}
+	if cycle {
+		return nil, ErrFolderCycle
+	}
+
+	updated, err := q.UpdateFolderParent(ctx, folderID, &targetID)
+	if err != nil {
+		if isDuplicateKeyError(err) {
+			return nil, ErrDuplicateFolderName
+		}
+		return nil, fmt.Errorf("move folder: %w", err)
+	}
+	return updated, tx.Commit()
+}
+
 // Delete removes an empty folder. Returns ErrFolderNotFound if the folder does
 // not belong to userID, and ErrFolderNotEmpty if it still contains files or
 // subfolders (the caller must delete children first).
@@ -280,3 +319,6 @@ var ErrFolderNotEmpty = errors.New("folder is not empty — delete its contents 
 // ErrDuplicateFolderName is returned when a sibling folder with the same name
 // already exists in the target parent.
 var ErrDuplicateFolderName = errors.New("a folder with that name already exists here")
+
+// ErrFolderCycle is returned when a move would make a folder its own descendant.
+var ErrFolderCycle = errors.New("cannot move a folder into itself or one of its subfolders")

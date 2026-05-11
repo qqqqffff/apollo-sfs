@@ -171,6 +171,54 @@ func (h *Handler) UpdateFolder(c *gin.Context) {
 	c.JSON(http.StatusOK, updated)
 }
 
+// ── MoveFolder ────────────────────────────────────────────────────────────────
+
+type moveFolderRequest struct {
+	TargetFolderID string `json:"target_folder_id" binding:"required"`
+}
+
+// MoveFolder handles PATCH /api/v1/folders/:folder_id/move.
+// Body: {"target_folder_id": "<uuid>"}.
+// Reparents the folder under the target. Returns 409 if a cycle would result
+// or a sibling with the same name already exists in the target.
+func (h *Handler) MoveFolder(c *gin.Context) {
+	folderID, err := uuid.Parse(c.Param("folder_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid folder_id"})
+		return
+	}
+
+	var req moveFolderRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "target_folder_id is required"})
+		return
+	}
+	targetID, err := uuid.Parse(req.TargetFolderID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "target_folder_id must be a valid UUID"})
+		return
+	}
+
+	userID, _ := uuid.Parse(c.GetString("userID"))
+
+	updated, err := h.folders.Move(c.Request.Context(), folderID, targetID, userID)
+	if err != nil {
+		switch {
+		case errors.Is(err, services.ErrFolderNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"error": "folder not found"})
+		case errors.Is(err, services.ErrFolderCycle):
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		case errors.Is(err, services.ErrDuplicateFolderName):
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "could not move folder"})
+		}
+		return
+	}
+
+	c.JSON(http.StatusOK, updated)
+}
+
 // ── DeleteFolder ──────────────────────────────────────────────────────────────
 
 // DeleteFolder handles DELETE /api/v1/folders/:folder_id.

@@ -254,3 +254,40 @@ func (q *Queries) DeleteFolder(ctx context.Context, id uuid.UUID) error {
 	}
 	return nil
 }
+
+// UpdateFolderParent sets a folder's parent_id, effectively moving it.
+// Pass nil to move the folder to the root level.
+func (q *Queries) UpdateFolderParent(ctx context.Context, id uuid.UUID, parentID *uuid.UUID) (*models.Folder, error) {
+	row := q.db.QueryRowContext(ctx, `
+		UPDATE folders SET parent_id = $2, updated_at = NOW()
+		WHERE id = $1
+		RETURNING id, user_id, parent_id, name, created_at, updated_at
+	`, id, parentID)
+	f, err := scanFolder(row)
+	if err != nil {
+		return nil, fmt.Errorf("UpdateFolderParent %s: %w", id, err)
+	}
+	return f, nil
+}
+
+// FolderWouldCreateCycle returns true if moving folderID into targetID would
+// create a cycle, i.e. targetID is folderID itself or a descendant of it.
+// Uses a recursive CTE to walk the ancestor chain of targetID upward to root.
+func (q *Queries) FolderWouldCreateCycle(ctx context.Context, folderID, targetID uuid.UUID) (bool, error) {
+	if folderID == targetID {
+		return true, nil
+	}
+	var would bool
+	err := q.db.QueryRowContext(ctx, `
+		WITH RECURSIVE chain AS (
+			SELECT id, parent_id FROM folders WHERE id = $2
+			UNION ALL
+			SELECT f.id, f.parent_id FROM folders f JOIN chain c ON f.id = c.parent_id
+		)
+		SELECT EXISTS(SELECT 1 FROM chain WHERE id = $1)
+	`, folderID, targetID).Scan(&would)
+	if err != nil {
+		return false, fmt.Errorf("FolderWouldCreateCycle: %w", err)
+	}
+	return would, nil
+}

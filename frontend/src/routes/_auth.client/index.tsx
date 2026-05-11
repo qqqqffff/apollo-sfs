@@ -13,7 +13,7 @@ import {
   MdStarOutline,
   MdUploadFile,
 } from 'react-icons/md'
-import { createFolder, deleteFolder } from '../../api/folders'
+import { createFolder, deleteFolder, moveFolder } from '../../api/folders'
 import { deleteFile, downloadUrl, fileQueryOptions, moveFile } from '../../api/files'
 import { meQueryOptions } from '../../api/me'
 import { FilePreviewModal, canPreview } from '../../components/FilePreviewModal'
@@ -121,11 +121,26 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
   const moveFileMutation = useMutation({
     mutationFn: ({ fileId, targetFolderId }: { fileId: string; targetFolderId: string }) =>
       moveFile(fileId, targetFolderId),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['folders'] }),
+    onSuccess: (_, { targetFolderId }) => {
+      queryClient.invalidateQueries({ queryKey: ['folders'] })
+      navigate({ to: '/client', search: { file: undefined, folder: targetFolderId } })
+    },
   })
 
-  const { draggingFileId, dragOverFolderId, getFileDragHandlers, getFolderDropHandlers } =
-    useFileDrag((fileId, targetFolderId) => moveFileMutation.mutate({ fileId, targetFolderId }))
+  const moveFolderMutation = useMutation({
+    mutationFn: ({ folderId, targetFolderId }: { folderId: string; targetFolderId: string }) =>
+      moveFolder(folderId, targetFolderId),
+    onSuccess: (_, { targetFolderId }) => {
+      queryClient.invalidateQueries({ queryKey: ['folders'] })
+      navigate({ to: '/client', search: { file: undefined, folder: targetFolderId } })
+    },
+  })
+
+  const { draggingFileId, draggingFolderId, dragOverFolderId, getFileDragHandlers, getFolderDragHandlers, getFolderDropHandlers } =
+    useFileDrag(
+      (fileId, targetFolderId) => moveFileMutation.mutate({ fileId, targetFolderId }),
+      (folderId, targetFolderId) => moveFolderMutation.mutate({ folderId, targetFolderId }),
+    )
 
   const createFolderMutation = useMutation({
     mutationFn: (name: string) => createFolder(name, folderId === 'root' ? undefined : folderId),
@@ -286,12 +301,13 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
             {subfolders.map((f) => (
               <li
                 key={f.id}
+                {...getFolderDragHandlers(f)}
                 {...getFolderDropHandlers(f)}
-                className={`flex items-center gap-2 px-2 py-1.5 rounded-lg transition-colors ${
+                className={`flex items-center gap-2 px-2 py-1.5 rounded-lg transition-colors cursor-grab ${
                   dragOverFolderId === f.id
                     ? 'bg-blue-50 ring-2 ring-blue-300 ring-inset'
                     : 'hover:bg-gray-50'
-                }`}
+                } ${draggingFolderId === f.id ? 'opacity-40' : ''}`}
               >
                 <button
                   onClick={() => openFolder(f.id)}

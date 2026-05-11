@@ -5,6 +5,7 @@ import { favoritesQueryOptions, unfavoriteFile, unfavoriteFolder } from '../../a
 import { canPreview, FilePreviewModal } from '../../components/FilePreviewModal'
 import { useState } from 'react'
 import type { File as ApiFile } from '../../types/api'
+import { useNotification } from '../../context/NotificationContext'
 
 export const Route = createFileRoute('/_auth/client/favorites')({
   component: RouteComponent,
@@ -12,17 +13,20 @@ export const Route = createFileRoute('/_auth/client/favorites')({
 
 function RouteComponent() {
   const queryClient = useQueryClient()
+  const { notify } = useNotification()
   const { data, isLoading } = useQuery(favoritesQueryOptions)
   const [previewFile, setPreviewFile] = useState<ApiFile | null>(null)
 
   const removeFileMutation = useMutation({
     mutationFn: unfavoriteFile,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: favoritesQueryOptions.queryKey }),
+    onError: () => notify('error', 'Failed to remove from favorites'),
   })
 
   const removeFolderMutation = useMutation({
     mutationFn: unfavoriteFolder,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: favoritesQueryOptions.queryKey }),
+    onError: () => notify('error', 'Failed to remove from favorites'),
   })
 
   if (isLoading) return <p className="text-sm text-gray-500">Loading…</p>

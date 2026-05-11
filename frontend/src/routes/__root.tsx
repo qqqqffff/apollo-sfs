@@ -4,6 +4,8 @@ import { useQueryClient } from '@tanstack/react-query'
 import type { QueryClient } from '@tanstack/react-query'
 import { AuthContext, AuthProvider, useAuth } from '../auth'
 import { clearSkipDeleteCookie } from '../components/DeleteConfirmModal'
+import { NotificationProvider } from '../context/NotificationContext'
+import { NotificationBanner } from '../components/NotificationBanner'
 
 export const Route = createRootRouteWithContext<{ queryClient: QueryClient; auth: AuthContext }>()({
   component: Root,
@@ -19,9 +21,11 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient; auth
 
 function Root() {
   return (
-    <AuthProvider>
-      <RootLayout />
-    </AuthProvider>
+    <NotificationProvider>
+      <AuthProvider>
+        <RootLayout />
+      </AuthProvider>
+    </NotificationProvider>
   )
 }
 
@@ -45,6 +49,7 @@ function RootLayout() {
     <>
       {!isAuthenticated && <PublicHeader />}
       <Outlet />
+      <NotificationBanner />
     </>
   )
 }

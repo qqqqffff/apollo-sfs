@@ -11,7 +11,7 @@ Internet → Cloudflare (proxy) → Host nginx (TLS termination)
                                                        ├── db-app (PostgreSQL)
                                                        ├── keycloak (OIDC/auth)
                                                        ├── minio (encrypted blobs)
-                                                       └── maddy (SMTP relay)
+                                                       └── postfix (SMTP relay)
 ```
 
 nginx runs **on the host**, not in Docker. All other services run in Docker Compose on an internal bridge network.
@@ -131,7 +131,8 @@ COOKIE_DOMAIN=files.example.com
 COOKIE_SECURE=true
 APP_BASE_URL=https://files.example.com
 
-# ── Email (Maddy → SendGrid) ───────────────────────────────────────────────────
+# ── Email (Postfix → SendGrid) ─────────────────────────────────────────────────
+POSTFIX_INTERNAL_HOST=postfix:587
 MAIL_FROM=noreply@example.com
 MAIL_DOMAIN=example.com
 SENDGRID_SMTP_PASSWORD=<sendgrid-api-key>
@@ -177,16 +178,16 @@ cp your-realm-export.json keycloak/import/realm-export.json
 
 ## 7 — SMTP relay configuration
 
-The `maddy` service in the compose file uses `boky/postfix` — a multi-arch Postfix image that relays outbound mail through SendGrid. It is fully configured via the environment variables already set in your `.env` file (`MAIL_DOMAIN`, `SENDGRID_SMTP_PASSWORD`). No extra config file is needed.
+The `postfix` service uses `boky/postfix` — a multi-arch Postfix image that relays outbound mail through SendGrid. It is fully configured via the environment variables already set in your `.env` file (`MAIL_DOMAIN`, `SENDGRID_SMTP_PASSWORD`). No extra config file is needed.
 
-The Go API connects to this relay at `maddy:587` (the container is named `maddy` to keep the environment variable `MADDY_INTERNAL_HOST=maddy:587` unchanged).
+The Go API connects to this relay at `postfix:587` via the `POSTFIX_INTERNAL_HOST` environment variable.
 
 If you want to verify the relay is working after first launch:
 
 ```bash
-docker exec -it apollo-sfs-maddy sh -c \
+docker exec -it apollo-sfs-postfix sh -c \
   "echo 'Test body' | mail -s 'Test' your@email.com"
-docker compose logs maddy
+docker compose logs postfix
 ```
 
 ---
@@ -338,8 +339,8 @@ apollo-sfs/
 ├── frontend/             React + Vite SPA
 ├── keycloak/
 │   └── import/           Place realm-export.json here before first boot
-├── maddy/
-│   └── maddy.conf        Maddy SMTP config (you create this)
+├── docker/
+│   └── postfix/          Postfix spool directory (created on first boot)
 ├── nginx/
 │   └── conf.d/
 │       └── apollo-sfs.conf   Host nginx site config

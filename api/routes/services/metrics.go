@@ -6,13 +6,15 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/shirou/gopsutil/v4/cpu"
-	"github.com/shirou/gopsutil/v4/mem"
 	psdisk "github.com/shirou/gopsutil/v4/disk"
+	"github.com/shirou/gopsutil/v4/mem"
 	psnet "github.com/shirou/gopsutil/v4/net"
+	"github.com/shirou/gopsutil/v4/sensors"
 
 	"apollo-sfs.com/api/db"
 	"apollo-sfs.com/api/models"
@@ -186,6 +188,42 @@ func (s *MetricsService) runPruner(ctx context.Context) {
 
 // ── Snapshot collection ───────────────────────────────────────────────────────
 
+// collectTemperatures reads hardware sensor data and returns the best available
+// CPU and drive temperatures. Either value may be nil if no suitable sensor is
+// found or the OS does not expose temperature data.
+func collectTemperatures() (cpuTemp, driveTemp *float64) {
+	readings, err := sensors.SensorsTemperatures()
+	if err != nil {
+		return nil, nil
+	}
+	for i := range readings {
+		s := &readings[i]
+		if s.Temperature <= 0 {
+			continue
+		}
+		key := strings.ToLower(s.SensorKey)
+		if cpuTemp == nil && (strings.Contains(key, "coretemp") ||
+			strings.Contains(key, "k10temp") ||
+			strings.Contains(key, "package id") ||
+			strings.Contains(key, "tctl") ||
+			strings.Contains(key, "cpu")) {
+			t := s.Temperature
+			cpuTemp = &t
+		}
+		if driveTemp == nil && (strings.Contains(key, "drivetemp") ||
+			strings.Contains(key, "nvme") ||
+			strings.Contains(key, "sda") ||
+			strings.Contains(key, "sdb")) {
+			t := s.Temperature
+			driveTemp = &t
+		}
+		if cpuTemp != nil && driveTemp != nil {
+			break
+		}
+	}
+	return cpuTemp, driveTemp
+}
+
 func (s *MetricsService) collectSnapshot(ctx context.Context) (*models.ServerMetricSnapshot, error) {
 	sys, err := collectSystem()
 	if err != nil {
@@ -205,6 +243,8 @@ func (s *MetricsService) collectSnapshot(ctx context.Context) (*models.ServerMet
 		log.Printf("metrics: disk stats for %q: %v", s.diskStatsPath, err)
 	}
 
+	cpuTemp, driveTemp := collectTemperatures()
+
 	return &models.ServerMetricSnapshot{
 		CPUPercent:             sys.cpuPercent,
 		MemoryUsedBytes:        sys.memUsed,
@@ -218,6 +258,8 @@ func (s *MetricsService) collectSnapshot(ctx context.Context) (*models.ServerMet
 		ActiveUserCount:        app.ActiveUsersLast5m,
 		TotalUserCount:         app.TotalUsers,
 		SampledAt:              time.Now().UTC(),
+		CPUTempCelsius:         cpuTemp,
+		DriveTempCelsius:       driveTemp,
 	}, nil
 }
 

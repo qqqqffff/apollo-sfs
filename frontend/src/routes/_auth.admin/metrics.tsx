@@ -1,11 +1,12 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { getMetricsHistoryByHours } from '../../api/admin'
 import { useMetricsStream } from '../../hooks/useMetricsStream'
 import { BarGraph } from '../../components/BarGraph'
 import { LineGraph } from '../../components/LineGraph'
 import type { LinePoint } from '../../components/LineGraph'
+import { useNotification } from '../../context/NotificationContext'
 
 export const Route = createFileRoute('/_auth/admin/metrics')({
   component: RouteComponent,
@@ -17,6 +18,7 @@ type HourWindow = 1 | 12 | 24 | 48 | 72
 const HOUR_OPTIONS: HourWindow[] = [1, 12, 24, 48, 72]
 
 function RouteComponent() {
+  const { notify } = useNotification()
   const { snapshots, connected } = useMetricsStream()
   const [hours, setHours] = useState<HourWindow>(12)
 
@@ -47,12 +49,17 @@ function RouteComponent() {
     .filter(s => new Date(s.sampled_at).getTime() >= nowMs - 60 * 60 * 1000)
     .map(s => ({ x: new Date(s.sampled_at).getTime(), y: s.storage_total_used_bytes }))
 
-  const { data: historySnaps } = useQuery({
+  const { data: historySnaps, error: historyError } = useQuery({
     queryKey: ['admin', 'metrics', 'history', hours],
     queryFn: () => getMetricsHistoryByHours(hours),
     staleTime: 60_000,
     enabled: hours > 1,
+    retry: 1,
   })
+
+  useEffect(() => {
+    if (historyError) notify('error', 'Failed to load metrics history')
+  }, [historyError, notify])
 
   const historyPoints: LinePoint[] = (historySnaps ?? []).map(s => ({
     x: new Date(s.sampled_at).getTime(),

@@ -16,6 +16,7 @@ import {
 import { createFolder, deleteFolder } from '../../api/folders'
 import { deleteFile, downloadUrl, fileQueryOptions, moveFile } from '../../api/files'
 import { meQueryOptions } from '../../api/me'
+import { useNotification } from '../../context/NotificationContext'
 import { FilePreviewModal, canPreview } from '../../components/FilePreviewModal'
 import { UploadModal } from '../../components/UploadModal'
 import { DeleteConfirmModal, readSkipDeleteCookie } from '../../components/DeleteConfirmModal'
@@ -95,6 +96,7 @@ function FileView({ fileId }: { fileId: string }) {
 function FolderView({ folderId }: { folderId: string | 'root' }) {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
+  const { notify } = useNotification()
   const { data: user } = useQuery(meQueryOptions)
   const fileRef = useRef<HTMLInputElement>(null)
   const [pendingFiles, setPendingFiles] = useState<globalThis.File[]>([])
@@ -121,7 +123,11 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
   const moveFileMutation = useMutation({
     mutationFn: ({ fileId, targetFolderId }: { fileId: string; targetFolderId: string }) =>
       moveFile(fileId, targetFolderId),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['folders'] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['folders'] })
+      notify('success', 'File moved')
+    },
+    onError: () => notify('error', 'Failed to move file'),
   })
 
   const { draggingFileId, dragOverFolderId, getFileDragHandlers, getFolderDropHandlers } =
@@ -134,6 +140,7 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
       setNewFolderName('')
       queryClient.invalidateQueries({ queryKey: ['folders', folderId] })
     },
+    onError: () => notify('error', 'Failed to create folder'),
   })
 
   function confirmNewFolder() {
@@ -152,6 +159,7 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
       queryClient.invalidateQueries({ queryKey: ['folders'] })
       queryClient.invalidateQueries({ queryKey: ['me'] })
     },
+    onError: () => notify('error', 'Failed to delete folder'),
   })
 
   const deleteFileMutation = useMutation({
@@ -160,6 +168,7 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
       queryClient.invalidateQueries({ queryKey: ['folders', folderId] })
       queryClient.invalidateQueries({ queryKey: ['me'] })
     },
+    onError: () => notify('error', 'Failed to delete file'),
   })
 
   function handleDeleteClick(type: 'file' | 'folder', id: string, name: string) {

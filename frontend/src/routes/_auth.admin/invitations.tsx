@@ -1,5 +1,5 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { useState, useCallback, useEffect, useRef } from 'react'
+import { useState, useCallback } from 'react'
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { MdContentCopy, MdCheck, MdRefresh } from 'react-icons/md'
 import {
@@ -10,6 +10,7 @@ import {
   resendInvitation,
 } from '../../api/admin'
 import { ApiError } from '../../api/client'
+import { useNotification } from '../../context/NotificationContext'
 
 export const Route = createFileRoute('/_auth/admin/invitations')({
   component: RouteComponent,
@@ -37,24 +38,11 @@ function RouteComponent() {
   const [quotaBytes, setQuotaBytes] = useState(10 * GB)
   const [customGb, setCustomGb] = useState('')
   const [useCustom, setUseCustom] = useState(false)
+  const { notify } = useNotification()
   const [createError, setCreateError] = useState<string | null>(null)
   const [copiedId, setCopiedId] = useState<string | null>(null)
   const [lastResent, setLastResent] = useState<Record<string, number>>({})
   const [pendingResendId, setPendingResendId] = useState<string | null>(null)
-
-  type Banner = { type: 'success' | 'error'; message: string }
-  const [banner, setBanner] = useState<Banner | null>(null)
-  const bannerTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-
-  const showBanner = useCallback((type: 'success' | 'error', message: string) => {
-    if (bannerTimer.current) clearTimeout(bannerTimer.current)
-    setBanner({ type, message })
-    bannerTimer.current = setTimeout(() => setBanner(null), 5000)
-  }, [])
-
-  useEffect(() => () => {
-    if (bannerTimer.current) clearTimeout(bannerTimer.current)
-  }, [])
 
   const effectiveQuota = useCustom
     ? Math.round((parseFloat(customGb) || 0) * GB)
@@ -66,6 +54,7 @@ function RouteComponent() {
       setEmail('')
       setCreateError(null)
       queryClient.invalidateQueries({ queryKey: ['admin', 'invitations'] })
+      notify('success', 'Invitation sent')
     },
     onError: (err) => {
       setCreateError(err instanceof ApiError ? err.message : 'Failed to create invitation')
@@ -75,6 +64,7 @@ function RouteComponent() {
   const revokeMutation = useMutation({
     mutationFn: revokeInvitation,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['admin', 'invitations'] }),
+    onError: () => notify('error', 'Failed to revoke invitation'),
   })
 
   const resendMutation = useMutation({
@@ -83,11 +73,11 @@ function RouteComponent() {
     onSuccess: (_data, id) => {
       setLastResent((prev) => ({ ...prev, [id]: Date.now() }))
       queryClient.invalidateQueries({ queryKey: ['admin', 'invitations'] })
-      showBanner('success', 'Invitation email resent successfully.')
+      notify('success', 'Invitation email resent successfully')
       setPendingResendId(null)
     },
-    onError: (err) => {
-      showBanner('error', err instanceof ApiError ? err.message : 'Failed to resend invitation.')
+    onError: () => {
+      notify('error', 'Failed to resend invitation')
       setPendingResendId(null)
     },
   })
@@ -205,23 +195,6 @@ function RouteComponent() {
         </div>
       </form>
       {createError && <p className="text-sm text-red-500 mb-4">{createError}</p>}
-
-      {banner && (
-        <div className={`mb-4 flex items-center justify-between gap-4 px-4 py-3 rounded-lg text-sm border ${
-          banner.type === 'success'
-            ? 'bg-green-50 text-green-800 border-green-200'
-            : 'bg-red-50 text-red-800 border-red-200'
-        }`}>
-          <span>{banner.message}</span>
-          <button
-            onClick={() => setBanner(null)}
-            className="shrink-0 opacity-50 hover:opacity-100 cursor-pointer bg-transparent border-0 text-current leading-none"
-            aria-label="Dismiss"
-          >
-            ✕
-          </button>
-        </div>
-      )}
 
       <div className="bg-white rounded-xl border border-gray-200 overflow-x-auto">
         <table className="w-full min-w-[640px] text-sm border-collapse">

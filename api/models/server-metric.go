@@ -24,4 +24,7 @@ type ServerMetricSnapshot struct {
 	ActiveUserCount        int       `json:"active_user_count" db:"active_user_count"`
 	TotalUserCount         int       `json:"total_user_count" db:"total_user_count"`
 	SampledAt              time.Time `json:"sampled_at" db:"sampled_at"`
+	// Nullable — set to nil when the host has no accessible temperature sensors.
+	CPUTempCelsius   *float64 `json:"cpu_temp_celsius" db:"cpu_temp_celsius"`
+	DriveTempCelsius *float64 `json:"drive_temp_celsius" db:"drive_temp_celsius"`
 }

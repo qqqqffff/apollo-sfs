@@ -1,0 +1,10 @@
+[Unit]
+Description=Refresh Cloudflare IP ranges for nginx real-IP passthrough
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/apollo-sfs/scripts/cf-ip-refresh.sh
+StandardOutput=journal
+StandardError=journal

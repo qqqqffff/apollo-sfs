@@ -14,7 +14,8 @@ const snapshotColumns = `
 	network_bytes_sent, network_bytes_recv,
 	storage_total_used_bytes, storage_total_quota_bytes,
 	disk_total_bytes, disk_free_bytes,
-	active_user_count, total_user_count, sampled_at`
+	active_user_count, total_user_count, sampled_at,
+	cpu_temp_celsius, drive_temp_celsius`
 
 func scanSnapshot(rows *sql.Rows) (*models.ServerMetricSnapshot, error) {
 	var s models.ServerMetricSnapshot
@@ -24,6 +25,7 @@ func scanSnapshot(rows *sql.Rows) (*models.ServerMetricSnapshot, error) {
 		&s.StorageTotalUsedBytes, &s.StorageTotalQuotaBytes,
 		&s.DiskTotalBytes, &s.DiskFreeBytes,
 		&s.ActiveUserCount, &s.TotalUserCount, &s.SampledAt,
+		&s.CPUTempCelsius, &s.DriveTempCelsius,
 	)
 	return &s, err
 }
@@ -37,8 +39,9 @@ func (q *Queries) InsertSnapshot(ctx context.Context, s *models.ServerMetricSnap
 			network_bytes_sent, network_bytes_recv,
 			storage_total_used_bytes, storage_total_quota_bytes,
 			disk_total_bytes, disk_free_bytes,
-			active_user_count, total_user_count, sampled_at
-		) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+			active_user_count, total_user_count, sampled_at,
+			cpu_temp_celsius, drive_temp_celsius
+		) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 		RETURNING id
 	`,
 		s.CPUPercent, s.MemoryUsedBytes, s.MemoryTotalBytes,
@@ -46,6 +49,7 @@ func (q *Queries) InsertSnapshot(ctx context.Context, s *models.ServerMetricSnap
 		s.StorageTotalUsedBytes, s.StorageTotalQuotaBytes,
 		s.DiskTotalBytes, s.DiskFreeBytes,
 		s.ActiveUserCount, s.TotalUserCount, s.SampledAt,
+		s.CPUTempCelsius, s.DriveTempCelsius,
 	).Scan(&s.ID)
 	if err != nil {
 		return fmt.Errorf("InsertSnapshot: %w", err)
@@ -190,7 +194,8 @@ func (q *Queries) ListSnapshotsByHours(ctx context.Context, hours, maxPoints int
 			network_bytes_sent, network_bytes_recv,
 			storage_total_used_bytes, storage_total_quota_bytes,
 			disk_total_bytes, disk_free_bytes,
-			active_user_count, total_user_count, sampled_at
+			active_user_count, total_user_count, sampled_at,
+			cpu_temp_celsius, drive_temp_celsius
 		FROM (
 			SELECT
 				id, cpu_percent, memory_used_bytes, memory_total_bytes,
@@ -198,6 +203,7 @@ func (q *Queries) ListSnapshotsByHours(ctx context.Context, hours, maxPoints int
 				storage_total_used_bytes, storage_total_quota_bytes,
 				disk_total_bytes, disk_free_bytes,
 				active_user_count, total_user_count, sampled_at,
+				cpu_temp_celsius, drive_temp_celsius,
 				NTILE($1) OVER (ORDER BY sampled_at ASC) AS bucket
 			FROM server_metrics_snapshots
 			WHERE sampled_at >= $2

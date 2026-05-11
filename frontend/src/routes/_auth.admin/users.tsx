@@ -5,6 +5,7 @@ import { MdCheck, MdClose, MdEdit } from 'react-icons/md'
 import { adminUsersInfiniteQueryOptions, updateUserQuota, updateUsername } from '../../api/admin'
 import { meQueryOptions } from '../../api/me'
 import type { User } from '../../types/api'
+import { useNotification } from '../../context/NotificationContext'
 
 export const Route = createFileRoute('/_auth/admin/users')({
   component: RouteComponent,
@@ -20,6 +21,7 @@ function isActive(user: User): boolean {
 
 function RouteComponent() {
   const queryClient = useQueryClient()
+  const { notify } = useNotification()
   const { data, isLoading, error, hasNextPage, isFetchingNextPage, fetchNextPage } =
     useInfiniteQuery(adminUsersInfiniteQueryOptions)
   const { data: me } = useQuery(meQueryOptions)
@@ -31,7 +33,11 @@ function RouteComponent() {
   const quotaMutation = useMutation({
     mutationFn: ({ username, gb }: { username: string; gb: number }) =>
       updateUserQuota(username, gb * GB),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['admin', 'users'] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['admin', 'users'] })
+      notify('success', 'Storage quota updated')
+    },
+    onError: () => notify('error', 'Failed to update storage quota'),
   })
 
   const renameMutation = useMutation({

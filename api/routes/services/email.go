@@ -30,8 +30,8 @@ const (
 
 // EmailConfig holds the parameters needed to construct an EmailService.
 type EmailConfig struct {
-	// SMTPAddr is the host:port of the internal Maddy submission endpoint.
-	// e.g. "maddy:587"
+	// SMTPAddr is the host:port of the internal Postfix submission endpoint.
+	// e.g. "postfix:587"
 	SMTPAddr string
 	// MailFrom is the envelope From address. e.g. "noreply@example.com"
 	MailFrom string
@@ -47,7 +47,7 @@ type EmailConfig struct {
 // ── Service ───────────────────────────────────────────────────────────────────
 
 // EmailService renders HTML email templates, enqueues outgoing mail to the
-// email_queue table, and dispatches them to Maddy via SMTP in the background.
+// email_queue table, and dispatches them to Postfix via SMTP in the background.
 type EmailService struct {
 	q       *db.Queries
 	host    string
@@ -204,7 +204,7 @@ func (s *EmailService) SendPasswordReset(
 // ── Background worker ─────────────────────────────────────────────────────────
 
 // Start launches the background email worker. It polls the email_queue table
-// every 30 seconds and dispatches pending messages to Maddy via SMTP.
+// every 30 seconds and dispatches pending messages to Postfix via SMTP.
 // It returns when ctx is cancelled.
 func (s *EmailService) Start(ctx context.Context) {
 	ticker := time.NewTicker(emailPollInterval)
@@ -298,7 +298,7 @@ func (s *EmailService) render(name string, data any) (string, error) {
 	return buf.String(), nil
 }
 
-// send opens an SMTP connection to Maddy, upgrades to STARTTLS if available,
+// send opens an SMTP connection to Postfix, upgrades to STARTTLS if available,
 // and delivers one HTML message.
 func (s *EmailService) send(to, subject, htmlBody string) error {
 	addr := net.JoinHostPort(s.host, s.port)
@@ -310,7 +310,7 @@ func (s *EmailService) send(to, subject, htmlBody string) error {
 	defer c.Close()
 
 	// Upgrade to STARTTLS when the server advertises it. InsecureSkipVerify is
-	// intentional — this is an internal Docker-network connection to Maddy and
+	// intentional — this is an internal Docker-network connection to Postfix and
 	// the certificate is self-signed.
 	if ok, _ := c.Extension("STARTTLS"); ok {
 		tlsCfg := &tls.Config{

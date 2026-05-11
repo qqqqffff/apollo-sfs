@@ -8,7 +8,7 @@ name: apollo-sfs
 #
 #   sudo mkdir -p /minio/nvme-1/data
 #
-# All other persistent data (PostgreSQL, Maddy) uses standard named Docker volumes
+# All other persistent data (PostgreSQL) uses standard named Docker volumes
 # managed under the Docker data root (/minio/nvme-1/docker if you've moved it there).
 #
 # Place the Keycloak realm import JSON at ./keycloak/import/realm-export.json
@@ -76,8 +76,8 @@ services:
       COOKIE_SECURE: ${COOKIE_SECURE:-true}
       TOKEN_REFRESH_THRESHOLD: ${TOKEN_REFRESH_THRESHOLD:-60}
       APP_BASE_URL: ${APP_BASE_URL}
-      # Email — Maddy submission point (internal Docker only)
-      MADDY_INTERNAL_HOST: maddy:587
+      # Email — Postfix submission point (internal Docker only)
+      POSTFIX_INTERNAL_HOST: postfix:587
       MAIL_FROM: ${MAIL_FROM}
       MAIL_DOMAIN: ${MAIL_DOMAIN}
       QUOTA_WARNING_THRESHOLD_PERCENT: ${QUOTA_WARNING_THRESHOLD_PERCENT:-80}
@@ -91,7 +91,7 @@ services:
         condition: service_started
       minio:
         condition: service_healthy
-      maddy:
+      postfix:
         condition: service_started
     networks:
       - app-network
@@ -195,10 +195,10 @@ services:
   # port 587, then relays outbound through SendGrid. Never exposed to the host.
   # boky/postfix is multi-arch (amd64 + arm64) and configures Postfix as a
   # pure relay via environment variables — no config file needed.
-  maddy:
+  postfix:
     image: boky/postfix:latest
     platform: linux/arm64
-    container_name: apollo-sfs-maddy
+    container_name: apollo-sfs-postfix
     restart: unless-stopped
     environment:
       # Accept submissions from the internal Docker network only

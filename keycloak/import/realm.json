@@ -32,7 +32,7 @@
   "maxDeltaTimeSeconds": 43200,
   "failureFactor": 10,
   "smtpServer": {
-    "host": "maddy",
+    "host": "postfix",
     "port": "587",
     "from": "noreply@apollo-sfs.com",
     "fromDisplayName": "Apollo SFS",

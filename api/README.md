@@ -6,7 +6,7 @@ Go + Gin REST API for the Apollo SFS file storage service.
 
 - [Go 1.26+](https://go.dev/dl/)
 - [golang-migrate CLI](https://github.com/golang-migrate/migrate/tree/master/cmd/migrate) (for running migrations manually)
-- A running instance of the Docker Compose stack (PostgreSQL, MinIO, Keycloak, Maddy)
+- A running instance of the Docker Compose stack (PostgreSQL, MinIO, Keycloak, Postfix)
 - A populated `.env` file in the project root
 
 ## Installation

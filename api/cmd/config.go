@@ -27,7 +27,7 @@ type Config struct {
 	CookieSecure          bool
 	TokenRefreshThreshold time.Duration
 
-	MaddyInternalHost string
+	PostfixInternalHost string
 	MailFrom          string
 	MailDomain        string
 
@@ -71,7 +71,7 @@ func loadConfig() Config {
 		CookieSecure:          os.Getenv("COOKIE_SECURE") == "true",
 		TokenRefreshThreshold: time.Duration(refreshSecs) * time.Second,
 
-		MaddyInternalHost: requireEnv("MADDY_INTERNAL_HOST"),
+		PostfixInternalHost: requireEnv("POSTFIX_INTERNAL_HOST"),
 		MailFrom:          requireEnv("MAIL_FROM"),
 		MailDomain:        requireEnv("MAIL_DOMAIN"),
 

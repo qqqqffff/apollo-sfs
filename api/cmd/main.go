@@ -97,7 +97,7 @@ func main() {
 	log.Printf("minio: connected to %s (bucket: %s)", cfg.MinIOEndpoint, cfg.MinIOBucketName)
 
 	emailSvc, err := services.NewEmailService(queries, services.EmailConfig{
-		SMTPAddr:     cfg.MaddyInternalHost,
+		SMTPAddr:     cfg.PostfixInternalHost,
 		MailFrom:     cfg.MailFrom,
 		AppName:      "Apollo SFS",
 		AppURL:       cfg.AppBaseURL,

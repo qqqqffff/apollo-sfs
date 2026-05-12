@@ -1,3 +1,5 @@
+import { useId } from 'react'
+
 export interface LinePoint {
   x: number  // Unix ms timestamp
   y: number  // numeric value
@@ -36,6 +38,8 @@ export function LineGraph({
   formatY = defaultFormatY,
   formatX = defaultFormatX,
 }: Props) {
+  const uid = useId()
+  const gradId = `line-fill-${uid.replace(/:/g, '')}`
   const chartW = width - PAD.left - PAD.right
   const chartH = height - PAD.top - PAD.bottom
 
@@ -89,7 +93,7 @@ export function LineGraph({
   return (
     <svg width={width} height={height} style={{ display: 'block', overflow: 'visible' }}>
       <defs>
-        <linearGradient id="line-fill" x1="0" y1="0" x2="0" y2="1">
+        <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
           <stop offset="0%" stopColor={color} stopOpacity={0.18} />
           <stop offset="100%" stopColor={color} stopOpacity={0} />
         </linearGradient>
@@ -116,7 +120,7 @@ export function LineGraph({
       })}
 
       {/* filled area */}
-      <path d={fillD} fill="url(#line-fill)" />
+      <path d={fillD} fill={`url(#${gradId})`} />
 
       {/* line */}
       <path d={pathD} stroke={color} strokeWidth={2} fill="none" strokeLinejoin="round" />

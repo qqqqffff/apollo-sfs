@@ -60,6 +60,8 @@ export interface MetricsSnapshot {
   disk_free_bytes: number
   active_user_count: number
   total_user_count: number
+  cpu_temp_celsius: number | null
+  drive_temp_celsius: number | null
 }
 
 export function getMetrics() {
@@ -68,6 +70,77 @@ export function getMetrics() {
 
 export function getMetricsHistoryByHours(hours: number) {
   return get<MetricsSnapshot[]>(`/admin/system/metrics/history?hours=${hours}`)
+}
+
+// ── Infrastructure ─────────────────────────────────────────────────────────────
+
+export interface DriveSummary {
+  drive_id: string
+  server_id: string
+  server_name: string
+  drive_label: string
+  capacity_bytes: number
+  minio_bucket: string
+  allocated_quota_bytes: number
+  used_bytes: number
+  drive_is_active: boolean
+  server_is_active: boolean
+}
+
+export interface CapacitySummary {
+  max_available_bytes: number
+}
+
+export function listInfrastructure() {
+  return get<{ drives: DriveSummary[] }>('/admin/system/infrastructure')
+}
+
+export function getCapacity() {
+  return get<CapacitySummary>('/admin/system/capacity')
+}
+
+export function createServer(params: {
+  state: string
+  minio_endpoint: string
+  minio_use_ssl: boolean
+  access_key: string
+  secret_key: string
+}) {
+  return post<{ id: string; name: string }>('/admin/system/servers', params)
+}
+
+export function updateServer(serverId: string, params: { is_active?: boolean }) {
+  return patch<{ message: string }>(`/admin/system/servers/${serverId}`, params)
+}
+
+export function addDrive(
+  serverId: string,
+  params: { label: string; minio_bucket: string; capacity_bytes: number },
+) {
+  return post<DriveSummary>(`/admin/system/servers/${serverId}/drives`, params)
+}
+
+export function updateDrive(
+  serverId: string,
+  driveId: string,
+  params: { label?: string; capacity_bytes?: number; is_active?: boolean },
+) {
+  return patch<DriveSummary>(
+    `/admin/system/servers/${serverId}/drives/${driveId}`,
+    params,
+  )
+}
+
+export const infrastructureQueryOptions = {
+  queryKey: ['admin', 'infrastructure'] as const,
+  queryFn: listInfrastructure,
+  refetchInterval: 30_000,
+}
+
+export const capacityQueryOptions = {
+  queryKey: ['admin', 'capacity'] as const,
+  queryFn: getCapacity,
+  refetchInterval: 30_000,
 }
 
 // ── Banned IPs ─────────────────────────────────────────────────────────────────

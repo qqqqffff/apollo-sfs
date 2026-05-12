@@ -30,6 +30,8 @@ type UploadSession struct {
 	MinioUploadID string
 	UserKey       []byte // zeroed by Zero() when the session is finalised or deleted
 	MimeType      string // detected from the first chunk; set by EncryptAndUploadPart
+	DriveID       uuid.UUID
+	MinIOStorage  *MinIOService
 
 	createdAt time.Time
 	wg        sync.WaitGroup

@@ -157,6 +157,7 @@ services:
       KC_HTTP_ENABLED: "true"
       KC_HTTP_PORT: 8180
       KC_HTTPS_ENABLED: "false"
+      KC_HEALTH_ENABLED: "true"
       # Full URL including protocol — KC 26 requires this, not a bare hostname
       KC_HOSTNAME: ${APP_BASE_URL}
       KC_HOSTNAME_STRICT: "true"
@@ -177,7 +178,7 @@ services:
     healthcheck:
       # Port 9000 is Keycloak 26's dedicated management port — health endpoints
       # are always available here regardless of any KC_HEALTH_ENABLED setting
-      test: ["CMD-SHELL", "curl -sf http://localhost:9000/health/ready"]
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/9000; echo -e 'GET /health/live HTTP/1.1\r\nhost: localhost\r\nConnection: close\r\n\r\n' >&3; grep 'HTTP/1.1 200 OK' <&3"]
       interval: 30s
       timeout: 15s
       retries: 10

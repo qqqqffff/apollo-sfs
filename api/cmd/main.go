@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
 	"github.com/oschwald/geoip2-golang"
+	psdisk "github.com/shirou/gopsutil/v4/disk"
 
 	"apollo-sfs.com/api/db"
 	"apollo-sfs.com/api/routes"
@@ -82,20 +84,17 @@ func main() {
 	})
 	authSvc.ProvisionUserKey = encSvc.ProvisionUserKey
 
-	// ── MinIO ─────────────────────────────────────────────────────────────────
-	minioClient, err := services.NewMinIOClient(
-		cfg.MinIOEndpoint,
-		cfg.MinIOAccessKey,
-		cfg.MinIOSecretKey,
-		false, // TLS terminated by Nginx; internal Docker network uses plain HTTP
-	)
+	// ── MinIO registry ────────────────────────────────────────────────────────
+	// Seed the servers/drives tables on first boot, then build the registry from DB.
+	if err := seedDefaultServer(context.Background(), queries, cfg, encSvc.KEK()); err != nil {
+		log.Fatalf("startup seed: %v", err)
+	}
+
+	registry, err := services.NewMinIORegistry(context.Background(), queries, encSvc.KEK())
 	if err != nil {
-		log.Fatalf("minio: %v", err)
+		log.Fatalf("minio registry: %v", err)
 	}
-	if err := services.EnsureBucket(context.Background(), minioClient, cfg.MinIOBucketName); err != nil {
-		log.Fatalf("minio: %v", err)
-	}
-	log.Printf("minio: connected to %s (bucket: %s)", cfg.MinIOEndpoint, cfg.MinIOBucketName)
+	log.Printf("minio: registry initialised")
 
 	emailSvc, err := services.NewEmailService(queries, services.EmailConfig{
 		SMTPAddr:     cfg.PostfixInternalHost,
@@ -108,8 +107,6 @@ func main() {
 		log.Fatalf("email service: %v", err)
 	}
 
-	minioSvc := services.NewMinIOService(minioClient, cfg.MinIOBucketName)
-
 	transcodeSvc := services.NewTranscodeService()
 	if transcodeSvc.Available() {
 		log.Printf("transcode: ffmpeg found — background 480p variants enabled")
@@ -117,7 +114,7 @@ func main() {
 		log.Printf("transcode: ffmpeg not found — video variants disabled")
 	}
 
-	fileSvc := services.NewFileService(queries, minioSvc, encSvc, emailSvc, transcodeSvc, services.FileServiceConfig{
+	fileSvc := services.NewFileService(queries, registry, encSvc, emailSvc, transcodeSvc, services.FileServiceConfig{
 		QuotaWarnPct: cfg.QuotaWarningThresholdPct,
 	})
 	folderSvc := services.NewFolderService(queries)
@@ -150,7 +147,7 @@ func main() {
 	go metricsSvc.Start(context.Background())
 	go emailSvc.Start(context.Background())
 
-	r := setupRouter(cfg, queries, oidcVerifier, authSvc, fileSvc, folderSvc, favSvc, inviteSvc, metricsSvc, geoReader)
+	r := setupRouter(cfg, queries, oidcVerifier, authSvc, fileSvc, folderSvc, favSvc, inviteSvc, metricsSvc, registry, geoReader)
 
 	addr := ":" + cfg.Port
 	log.Printf("apollo-sfs API listening on %s", addr)
@@ -169,7 +166,7 @@ func main() {
 	}
 }
 
-func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVerifier, authSvc *services.AuthService, fileSvc *services.FileService, folderSvc *services.FolderService, favSvc *services.FavoriteService, inviteSvc *services.InviteService, metricsSvc *services.MetricsService, geoReader *geoip2.Reader) *gin.Engine {
+func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVerifier, authSvc *services.AuthService, fileSvc *services.FileService, folderSvc *services.FolderService, favSvc *services.FavoriteService, inviteSvc *services.InviteService, metricsSvc *services.MetricsService, registry *services.MinIORegistry, geoReader *geoip2.Reader) *gin.Engine {
 	r := gin.New()
 	r.Use(gin.Logger())
 	r.Use(gin.Recovery())
@@ -205,7 +202,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 
 	h := routes.NewHandler(queries, fileSvc, folderSvc, inviteSvc, favSvc, authSvc, uploadStore)
 	authHandler := auth.NewHandler(authSvc)
-	adminHandler := admin.NewHandler(queries, inviteSvc, metricsSvc, authSvc, geoReader)
+	adminHandler := admin.NewHandler(queries, inviteSvc, metricsSvc, authSvc, registry, geoReader)
 
 	v1 := r.Group("/api/v1")
 
@@ -285,6 +282,13 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 			adminGroup.GET("/system/metrics/history", adminHandler.GetMetricsHistory)
 			adminGroup.GET("/system/metrics/stream", adminHandler.StreamMetrics)
 
+			adminGroup.GET("/system/infrastructure", adminHandler.GetInfrastructure)
+			adminGroup.GET("/system/capacity", adminHandler.GetCapacity)
+			adminGroup.POST("/system/servers", adminHandler.CreateServer)
+			adminGroup.PATCH("/system/servers/:server_id", adminHandler.UpdateServer)
+			adminGroup.POST("/system/servers/:server_id/drives", adminHandler.AddDrive)
+			adminGroup.PATCH("/system/servers/:server_id/drives/:drive_id", adminHandler.UpdateDrive)
+
 			adminGroup.GET("/banned-ips", adminHandler.ListBannedIPs)
 			adminGroup.POST("/banned-ips/:id/unban", adminHandler.UnbanIP)
 			adminGroup.POST("/banned-ips/:id/extend", adminHandler.ExtendBan)
@@ -292,4 +296,84 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	}
 
 	return r
+}
+
+// seedDefaultServer runs once on first boot (when the servers table is empty).
+// It creates a server + drive record from the existing env-var MinIO credentials,
+// auto-detects drive capacity from the disk stats path, backfills files.drive_id,
+// and allocates all existing users to the new drive.
+func seedDefaultServer(ctx context.Context, queries *db.Queries, cfg Config, kek []byte) error {
+	servers, err := queries.ListServers(ctx)
+	if err != nil {
+		return fmt.Errorf("list servers: %w", err)
+	}
+	if len(servers) > 0 {
+		return nil // already seeded
+	}
+
+	// Detect physical capacity from the data mount.
+	var capacityBytes int64
+	if usage, err := psdisk.Usage(cfg.DiskStatsPath); err == nil {
+		capacityBytes = int64(usage.Total)
+	} else {
+		log.Printf("seed: could not detect disk capacity (%v); defaulting to 1 TiB", err)
+		capacityBytes = 1 << 40
+	}
+
+	// Encrypt the existing MinIO credentials with the KEK.
+	accessEnc, accessNonce, err := services.EncryptMinIOSecret(kek, cfg.MinIOAccessKey)
+	if err != nil {
+		return fmt.Errorf("encrypt access key: %w", err)
+	}
+	secretEnc, secretNonce, err := services.EncryptMinIOSecret(kek, cfg.MinIOSecretKey)
+	if err != nil {
+		return fmt.Errorf("encrypt secret key: %w", err)
+	}
+
+	server, err := queries.CreateServer(ctx, db.CreateServerParams{
+		Name:                "LOCAL-0001",
+		State:               "LOCAL",
+		MinioEndpoint:       cfg.MinIOEndpoint,
+		MinioUseSSL:         false,
+		MinioAccessKeyEnc:   accessEnc,
+		MinioAccessKeyNonce: accessNonce,
+		MinioSecretKeyEnc:   secretEnc,
+		MinioSecretKeyNonce: secretNonce,
+	})
+	if err != nil {
+		return fmt.Errorf("create server: %w", err)
+	}
+
+	drive, err := queries.CreateDrive(ctx, db.CreateDriveParams{
+		ServerID:      server.ID,
+		Label:         "nvme-01",
+		CapacityBytes: capacityBytes,
+		MinioBucket:   cfg.MinIOBucketName,
+	})
+	if err != nil {
+		return fmt.Errorf("create drive: %w", err)
+	}
+
+	// Backfill existing files and user allocations.
+	pool, err := db.Connect(cfg.DatabaseDSN)
+	if err != nil {
+		return fmt.Errorf("open pool for backfill: %w", err)
+	}
+	defer pool.Close()
+
+	if _, err := pool.ExecContext(ctx,
+		`UPDATE files SET drive_id = $1 WHERE drive_id IS NULL`, drive.ID); err != nil {
+		return fmt.Errorf("backfill files.drive_id: %w", err)
+	}
+	if _, err := pool.ExecContext(ctx, `
+		INSERT INTO user_drive_allocations (user_id, drive_id)
+		SELECT username, $1 FROM users
+		ON CONFLICT (user_id) DO NOTHING
+	`, drive.ID); err != nil {
+		return fmt.Errorf("backfill user_drive_allocations: %w", err)
+	}
+
+	log.Printf("seed: created server %s + drive %s (capacity %.1f GB), backfilled existing data",
+		server.Name, drive.Label, float64(capacityBytes)/(1<<30))
+	return nil
 }

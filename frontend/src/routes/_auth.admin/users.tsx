@@ -3,6 +3,7 @@ import { useRef, useState } from 'react'
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { MdCheck, MdClose, MdEdit } from 'react-icons/md'
 import { adminUsersInfiniteQueryOptions, updateUserQuota, updateUsername } from '../../api/admin'
+import { ApiError } from '../../api/client'
 import { meQueryOptions } from '../../api/me'
 import type { User } from '../../types/api'
 import { useNotification } from '../../context/NotificationContext'
@@ -28,16 +29,30 @@ function RouteComponent() {
   const [editingUsername, setEditingUsername] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
   const [editError, setEditError] = useState<string | null>(null)
+  const [quotaError, setQuotaError] = useState<string | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
   const quotaMutation = useMutation({
     mutationFn: ({ username, gb }: { username: string; gb: number }) =>
       updateUserQuota(username, gb * GB),
     onSuccess: () => {
+      setQuotaError(null)
       queryClient.invalidateQueries({ queryKey: ['admin', 'users'] })
       notify('success', 'Storage quota updated')
     },
-    onError: () => notify('error', 'Failed to update storage quota'),
+    onError: (err) => {
+      if (err instanceof ApiError && err.status === 409) {
+        const maxBytes = typeof err.body.max_bytes === 'number' ? err.body.max_bytes : null
+        const drive = typeof err.body.drive_label === 'string' ? err.body.drive_label : null
+        const maxGb = maxBytes !== null ? (maxBytes / GB).toFixed(1) : null
+        const msg = maxGb
+          ? `Drive capacity exceeded — max ${maxGb} GB${drive ? ` on ${drive}` : ''}`
+          : 'Quota exceeds drive capacity'
+        setQuotaError(msg)
+      } else {
+        notify('error', 'Failed to update storage quota')
+      }
+    },
   })
 
   const renameMutation = useMutation({
@@ -166,16 +181,22 @@ function RouteComponent() {
                     {u.last_seen_at ? new Date(u.last_seen_at).toLocaleString() : '—'}
                   </td>
                   <td className="px-4 py-3">
-                    <button
-                      onClick={() => {
-                        const raw = prompt(`New quota for ${u.username} (GB)`, String(u.storage_quota_bytes / GB | 0))
-                        const gb = Number(raw)
-                        if (raw && !isNaN(gb) && gb >= 0) quotaMutation.mutate({ username: u.username, gb })
-                      }}
-                      className="text-xs text-blue-600 hover:text-blue-800 cursor-pointer bg-transparent border border-blue-200 hover:border-blue-400 rounded px-2 py-1 transition-colors"
-                    >
-                      Set quota
-                    </button>
+                    <div className="flex flex-col gap-1">
+                      <button
+                        onClick={() => {
+                          setQuotaError(null)
+                          const raw = prompt(`New quota for ${u.username} (GB)`, String(u.storage_quota_bytes / GB | 0))
+                          const gb = Number(raw)
+                          if (raw && !isNaN(gb) && gb >= 0) quotaMutation.mutate({ username: u.username, gb })
+                        }}
+                        className="text-xs text-blue-600 hover:text-blue-800 cursor-pointer bg-transparent border border-blue-200 hover:border-blue-400 rounded px-2 py-1 transition-colors"
+                      >
+                        Set quota
+                      </button>
+                      {quotaError && quotaMutation.variables?.username === u.username && (
+                        <span className="text-xs text-red-500">{quotaError}</span>
+                      )}
+                    </div>
                   </td>
                 </tr>
               )

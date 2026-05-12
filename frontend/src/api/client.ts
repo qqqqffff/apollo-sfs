@@ -8,6 +8,7 @@ export class ApiError extends Error {
   constructor(
     public readonly status: number,
     message: string,
+    public readonly body: Record<string, unknown> = {},
   ) {
     super(message)
     this.name = 'ApiError'
@@ -26,8 +27,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
   if (!res.ok) {
     if (res.status === 401) dispatchSessionExpired()
-    const body = await res.json().catch(() => ({})) as { error?: string }
-    throw new ApiError(res.status, body.error ?? res.statusText)
+    const body = await res.json().catch(() => ({})) as Record<string, unknown>
+    throw new ApiError(res.status, (body.error as string | undefined) ?? res.statusText, body)
   }
 
   // 204 No Content

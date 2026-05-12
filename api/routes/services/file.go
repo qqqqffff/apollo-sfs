@@ -92,12 +92,18 @@ type raEntry struct {
 	expiresAt time.Time
 }
 
+type cachedAlloc struct {
+	storage   *MinIOService
+	driveID   uuid.UUID
+	expiresAt time.Time
+}
+
 // FileService handles encrypted file upload, download, metadata retrieval,
 // rename, and deletion. All blobs are AES-256-GCM encrypted before being
 // written to MinIO; plaintext never leaves the service boundary.
 type FileService struct {
 	queries      *db.Queries
-	storage      *MinIOService
+	registry     *MinIORegistry
 	enc          *EncryptionService
 	email        *EmailService
 	transcode    *TranscodeService
@@ -106,24 +112,62 @@ type FileService struct {
 	userCacheMu sync.RWMutex
 	userCache   map[string]cachedUser
 
+	allocCacheMu sync.RWMutex
+	allocCache   map[string]cachedAlloc
+
 	raMu       sync.Mutex
 	raCache    map[raKey]*raEntry
 	raInflight map[raKey]struct{} // keys with an active prefetch goroutine
 }
 
 // NewFileService constructs a FileService.
-func NewFileService(q *db.Queries, storage *MinIOService, enc *EncryptionService, email *EmailService, transcode *TranscodeService, cfg FileServiceConfig) *FileService {
+func NewFileService(q *db.Queries, registry *MinIORegistry, enc *EncryptionService, email *EmailService, transcode *TranscodeService, cfg FileServiceConfig) *FileService {
 	return &FileService{
 		queries:      q,
-		storage:      storage,
+		registry:     registry,
 		enc:          enc,
 		email:        email,
 		transcode:    transcode,
 		quotaWarnPct: cfg.QuotaWarnPct,
 		userCache:    make(map[string]cachedUser),
+		allocCache:   make(map[string]cachedAlloc),
 		raCache:      make(map[raKey]*raEntry),
 		raInflight:   make(map[raKey]struct{}),
 	}
+}
+
+// storageFor returns the MinIOService and driveID for the given user. Results
+// are cached for userCacheTTL to avoid a DB round-trip on every range request.
+func (s *FileService) storageFor(ctx context.Context, username string) (*MinIOService, uuid.UUID, error) {
+	s.allocCacheMu.RLock()
+	entry, ok := s.allocCache[username]
+	s.allocCacheMu.RUnlock()
+	if ok && time.Now().Before(entry.expiresAt) {
+		return entry.storage, entry.driveID, nil
+	}
+
+	alloc, err := s.queries.GetUserDrive(ctx, username)
+	if err != nil {
+		return nil, uuid.Nil, fmt.Errorf("storage lookup for %q: %w", username, err)
+	}
+	if alloc == nil {
+		return nil, uuid.Nil, fmt.Errorf("storage lookup for %q: no drive allocation", username)
+	}
+	client, ok := s.registry.Client(alloc.Server.ID)
+	if !ok {
+		return nil, uuid.Nil, fmt.Errorf("storage lookup for %q: no MinIO client for server %s", username, alloc.Server.Name)
+	}
+	svc := NewMinIOService(client, alloc.Drive.MinioBucket)
+
+	s.allocCacheMu.Lock()
+	s.allocCache[username] = cachedAlloc{
+		storage:   svc,
+		driveID:   alloc.DriveID,
+		expiresAt: time.Now().Add(userCacheTTL),
+	}
+	s.allocCacheMu.Unlock()
+
+	return svc, alloc.DriveID, nil
 }
 
 // ── Public operations ─────────────────────────────────────────────────────────
@@ -182,11 +226,17 @@ func (s *FileService) Upload(ctx context.Context, in UploadInput) (*models.File,
 		}
 	}
 
-	// 6. Stream ciphertext to MinIO. Object key: {userID}/{fileID}.
+	// 6. Resolve the user's storage drive.
+	storage, driveID, err := s.storageFor(ctx, in.Username)
+	if err != nil {
+		return nil, fmt.Errorf("upload: %w", err)
+	}
+
+	// 7. Stream ciphertext to MinIO. Object key: {userID}/{fileID}.
 	fileID := uuid.New()
 	objectKey := objectKeyFor(in.UserID, fileID)
 
-	if err := s.storage.PutObject(
+	if err := storage.PutObject(
 		ctx, objectKey,
 		bytes.NewReader(ciphertext), int64(len(ciphertext)),
 		"application/octet-stream",
@@ -194,10 +244,10 @@ func (s *FileService) Upload(ctx context.Context, in UploadInput) (*models.File,
 		return nil, fmt.Errorf("upload: store: %w", err)
 	}
 
-	// 7. Insert file metadata into DB within a user-scoped transaction.
+	// 8. Insert file metadata into DB within a user-scoped transaction.
 	uq, utx, err := s.queries.ForUser(ctx, in.UserID)
 	if err != nil {
-		_ = s.storage.RemoveObject(ctx, objectKey)
+		_ = storage.RemoveObject(ctx, objectKey)
 		return nil, fmt.Errorf("upload: begin tx: %w", err)
 	}
 	defer func() { _ = utx.Rollback() }()
@@ -205,6 +255,7 @@ func (s *FileService) Upload(ctx context.Context, in UploadInput) (*models.File,
 		ID:             fileID,
 		UserID:         in.UserID,
 		FolderID:       in.FolderID,
+		DriveID:        &driveID,
 		Name:           in.Name,
 		MimeType:       mimeType,
 		SizeBytes:      fileSize,
@@ -213,7 +264,7 @@ func (s *FileService) Upload(ctx context.Context, in UploadInput) (*models.File,
 	})
 	if err != nil {
 		// Best-effort cleanup: delete the orphaned MinIO object.
-		_ = s.storage.RemoveObject(ctx, objectKey)
+		_ = storage.RemoveObject(ctx, objectKey)
 		var pqErr *pq.Error
 		if errors.As(err, &pqErr) && pqErr.Code == "23505" {
 			return nil, ErrDuplicateName
@@ -221,7 +272,7 @@ func (s *FileService) Upload(ctx context.Context, in UploadInput) (*models.File,
 		return nil, fmt.Errorf("upload: save metadata: %w", err)
 	}
 	if err := utx.Commit(); err != nil {
-		_ = s.storage.RemoveObject(ctx, objectKey)
+		_ = storage.RemoveObject(ctx, objectKey)
 		return nil, fmt.Errorf("upload: commit: %w", err)
 	}
 
@@ -377,14 +428,19 @@ func (s *FileService) Delete(ctx context.Context, fileID, userID uuid.UUID, user
 		return fmt.Errorf("delete: get file: %w", err)
 	}
 
+	storage, _, err := s.storageFor(ctx, username)
+	if err != nil {
+		return fmt.Errorf("delete: %w", err)
+	}
+
 	// Best-effort: remove any transcoded variant blobs before the parent row is deleted.
 	if variants, err := q.ListVideoVariants(ctx, fileID); err == nil {
 		for _, v := range variants {
-			_ = s.storage.RemoveObject(ctx, v.MinIOObjectKey)
+			_ = storage.RemoveObject(ctx, v.MinIOObjectKey)
 		}
 	}
 
-	if err := s.storage.RemoveObject(ctx, file.MinIOObjectKey); err != nil {
+	if err := storage.RemoveObject(ctx, file.MinIOObjectKey); err != nil {
 		return fmt.Errorf("delete: remove blob: %w", err)
 	}
 	if err := q.DeleteFile(ctx, fileID); err != nil {
@@ -435,6 +491,12 @@ func (s *FileService) createVariant(file *models.File, username string) {
 
 	ctx := context.Background()
 	variantKey := objectKeyFor(file.UserID, uuid.New())
+
+	storage, _, storErr := s.storageFor(ctx, username)
+	if storErr != nil {
+		log.Printf("transcode: storage lookup for %s: %v", file.ID, storErr)
+		return
+	}
 
 	if _, err := s.queries.CreateVideoVariant(ctx, file.ID, LowQualityLabel, variantKey); err != nil {
 		log.Printf("transcode: create record for %s: %v", file.ID, err)
@@ -520,7 +582,7 @@ func (s *FileService) createVariant(file *models.File, username string) {
 		return
 	}
 
-	if err := s.storage.PutObject(ctx, variantKey, bytes.NewReader(ciphertext), int64(len(ciphertext)), "application/octet-stream"); err != nil {
+	if err := storage.PutObject(ctx, variantKey, bytes.NewReader(ciphertext), int64(len(ciphertext)), "application/octet-stream"); err != nil {
 		log.Printf("transcode: upload variant for %s: %v", file.ID, err)
 		markFailed()
 		return
@@ -528,7 +590,7 @@ func (s *FileService) createVariant(file *models.File, username string) {
 
 	if err := s.queries.MarkVideoVariantReady(ctx, file.ID, LowQualityLabel, variantPlaintextSize); err != nil {
 		log.Printf("transcode: mark ready for %s: %v", file.ID, err)
-		_ = s.storage.RemoveObject(ctx, variantKey)
+		_ = storage.RemoveObject(ctx, variantKey)
 		return
 	}
 	log.Printf("transcode: done %s → 480p (%.1f MB)", file.ID, float64(variantPlaintextSize)/(1024*1024))
@@ -570,7 +632,12 @@ func (s *FileService) DownloadChunked(ctx context.Context, file *models.File, us
 	}
 	defer zeroBytes(userKey)
 
-	rc, err := s.storage.GetObject(ctx, file.MinIOObjectKey)
+	storage, _, err := s.storageFor(ctx, username)
+	if err != nil {
+		return nil, fmt.Errorf("download chunked: %w", err)
+	}
+
+	rc, err := storage.GetObject(ctx, file.MinIOObjectKey)
 	if err != nil {
 		return nil, fmt.Errorf("download chunked: fetch blob: %w", err)
 	}
@@ -586,7 +653,7 @@ func (s *FileService) DownloadChunked(ctx context.Context, file *models.File, us
 // fetchRange fetches and decrypts plaintext bytes [rangeStart, rangeEnd] for a
 // chunked-encrypted file, bypassing the read-ahead cache. It is the inner
 // implementation shared by DownloadRange and the prefetch goroutine.
-func (s *FileService) fetchRange(ctx context.Context, file *models.File, username string, rangeStart, rangeEnd int64) ([]byte, error) {
+func (s *FileService) fetchRange(ctx context.Context, storage *MinIOService, file *models.File, username string, rangeStart, rangeEnd int64) ([]byte, error) {
 	userKey, err := s.userKey(ctx, username)
 	if err != nil {
 		return nil, fmt.Errorf("fetch range: %w", err)
@@ -610,7 +677,7 @@ func (s *FileService) fetchRange(ctx context.Context, file *models.File, usernam
 	}
 	blobEnd := blobStart + (lastChunkIdx-firstChunkIdx)*int64(StoredChunkSize) + lastStoredSize - 1
 
-	rc, err := s.storage.GetObjectRange(ctx, file.MinIOObjectKey, blobStart, blobEnd)
+	rc, err := storage.GetObjectRange(ctx, file.MinIOObjectKey, blobStart, blobEnd)
 	if err != nil {
 		return nil, fmt.Errorf("fetch range: get object: %w", err)
 	}
@@ -630,23 +697,28 @@ func (s *FileService) fetchRange(ctx context.Context, file *models.File, usernam
 // response from RAM; on a miss, fetchRange is called and a prefetch goroutine
 // is scheduled for the next segment to hide the latency of the following request.
 func (s *FileService) DownloadRange(ctx context.Context, file *models.File, username string, rangeStart, rangeEnd int64) ([]byte, error) {
+	storage, _, err := s.storageFor(ctx, username)
+	if err != nil {
+		return nil, fmt.Errorf("download range: %w", err)
+	}
+
 	key := raKey{objectKey: file.MinIOObjectKey, offset: rangeStart}
 
 	if cached, ok := s.raCacheGet(key); ok {
 		need := rangeEnd - rangeStart + 1
 		if int64(len(cached)) >= need {
 			// Prefetch the segment that follows the full cached window, not just rangeEnd.
-			s.schedulePrefetch(file, username, rangeStart+int64(len(cached)))
+			s.schedulePrefetch(storage, file, username, rangeStart+int64(len(cached)))
 			return cached[:need], nil
 		}
 		// Cache holds fewer bytes than needed (e.g. near EOF) — fall through.
 	}
 
-	data, err := s.fetchRange(ctx, file, username, rangeStart, rangeEnd)
+	data, err := s.fetchRange(ctx, storage, file, username, rangeStart, rangeEnd)
 	if err != nil {
 		return nil, err
 	}
-	s.schedulePrefetch(file, username, rangeEnd+1)
+	s.schedulePrefetch(storage, file, username, rangeEnd+1)
 	return data, nil
 }
 
@@ -697,7 +769,7 @@ func (s *FileService) raCachePut(key raKey, data []byte) {
 
 // schedulePrefetch launches a background goroutine to fetch and cache the
 // segment starting at offset, unless one is already in-flight or cached.
-func (s *FileService) schedulePrefetch(file *models.File, username string, offset int64) {
+func (s *FileService) schedulePrefetch(storage *MinIOService, file *models.File, username string, offset int64) {
 	if offset >= file.SizeBytes {
 		return
 	}
@@ -725,7 +797,7 @@ func (s *FileService) schedulePrefetch(file *models.File, username string, offse
 		if end >= fileCopy.SizeBytes {
 			end = fileCopy.SizeBytes - 1
 		}
-		data, err := s.fetchRange(context.Background(), &fileCopy, username, offset, end)
+		data, err := s.fetchRange(context.Background(), storage, &fileCopy, username, offset, end)
 		if err != nil {
 			log.Printf("read-ahead: prefetch %s@%d: %v", fileCopy.MinIOObjectKey, offset, err)
 			return
@@ -744,7 +816,13 @@ func (s *FileService) decryptBlob(ctx context.Context, username string, file *mo
 	}
 	defer zeroBytes(userKey)
 
-	rc, err := s.storage.GetObject(ctx, file.MinIOObjectKey)
+	storage, _, err := s.storageFor(ctx, username)
+	if err != nil {
+		log.Printf("decryptBlob: storageFor(%s) file=%s: %v", username, file.ID, err)
+		return nil, fmt.Errorf("decrypt blob: %w", err)
+	}
+
+	rc, err := storage.GetObject(ctx, file.MinIOObjectKey)
 	if err != nil {
 		log.Printf("decryptBlob: GetObject(%s) file=%s: %v", file.MinIOObjectKey, file.ID, err)
 		return nil, fmt.Errorf("fetch blob: %w", err)
@@ -841,9 +919,14 @@ func (s *FileService) BeginChunkedUpload(ctx context.Context, sess *UploadSessio
 	if err != nil {
 		return fmt.Errorf("begin chunked upload: decrypt user key: %w", err)
 	}
+	storage, driveID, err := s.storageFor(ctx, sess.Username)
+	if err != nil {
+		zeroBytes(userKey)
+		return fmt.Errorf("begin chunked upload: %w", err)
+	}
 	fileID := uuid.New()
 	objectKey := objectKeyFor(sess.UserID, fileID)
-	uploadID, err := s.storage.CreateMultipartUpload(ctx, objectKey)
+	uploadID, err := storage.CreateMultipartUpload(ctx, objectKey)
 	if err != nil {
 		zeroBytes(userKey)
 		return fmt.Errorf("begin chunked upload: create multipart: %w", err)
@@ -852,6 +935,8 @@ func (s *FileService) BeginChunkedUpload(ctx context.Context, sess *UploadSessio
 	sess.ObjectKey = objectKey
 	sess.MinioUploadID = uploadID
 	sess.UserKey = userKey
+	sess.DriveID = driveID
+	sess.MinIOStorage = storage
 	return nil
 }
 
@@ -880,7 +965,7 @@ func (s *FileService) EncryptAndUploadPart(ctx context.Context, sess *UploadSess
 		return
 	}
 
-	part, err := s.storage.UploadPart(ctx, sess.ObjectKey, sess.MinioUploadID, index+1, ciphertext)
+	part, err := sess.MinIOStorage.UploadPart(ctx, sess.ObjectKey, sess.MinioUploadID, index+1, ciphertext)
 	if err != nil {
 		sess.RecordPart(index, minio.CompletePart{}, fmt.Errorf("upload part %d: %w", index, err))
 		return
@@ -896,12 +981,12 @@ func (s *FileService) FinalizeChunkedUpload(ctx context.Context, sess *UploadSes
 
 	parts, err := sess.Wait()
 	if err != nil {
-		_ = s.storage.AbortMultipartUpload(ctx, sess.ObjectKey, sess.MinioUploadID)
+		_ = sess.MinIOStorage.AbortMultipartUpload(ctx, sess.ObjectKey, sess.MinioUploadID)
 		return nil, fmt.Errorf("finalize: part upload failed: %w", err)
 	}
 
-	if err := s.storage.CompleteMultipartUpload(ctx, sess.ObjectKey, sess.MinioUploadID, parts); err != nil {
-		_ = s.storage.AbortMultipartUpload(ctx, sess.ObjectKey, sess.MinioUploadID)
+	if err := sess.MinIOStorage.CompleteMultipartUpload(ctx, sess.ObjectKey, sess.MinioUploadID, parts); err != nil {
+		_ = sess.MinIOStorage.AbortMultipartUpload(ctx, sess.ObjectKey, sess.MinioUploadID)
 		return nil, fmt.Errorf("finalize: complete multipart: %w", err)
 	}
 
@@ -915,7 +1000,7 @@ func (s *FileService) FinalizeChunkedUpload(ctx context.Context, sess *UploadSes
 
 	uq, utx, err := s.queries.ForUser(ctx, sess.UserID)
 	if err != nil {
-		_ = s.storage.RemoveObject(ctx, sess.ObjectKey)
+		_ = sess.MinIOStorage.RemoveObject(ctx, sess.ObjectKey)
 		return nil, fmt.Errorf("finalize: begin tx: %w", err)
 	}
 	defer func() { _ = utx.Rollback() }()
@@ -923,6 +1008,7 @@ func (s *FileService) FinalizeChunkedUpload(ctx context.Context, sess *UploadSes
 		ID:             sess.FileID,
 		UserID:         sess.UserID,
 		FolderID:       sess.FolderID,
+		DriveID:        &sess.DriveID,
 		Name:           sess.Name,
 		MimeType:       mimeType,
 		SizeBytes:      sess.TotalSize,
@@ -930,7 +1016,7 @@ func (s *FileService) FinalizeChunkedUpload(ctx context.Context, sess *UploadSes
 		Nonce:          []byte{}, // empty nonce signals chunked encryption mode
 	})
 	if err != nil {
-		_ = s.storage.RemoveObject(ctx, sess.ObjectKey)
+		_ = sess.MinIOStorage.RemoveObject(ctx, sess.ObjectKey)
 		var pqErr *pq.Error
 		if errors.As(err, &pqErr) && pqErr.Code == "23505" {
 			return nil, ErrDuplicateName
@@ -938,7 +1024,7 @@ func (s *FileService) FinalizeChunkedUpload(ctx context.Context, sess *UploadSes
 		return nil, fmt.Errorf("finalize: save metadata: %w", err)
 	}
 	if err := utx.Commit(); err != nil {
-		_ = s.storage.RemoveObject(ctx, sess.ObjectKey)
+		_ = sess.MinIOStorage.RemoveObject(ctx, sess.ObjectKey)
 		return nil, fmt.Errorf("finalize: commit: %w", err)
 	}
 

@@ -9,6 +9,7 @@ CREATE TABLE files (
     id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id          UUID        NOT NULL,
     folder_id        UUID        REFERENCES folders (id) ON DELETE CASCADE,
+    drive_id         UUID        REFERENCES drives (id),
     name             TEXT        NOT NULL,
     mime_type        TEXT        NOT NULL DEFAULT 'application/octet-stream',
     size_bytes       BIGINT      NOT NULL DEFAULT 0,

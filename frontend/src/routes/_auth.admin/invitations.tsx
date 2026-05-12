@@ -4,7 +4,7 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tansta
 import { MdContentCopy, MdCheck, MdRefresh } from 'react-icons/md'
 import {
   adminInvitationsInfiniteQueryOptions,
-  adminMetricsQueryOptions,
+  capacityQueryOptions,
   createInvitation,
   revokeInvitation,
   resendInvitation,
@@ -32,7 +32,7 @@ function RouteComponent() {
   const queryClient = useQueryClient()
   const { data, isLoading, error, hasNextPage, isFetchingNextPage, fetchNextPage } =
     useInfiniteQuery(adminInvitationsInfiniteQueryOptions)
-  const { data: metrics } = useQuery({ ...adminMetricsQueryOptions, refetchInterval: 30_000 })
+  const { data: capacity } = useQuery(capacityQueryOptions)
 
   const [email, setEmail] = useState('')
   const [quotaBytes, setQuotaBytes] = useState(10 * GB)
@@ -95,8 +95,9 @@ function RouteComponent() {
     return Math.max(0, RESEND_COOLDOWN_MS - (Date.now() - last))
   }
 
-  const diskFreeGb = metrics?.disk_free_bytes ? metrics.disk_free_bytes / GB : null
-  const diskTotalGb = metrics?.disk_total_bytes ? metrics.disk_total_bytes / GB : null
+  const maxAvailableBytes = capacity?.max_available_bytes ?? null
+  const maxAvailableGb = maxAvailableBytes !== null ? maxAvailableBytes / GB : null
+  const quotaExceedsCapacity = maxAvailableBytes !== null && effectiveQuota > maxAvailableBytes
 
   if (isLoading) return <p className="text-sm text-gray-500">Loading…</p>
   if (error) return <p className="text-sm text-red-500">Failed to load invitations.</p>
@@ -107,21 +108,15 @@ function RouteComponent() {
     <div>
       <h2 className="text-lg font-semibold text-gray-900 mb-6 mt-0">Invitations</h2>
 
-      {diskFreeGb !== null && (
+      {maxAvailableGb !== null && (
         <div className="mb-4 flex items-center gap-2 text-xs text-gray-500">
-          <span className="font-medium text-gray-700">Server disk:</span>
-          <span>
-            {diskFreeGb.toFixed(1)} GB free
-            {diskTotalGb ? ` of ${diskTotalGb.toFixed(0)} GB` : ''}
-          </span>
-          <div className="flex-1 max-w-xs h-1.5 bg-gray-100 rounded-full overflow-hidden">
-            {diskTotalGb && (
-              <div
-                className="h-full bg-blue-400 rounded-full"
-                style={{ width: `${Math.min(100, ((diskTotalGb - diskFreeGb) / diskTotalGb) * 100).toFixed(1)}%` }}
-              />
-            )}
-          </div>
+          <span className="font-medium text-gray-700">Max quota available:</span>
+          <span>{maxAvailableGb.toFixed(1)} GB</span>
+          {quotaExceedsCapacity && (
+            <span className="text-red-500 font-medium">
+              Selected quota exceeds available drive capacity
+            </span>
+          )}
         </div>
       )}
 
@@ -144,7 +139,7 @@ function RouteComponent() {
           />
           <button
             type="submit"
-            disabled={createMutation.isPending || (useCustom && effectiveQuota <= 0)}
+            disabled={createMutation.isPending || (useCustom && effectiveQuota <= 0) || quotaExceedsCapacity}
             className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-lg disabled:opacity-50 cursor-pointer transition-colors"
           >
             {createMutation.isPending ? 'Sending…' : 'Invite'}

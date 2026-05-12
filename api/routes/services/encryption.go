@@ -59,6 +59,9 @@ func NewEncryptionService(q *db.Queries, kekBase64 string) (*EncryptionService, 
 	}, nil
 }
 
+// KEK returns the raw key-encryption key bytes. Used to initialise the MinIORegistry.
+func (s *EncryptionService) KEK() []byte { return s.kek }
+
 // ── Startup ───────────────────────────────────────────────────────────────────
 
 // LoadMasterKeys fetches all non-deleted master keys from the DB, decrypts them

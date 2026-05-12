@@ -10,11 +10,16 @@ import (
 	"apollo-sfs.com/api/models"
 )
 
+const fileColumns = `
+	id, user_id, folder_id, drive_id, name, mime_type,
+	size_bytes, minio_object_key, nonce, created_at, updated_at`
+
 func scanFile(row *sql.Row) (*models.File, error) {
 	var f models.File
 	var folderID uuid.NullUUID
+	var driveID uuid.NullUUID
 	err := row.Scan(
-		&f.ID, &f.UserID, &folderID, &f.Name, &f.MimeType,
+		&f.ID, &f.UserID, &folderID, &driveID, &f.Name, &f.MimeType,
 		&f.SizeBytes, &f.MinIOObjectKey, &f.Nonce, &f.CreatedAt, &f.UpdatedAt,
 	)
 	if err != nil {
@@ -22,6 +27,9 @@ func scanFile(row *sql.Row) (*models.File, error) {
 	}
 	if folderID.Valid {
 		f.FolderID = &folderID.UUID
+	}
+	if driveID.Valid {
+		f.DriveID = &driveID.UUID
 	}
 	return &f, nil
 }
@@ -29,8 +37,9 @@ func scanFile(row *sql.Row) (*models.File, error) {
 func scanFileRow(rows *sql.Rows) (*models.File, error) {
 	var f models.File
 	var folderID uuid.NullUUID
+	var driveID uuid.NullUUID
 	err := rows.Scan(
-		&f.ID, &f.UserID, &folderID, &f.Name, &f.MimeType,
+		&f.ID, &f.UserID, &folderID, &driveID, &f.Name, &f.MimeType,
 		&f.SizeBytes, &f.MinIOObjectKey, &f.Nonce, &f.CreatedAt, &f.UpdatedAt,
 	)
 	if err != nil {
@@ -38,6 +47,9 @@ func scanFileRow(rows *sql.Rows) (*models.File, error) {
 	}
 	if folderID.Valid {
 		f.FolderID = &folderID.UUID
+	}
+	if driveID.Valid {
+		f.DriveID = &driveID.UUID
 	}
 	return &f, nil
 }
@@ -50,14 +62,17 @@ func (q *Queries) CreateFile(ctx context.Context, f *models.File) (*models.File,
 	if f.FolderID != nil {
 		folderID = uuid.NullUUID{UUID: *f.FolderID, Valid: true}
 	}
+	var driveID uuid.NullUUID
+	if f.DriveID != nil {
+		driveID = uuid.NullUUID{UUID: *f.DriveID, Valid: true}
+	}
 	row := q.db.QueryRowContext(ctx, `
 		INSERT INTO files (
-			id, user_id, folder_id, name, mime_type,
+			id, user_id, folder_id, drive_id, name, mime_type,
 			size_bytes, minio_object_key, nonce, created_at, updated_at
-		) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
-		RETURNING id, user_id, folder_id, name, mime_type,
-		          size_bytes, minio_object_key, nonce, created_at, updated_at
-	`, f.UserID, folderID, f.Name, f.MimeType,
+		) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
+		RETURNING`+fileColumns,
+		f.UserID, folderID, driveID, f.Name, f.MimeType,
 		f.SizeBytes, f.MinIOObjectKey, f.Nonce,
 	)
 	out, err := scanFile(row)
@@ -69,11 +84,8 @@ func (q *Queries) CreateFile(ctx context.Context, f *models.File) (*models.File,
 
 // GetFileByID returns a single file record. Returns sql.ErrNoRows if not found.
 func (q *Queries) GetFileByID(ctx context.Context, id uuid.UUID) (*models.File, error) {
-	row := q.db.QueryRowContext(ctx, `
-		SELECT id, user_id, folder_id, name, mime_type,
-		       size_bytes, minio_object_key, nonce, created_at, updated_at
-		FROM files WHERE id = $1
-	`, id)
+	row := q.db.QueryRowContext(ctx,
+		`SELECT`+fileColumns+`FROM files WHERE id = $1`, id)
 	f, err := scanFile(row)
 	if err != nil {
 		return nil, fmt.Errorf("GetFileByID %s: %w", id, err)
@@ -90,8 +102,7 @@ func (q *Queries) ListFilesByFolder(ctx context.Context, folderID uuid.UUID, in 
 	}
 
 	rows, err := q.db.QueryContext(ctx, `
-		SELECT id, user_id, folder_id, name, mime_type,
-		       size_bytes, minio_object_key, nonce, created_at, updated_at
+		SELECT`+fileColumns+`
 		FROM files WHERE folder_id = $1
 		ORDER BY name ASC
 		LIMIT $2 OFFSET $3
@@ -128,8 +139,7 @@ func (q *Queries) ListRootFiles(ctx context.Context, userID uuid.UUID, in PageIn
 	}
 
 	rows, err := q.db.QueryContext(ctx, `
-		SELECT id, user_id, folder_id, name, mime_type,
-		       size_bytes, minio_object_key, nonce, created_at, updated_at
+		SELECT`+fileColumns+`
 		FROM files
 		WHERE user_id = $1 AND folder_id IS NULL
 		ORDER BY name ASC
@@ -158,8 +168,7 @@ func (q *Queries) ListRootFiles(ctx context.Context, userID uuid.UUID, in PageIn
 }
 
 // SearchFilesByUser returns a page of files owned by userID whose name
-// contains term (case-insensitive), ordered by name. Searches across all
-// folders — intended for the global search endpoint.
+// contains term (case-insensitive), ordered by name.
 func (q *Queries) SearchFilesByUser(ctx context.Context, userID uuid.UUID, term string, in PageInput) (*PageResult[models.File], error) {
 	limit := clampLimit(in.Limit)
 	offset, err := decodeOffsetCursor(in.Cursor)
@@ -168,8 +177,7 @@ func (q *Queries) SearchFilesByUser(ctx context.Context, userID uuid.UUID, term 
 	}
 
 	rows, err := q.db.QueryContext(ctx, `
-		SELECT id, user_id, folder_id, name, mime_type,
-		       size_bytes, minio_object_key, nonce, created_at, updated_at
+		SELECT`+fileColumns+`
 		FROM files
 		WHERE user_id = $1 AND name ILIKE '%' || $2 || '%'
 		ORDER BY name ASC
@@ -198,7 +206,7 @@ func (q *Queries) SearchFilesByUser(ctx context.Context, userID uuid.UUID, term 
 }
 
 // ListFilesByUser returns a page of all files owned by userID across all folders,
-// ordered by name. Secondary index: files.user_id should be indexed in the DB migration.
+// ordered by name.
 func (q *Queries) ListFilesByUser(ctx context.Context, userID uuid.UUID, in PageInput) (*PageResult[models.File], error) {
 	limit := clampLimit(in.Limit)
 	offset, err := decodeOffsetCursor(in.Cursor)
@@ -207,8 +215,7 @@ func (q *Queries) ListFilesByUser(ctx context.Context, userID uuid.UUID, in Page
 	}
 
 	rows, err := q.db.QueryContext(ctx, `
-		SELECT id, user_id, folder_id, name, mime_type,
-		       size_bytes, minio_object_key, nonce, created_at, updated_at
+		SELECT`+fileColumns+`
 		FROM files WHERE user_id = $1
 		ORDER BY name ASC
 		LIMIT $2 OFFSET $3
@@ -240,9 +247,8 @@ func (q *Queries) UpdateFileName(ctx context.Context, id uuid.UUID, name string)
 	row := q.db.QueryRowContext(ctx, `
 		UPDATE files SET name = $2, updated_at = NOW()
 		WHERE id = $1
-		RETURNING id, user_id, folder_id, name, mime_type,
-		          size_bytes, minio_object_key, nonce, created_at, updated_at
-	`, id, name)
+		RETURNING`+fileColumns,
+		id, name)
 	f, err := scanFile(row)
 	if err != nil {
 		return nil, fmt.Errorf("UpdateFileName %s: %w", id, err)
@@ -256,9 +262,8 @@ func (q *Queries) MoveFile(ctx context.Context, fileID, newFolderID uuid.UUID) (
 	row := q.db.QueryRowContext(ctx, `
 		UPDATE files SET folder_id = $2, updated_at = NOW()
 		WHERE id = $1
-		RETURNING id, user_id, folder_id, name, mime_type,
-		          size_bytes, minio_object_key, nonce, created_at, updated_at
-	`, fileID, newFolderID)
+		RETURNING`+fileColumns,
+		fileID, newFolderID)
 	f, err := scanFile(row)
 	if err != nil {
 		return nil, fmt.Errorf("MoveFile %s: %w", fileID, err)

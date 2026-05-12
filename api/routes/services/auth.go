@@ -17,6 +17,9 @@ import (
 	"apollo-sfs.com/api/models"
 )
 
+// ErrNoCapacity is re-exported so handlers can check it without importing db.
+var ErrNoCapacity = db.ErrNoCapacity
+
 const defaultQuotaBytes = 10 * 1024 * 1024 * 1024 // 10 GB
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -206,6 +209,17 @@ func (s *AuthService) Register(ctx context.Context, username, email, password, i
 	if quotaBytes <= 0 {
 		quotaBytes = defaultQuotaBytes
 	}
+
+	// Select the best-fit drive before creating the user so we can fail fast
+	// if no drive has enough free capacity for the requested quota.
+	drive, err := s.queries.SelectDriveForQuota(ctx, quotaBytes)
+	if err != nil {
+		if errors.Is(err, db.ErrNoCapacity) {
+			return nil, fmt.Errorf("register: no drive has sufficient capacity for the requested quota")
+		}
+		return nil, fmt.Errorf("register: select drive: %w", err)
+	}
+
 	if err := s.queries.CreateUser(ctx, &models.User{
 		Username:          username,
 		Email:             email,
@@ -216,6 +230,10 @@ func (s *AuthService) Register(ctx context.Context, username, email, password, i
 		StorageQuotaBytes: quotaBytes,
 	}); err != nil {
 		return nil, fmt.Errorf("register: create db user: %w", err)
+	}
+
+	if err := s.queries.AllocateUserToDrive(ctx, username, drive.ID); err != nil {
+		return nil, fmt.Errorf("register: allocate drive: %w", err)
 	}
 
 	// 5. Accept invitation.

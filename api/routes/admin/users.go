@@ -58,6 +58,7 @@ func (h *Handler) GetUser(c *gin.Context) {
 
 // UpdateUserQuota handles PATCH /api/v1/admin/users/:user_id/quota
 func (h *Handler) UpdateUserQuota(c *gin.Context) {
+	ctx := c.Request.Context()
 	username := sanitize.String(c.Param("user_id"))
 	if username == "" || len(username) > 150 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user_id"})
@@ -70,7 +71,36 @@ func (h *Handler) UpdateUserQuota(c *gin.Context) {
 		return
 	}
 
-	if err := h.queries.UpdateUserQuota(c.Request.Context(), username, req.QuotaBytes); err != nil {
+	// Validate that the user's current drive can accommodate the new quota.
+	alloc, err := h.queries.GetUserDrive(ctx, username)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not retrieve drive allocation"})
+		return
+	}
+	if alloc != nil {
+		user, err := h.queries.GetUserByUsername(ctx, username)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "could not retrieve user"})
+			return
+		}
+		avail, err := h.queries.GetDriveAvailableBytes(ctx, alloc.DriveID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "could not check drive capacity"})
+			return
+		}
+		// Available space for this user = free drive space + their existing quota slot.
+		maxQuota := avail + user.StorageQuotaBytes
+		if req.QuotaBytes > maxQuota {
+			c.JSON(http.StatusConflict, gin.H{
+				"error":      "quota exceeds drive capacity",
+				"max_bytes":  maxQuota,
+				"drive_label": alloc.Drive.Label,
+			})
+			return
+		}
+	}
+
+	if err := h.queries.UpdateUserQuota(ctx, username, req.QuotaBytes); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not update quota"})
 		return
 	}

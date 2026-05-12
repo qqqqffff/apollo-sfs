@@ -60,7 +60,7 @@ func (q *Queries) ListBannedIPs(ctx context.Context, activeOnly bool, in PageInp
 	}
 	defer rows.Close()
 
-	var bans []models.BannedIP
+	bans := make([]models.BannedIP, 0)
 	for rows.Next() {
 		var b models.BannedIP
 		if err := rows.Scan(&b.ID, &b.IP, &b.Jail, &b.BannedAt, &b.UnbannedAt, &b.BanCount); err != nil {

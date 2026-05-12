@@ -2,6 +2,7 @@ package routes
 
 import (
 	"errors"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -34,6 +35,7 @@ func (h *Handler) ListFolders(c *gin.Context) {
 		parsePage(c, "file"),
 	)
 	if err != nil {
+		log.Printf("ListFolders: userID=%s err=%v", c.GetString("userID"), err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not list root contents"})
 		return
 	}

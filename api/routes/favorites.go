@@ -2,6 +2,7 @@ package routes
 
 import (
 	"errors"
+	"log"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -17,6 +18,7 @@ func (h *Handler) ListFavorites(c *gin.Context) {
 
 	list, err := h.favorites.List(c.Request.Context(), userID)
 	if err != nil {
+		log.Printf("ListFavorites: userID=%s err=%v", c.GetString("userID"), err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not retrieve favorites"})
 		return
 	}

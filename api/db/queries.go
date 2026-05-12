@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/google/uuid"
@@ -138,9 +139,14 @@ func New(db *sql.DB) *Queries {
 func (q *Queries) ForUser(ctx context.Context, userID uuid.UUID) (*Queries, *sql.Tx, error) {
 	tx, err := q.pool.BeginTx(ctx, nil)
 	if err != nil {
+		log.Printf("ForUser: begin tx failed: %v", err)
 		return nil, nil, fmt.Errorf("ForUser: begin tx: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `SET LOCAL app.current_user_id = $1`, userID.String()); err != nil {
+	// set_config(param, value, is_local=true) is transaction-scoped and works
+	// correctly with lib/pq's parameterized query handling, unlike SET LOCAL x = $1
+	// which lib/pq may send as a literal rather than a bound parameter.
+	if _, err := tx.ExecContext(ctx, `SELECT set_config('app.current_user_id', $1, true)`, userID.String()); err != nil {
+		log.Printf("ForUser: set_config failed for user %s: %v", userID, err)
 		_ = tx.Rollback()
 		return nil, nil, fmt.Errorf("ForUser: set user: %w", err)
 	}

@@ -2,6 +2,7 @@ import { createFileRoute, Link, Outlet, redirect, useNavigate } from '@tanstack/
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState, useEffect, useRef } from 'react'
 import { MdMenu, MdClose } from 'react-icons/md'
+import { AppIcon } from '../components/AppIcon'
 import { meQueryOptions } from '../api/me'
 import { logout } from '../api/auth'
 import { clearSkipDeleteCookie } from '../components/DeleteConfirmModal'
@@ -53,9 +54,12 @@ function RouteComponent() {
 
         {/* Left: brand + desktop nav */}
         <div className="flex items-center gap-5 min-w-0">
-          <span className="font-semibold text-gray-900 text-sm tracking-tight whitespace-nowrap shrink-0">
-            Apollo SFS
-          </span>
+          <div className="flex items-center gap-2 shrink-0">
+            <AppIcon size={26} />
+            <span className="font-semibold text-gray-900 text-sm tracking-tight whitespace-nowrap">
+              Apollo SFS
+            </span>
+          </div>
           <div className="hidden sm:flex items-center gap-1">
             <NavLink to="/client" exact onClick={closeMenu}>Files</NavLink>
             <NavLink to="/client/favorites" onClick={closeMenu}>Favorites</NavLink>

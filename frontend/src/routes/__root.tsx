@@ -3,6 +3,7 @@ import { useEffect } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import type { QueryClient } from '@tanstack/react-query'
 import { AuthContext, AuthProvider, useAuth } from '../auth'
+import { AppIcon } from '../components/AppIcon'
 import { clearSkipDeleteCookie } from '../components/DeleteConfirmModal'
 import { NotificationProvider } from '../context/NotificationContext'
 import { NotificationBanner } from '../components/NotificationBanner'
@@ -57,15 +58,24 @@ function RootLayout() {
 function PublicHeader() {
   return (
     <header className="bg-white border-b border-gray-200 px-6 h-14 flex items-center justify-between">
-      <Link to="/" className="font-semibold text-gray-900 text-sm tracking-tight no-underline">
-        Apollo SFS
+      <Link to="/" className="flex items-center gap-2 no-underline">
+        <AppIcon size={26} />
+        <span className="font-semibold text-gray-900 text-sm tracking-tight">Apollo SFS</span>
       </Link>
-      <Link
-        to="/login"
-        className="px-4 py-1.5 text-sm font-medium bg-blue-600 hover:bg-blue-700 text-white rounded-lg no-underline transition-colors"
-      >
-        Sign in
-      </Link>
+      <div className="flex items-center gap-4">
+        <Link
+          to="/about"
+          className="text-sm text-gray-500 hover:text-gray-900 no-underline transition-colors"
+        >
+          About
+        </Link>
+        <Link
+          to="/login"
+          className="px-4 py-1.5 text-sm font-medium bg-blue-600 hover:bg-blue-700 text-white rounded-lg no-underline transition-colors"
+        >
+          Sign in
+        </Link>
+      </div>
     </header>
   )
 }

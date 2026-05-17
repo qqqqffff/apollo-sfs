@@ -178,6 +178,36 @@ func (s *EmailService) SendQuotaLimit(
 	)
 }
 
+// SendInterestFormNotification enqueues an admin notification email for every
+// address in adminEmails when a new interest form submission arrives.
+func (s *EmailService) SendInterestFormNotification(
+	ctx context.Context,
+	adminEmails []string,
+	name, email string,
+	desiredStorageGB int,
+	useCase string,
+) error {
+	adminURL := s.appURL + "/admin/interest"
+	for _, to := range adminEmails {
+		if err := s.enqueue(ctx, to,
+			fmt.Sprintf("New interest form submission — %s", s.appName),
+			"interest_notification",
+			map[string]any{
+				"AppName":          s.appName,
+				"AppURL":           s.appURL,
+				"Name":             name,
+				"Email":            email,
+				"DesiredStorageGB": desiredStorageGB,
+				"UseCase":          useCase,
+				"AdminURL":         adminURL,
+			},
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // SendPasswordReset enqueues a password-reset email.
 // resetURL must be the full one-time reset URL.
 // expiresIn is shown in the email copy, e.g. "30 minutes".

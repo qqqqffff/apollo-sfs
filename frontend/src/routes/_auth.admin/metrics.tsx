@@ -6,10 +6,14 @@ import {
   createServer,
   getMetricsHistoryByHours,
   infrastructureQueryOptions,
+  runTests,
+  shutdownServer,
+  speedTestQueryOptions,
+  triggerSpeedTest,
   updateDrive,
   updateServer,
 } from '../../api/admin'
-import type { DriveSummary } from '../../api/admin'
+import type { DriveSummary, TestRunResponse } from '../../api/admin'
 import { useMetricsStream } from '../../hooks/useMetricsStream'
 import { BarGraph } from '../../components/BarGraph'
 import { LineGraph } from '../../components/LineGraph'
@@ -166,6 +170,46 @@ function RouteComponent() {
   const hasDriveTemp = latest?.drive_temp_celsius != null
   const hasTemps = hasCpuTemp || hasDriveTemp
 
+  const { data: speedTest, error: speedTestError } = useQuery({
+    ...speedTestQueryOptions,
+    retry: false,
+  })
+
+  useEffect(() => {
+    if (speedTestError && (speedTestError as { status?: number }).status !== 404) {
+      notify('error', 'Failed to load speed test result')
+    }
+  }, [speedTestError, notify])
+
+  const speedTestMutation = useMutation({
+    mutationFn: triggerSpeedTest,
+    onSuccess: (data) => {
+      queryClient.setQueryData(speedTestQueryOptions.queryKey, data)
+    },
+    onError: () => notify('error', 'Speed test failed'),
+  })
+
+  const [testResult, setTestResult] = useState<TestRunResponse | null>(null)
+  const [testOutputOpen, setTestOutputOpen] = useState(false)
+  const [shutdownConfirm, setShutdownConfirm] = useState(false)
+
+  const shutdownMutation = useMutation({
+    mutationFn: shutdownServer,
+    onError: () => notify('error', 'Shutdown request failed'),
+  })
+
+  const runTestsMutation = useMutation({
+    mutationFn: runTests,
+    onSuccess: (data) => setTestResult(data),
+    onError: (err: { status?: number }) => {
+      if (err.status === 422) {
+        // 422 still returns the full result body — handled via onSuccess for non-2xx
+      } else {
+        notify('error', 'Failed to run tests')
+      }
+    },
+  })
+
   let netSentRate: string | null = null
   let netRecvRate: string | null = null
   if (snapshots.length >= 2) {
@@ -183,13 +227,42 @@ function RouteComponent() {
 
   return (
     <div className="max-w-4xl">
-      <div className="flex items-center gap-3 mb-6">
-        <h2 className="text-lg font-semibold text-gray-900 m-0">System Metrics</h2>
-        <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${
-          connected ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-600'
-        }`}>
-          {connected ? 'Live' : 'Reconnecting…'}
-        </span>
+      <div className="flex items-center justify-between mb-6">
+        <div className="flex items-center gap-3">
+          <h2 className="text-lg font-semibold text-gray-900 m-0">System Metrics</h2>
+          <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${
+            connected ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-600'
+          }`}>
+            {connected ? 'Live' : 'Reconnecting…'}
+          </span>
+        </div>
+        <div className="flex items-center gap-2">
+          {shutdownConfirm ? (
+            <>
+              <span className="text-xs text-red-600 font-medium">Stop all containers and power off?</span>
+              <button
+                onClick={() => { shutdownMutation.mutate(); setShutdownConfirm(false) }}
+                disabled={shutdownMutation.isPending}
+                className="text-xs bg-red-600 text-white rounded px-2 py-1 disabled:opacity-50 cursor-pointer"
+              >
+                Confirm
+              </button>
+              <button
+                onClick={() => setShutdownConfirm(false)}
+                className="text-xs text-gray-500 hover:text-gray-800 cursor-pointer bg-transparent border border-gray-200 hover:border-gray-400 rounded px-2 py-1 transition-colors"
+              >
+                Cancel
+              </button>
+            </>
+          ) : (
+            <button
+              onClick={() => setShutdownConfirm(true)}
+              className="text-xs text-red-500 hover:text-red-700 cursor-pointer bg-transparent border border-red-200 hover:border-red-400 rounded px-2 py-1 transition-colors"
+            >
+              Shutdown server
+            </button>
+          )}
+        </div>
       </div>
 
       {latest && (
@@ -207,8 +280,9 @@ function RouteComponent() {
             sub={`${memPct.toFixed(1)}% of ${(latest.memory_total_bytes / GB).toFixed(1)} GB`}
           />
           {netSentRate !== null && (
-            <StatCard label="Net ↑ / ↓" value={`${netSentRate} / ${netRecvRate}`} />
+            <NetworkTrafficCard sent={netSentRate!} recv={netRecvRate!} />
           )}
+          <SpeedTestCard result={speedTest} onRun={() => speedTestMutation.mutate()} pending={speedTestMutation.isPending} />
           {hasCpuTemp && (
             <StatCard label="CPU temp" value={`${latest.cpu_temp_celsius!.toFixed(1)}°C`} />
           )}
@@ -289,6 +363,49 @@ function RouteComponent() {
         </section>
       )}
 
+      <section className="mb-10">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-sm font-semibold text-gray-600 m-0">Tests</h3>
+          <button
+            onClick={() => runTestsMutation.mutate()}
+            disabled={runTestsMutation.isPending}
+            className="text-xs bg-blue-600 text-white rounded px-2 py-1 disabled:opacity-50 cursor-pointer"
+          >
+            {runTestsMutation.isPending ? 'Running…' : 'Run tests'}
+          </button>
+        </div>
+        <div className="bg-white border border-gray-200 rounded-xl px-5 py-4">
+          {!testResult && !runTestsMutation.isPending && (
+            <p className="text-sm text-gray-400 m-0">No test run yet. Click "Run tests" to execute the suite.</p>
+          )}
+          {runTestsMutation.isPending && (
+            <p className="text-sm text-gray-400 m-0 animate-pulse">Running test suites…</p>
+          )}
+          {testResult && (
+            <div className="flex flex-col gap-3">
+              <TestSuiteRow label="Backend" entry={testResult.backend} />
+              <TestSuiteRow label="Frontend" entry={testResult.frontend} />
+              <button
+                onClick={() => setTestOutputOpen(o => !o)}
+                className="text-xs text-gray-400 hover:text-gray-700 cursor-pointer bg-transparent border-0 text-left w-fit"
+              >
+                {testOutputOpen ? '▲ Hide output' : '▼ Show output'}
+              </button>
+              {testOutputOpen && (
+                <div className="flex flex-col gap-3">
+                  {testResult.backend.enabled && testResult.backend.result && (
+                    <OutputBlock label="Backend" output={testResult.backend.result.output} />
+                  )}
+                  {testResult.frontend.enabled && testResult.frontend.result && (
+                    <OutputBlock label="Frontend" output={testResult.frontend.result.output} />
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </section>
+
       <section>
         <div className="flex items-center justify-between mb-3">
           <h3 className="text-sm font-semibold text-gray-600 m-0">Infrastructure</h3>
@@ -347,6 +464,97 @@ function StatCard({ label, value, sub }: { label: string; value: string; sub?: s
       <div className="text-xs text-gray-400 mb-1">{label}</div>
       <div className="text-xl font-semibold text-gray-900">{value}</div>
       {sub && <div className="text-xs text-gray-400 mt-0.5">{sub}</div>}
+    </div>
+  )
+}
+
+import type { SpeedTestResult, TestSuiteEntry } from '../../api/admin'
+
+function SpeedTestCard({ result, onRun, pending }: {
+  result: SpeedTestResult | undefined
+  onRun: () => void
+  pending: boolean
+}) {
+  return (
+    <div className="bg-white border border-gray-200 rounded-xl px-4 py-3">
+      <div className="flex items-center justify-between mb-1">
+        <div className="text-xs text-gray-400">Network speed</div>
+        <button
+          onClick={onRun}
+          disabled={pending}
+          className="text-xs text-blue-600 hover:text-blue-800 disabled:opacity-40 cursor-pointer bg-transparent border-0"
+        >
+          {pending ? '…' : 'Run'}
+        </button>
+      </div>
+      {result && !result.error ? (
+        <>
+          <div className="text-xl font-semibold text-gray-900">
+            ↑ {result.upload_mbps.toFixed(1)} / ↓ {result.download_mbps.toFixed(1)} <span className="text-sm font-normal text-gray-500">Mb/s</span>
+          </div>
+          <div className="text-xs text-gray-400 mt-0.5">
+            {new Date(result.tested_at).toLocaleTimeString()}
+          </div>
+        </>
+      ) : result?.error ? (
+        <div className="text-xs text-red-500 mt-1">{result.error}</div>
+      ) : (
+        <div className="text-sm font-semibold text-gray-400">{pending ? 'Testing…' : '—'}</div>
+      )}
+    </div>
+  )
+}
+
+function TestSuiteRow({ label, entry }: { label: string; entry: TestSuiteEntry }) {
+  if (!entry.enabled) {
+    return (
+      <div className="flex items-center gap-2 text-sm text-gray-400">
+        <span className="w-2 h-2 rounded-full bg-gray-200 shrink-0" />
+        <span className="font-medium text-gray-500">{label}</span>
+        <span className="text-xs">{entry.message ?? 'disabled'}</span>
+      </div>
+    )
+  }
+  const passed = entry.result?.passed
+  return (
+    <div className="flex items-center gap-2 text-sm">
+      <span className={`w-2 h-2 rounded-full shrink-0 ${passed ? 'bg-green-500' : 'bg-red-500'}`} />
+      <span className="font-medium text-gray-700">{label}</span>
+      <span className={`text-xs font-medium ${passed ? 'text-green-600' : 'text-red-600'}`}>
+        {passed ? 'PASS' : 'FAIL'}
+      </span>
+      {entry.result && (
+        <span className="text-xs text-gray-400">{entry.result.duration_ms} ms</span>
+      )}
+    </div>
+  )
+}
+
+function OutputBlock({ label, output }: { label: string; output: string }) {
+  return (
+    <div>
+      <div className="text-xs text-gray-400 mb-1">{label}</div>
+      <pre className="bg-gray-50 border border-gray-200 rounded-lg p-3 text-xs text-gray-700 overflow-x-auto whitespace-pre-wrap max-h-60 overflow-y-auto m-0">
+        {output || '(no output)'}
+      </pre>
+    </div>
+  )
+}
+
+function NetworkTrafficCard({ sent, recv }: { sent: string; recv: string }) {
+  return (
+    <div className="bg-white border border-gray-200 rounded-xl px-4 py-3">
+      <div className="text-xs text-gray-400 mb-2">Network traffic</div>
+      <div className="flex flex-col gap-1">
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-xs text-gray-500">↑ Upload</span>
+          <span className="text-sm font-semibold text-gray-900 tabular-nums">{sent}</span>
+        </div>
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-xs text-gray-500">↓ Download</span>
+          <span className="text-sm font-semibold text-gray-900 tabular-nums">{recv}</span>
+        </div>
+      </div>
     </div>
   )
 }

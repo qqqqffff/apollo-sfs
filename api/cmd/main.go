@@ -147,7 +147,8 @@ func main() {
 	go metricsSvc.Start(context.Background())
 	go emailSvc.Start(context.Background())
 
-	r := setupRouter(cfg, queries, oidcVerifier, authSvc, fileSvc, folderSvc, favSvc, inviteSvc, metricsSvc, registry, geoReader)
+	shutdownCh := make(chan struct{})
+	r := setupRouter(cfg, queries, oidcVerifier, authSvc, fileSvc, folderSvc, favSvc, inviteSvc, metricsSvc, registry, geoReader, emailSvc, shutdownCh)
 
 	addr := ":" + cfg.Port
 	log.Printf("apollo-sfs API listening on %s", addr)
@@ -161,12 +162,24 @@ func main() {
 		// Idle connections are reclaimed after 2 minutes of inactivity.
 		IdleTimeout: 2 * time.Minute,
 	}
-	if err := srv.ListenAndServe(); err != nil {
-		log.Fatalf("server error: %v", err)
+
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("server error: %v", err)
+		}
+	}()
+
+	<-shutdownCh
+	log.Println("kill switch triggered — draining connections…")
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer drainCancel()
+	if err := srv.Shutdown(drainCtx); err != nil {
+		log.Printf("graceful shutdown error: %v", err)
 	}
+	log.Println("server stopped")
 }
 
-func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVerifier, authSvc *services.AuthService, fileSvc *services.FileService, folderSvc *services.FolderService, favSvc *services.FavoriteService, inviteSvc *services.InviteService, metricsSvc *services.MetricsService, registry *services.MinIORegistry, geoReader *geoip2.Reader) *gin.Engine {
+func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVerifier, authSvc *services.AuthService, fileSvc *services.FileService, folderSvc *services.FolderService, favSvc *services.FavoriteService, inviteSvc *services.InviteService, metricsSvc *services.MetricsService, registry *services.MinIORegistry, geoReader *geoip2.Reader, emailSvc *services.EmailService, shutdownCh chan struct{}) *gin.Engine {
 	r := gin.New()
 	r.Use(gin.Logger())
 	r.Use(gin.Recovery())
@@ -200,15 +213,20 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 
 	uploadStore := services.NewUploadSessionStore()
 
-	h := routes.NewHandler(queries, fileSvc, folderSvc, inviteSvc, favSvc, authSvc, uploadStore)
+	h := routes.NewHandler(queries, fileSvc, folderSvc, inviteSvc, favSvc, authSvc, uploadStore, emailSvc, cfg.TurnstileSecretKey)
 	authHandler := auth.NewHandler(authSvc)
-	adminHandler := admin.NewHandler(queries, inviteSvc, metricsSvc, authSvc, registry, geoReader)
+	adminHandler := admin.NewHandler(queries, inviteSvc, metricsSvc, authSvc, registry, geoReader, cfg.AppDir, cfg.FrontendTestURL, shutdownCh)
+	go adminHandler.SpeedTestLoop(context.Background())
 
 	v1 := r.Group("/api/v1")
 
 	// ── Unauthenticated ──────────────────────────────────────────────────────
 	v1.GET("/health", routes.Health)
+	v1.GET("/config", func(c *gin.Context) {
+		c.JSON(200, gin.H{"turnstile_site_key": cfg.TurnstileSiteKey})
+	})
 	v1.GET("/invitations/:token", h.ValidateInvitationToken)
+	v1.POST("/interest", h.SubmitInterestForm)
 
 	// ── Auth — rate-limited, no JWT required ─────────────────────────────────
 	// Logout is the exception: it requires a valid session to invalidate.
@@ -292,6 +310,17 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 			adminGroup.GET("/banned-ips", adminHandler.ListBannedIPs)
 			adminGroup.POST("/banned-ips/:id/unban", adminHandler.UnbanIP)
 			adminGroup.POST("/banned-ips/:id/extend", adminHandler.ExtendBan)
+
+			adminGroup.GET("/interest", adminHandler.ListInterestSubmissions)
+			adminGroup.GET("/interest/settings", adminHandler.GetInterestFormSettings)
+			adminGroup.PUT("/interest/settings", adminHandler.UpdateInterestFormSettings)
+			adminGroup.POST("/interest/:id/provision", adminHandler.ProvisionInterestSubmission)
+
+			adminGroup.POST("/system/tests", adminHandler.RunTests)
+			adminGroup.POST("/system/shutdown", adminHandler.Shutdown)
+
+			adminGroup.GET("/system/speed-test", adminHandler.GetSpeedTest)
+			adminGroup.POST("/system/speed-test", adminHandler.TriggerSpeedTest)
 		}
 	}
 

@@ -36,6 +36,25 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # ── Frontend test runner sidecar ──────────────────────────────────────────
+  # Runs Jest via test-server.js on the internal Docker bridge only.
+  # The API calls POST http://frontend-tests:9229/run-tests to trigger the suite.
+  # This service is NOT present in production — remove or comment it out there.
+  frontend-tests:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.test
+    platform: linux/arm64
+    container_name: apollo-sfs-frontend-tests
+    restart: unless-stopped
+    networks:
+      - app-network
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
   # ── App API ────────────────────────────────────────────────────────────────
   api:
     build:
@@ -44,9 +63,17 @@ services:
     platform: linux/arm64
     container_name: apollo-sfs-api
     restart: unless-stopped
+    # privileged + user: root are required for the remote kill switch endpoint.
+    # The kill switch escapes the container cgroup, enters host namespaces via
+    # nsenter, runs `docker compose down`, then powers off the host.
+    # Remove both if you don't need remote shutdown capability.
+    privileged: true
+    user: root
     ports:
       - "127.0.0.1:8080:8080"
     environment:
+      # Used by the kill switch to identify the Compose stack to stop.
+      COMPOSE_PROJECT_NAME: apollo-sfs
       # PostgreSQL — app DB
       POSTGRES_APP_HOST: db-app
       POSTGRES_APP_PORT: 5432
@@ -82,9 +109,14 @@ services:
       MAIL_DOMAIN: ${MAIL_DOMAIN}
       QUOTA_WARNING_THRESHOLD_PERCENT: ${QUOTA_WARNING_THRESHOLD_PERCENT:-80}
       DISK_STATS_PATH: /data
+      # Test runner — points at the frontend-tests sidecar on the Docker bridge.
+      # APP_DIR is intentionally unset here; go test requires the source tree and
+      # Go toolchain which are not present in the compiled API container image.
+      FRONTEND_TEST_URL: http://frontend-tests:9229/run-tests
     volumes:
       - /home/apollo/apollo-sfs/minio/nvme-01:/data:ro
       - /var/lib/GeoIP:/var/lib/GeoIP:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       db-app:
         condition: service_healthy
@@ -93,6 +125,8 @@ services:
       minio:
         condition: service_healthy
       postfix:
+        condition: service_started
+      frontend-tests:
         condition: service_started
     networks:
       - app-network

@@ -40,6 +40,21 @@ type Config struct {
 	// SessionKey is the secret used to sign and encrypt the session cookie.
 	// Must be 32 or 64 bytes (AES-128 or AES-256). Set via SESSION_KEY env var.
 	SessionKey string
+
+	// Cloudflare Turnstile — used to protect the interest form from bots.
+	// Get keys at https://dash.cloudflare.com/?to=/:account/turnstile
+	TurnstileSecretKey string
+	TurnstileSiteKey   string
+
+	// AppDir is the absolute path to the api/ source directory on the host.
+	// Required for the backend test-runner endpoint (needs Go toolchain + source).
+	// Not meaningful inside the compiled Docker image — leave unset in production.
+	AppDir string
+
+	// FrontendTestURL is the internal URL of the frontend-tests sidecar container.
+	// e.g. "http://frontend-tests:9229/run-tests"
+	// Leave empty to disable the frontend test runner.
+	FrontendTestURL string
 }
 
 func loadConfig() Config {
@@ -82,6 +97,12 @@ func loadConfig() Config {
 		DiskStatsPath:            getEnv("DISK_STATS_PATH", "/mnt/data"),
 
 		SessionKey: requireEnv("SESSION_KEY"),
+
+		TurnstileSecretKey: requireEnv("CLOUDFLARE_TURNSTILE_SECRET_KEY"),
+		TurnstileSiteKey:   requireEnv("CLOUDFLARE_TURNSTILE_SITE_KEY"),
+
+		AppDir:          getEnv("APP_DIR", ""),
+		FrontendTestURL: getEnv("FRONTEND_TEST_URL", ""),
 	}
 }
 

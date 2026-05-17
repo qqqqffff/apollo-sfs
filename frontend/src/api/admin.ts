@@ -1,5 +1,5 @@
-import { del, get, patch, post } from './client'
-import type { BannedIP, Invitation, PageResult, User } from '../types/api'
+import { del, get, patch, post, put } from './client'
+import type { BannedIP, Invitation, InterestSubmission, InterestFormSettings, PageResult, User } from '../types/api'
 
 // ── Users ──────────────────────────────────────────────────────────────────────
 
@@ -160,6 +160,94 @@ export function unbanIP(id: number) {
 
 export function extendBan(id: number) {
   return post<{ message: string }>(`/admin/banned-ips/${id}/extend`)
+}
+
+// ── Interest form ──────────────────────────────────────────────────────────────
+
+export function listInterestSubmissions(cursor?: string) {
+  const params = new URLSearchParams()
+  if (cursor) params.set('cursor', cursor)
+  const qs = params.size ? `?${params}` : ''
+  return get<PageResult<InterestSubmission>>(`/admin/interest${qs}`)
+}
+
+export function getInterestFormSettings() {
+  return get<InterestFormSettings>('/admin/interest/settings')
+}
+
+export function updateInterestFormSettings(dailyCap: number) {
+  return put<InterestFormSettings>('/admin/interest/settings', { daily_cap: dailyCap })
+}
+
+export function provisionInterestSubmission(id: string, initialQuotaBytes: number) {
+  return post<Invitation>(`/admin/interest/${id}/provision`, { initial_quota_bytes: initialQuotaBytes })
+}
+
+export const adminInterestInfiniteQueryOptions = {
+  queryKey: ['admin', 'interest'] as const,
+  queryFn: ({ pageParam }: { pageParam: string | undefined }) =>
+    listInterestSubmissions(pageParam),
+  initialPageParam: undefined as string | undefined,
+  getNextPageParam: (lastPage: PageResult<InterestSubmission>) =>
+    lastPage.next_token || undefined,
+}
+
+export const interestFormSettingsQueryOptions = {
+  queryKey: ['admin', 'interest', 'settings'] as const,
+  queryFn: getInterestFormSettings,
+}
+
+// ── Speed test ─────────────────────────────────────────────────────────────────
+
+export interface SpeedTestResult {
+  upload_mbps: number
+  download_mbps: number
+  size_bytes: number
+  tested_at: string
+  error?: string
+}
+
+export function getSpeedTest() {
+  return get<SpeedTestResult>('/admin/system/speed-test')
+}
+
+export function triggerSpeedTest() {
+  return post<SpeedTestResult>('/admin/system/speed-test')
+}
+
+export const speedTestQueryOptions = {
+  queryKey: ['admin', 'speed-test'] as const,
+  queryFn: getSpeedTest,
+}
+
+// ── Test runner ────────────────────────────────────────────────────────────────
+
+export interface SuiteResult {
+  passed: boolean
+  exit_code: number
+  output: string
+  duration_ms: number
+}
+
+export interface TestSuiteEntry {
+  enabled: boolean
+  result?: SuiteResult
+  message?: string
+}
+
+export interface TestRunResponse {
+  backend: TestSuiteEntry
+  frontend: TestSuiteEntry
+}
+
+export function runTests() {
+  return post<TestRunResponse>('/admin/system/tests')
+}
+
+// ── Kill switch ────────────────────────────────────────────────────────────────
+
+export function shutdownServer() {
+  return post<{ message: string }>('/admin/system/shutdown')
 }
 
 // ── Query options ──────────────────────────────────────────────────────────────

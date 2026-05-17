@@ -66,6 +66,23 @@ export interface FavoriteList {
   folders: Folder[]
 }
 
+export interface InterestSubmission {
+  id: string
+  name: string
+  email: string
+  desired_storage_gb: number
+  use_case: string
+  ip_address: string
+  created_at: string
+  provisioned_at: string | null
+  invitation_id: string | null
+}
+
+export interface InterestFormSettings {
+  daily_cap: number
+  updated_at: string
+}
+
 export interface BannedIP {
   id: number
   ip: string

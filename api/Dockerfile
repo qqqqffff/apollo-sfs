@@ -22,7 +22,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
 # minimal. uid 65532 matches the distroless nonroot convention.
 FROM alpine:3.21
 
-RUN apk add --no-cache ca-certificates ffmpeg tzdata \
+RUN apk add --no-cache ca-certificates ffmpeg tzdata util-linux \
     && adduser -D -H -u 65532 -s /sbin/nologin nonroot
 
 WORKDIR /app

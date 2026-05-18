@@ -197,7 +197,7 @@ function RouteComponent() {
           {/* Social links */}
           <div className="flex items-center gap-3">
             <a
-              href="https://linkedin.com/in/apollinaris-rowe"
+              href="https://www.linkedin.com/in/apollo-r-051023125"
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold text-white bg-[#0A66C2] rounded-lg hover:bg-[#004182] transition-colors"
@@ -206,7 +206,7 @@ function RouteComponent() {
               LinkedIn
             </a>
             <a
-              href="https://github.com/apollorowe"
+              href="https://github.com/qqqqffff"
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold text-white bg-gray-900 rounded-lg hover:bg-gray-700 transition-colors"

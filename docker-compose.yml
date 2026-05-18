@@ -117,6 +117,9 @@ services:
       MAIL_DOMAIN: ${MAIL_DOMAIN}
       QUOTA_WARNING_THRESHOLD_PERCENT: ${QUOTA_WARNING_THRESHOLD_PERCENT:-80}
       DISK_STATS_PATH: /data
+      # Cloudflare Turnstile — bot protection for the interest form
+      CLOUDFLARE_TURNSTILE_SECRET_KEY: ${CLOUDFLARE_TURNSTILE_SECRET_KEY}
+      CLOUDFLARE_TURNSTILE_SITE_KEY: ${CLOUDFLARE_TURNSTILE_SITE_KEY}
       # Test runner — points at the frontend-tests sidecar on the Docker bridge.
       # APP_DIR is intentionally unset here; go test requires the source tree and
       # Go toolchain which are not present in the compiled API container image.

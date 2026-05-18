@@ -208,6 +208,34 @@ func (s *EmailService) SendInterestFormNotification(
 	return nil
 }
 
+// SendAlarmNotification enqueues an alarm notification email to every address
+// in recipients. title is a short label (e.g. "High CPU Usage") and detail
+// is a human-readable explanation of the current metric value.
+func (s *EmailService) SendAlarmNotification(
+	ctx context.Context,
+	recipients []string,
+	title string,
+	detail string,
+) error {
+	adminURL := s.appURL + "/admin/alarm"
+	for _, to := range recipients {
+		if err := s.enqueue(ctx, to,
+			fmt.Sprintf("Server alarm: %s — %s", title, s.appName),
+			"alarm_notification",
+			map[string]any{
+				"AppName":  s.appName,
+				"AppURL":   s.appURL,
+				"Title":    title,
+				"Detail":   detail,
+				"AdminURL": adminURL,
+			},
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // SendPasswordReset enqueues a password-reset email.
 // resetURL must be the full one-time reset URL.
 // expiresIn is shown in the email copy, e.g. "30 minutes".

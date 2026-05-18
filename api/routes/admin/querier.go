@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -36,6 +37,11 @@ type AdminQuerier interface {
 	GetDrive(ctx context.Context, id uuid.UUID) (*models.Drive, error)
 	CreateDrive(ctx context.Context, p db.CreateDriveParams) (*models.Drive, error)
 	UpdateDrive(ctx context.Context, id uuid.UUID, p db.UpdateDriveParams) (*models.Drive, error)
+
+	// Alarm settings
+	GetAlarmSettings(ctx context.Context) (*models.AlarmSettings, error)
+	UpdateAlarmSettings(ctx context.Context, p db.UpdateAlarmSettingsParams) (*models.AlarmSettings, error)
+	ListSnapshotsWindow(ctx context.Context, window time.Duration) ([]models.ServerMetricSnapshot, error)
 
 	// Interest form
 	ListInterestSubmissions(ctx context.Context, in db.PageInput) (*db.PageResult[models.InterestSubmission], error)

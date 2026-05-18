@@ -23,6 +23,7 @@ import { Route as AuthAdminMetricsRouteImport } from './routes/_auth.admin/metri
 import { Route as AuthAdminInvitationsRouteImport } from './routes/_auth.admin/invitations'
 import { Route as AuthAdminInterestRouteImport } from './routes/_auth.admin/interest'
 import { Route as AuthAdminBannedIpsRouteImport } from './routes/_auth.admin/banned-ips'
+import { Route as AuthAdminAlarmRouteImport } from './routes/_auth.admin/alarm'
 
 const RegisterRoute = RegisterRouteImport.update({
   id: '/register',
@@ -93,6 +94,11 @@ const AuthAdminBannedIpsRoute = AuthAdminBannedIpsRouteImport.update({
   path: '/admin/banned-ips',
   getParentRoute: () => AuthRoute,
 } as any)
+const AuthAdminAlarmRoute = AuthAdminAlarmRouteImport.update({
+  id: '/admin/alarm',
+  path: '/admin/alarm',
+  getParentRoute: () => AuthRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -100,6 +106,7 @@ export interface FileRoutesByFullPath {
   '/interest': typeof InterestRoute
   '/login': typeof LoginRoute
   '/register': typeof RegisterRoute
+  '/admin/alarm': typeof AuthAdminAlarmRoute
   '/admin/banned-ips': typeof AuthAdminBannedIpsRoute
   '/admin/interest': typeof AuthAdminInterestRoute
   '/admin/invitations': typeof AuthAdminInvitationsRoute
@@ -115,6 +122,7 @@ export interface FileRoutesByTo {
   '/interest': typeof InterestRoute
   '/login': typeof LoginRoute
   '/register': typeof RegisterRoute
+  '/admin/alarm': typeof AuthAdminAlarmRoute
   '/admin/banned-ips': typeof AuthAdminBannedIpsRoute
   '/admin/interest': typeof AuthAdminInterestRoute
   '/admin/invitations': typeof AuthAdminInvitationsRoute
@@ -132,6 +140,7 @@ export interface FileRoutesById {
   '/interest': typeof InterestRoute
   '/login': typeof LoginRoute
   '/register': typeof RegisterRoute
+  '/_auth/admin/alarm': typeof AuthAdminAlarmRoute
   '/_auth/admin/banned-ips': typeof AuthAdminBannedIpsRoute
   '/_auth/admin/interest': typeof AuthAdminInterestRoute
   '/_auth/admin/invitations': typeof AuthAdminInvitationsRoute
@@ -149,6 +158,7 @@ export interface FileRouteTypes {
     | '/interest'
     | '/login'
     | '/register'
+    | '/admin/alarm'
     | '/admin/banned-ips'
     | '/admin/interest'
     | '/admin/invitations'
@@ -164,6 +174,7 @@ export interface FileRouteTypes {
     | '/interest'
     | '/login'
     | '/register'
+    | '/admin/alarm'
     | '/admin/banned-ips'
     | '/admin/interest'
     | '/admin/invitations'
@@ -180,6 +191,7 @@ export interface FileRouteTypes {
     | '/interest'
     | '/login'
     | '/register'
+    | '/_auth/admin/alarm'
     | '/_auth/admin/banned-ips'
     | '/_auth/admin/interest'
     | '/_auth/admin/invitations'
@@ -299,10 +311,18 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthAdminBannedIpsRouteImport
       parentRoute: typeof AuthRoute
     }
+    '/_auth/admin/alarm': {
+      id: '/_auth/admin/alarm'
+      path: '/admin/alarm'
+      fullPath: '/admin/alarm'
+      preLoaderRoute: typeof AuthAdminAlarmRouteImport
+      parentRoute: typeof AuthRoute
+    }
   }
 }
 
 interface AuthRouteChildren {
+  AuthAdminAlarmRoute: typeof AuthAdminAlarmRoute
   AuthAdminBannedIpsRoute: typeof AuthAdminBannedIpsRoute
   AuthAdminInterestRoute: typeof AuthAdminInterestRoute
   AuthAdminInvitationsRoute: typeof AuthAdminInvitationsRoute
@@ -314,6 +334,7 @@ interface AuthRouteChildren {
 }
 
 const AuthRouteChildren: AuthRouteChildren = {
+  AuthAdminAlarmRoute: AuthAdminAlarmRoute,
   AuthAdminBannedIpsRoute: AuthAdminBannedIpsRoute,
   AuthAdminInterestRoute: AuthAdminInterestRoute,
   AuthAdminInvitationsRoute: AuthAdminInvitationsRoute,

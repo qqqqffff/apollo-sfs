@@ -251,6 +251,32 @@ export function shutdownServer() {
   return post<{ message: string }>('/admin/system/shutdown')
 }
 
+// ── Alarm settings ─────────────────────────────────────────────────────────────
+
+export interface AlarmSettings {
+  notify_emails: string[]
+  cpu_usage_enabled: boolean
+  cpu_temp_enabled: boolean
+  drive_temp_enabled: boolean
+  drive_load_enabled: boolean
+  network_traffic_enabled: boolean
+  api_error_rate_enabled: boolean
+  updated_at: string
+}
+
+export function getAlarmSettings() {
+  return get<AlarmSettings>('/admin/system/alarm/settings')
+}
+
+export function updateAlarmSettings(settings: Omit<AlarmSettings, 'updated_at'>) {
+  return put<AlarmSettings>('/admin/system/alarm/settings', settings)
+}
+
+export const alarmSettingsQueryOptions = {
+  queryKey: ['admin', 'alarm', 'settings'] as const,
+  queryFn: getAlarmSettings,
+}
+
 // ── Query options ──────────────────────────────────────────────────────────────
 
 export const adminUsersInfiniteQueryOptions = {

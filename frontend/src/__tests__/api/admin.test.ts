@@ -31,6 +31,9 @@ import {
   speedTestQueryOptions,
   adminInterestInfiniteQueryOptions,
   interestFormSettingsQueryOptions,
+  getAlarmSettings,
+  updateAlarmSettings,
+  alarmSettingsQueryOptions,
 } from '../../api/admin'
 import type { InterestSubmission, PageResult } from '../../types/api'
 
@@ -429,5 +432,89 @@ describe('shutdownServer', () => {
     await shutdownServer()
     expect(lastUrl()).toBe('/api/v1/admin/system/shutdown')
     expect(lastInit().method).toBe('POST')
+  })
+})
+
+// ── Alarm settings ─────────────────────────────────────────────────────────────
+
+const ALARM_DEFAULTS = {
+  notify_emails: [],
+  cpu_usage_enabled: false,
+  cpu_temp_enabled: false,
+  drive_temp_enabled: false,
+  drive_load_enabled: false,
+  network_traffic_enabled: false,
+  api_error_rate_enabled: false,
+  updated_at: '2026-01-01T00:00:00Z',
+}
+
+describe('getAlarmSettings', () => {
+  it('GETs /admin/system/alarm/settings', async () => {
+    mockFetch(200, ALARM_DEFAULTS)
+    const result = await getAlarmSettings()
+    expect(lastUrl()).toBe('/api/v1/admin/system/alarm/settings')
+    expect(lastInit().method).toBeUndefined() // GET has no explicit method set
+    expect(result).toEqual(ALARM_DEFAULTS)
+  })
+})
+
+describe('updateAlarmSettings', () => {
+  it('PUTs /admin/system/alarm/settings with all fields', async () => {
+    const payload = {
+      notify_emails: ['ops@example.com'],
+      cpu_usage_enabled: true,
+      cpu_temp_enabled: false,
+      drive_temp_enabled: true,
+      drive_load_enabled: false,
+      network_traffic_enabled: true,
+      api_error_rate_enabled: false,
+    }
+    mockFetch(200, { ...payload, updated_at: '2026-01-01T00:00:00Z' })
+    await updateAlarmSettings(payload)
+    expect(lastUrl()).toBe('/api/v1/admin/system/alarm/settings')
+    expect(lastInit().method).toBe('PUT')
+    expect(lastBody()).toEqual(payload)
+  })
+
+  it('sends empty notify_emails array', async () => {
+    const payload = {
+      notify_emails: [],
+      cpu_usage_enabled: false,
+      cpu_temp_enabled: false,
+      drive_temp_enabled: false,
+      drive_load_enabled: false,
+      network_traffic_enabled: false,
+      api_error_rate_enabled: false,
+    }
+    mockFetch(200, { ...payload, updated_at: '2026-01-01T00:00:00Z' })
+    await updateAlarmSettings(payload)
+    expect(lastBody().notify_emails).toEqual([])
+  })
+
+  it('sends multiple notify_emails', async () => {
+    const payload = {
+      notify_emails: ['a@example.com', 'b@example.com', 'c@example.com'],
+      cpu_usage_enabled: false,
+      cpu_temp_enabled: false,
+      drive_temp_enabled: false,
+      drive_load_enabled: false,
+      network_traffic_enabled: false,
+      api_error_rate_enabled: false,
+    }
+    mockFetch(200, { ...payload, updated_at: '2026-01-01T00:00:00Z' })
+    await updateAlarmSettings(payload)
+    expect(lastBody().notify_emails).toHaveLength(3)
+  })
+})
+
+describe('alarmSettingsQueryOptions', () => {
+  it('has correct queryKey', () => {
+    expect(alarmSettingsQueryOptions.queryKey).toEqual(['admin', 'alarm', 'settings'])
+  })
+
+  it('queryFn calls getAlarmSettings', () => {
+    mockFetch(200, ALARM_DEFAULTS)
+    alarmSettingsQueryOptions.queryFn()
+    expect(lastUrl()).toBe('/api/v1/admin/system/alarm/settings')
   })
 })

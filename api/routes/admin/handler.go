@@ -9,6 +9,9 @@ import (
 	"apollo-sfs.com/api/routes/services"
 )
 
+// Compile-time check: Handler satisfies SpeedTestProvider used by AlarmService.
+var _ services.SpeedTestProvider = (*Handler)(nil)
+
 // Handler holds dependencies for all /api/v1/admin/* endpoints.
 type Handler struct {
 	queries  AdminQuerier

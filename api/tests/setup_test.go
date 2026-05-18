@@ -145,6 +145,11 @@ type stubAdminQuerier struct {
 	driveAvail       int64
 	driveAvailErr    error
 	updateQuotaErr   error
+	// alarm settings fields
+	alarmSettings           *models.AlarmSettings
+	alarmSettingsErr        error
+	updatedAlarmSettings    *models.AlarmSettings
+	updatedAlarmSettingsErr error
 }
 
 func (s *stubAdminQuerier) ListUsers(_ context.Context, _ db.PageInput) (*db.PageResult[models.User], error) {
@@ -194,6 +199,34 @@ func (s *stubAdminQuerier) CreateDrive(_ context.Context, _ db.CreateDriveParams
 func (s *stubAdminQuerier) UpdateDrive(_ context.Context, _ uuid.UUID, _ db.UpdateDriveParams) (*models.Drive, error) {
 	return nil, nil
 }
+// Alarm settings
+func (s *stubAdminQuerier) GetAlarmSettings(_ context.Context) (*models.AlarmSettings, error) {
+	if s.alarmSettings == nil && s.alarmSettingsErr == nil {
+		return &models.AlarmSettings{NotifyEmails: []string{}}, nil
+	}
+	return s.alarmSettings, s.alarmSettingsErr
+}
+func (s *stubAdminQuerier) UpdateAlarmSettings(_ context.Context, p db.UpdateAlarmSettingsParams) (*models.AlarmSettings, error) {
+	if s.updatedAlarmSettingsErr != nil {
+		return nil, s.updatedAlarmSettingsErr
+	}
+	if s.updatedAlarmSettings != nil {
+		return s.updatedAlarmSettings, nil
+	}
+	return &models.AlarmSettings{
+		NotifyEmails:          p.NotifyEmails,
+		CPUUsageEnabled:       p.CPUUsageEnabled,
+		CPUTempEnabled:        p.CPUTempEnabled,
+		DriveTempEnabled:      p.DriveTempEnabled,
+		DriveLoadEnabled:      p.DriveLoadEnabled,
+		NetworkTrafficEnabled: p.NetworkTrafficEnabled,
+		APIErrorRateEnabled:   p.APIErrorRateEnabled,
+	}, nil
+}
+func (s *stubAdminQuerier) ListSnapshotsWindow(_ context.Context, _ time.Duration) ([]models.ServerMetricSnapshot, error) {
+	return []models.ServerMetricSnapshot{}, nil
+}
+
 func (s *stubAdminQuerier) ListInterestSubmissions(_ context.Context, _ db.PageInput) (*db.PageResult[models.InterestSubmission], error) {
 	if s.submissionsErr != nil {
 		return nil, s.submissionsErr

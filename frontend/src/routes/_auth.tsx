@@ -70,6 +70,7 @@ function RouteComponent() {
                 <NavLink to="/admin/interest" onClick={closeMenu}>Interest</NavLink>
                 <NavLink to="/admin/banned-ips" onClick={closeMenu}>Banned IPs</NavLink>
                 <NavLink to="/admin/metrics" onClick={closeMenu}>Metrics</NavLink>
+                <NavLink to="/admin/alarm" onClick={closeMenu}>Alarms</NavLink>
               </>
             )}
           </div>
@@ -115,6 +116,7 @@ function RouteComponent() {
               <MobileNavLink to="/admin/interest" onClick={closeMenu}>Interest</MobileNavLink>
               <MobileNavLink to="/admin/banned-ips" onClick={closeMenu}>Banned IPs</MobileNavLink>
               <MobileNavLink to="/admin/metrics" onClick={closeMenu}>Metrics</MobileNavLink>
+              <MobileNavLink to="/admin/alarm" onClick={closeMenu}>Alarms</MobileNavLink>
             </>
           )}
           <div className="mt-2 pt-2 border-t border-gray-100">

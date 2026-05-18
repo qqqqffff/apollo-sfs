@@ -218,6 +218,9 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	adminHandler := admin.NewHandler(queries, inviteSvc, metricsSvc, authSvc, registry, geoReader, cfg.AppDir, cfg.FrontendTestURL, cfg.FrontendE2EURL, shutdownCh)
 	go adminHandler.SpeedTestLoop(context.Background())
 
+	alarmSvc, apiCounter := services.NewAlarmService(queries, emailSvc, adminHandler)
+	go alarmSvc.Start(context.Background())
+
 	v1 := r.Group("/api/v1")
 
 	// ── Unauthenticated ──────────────────────────────────────────────────────
@@ -245,7 +248,10 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	// RequireAuth validates the token and injects userID + exp into Gin context.
 	// ProactiveRefresh silently refreshes the token when it is close to expiring.
 	protected := v1.Group("")
-	protected.Use(mw.RequireAuth(), mw.ProactiveRefresh(), mw.APIRateLimit())
+	protected.Use(mw.RequireAuth(), mw.ProactiveRefresh(), mw.APIRateLimit(), func(c *gin.Context) {
+		c.Next()
+		apiCounter.RecordRequest(c.Writer.Status() >= 500)
+	})
 	{
 		protected.GET("/me", h.Me)
 		protected.POST("/me/password", h.ChangePassword)
@@ -321,6 +327,9 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 
 			adminGroup.GET("/system/speed-test", adminHandler.GetSpeedTest)
 			adminGroup.POST("/system/speed-test", adminHandler.TriggerSpeedTest)
+
+			adminGroup.GET("/system/alarm/settings", adminHandler.GetAlarmSettings)
+			adminGroup.PUT("/system/alarm/settings", adminHandler.UpdateAlarmSettings)
 		}
 	}
 

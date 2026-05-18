@@ -25,6 +25,22 @@ type SpeedTestResult struct {
 	Error        string    `json:"error,omitempty"`
 }
 
+// LatestSpeedTestMbps returns max(upload, download) from the most recent speed
+// test result, or 0 when no test has run or the last test failed.
+// Implements services.SpeedTestProvider.
+func (h *Handler) LatestSpeedTestMbps() float64 {
+	h.speedTestMu.RLock()
+	result := h.latestSpeedTest
+	h.speedTestMu.RUnlock()
+	if result == nil || result.Error != "" {
+		return 0
+	}
+	if result.UploadMbps > result.DownloadMbps {
+		return result.UploadMbps
+	}
+	return result.DownloadMbps
+}
+
 // GetSpeedTest handles GET /admin/system/speed-test.
 // Returns the most recently cached result, or 404 if no test has run yet.
 func (h *Handler) GetSpeedTest(c *gin.Context) {

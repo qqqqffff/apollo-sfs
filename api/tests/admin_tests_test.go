@@ -10,14 +10,14 @@ import (
 )
 
 // newTestRunnerHandler constructs a Handler with test-runner params only.
-func newTestRunnerHandler(apiDir, frontendTestURL string) *admin.Handler {
-	return admin.NewHandler(&stubAdminQuerier{}, &stubAdminInviteService{}, nil, nil, nil, nil, apiDir, frontendTestURL, nil)
+func newTestRunnerHandler(apiDir, frontendTestURL, frontendE2EURL string) *admin.Handler {
+	return admin.NewHandler(&stubAdminQuerier{}, &stubAdminInviteService{}, nil, nil, nil, nil, apiDir, frontendTestURL, frontendE2EURL, nil)
 }
 
 // ── Neither suite configured ──────────────────────────────────────────────────
 
 func TestRunTests_NeitherConfigured(t *testing.T) {
-	h := newTestRunnerHandler("", "")
+	h := newTestRunnerHandler("", "", "")
 	r := newEngine()
 	r.POST("/admin/system/tests", h.RunTests)
 
@@ -35,7 +35,7 @@ func TestRunTests_FrontendDisabledWhenURLNotSet(t *testing.T) {
 	// Provide a fake apiDir so the backend entry is attempted (it will fail
 	// because the dir is invalid, but that's fine — we only check the frontend
 	// entry here).
-	h := newTestRunnerHandler("/nonexistent-dir", "")
+	h := newTestRunnerHandler("/nonexistent-dir", "", "")
 	r := newEngine()
 	r.POST("/admin/system/tests", h.RunTests)
 
@@ -69,7 +69,7 @@ func TestRunTests_BackendDisabledWhenDirNotSet(t *testing.T) {
 	}))
 	defer sidecar.Close()
 
-	h := newTestRunnerHandler("", sidecar.URL+"/run-tests")
+	h := newTestRunnerHandler("", sidecar.URL+"/run-tests", "")
 	r := newEngine()
 	r.POST("/admin/system/tests", h.RunTests)
 
@@ -106,7 +106,7 @@ func TestRunTests_FrontendSidecar_Pass(t *testing.T) {
 	}))
 	defer sidecar.Close()
 
-	h := newTestRunnerHandler("", sidecar.URL+"/run-tests")
+	h := newTestRunnerHandler("", sidecar.URL+"/run-tests", "")
 	r := newEngine()
 	r.POST("/admin/system/tests", h.RunTests)
 
@@ -147,7 +147,7 @@ func TestRunTests_FrontendSidecar_Fail(t *testing.T) {
 	}))
 	defer sidecar.Close()
 
-	h := newTestRunnerHandler("", sidecar.URL+"/run-tests")
+	h := newTestRunnerHandler("", sidecar.URL+"/run-tests", "")
 	r := newEngine()
 	r.POST("/admin/system/tests", h.RunTests)
 
@@ -163,7 +163,7 @@ func TestRunTests_FrontendSidecar_Fail(t *testing.T) {
 
 func TestRunTests_FrontendSidecar_Unreachable(t *testing.T) {
 	// Port 19229 is very unlikely to be listening.
-	h := newTestRunnerHandler("", "http://127.0.0.1:19229/run-tests")
+	h := newTestRunnerHandler("", "http://127.0.0.1:19229/run-tests", "")
 	r := newEngine()
 	r.POST("/admin/system/tests", h.RunTests)
 

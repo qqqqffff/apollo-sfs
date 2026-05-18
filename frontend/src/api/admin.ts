@@ -238,6 +238,7 @@ export interface TestSuiteEntry {
 export interface TestRunResponse {
   backend: TestSuiteEntry
   frontend: TestSuiteEntry
+  frontend_e2e: TestSuiteEntry
 }
 
 export function runTests() {

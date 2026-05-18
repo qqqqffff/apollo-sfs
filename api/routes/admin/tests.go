@@ -30,39 +30,43 @@ type suiteEntry struct {
 }
 
 type testRunResponse struct {
-	Backend  suiteEntry `json:"backend"`
-	Frontend suiteEntry `json:"frontend"`
+	Backend     suiteEntry `json:"backend"`
+	Frontend    suiteEntry `json:"frontend"`
+	FrontendE2E suiteEntry `json:"frontend_e2e"`
 }
 
 // RunTests handles POST /admin/system/tests.
 //
-// Backend suite  — runs `go test ./tests/... -count=1` in apiDir.
+// Backend suite      — runs `go test ./tests/... -count=1` in apiDir.
 //   Requires the Go toolchain to be available in PATH and the source tree to
 //   be present (dev / source-based deployments only).
 //
-// Frontend suite — calls the Jest sidecar at frontendTestURL (POST /run-tests).
-//   The sidecar runs inside the frontend-tests Docker container on the internal
+// Frontend suite     — calls the Jest sidecar at frontendTestURL (POST /run-tests).
+// Frontend E2E suite — calls the Playwright sidecar at frontendE2EURL (POST /run-e2e).
+//   Both sidecars run inside the frontend-tests Docker container on the internal
 //   bridge network. Because the React app lives in a separate container it cannot
 //   be exec'd directly — the sidecar bridges the gap.
 //
-// Returns 503 when neither suite is configured.
+// Returns 503 when no suite is configured.
 // Returns 422 when at least one enabled suite fails.
 // Returns 200 when all enabled suites pass.
 func (h *Handler) RunTests(c *gin.Context) {
 	resp := testRunResponse{
-		Backend:  h.runBackend(c.Request.Context()),
-		Frontend: h.runFrontend(c.Request.Context()),
+		Backend:     h.runBackend(c.Request.Context()),
+		Frontend:    h.runFrontend(c.Request.Context()),
+		FrontendE2E: h.runFrontendE2E(c.Request.Context()),
 	}
 
-	if !resp.Backend.Enabled && !resp.Frontend.Enabled {
+	if !resp.Backend.Enabled && !resp.Frontend.Enabled && !resp.FrontendE2E.Enabled {
 		c.JSON(http.StatusServiceUnavailable, gin.H{
-			"error": "no test suites are configured (set APP_DIR and/or FRONTEND_TEST_URL)",
+			"error": "no test suites are configured (set APP_DIR and/or FRONTEND_TEST_URL and/or FRONTEND_E2E_URL)",
 		})
 		return
 	}
 
 	anyFailed := (resp.Backend.Enabled && resp.Backend.Result != nil && !resp.Backend.Result.Passed) ||
-		(resp.Frontend.Enabled && resp.Frontend.Result != nil && !resp.Frontend.Result.Passed)
+		(resp.Frontend.Enabled && resp.Frontend.Result != nil && !resp.Frontend.Result.Passed) ||
+		(resp.FrontendE2E.Enabled && resp.FrontendE2E.Result != nil && !resp.FrontendE2E.Result.Passed)
 
 	status := http.StatusOK
 	if anyFailed {
@@ -112,17 +116,25 @@ func (h *Handler) runBackend(parent context.Context) suiteEntry {
 
 // runFrontend calls the Jest sidecar container and returns its entry.
 func (h *Handler) runFrontend(parent context.Context) suiteEntry {
-	if h.frontendTestURL == "" {
-		return suiteEntry{
-			Enabled: false,
-			Message: "frontend tests disabled — FRONTEND_TEST_URL is not set",
-		}
+	return h.callSidecar(parent, h.frontendTestURL, "frontend tests disabled — FRONTEND_TEST_URL is not set")
+}
+
+// runFrontendE2E calls the Playwright sidecar container and returns its entry.
+func (h *Handler) runFrontendE2E(parent context.Context) suiteEntry {
+	return h.callSidecar(parent, h.frontendE2EURL, "frontend E2E tests disabled — FRONTEND_E2E_URL is not set")
+}
+
+// callSidecar posts to url and unmarshals the suiteResult response.
+// Returns a disabled entry when url is empty.
+func (h *Handler) callSidecar(parent context.Context, url, disabledMsg string) suiteEntry {
+	if url == "" {
+		return suiteEntry{Enabled: false, Message: disabledMsg}
 	}
 
 	ctx, cancel := context.WithTimeout(parent, 120*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.frontendTestURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
 	if err != nil {
 		return suiteEntry{Enabled: true, Result: errorResult(fmt.Sprintf("build request: %v", err))}
 	}

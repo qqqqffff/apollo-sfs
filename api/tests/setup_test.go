@@ -374,7 +374,7 @@ func newFolderHandler(folderSvc routes.FolderServicer) *routes.Handler {
 
 // newAdminHandler builds an admin.Handler with only querier and invite service set.
 func newAdminHandler(q admin.AdminQuerier, inv admin.AdminInviteService) *admin.Handler {
-	return admin.NewHandler(q, inv, nil, nil, nil, nil, "", "", nil)
+	return admin.NewHandler(q, inv, nil, nil, nil, nil, "", "", "", nil)
 }
 
 // sampleUser returns a minimal populated User for tests.

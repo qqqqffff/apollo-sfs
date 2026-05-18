@@ -53,8 +53,13 @@ type Config struct {
 
 	// FrontendTestURL is the internal URL of the frontend-tests sidecar container.
 	// e.g. "http://frontend-tests:9229/run-tests"
-	// Leave empty to disable the frontend test runner.
+	// Leave empty to disable the Jest unit test runner.
 	FrontendTestURL string
+
+	// FrontendE2EURL is the internal URL of the Playwright E2E sidecar endpoint.
+	// e.g. "http://frontend-tests:9229/run-e2e"
+	// Leave empty to disable the E2E test runner.
+	FrontendE2EURL string
 }
 
 func loadConfig() Config {
@@ -103,6 +108,7 @@ func loadConfig() Config {
 
 		AppDir:          getEnv("APP_DIR", ""),
 		FrontendTestURL: getEnv("FRONTEND_TEST_URL", ""),
+		FrontendE2EURL:  getEnv("FRONTEND_E2E_URL", ""),
 	}
 }
 

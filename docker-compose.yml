@@ -37,8 +37,10 @@ services:
         max-file: "3"
 
   # ── Frontend test runner sidecar ──────────────────────────────────────────
-  # Runs Jest via test-server.js on the internal Docker bridge only.
-  # The API calls POST http://frontend-tests:9229/run-tests to trigger the suite.
+  # Runs Jest and Playwright via test-server.js on the internal Docker bridge.
+  #   POST /run-tests  — Jest unit tests
+  #   POST /run-e2e    — Playwright E2E tests (Chromium, headless)
+  # The API calls these endpoints to trigger the suites.
   # This service is NOT present in production — remove or comment it out there.
   frontend-tests:
     build:
@@ -47,6 +49,12 @@ services:
     platform: linux/arm64
     container_name: apollo-sfs-frontend-tests
     restart: unless-stopped
+    environment:
+      # Playwright connects to the already-running frontend nginx container
+      # instead of spinning up a Vite dev server inside the sidecar.
+      PLAYWRIGHT_BASE_URL: http://frontend:80
+    depends_on:
+      - frontend
     networks:
       - app-network
     logging:
@@ -113,6 +121,7 @@ services:
       # APP_DIR is intentionally unset here; go test requires the source tree and
       # Go toolchain which are not present in the compiled API container image.
       FRONTEND_TEST_URL: http://frontend-tests:9229/run-tests
+      FRONTEND_E2E_URL: http://frontend-tests:9229/run-e2e
     volumes:
       - /home/apollo/apollo-sfs/minio/nvme-01:/data:ro
       - /var/lib/GeoIP:/var/lib/GeoIP:ro

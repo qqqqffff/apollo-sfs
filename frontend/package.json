@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "test": "jest --watchAll=false --passWithNoTests --forceExit"
+    "test": "jest --watchAll=false --passWithNoTests --forceExit",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui"
   },
   "dependencies": {
     "@marsidev/react-turnstile": "^1.5.2",
@@ -23,6 +25,7 @@
     "tailwindcss": "^4.2.3"
   },
   "devDependencies": {
+    "@playwright/test": "^1.60.0",
     "@tanstack/router-cli": "^1.167.5",
     "@tanstack/router-plugin": "^1.167.22",
     "@testing-library/jest-dom": "^6.6.0",

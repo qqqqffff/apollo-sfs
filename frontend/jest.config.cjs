@@ -24,7 +24,7 @@ module.exports = {
     '**/__tests__/**/*.{ts,tsx}',
     '**/*.{spec,test}.{ts,tsx}',
   ],
-  testPathIgnorePatterns: ['/node_modules/', '/src/__tests__/setup\\.ts$'],
+  testPathIgnorePatterns: ['/node_modules/', '/src/__tests__/setup\\.ts$', '/src/__tests__/e2e/'],
   collectCoverageFrom: [
     'src/api/**/*.{ts,tsx}',
     'src/components/**/*.{ts,tsx}',

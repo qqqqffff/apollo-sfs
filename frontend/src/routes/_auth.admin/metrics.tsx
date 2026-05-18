@@ -385,6 +385,7 @@ function RouteComponent() {
             <div className="flex flex-col gap-3">
               <TestSuiteRow label="Backend" entry={testResult.backend} />
               <TestSuiteRow label="Frontend" entry={testResult.frontend} />
+              <TestSuiteRow label="Frontend E2E" entry={testResult.frontend_e2e} />
               <button
                 onClick={() => setTestOutputOpen(o => !o)}
                 className="text-xs text-gray-400 hover:text-gray-700 cursor-pointer bg-transparent border-0 text-left w-fit"
@@ -398,6 +399,9 @@ function RouteComponent() {
                   )}
                   {testResult.frontend.enabled && testResult.frontend.result && (
                     <OutputBlock label="Frontend" output={testResult.frontend.result.output} />
+                  )}
+                  {testResult.frontend_e2e.enabled && testResult.frontend_e2e.result && (
+                    <OutputBlock label="Frontend E2E" output={testResult.frontend_e2e.result.output} />
                   )}
                 </div>
               )}
@@ -505,6 +509,51 @@ function SpeedTestCard({ result, onRun, pending }: {
   )
 }
 
+// parseSuiteDetail extracts a human-readable count summary from test runner output.
+// Go: "ok  apollo-sfs.com/api/tests  1.234s" lines → "N suites passing"
+// Jest: "Test Suites: 3 passed, 3 total\nTests: 42 passed, 42 total"
+// Playwright: "38 passed (12s)" or "35 passed, 3 failed"
+function parseSuiteDetail(output: string, passed: boolean): string | null {
+  if (!output) return null
+
+  // Go — count "ok" lines
+  const goOk = (output.match(/^ok\s+\S+/gm) ?? []).length
+  const goFail = (output.match(/^FAIL\s+\S+/gm) ?? []).length
+  if (goOk > 0 || goFail > 0) {
+    return passed
+      ? `${goOk} suite${goOk !== 1 ? 's' : ''} passing`
+      : `${goFail} suite${goFail !== 1 ? 's' : ''} failing · ${goOk} passing`
+  }
+
+  // Jest — "Test Suites: X passed, Y total" and "Tests: A passed, B total"
+  const suiteMatch = output.match(/Test Suites:\s+(?:(\d+) failed,\s*)?(\d+) passed,\s*(\d+) total/)
+  const testMatch  = output.match(/Tests:\s+(?:(\d+) failed,\s*)?(\d+) passed,\s*(\d+) total/)
+  if (suiteMatch && testMatch) {
+    const suiteFail = parseInt(suiteMatch[1] ?? '0')
+    const suitePass = parseInt(suiteMatch[2])
+    const testFail  = parseInt(testMatch[1]  ?? '0')
+    const testPass  = parseInt(testMatch[2])
+    const sTotal = suitePass + suiteFail
+    const tTotal = testPass  + testFail
+    if (passed) return `${suitePass}/${sTotal} suite${sTotal !== 1 ? 's' : ''} · ${testPass}/${tTotal} tests passing`
+    return `${suiteFail} suite${suiteFail !== 1 ? 's' : ''} failing · ${testFail} test${testFail !== 1 ? 's' : ''} failing`
+  }
+
+  // Playwright — "X passed" or "X passed, Y failed"
+  const pwPass = output.match(/(\d+) passed/)
+  const pwFail = output.match(/(\d+) failed/)
+  if (pwPass) {
+    const p = parseInt(pwPass[1])
+    const f = pwFail ? parseInt(pwFail[1]) : 0
+    if (passed) return `${p} test${p !== 1 ? 's' : ''} passing`
+    return f > 0
+      ? `${f} test${f !== 1 ? 's' : ''} failing · ${p} passing`
+      : `${p} test${p !== 1 ? 's' : ''} passing`
+  }
+
+  return null
+}
+
 function TestSuiteRow({ label, entry }: { label: string; entry: TestSuiteEntry }) {
   if (!entry.enabled) {
     return (
@@ -516,6 +565,7 @@ function TestSuiteRow({ label, entry }: { label: string; entry: TestSuiteEntry }
     )
   }
   const passed = entry.result?.passed
+  const detail = entry.result ? parseSuiteDetail(entry.result.output, !!passed) : null
   return (
     <div className="flex items-center gap-2 text-sm">
       <span className={`w-2 h-2 rounded-full shrink-0 ${passed ? 'bg-green-500' : 'bg-red-500'}`} />
@@ -523,6 +573,9 @@ function TestSuiteRow({ label, entry }: { label: string; entry: TestSuiteEntry }
       <span className={`text-xs font-medium ${passed ? 'text-green-600' : 'text-red-600'}`}>
         {passed ? 'PASS' : 'FAIL'}
       </span>
+      {detail && (
+        <span className="text-xs text-gray-500">{detail}</span>
+      )}
       {entry.result && (
         <span className="text-xs text-gray-400">{entry.result.duration_ms} ms</span>
       )}

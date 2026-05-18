@@ -215,7 +215,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 
 	h := routes.NewHandler(queries, fileSvc, folderSvc, inviteSvc, favSvc, authSvc, uploadStore, emailSvc, cfg.TurnstileSecretKey)
 	authHandler := auth.NewHandler(authSvc)
-	adminHandler := admin.NewHandler(queries, inviteSvc, metricsSvc, authSvc, registry, geoReader, cfg.AppDir, cfg.FrontendTestURL, shutdownCh)
+	adminHandler := admin.NewHandler(queries, inviteSvc, metricsSvc, authSvc, registry, geoReader, cfg.AppDir, cfg.FrontendTestURL, cfg.FrontendE2EURL, shutdownCh)
 	go adminHandler.SpeedTestLoop(context.Background())
 
 	v1 := r.Group("/api/v1")

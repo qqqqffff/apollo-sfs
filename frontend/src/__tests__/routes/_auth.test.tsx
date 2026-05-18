@@ -9,7 +9,7 @@ jest.mock('@tanstack/react-router', () => {
   const R = require('react')
   return {
     createFileRoute: () => (opts: any) => ({ options: opts }),
-    Link: ({ children, to, className, activeProps }: any) =>
+    Link: ({ children, to, className }: any) =>
       R.createElement('a', { href: to, className }, children),
     Outlet: () => R.createElement('div', { 'data-testid': 'outlet' }),
     useNavigate: () => mockNavigate,

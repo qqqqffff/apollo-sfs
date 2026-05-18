@@ -15,10 +15,6 @@ function makeDragEvent(types: string[], files: File[] = []): DragEvent {
   } as unknown as DragEvent
 }
 
-function fireDoc(event: string, e: DragEvent) {
-  document.dispatchEvent(Object.assign(new Event(event), e))
-}
-
 function triggerDragEnter(types = ['Files']) {
   document.dispatchEvent(Object.assign(new Event('dragenter'), makeDragEvent(types)))
 }

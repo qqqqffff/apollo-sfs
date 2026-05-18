@@ -67,7 +67,7 @@ describe('get', () => {
 
   it('ApiError carries status and message from body.error', async () => {
     mockFetch(404, { error: 'resource gone' })
-    const err = await get('/x').catch(e => e)
+    const err = await get('/x').catch((e) => e) as ApiError
     expect(err.status).toBe(404)
     expect(err.message).toBe('resource gone')
   })
@@ -80,7 +80,7 @@ describe('get', () => {
       json: jest.fn().mockResolvedValue({}),
     }
     global.fetch = jest.fn().mockResolvedValue(res)
-    const err = await get('/x').catch(e => e)
+    const err = await get('/x').catch((e) => e) as ApiError
     expect(err.message).toBe('Service Unavailable')
   })
 
@@ -267,7 +267,7 @@ describe('uploadWithProgress', () => {
     xhrInstance.responseText = JSON.stringify({ error: 'file too large' })
     const p = uploadWithProgress('/upload', new FormData(), () => {})
     xhrInstance._trigger('load')
-    const err = await p.catch(e => e)
+    const err = await p.catch((e) => e) as ApiError
     expect(err).toBeInstanceOf(ApiError)
     expect(err.status).toBe(413)
     expect(err.message).toBe('file too large')
@@ -288,7 +288,7 @@ describe('uploadWithProgress', () => {
   it('rejects with network error on XHR error event', async () => {
     const p = uploadWithProgress('/upload', new FormData(), () => {})
     xhrInstance._trigger('error')
-    const err = await p.catch(e => e)
+    const err = await p.catch((e) => e) as ApiError
     expect(err).toBeInstanceOf(ApiError)
     expect(err.status).toBe(0)
     expect(err.message).toBe('Network error')
@@ -297,7 +297,7 @@ describe('uploadWithProgress', () => {
   it('rejects with Cancelled on abort', async () => {
     const p = uploadWithProgress('/upload', new FormData(), () => {})
     xhrInstance._trigger('abort')
-    const err = await p.catch(e => e)
+    const err = await p.catch((e) => e) as ApiError
     expect(err).toBeInstanceOf(ApiError)
     expect(err.message).toBe('Cancelled')
   })

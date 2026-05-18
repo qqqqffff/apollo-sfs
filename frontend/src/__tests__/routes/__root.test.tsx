@@ -23,7 +23,6 @@ const mockQueryClear = jest.fn()
 const mockUseQuery   = jest.fn()
 
 jest.mock('@tanstack/react-query', () => {
-  const R = require('react')
   return {
     useQuery:       (...args: any[]) => mockUseQuery(...args),
     useQueryClient: () => ({ clear: mockQueryClear, fetchQuery: jest.fn(), invalidateQueries: jest.fn(), setQueryData: jest.fn() }),

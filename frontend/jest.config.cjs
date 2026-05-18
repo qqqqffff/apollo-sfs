@@ -11,6 +11,10 @@ module.exports = {
       diagnostics: false,
     }],
   },
+  // react-icons v5 ships ESM — transform it through ts-jest so Jest can load it.
+  transformIgnorePatterns: ['node_modules/(?!(react-icons)/)'],
+  // Polyfills that must be available before any test module loads.
+  setupFiles: ['<rootDir>/src/__tests__/setup.ts'],
   moduleNameMapper: {
     // Static assets (images, SVGs, CSS) have no runtime meaning in tests.
     '\\.(css|svg|png|jpg|jpeg|gif|webp|ico|mp4|webm|ogg|mp3|wav)$':
@@ -20,4 +24,13 @@ module.exports = {
     '**/__tests__/**/*.{ts,tsx}',
     '**/*.{spec,test}.{ts,tsx}',
   ],
+  testPathIgnorePatterns: ['/node_modules/', '/src/__tests__/setup\\.ts$'],
+  collectCoverageFrom: [
+    'src/api/**/*.{ts,tsx}',
+    'src/components/**/*.{ts,tsx}',
+    'src/routes/**/*.{ts,tsx}',
+    'src/context/**/*.{ts,tsx}',
+    'src/hooks/**/*.{ts,tsx}',
+  ],
+  coverageReporters: ['text', 'lcov'],
 };

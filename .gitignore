@@ -1,5 +1,7 @@
 .env
 node_modules/
+docker
+minio
 /frontend/dist
 /frontend/coverage
 /frontend/test-results

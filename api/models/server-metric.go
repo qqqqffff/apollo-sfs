@@ -27,4 +27,7 @@ type ServerMetricSnapshot struct {
 	// Nullable — set to nil when the host has no accessible temperature sensors.
 	CPUTempCelsius   *float64 `json:"cpu_temp_celsius" db:"cpu_temp_celsius"`
 	DriveTempCelsius *float64 `json:"drive_temp_celsius" db:"drive_temp_celsius"`
+	// Nullable — set to nil when ICMP ping is unavailable (e.g. missing capability).
+	ServerISPPingMs            *float64 `json:"server_isp_ping_ms" db:"server_isp_ping_ms"`
+	ServerISPPacketLossPercent *float64 `json:"server_isp_packet_loss_percent" db:"server_isp_packet_loss_percent"`
 }

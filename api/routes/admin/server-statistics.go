@@ -154,6 +154,12 @@ func (h *Handler) StreamMetrics(c *gin.Context) {
 	}
 }
 
+// PingServer handles GET /api/v1/admin/system/ping.
+// Returns 204 immediately so the client can measure round-trip latency.
+func (h *Handler) PingServer(c *gin.Context) {
+	c.Status(http.StatusNoContent)
+}
+
 // wsWriteJSON serialises v to JSON and sends it as a single WebSocket text frame.
 func wsWriteJSON(conn *websocket.Conn, v any) error {
 	b, err := json.Marshal(v)

@@ -40,7 +40,7 @@ type AdminQuerier interface {
 
 	// Alarm settings
 	GetAlarmSettings(ctx context.Context) (*models.AlarmSettings, error)
-	UpdateAlarmSettings(ctx context.Context, p db.UpdateAlarmSettingsParams) (*models.AlarmSettings, error)
+	SetAlarmSubscription(ctx context.Context, alarmType, email string, subscribe bool) (*models.AlarmSettings, error)
 	ListSnapshotsWindow(ctx context.Context, window time.Duration) ([]models.ServerMetricSnapshot, error)
 
 	// Interest form
@@ -60,6 +60,18 @@ type AdminInviteService interface {
 	Revoke(ctx context.Context, id uuid.UUID) error
 }
 
+// MetricsServicer is the subset of *services.MetricsService used by admin
+// handlers. The interface exists so tests can supply lightweight stubs without
+// a running metrics background goroutine or a real database.
+type MetricsServicer interface {
+	GetLatest(ctx context.Context) (*models.ServerMetricSnapshot, error)
+	GetHistory(ctx context.Context, page db.PageInput) (*db.PageResult[models.ServerMetricSnapshot], error)
+	GetHistoryByHours(ctx context.Context, hours int) ([]models.ServerMetricSnapshot, error)
+	GetHistoryByDate(ctx context.Context, date string, page db.PageInput) (*db.PageResult[models.ServerMetricSnapshot], error)
+	Hub() *services.Hub
+}
+
 // Compile-time checks: ensure the concrete types satisfy the interfaces.
 var _ AdminQuerier = (*db.Queries)(nil)
 var _ AdminInviteService = (*services.InviteService)(nil)
+var _ MetricsServicer = (*services.MetricsService)(nil)

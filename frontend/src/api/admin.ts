@@ -62,6 +62,8 @@ export interface MetricsSnapshot {
   total_user_count: number
   cpu_temp_celsius: number | null
   drive_temp_celsius: number | null
+  server_isp_ping_ms: number | null
+  server_isp_packet_loss_percent: number | null
 }
 
 export function getMetrics() {
@@ -70,6 +72,12 @@ export function getMetrics() {
 
 export function getMetricsHistoryByHours(hours: number) {
   return get<MetricsSnapshot[]>(`/admin/system/metrics/history?hours=${hours}`)
+}
+
+export async function pingServer(): Promise<number> {
+  const start = performance.now()
+  await fetch('/api/v1/admin/system/ping', { signal: AbortSignal.timeout(5000) })
+  return performance.now() - start
 }
 
 // ── Infrastructure ─────────────────────────────────────────────────────────────
@@ -271,14 +279,27 @@ export function shutdownServer() {
 
 // ── Alarm settings ─────────────────────────────────────────────────────────────
 
+export type AlarmType =
+  | 'cpu_usage'
+  | 'cpu_temp'
+  | 'drive_temp'
+  | 'drive_load'
+  | 'network_traffic'
+  | 'api_error_rate'
+
 export interface AlarmSettings {
-  notify_emails: string[]
-  cpu_usage_enabled: boolean
-  cpu_temp_enabled: boolean
-  drive_temp_enabled: boolean
-  drive_load_enabled: boolean
-  network_traffic_enabled: boolean
-  api_error_rate_enabled: boolean
+  cpu_usage_emails: string[]
+  cpu_usage_last_fired_at: string | null
+  cpu_temp_emails: string[]
+  cpu_temp_last_fired_at: string | null
+  drive_temp_emails: string[]
+  drive_temp_last_fired_at: string | null
+  drive_load_emails: string[]
+  drive_load_last_fired_at: string | null
+  network_traffic_emails: string[]
+  network_traffic_last_fired_at: string | null
+  api_error_rate_emails: string[]
+  api_error_rate_last_fired_at: string | null
   updated_at: string
 }
 
@@ -286,8 +307,8 @@ export function getAlarmSettings() {
   return get<AlarmSettings>('/admin/system/alarm/settings')
 }
 
-export function updateAlarmSettings(settings: Omit<AlarmSettings, 'updated_at'>) {
-  return put<AlarmSettings>('/admin/system/alarm/settings', settings)
+export function toggleAlarmSubscription(alarmType: AlarmType, subscribed: boolean) {
+  return post<AlarmSettings>('/admin/system/alarm/subscribe', { alarm_type: alarmType, subscribed })
 }
 
 export const alarmSettingsQueryOptions = {

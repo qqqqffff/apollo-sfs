@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -25,7 +28,81 @@ const (
 	metricsPruneInterval  = 24 * time.Hour
 	metricsRetention      = 7 * 24 * time.Hour
 	hubChannelBuffer      = 64
+	pingTarget            = "8.8.8.8"
+	pingInterval          = 30 * time.Second
 )
+
+var (
+	rePktLoss = regexp.MustCompile(`(\d+(?:\.\d+)?)% packet loss`)
+	reRTTAvg  = regexp.MustCompile(`rtt min/avg/max/mdev = [\d.]+/([\d.]+)/`)
+)
+
+// pingResult holds the most recent ISP ping measurement.
+type pingResult struct {
+	pingMs     *float64
+	packetLoss *float64
+}
+
+// pingCollector runs periodic ICMP pings to a public DNS address and stores
+// the latest average RTT and packet-loss percentage. Results are nil when ping
+// is unavailable (missing capability, network unreachable, etc.).
+type pingCollector struct {
+	mu     sync.RWMutex
+	latest pingResult
+}
+
+func (p *pingCollector) run(ctx context.Context) {
+	p.collect() // populate immediately so the first snapshot has data
+	ticker := time.NewTicker(pingInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			p.collect()
+		}
+	}
+}
+
+func (p *pingCollector) collect() {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	// -c 5: 5 probes  -i 0.2: 200 ms between probes  -W 1: 1 s deadline  -q: quiet (summary only)
+	out, err := exec.CommandContext(ctx, "ping", "-c", "5", "-i", "0.2", "-W", "1", "-q", pingTarget).Output()
+	if err != nil {
+		p.mu.Lock()
+		p.latest = pingResult{}
+		p.mu.Unlock()
+		return
+	}
+	pingMs, packetLoss := parsePingOutput(string(out))
+	p.mu.Lock()
+	p.latest = pingResult{pingMs: pingMs, packetLoss: packetLoss}
+	p.mu.Unlock()
+}
+
+// parsePingOutput extracts the average RTT (ms) and packet-loss percentage from
+// Linux ping summary output. Either value is nil when its pattern is absent.
+func parsePingOutput(out string) (pingMs, packetLoss *float64) {
+	if m := rePktLoss.FindStringSubmatch(out); len(m) == 2 {
+		if v, err := strconv.ParseFloat(m[1], 64); err == nil {
+			packetLoss = &v
+		}
+	}
+	if m := reRTTAvg.FindStringSubmatch(out); len(m) == 2 {
+		if v, err := strconv.ParseFloat(m[1], 64); err == nil {
+			pingMs = &v
+		}
+	}
+	return
+}
+
+func (p *pingCollector) get() pingResult {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.latest
+}
 
 // ── WebSocket hub ─────────────────────────────────────────────────────────────
 
@@ -90,6 +167,7 @@ type MetricsService struct {
 	queries       *db.Queries
 	hub           *Hub
 	diskStatsPath string
+	ping          *pingCollector
 }
 
 // NewMetricsService constructs a MetricsService.
@@ -100,6 +178,7 @@ func NewMetricsService(q *db.Queries, diskStatsPath string) *MetricsService {
 		queries:       q,
 		hub:           newHub(),
 		diskStatsPath: diskStatsPath,
+		ping:          &pingCollector{},
 	}
 }
 
@@ -115,6 +194,7 @@ func (s *MetricsService) Start(ctx context.Context) {
 
 	go s.runSampler(ctx)
 	go s.runPruner(ctx)
+	go s.ping.run(ctx)
 }
 
 // ── Query helpers (used by admin REST handlers) ───────────────────────────────
@@ -244,22 +324,25 @@ func (s *MetricsService) collectSnapshot(ctx context.Context) (*models.ServerMet
 	}
 
 	cpuTemp, driveTemp := collectTemperatures()
+	pingData := s.ping.get()
 
 	return &models.ServerMetricSnapshot{
-		CPUPercent:             sys.cpuPercent,
-		MemoryUsedBytes:        sys.memUsed,
-		MemoryTotalBytes:       sys.memTotal,
-		NetworkBytesSent:       sys.netSent,
-		NetworkBytesRecv:       sys.netRecv,
-		StorageTotalUsedBytes:  minioStorageBytes("../minio"),
-		StorageTotalQuotaBytes: app.StorageQuotaBytes,
-		DiskTotalBytes:         diskTotal,
-		DiskFreeBytes:          diskFree,
-		ActiveUserCount:        app.ActiveUsersLast5m,
-		TotalUserCount:         app.TotalUsers,
-		SampledAt:              time.Now().UTC(),
-		CPUTempCelsius:         cpuTemp,
-		DriveTempCelsius:       driveTemp,
+		CPUPercent:                 sys.cpuPercent,
+		MemoryUsedBytes:            sys.memUsed,
+		MemoryTotalBytes:           sys.memTotal,
+		NetworkBytesSent:           sys.netSent,
+		NetworkBytesRecv:           sys.netRecv,
+		StorageTotalUsedBytes:      minioStorageBytes("../minio"),
+		StorageTotalQuotaBytes:     app.StorageQuotaBytes,
+		DiskTotalBytes:             diskTotal,
+		DiskFreeBytes:              diskFree,
+		ActiveUserCount:            app.ActiveUsersLast5m,
+		TotalUserCount:             app.TotalUsers,
+		SampledAt:                  time.Now().UTC(),
+		CPUTempCelsius:             cpuTemp,
+		DriveTempCelsius:           driveTemp,
+		ServerISPPingMs:            pingData.pingMs,
+		ServerISPPacketLossPercent: pingData.packetLoss,
 	}, nil
 }
 

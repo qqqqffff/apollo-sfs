@@ -1,4 +1,5 @@
--- Physical drives attached to a server. Each drive maps to a MinIO bucket.
+-- Physical drives attached to a server. A server may have many drives; each
+-- drive maps to its own MinIO bucket on the parent server's endpoint.
 -- All files for a user live in a single drive's bucket; users are never split
 -- across drives. capacity_bytes is the physical drive capacity used to gate
 -- quota allocation — the sum of all user quotas on a drive must not exceed it.

@@ -1,9 +1,13 @@
 package middleware
 
 import (
+	"context"
+	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
-	"time"
+	"net/url"
+	"strings"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/gin-contrib/sessions"
@@ -11,6 +15,51 @@ import (
 
 	"apollo-sfs.com/api/db"
 )
+
+// keycloakTokenResponse is the relevant subset of Keycloak's token endpoint
+// response used during a refresh grant.
+type keycloakTokenResponse struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+}
+
+// callRefreshGrant posts a refresh_token grant to the Keycloak token endpoint
+// and returns the new access and refresh tokens on success.
+func (m *AuthMiddleware) callRefreshGrant(ctx context.Context, refreshToken string) (*keycloakTokenResponse, error) {
+	tokenURL := fmt.Sprintf(
+		"%s/realms/%s/protocol/openid-connect/token",
+		m.keycloakURL, m.keycloakRealm,
+	)
+	body := url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {refreshToken},
+		"client_id":     {m.keycloakClientID},
+		"client_secret": {m.keycloakClientSecret},
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(body.Encode()))
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("keycloak request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("keycloak returned %s", resp.Status)
+	}
+	var tr keycloakTokenResponse
+	if err := json.NewDecoder(resp.Body).Decode(&tr); err != nil {
+		return nil, fmt.Errorf("decode response: %w", err)
+	}
+	if tr.AccessToken == "" {
+		return nil, fmt.Errorf("empty access_token in response")
+	}
+	return &tr, nil
+}
 
 // SessionName is the name used when registering and retrieving the session.
 // Register it once in setupRouter with:
@@ -23,24 +72,20 @@ const SessionName = "apollo_session"
 type AuthMiddleware struct {
 	verifier             *oidc.IDTokenVerifier
 	queries              *db.Queries
-	issuerURL            string // keycloakURL/realms/realm — used for InsecureIssuerURLContext
-	keycloakURL          string // base URL, retained for token endpoint calls in ProactiveRefresh
+	issuerURL            string
+	keycloakURL          string
 	keycloakRealm        string
 	keycloakClientID     string
 	keycloakClientSecret string
-	refreshThreshold     time.Duration
 	cookieDomain         string
 	cookieSecure         bool
 }
 
 // New creates an AuthMiddleware instance.
-// verifier is constructed in main from the OIDC provider and passed in so the
-// middleware does not need to know about provider setup.
 func New(
 	verifier *oidc.IDTokenVerifier,
 	queries *db.Queries,
 	keycloakURL, realm, clientID, clientSecret string,
-	refreshThreshold time.Duration,
 	cookieDomain string,
 	cookieSecure bool,
 ) *AuthMiddleware {
@@ -52,7 +97,6 @@ func New(
 		keycloakRealm:        realm,
 		keycloakClientID:     clientID,
 		keycloakClientSecret: clientSecret,
-		refreshThreshold:     refreshThreshold,
 		cookieDomain:         cookieDomain,
 		cookieSecure:         cookieSecure,
 	}

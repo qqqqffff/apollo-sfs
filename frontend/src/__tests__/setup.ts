@@ -7,6 +7,16 @@ if (!globalThis.crypto.randomUUID) {
   })
 }
 
+// Polyfill AbortSignal.timeout — not implemented in the jsdom version bundled
+// with jest-environment-jsdom but available in Node 17+ and all modern browsers.
+if (!AbortSignal.timeout) {
+  AbortSignal.timeout = (ms: number) => {
+    const controller = new AbortController()
+    setTimeout(() => controller.abort(new DOMException('TimeoutError', 'TimeoutError')), ms)
+    return controller.signal
+  }
+}
+
 // Polyfill URLSearchParams.size — added to the WHATWG spec in 2023 and not yet
 // implemented in the jsdom version bundled with jest-environment-jsdom.
 if (!('size' in URLSearchParams.prototype)) {

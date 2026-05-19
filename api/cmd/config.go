@@ -5,7 +5,6 @@ import (
 	"log"
 	"os"
 	"strconv"
-	"time"
 )
 
 type Config struct {
@@ -23,9 +22,8 @@ type Config struct {
 	MinIOSecretKey  string
 	MinIOBucketName string
 
-	CookieDomain          string
-	CookieSecure          bool
-	TokenRefreshThreshold time.Duration
+	CookieDomain string
+	CookieSecure bool
 
 	PostfixInternalHost string
 	MailFrom          string
@@ -66,7 +64,6 @@ type Config struct {
 }
 
 func loadConfig() Config {
-	refreshSecs, _ := strconv.Atoi(getEnv("TOKEN_REFRESH_THRESHOLD", "60"))
 	quotaPct, _ := strconv.Atoi(getEnv("QUOTA_WARNING_THRESHOLD_PERCENT", "80"))
 
 	return Config{
@@ -90,9 +87,8 @@ func loadConfig() Config {
 		MinIOSecretKey:  requireEnv("MINIO_ROOT_PASSWORD"),
 		MinIOBucketName: requireEnv("MINIO_BUCKET_NAME"),
 
-		CookieDomain:          requireEnv("COOKIE_DOMAIN"),
-		CookieSecure:          os.Getenv("COOKIE_SECURE") == "true",
-		TokenRefreshThreshold: time.Duration(refreshSecs) * time.Second,
+		CookieDomain: requireEnv("COOKIE_DOMAIN"),
+		CookieSecure: os.Getenv("COOKIE_SECURE") == "true",
 
 		PostfixInternalHost: requireEnv("POSTFIX_INTERNAL_HOST"),
 		MailFrom:          requireEnv("MAIL_FROM"),

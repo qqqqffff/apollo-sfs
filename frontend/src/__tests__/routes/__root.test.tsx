@@ -50,11 +50,13 @@ jest.mock('../../components/AppIcon', () => ({
   AppIcon: ({ size }: { size: number }) => <svg data-testid="app-icon" width={size} />,
 }))
 
+const mockNotify = jest.fn()
+
 jest.mock('../../context/NotificationContext', () => {
   const R = require('react')
   return {
     NotificationProvider: ({ children }: any) => R.createElement(R.Fragment, null, children),
-    useNotification: () => ({ notify: jest.fn() }),
+    useNotification: () => ({ notify: mockNotify }),
   }
 })
 
@@ -86,6 +88,7 @@ beforeEach(() => {
   mockNavigate.mockReset()
   mockQueryClear.mockReset()
   mockClearSkipDeleteCookie.mockReset()
+  mockNotify.mockReset()
   Object.defineProperty(window, 'location', {
     value: { pathname: '/' },
     writable: true,
@@ -166,6 +169,14 @@ describe('Root — session expired handler', () => {
     expect(mockClearSkipDeleteCookie).toHaveBeenCalled()
   })
 
+  it('shows a session-expired error notification', () => {
+    renderRoot(false)
+    act(() => {
+      window.dispatchEvent(new CustomEvent('apollo:session-expired'))
+    })
+    expect(mockNotify).toHaveBeenCalledWith('error', expect.stringMatching(/session.*expired/i))
+  })
+
   it('does not navigate when already on /login', () => {
     Object.defineProperty(window, 'location', { value: { pathname: '/login' }, writable: true })
     renderRoot(false)
@@ -173,6 +184,15 @@ describe('Root — session expired handler', () => {
       window.dispatchEvent(new CustomEvent('apollo:session-expired'))
     })
     expect(mockNavigate).not.toHaveBeenCalled()
+  })
+
+  it('does not show a notification when already on /login', () => {
+    Object.defineProperty(window, 'location', { value: { pathname: '/login' }, writable: true })
+    renderRoot(false)
+    act(() => {
+      window.dispatchEvent(new CustomEvent('apollo:session-expired'))
+    })
+    expect(mockNotify).not.toHaveBeenCalled()
   })
 
   it('removes the session-expired listener on unmount', () => {

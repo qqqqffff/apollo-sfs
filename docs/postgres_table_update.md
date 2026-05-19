@@ -10,3 +10,11 @@ Run `14_interest_form.sql` against the live database to create the two new table
 docker exec -i apollo-sfs-postgresql-app psql -U $POSTGRES_APP_USER -d apollo-sfs-db \
 -f /docker-entrypoint-initdb.d/14_interest_form.sql 
 ```
+
+migration example
+```bash
+docker exec -i apollo-sfs-postgresql-app psql \
+  -U <POSTGRES_APP_USER> \
+  -d <POSTGRES_APP_DB> \
+  -f /docker-entrypoint-initdb.d/migrations/006_alarm_subscriptions.sql
+```

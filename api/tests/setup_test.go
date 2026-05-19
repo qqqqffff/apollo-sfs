@@ -148,8 +148,7 @@ type stubAdminQuerier struct {
 	// alarm settings fields
 	alarmSettings           *models.AlarmSettings
 	alarmSettingsErr        error
-	updatedAlarmSettings    *models.AlarmSettings
-	updatedAlarmSettingsErr error
+	subscriptionErr         error
 }
 
 func (s *stubAdminQuerier) ListUsers(_ context.Context, _ db.PageInput) (*db.PageResult[models.User], error) {
@@ -202,25 +201,31 @@ func (s *stubAdminQuerier) UpdateDrive(_ context.Context, _ uuid.UUID, _ db.Upda
 // Alarm settings
 func (s *stubAdminQuerier) GetAlarmSettings(_ context.Context) (*models.AlarmSettings, error) {
 	if s.alarmSettings == nil && s.alarmSettingsErr == nil {
-		return &models.AlarmSettings{NotifyEmails: []string{}}, nil
+		return &models.AlarmSettings{
+			CPUUsageEmails:       []string{},
+			CPUTempEmails:        []string{},
+			DriveTempEmails:      []string{},
+			DriveLoadEmails:      []string{},
+			NetworkTrafficEmails: []string{},
+			APIErrorRateEmails:   []string{},
+		}, nil
 	}
 	return s.alarmSettings, s.alarmSettingsErr
 }
-func (s *stubAdminQuerier) UpdateAlarmSettings(_ context.Context, p db.UpdateAlarmSettingsParams) (*models.AlarmSettings, error) {
-	if s.updatedAlarmSettingsErr != nil {
-		return nil, s.updatedAlarmSettingsErr
+func (s *stubAdminQuerier) SetAlarmSubscription(_ context.Context, _, _ string, _ bool) (*models.AlarmSettings, error) {
+	if s.subscriptionErr != nil {
+		return nil, s.subscriptionErr
 	}
-	if s.updatedAlarmSettings != nil {
-		return s.updatedAlarmSettings, nil
+	if s.alarmSettings != nil {
+		return s.alarmSettings, nil
 	}
 	return &models.AlarmSettings{
-		NotifyEmails:          p.NotifyEmails,
-		CPUUsageEnabled:       p.CPUUsageEnabled,
-		CPUTempEnabled:        p.CPUTempEnabled,
-		DriveTempEnabled:      p.DriveTempEnabled,
-		DriveLoadEnabled:      p.DriveLoadEnabled,
-		NetworkTrafficEnabled: p.NetworkTrafficEnabled,
-		APIErrorRateEnabled:   p.APIErrorRateEnabled,
+		CPUUsageEmails:       []string{},
+		CPUTempEmails:        []string{},
+		DriveTempEmails:      []string{},
+		DriveLoadEmails:      []string{},
+		NetworkTrafficEmails: []string{},
+		APIErrorRateEmails:   []string{},
 	}, nil
 }
 func (s *stubAdminQuerier) ListSnapshotsWindow(_ context.Context, _ time.Duration) ([]models.ServerMetricSnapshot, error) {
@@ -409,6 +414,42 @@ func newFolderHandler(folderSvc routes.FolderServicer) *routes.Handler {
 func newAdminHandler(q admin.AdminQuerier, inv admin.AdminInviteService) *admin.Handler {
 	return admin.NewHandler(q, inv, nil, nil, nil, nil, "", "", "", "", nil)
 }
+
+// newMetricsAdminHandler builds an admin.Handler wired with the given metrics stub.
+func newMetricsAdminHandler(q admin.AdminQuerier, m admin.MetricsServicer) *admin.Handler {
+	return admin.NewHandler(q, &stubAdminInviteService{}, m, nil, nil, nil, "", "", "", "", nil)
+}
+
+// ── Stub MetricsService ───────────────────────────────────────────────────────
+
+type stubMetricsService struct {
+	latest     *models.ServerMetricSnapshot
+	latestErr  error
+	history    []models.ServerMetricSnapshot
+	historyErr error
+}
+
+func (s *stubMetricsService) GetLatest(_ context.Context) (*models.ServerMetricSnapshot, error) {
+	return s.latest, s.latestErr
+}
+func (s *stubMetricsService) GetHistory(_ context.Context, _ db.PageInput) (*db.PageResult[models.ServerMetricSnapshot], error) {
+	items := s.history
+	if items == nil {
+		items = []models.ServerMetricSnapshot{}
+	}
+	return &db.PageResult[models.ServerMetricSnapshot]{Items: items}, s.historyErr
+}
+func (s *stubMetricsService) GetHistoryByHours(_ context.Context, _ int) ([]models.ServerMetricSnapshot, error) {
+	return s.history, s.historyErr
+}
+func (s *stubMetricsService) GetHistoryByDate(_ context.Context, _ string, _ db.PageInput) (*db.PageResult[models.ServerMetricSnapshot], error) {
+	items := s.history
+	if items == nil {
+		items = []models.ServerMetricSnapshot{}
+	}
+	return &db.PageResult[models.ServerMetricSnapshot]{Items: items}, s.historyErr
+}
+func (s *stubMetricsService) Hub() *services.Hub { return nil }
 
 // sampleUser returns a minimal populated User for tests.
 func sampleUser() *models.User {

@@ -129,7 +129,6 @@ services:
       # Cookies & session
       COOKIE_DOMAIN: ${COOKIE_DOMAIN}
       COOKIE_SECURE: ${COOKIE_SECURE:-true}
-      TOKEN_REFRESH_THRESHOLD: ${TOKEN_REFRESH_THRESHOLD:-60}
       APP_BASE_URL: ${APP_BASE_URL}
       # Email — Postfix submission point (internal Docker only)
       POSTFIX_INTERNAL_HOST: postfix:587

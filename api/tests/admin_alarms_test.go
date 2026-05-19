@@ -9,6 +9,8 @@ import (
 	"apollo-sfs.com/api/models"
 )
 
+const testAdminUsername = "admin"
+
 // ── GET alarm settings ────────────────────────────────────────────────────────
 
 func TestAdminGetAlarmSettings_Defaults(t *testing.T) {
@@ -26,23 +28,27 @@ func TestAdminGetAlarmSettings_Defaults(t *testing.T) {
 
 	var body map[string]any
 	decodeBody(w, &body) //nolint
-	// Default row: all toggles false
+	// Default row: all email lists are empty arrays
 	for _, key := range []string{
-		"cpu_usage_enabled", "cpu_temp_enabled", "drive_temp_enabled",
-		"drive_load_enabled", "network_traffic_enabled", "api_error_rate_enabled",
+		"cpu_usage_emails", "cpu_temp_emails", "drive_temp_emails",
+		"drive_load_emails", "network_traffic_emails", "api_error_rate_emails",
 	} {
-		if body[key] != false {
-			t.Errorf("expected %s=false, got %v", key, body[key])
+		arr, _ := body[key].([]any)
+		if len(arr) != 0 {
+			t.Errorf("expected %s to be empty, got %v", key, arr)
 		}
 	}
 }
 
-func TestAdminGetAlarmSettings_WithData(t *testing.T) {
+func TestAdminGetAlarmSettings_WithSubscribers(t *testing.T) {
 	q := &stubAdminQuerier{
 		alarmSettings: &models.AlarmSettings{
-			NotifyEmails:    []string{"ops@example.com", "sre@example.com"},
-			CPUUsageEnabled: true,
-			CPUTempEnabled:  false,
+			CPUUsageEmails:       []string{"ops@example.com", "sre@example.com"},
+			CPUTempEmails:        []string{},
+			DriveTempEmails:      []string{},
+			DriveLoadEmails:      []string{},
+			NetworkTrafficEmails: []string{},
+			APIErrorRateEmails:   []string{},
 		},
 	}
 	h := newAdminHandler(q, &stubAdminInviteService{})
@@ -59,12 +65,9 @@ func TestAdminGetAlarmSettings_WithData(t *testing.T) {
 
 	var body map[string]any
 	decodeBody(w, &body) //nolint
-	if body["cpu_usage_enabled"] != true {
-		t.Errorf("expected cpu_usage_enabled=true, got %v", body["cpu_usage_enabled"])
-	}
-	emails, _ := body["notify_emails"].([]any)
+	emails, _ := body["cpu_usage_emails"].([]any)
 	if len(emails) != 2 {
-		t.Errorf("expected 2 notify_emails, got %d", len(emails))
+		t.Errorf("expected 2 cpu_usage_emails, got %d", len(emails))
 	}
 }
 
@@ -83,63 +86,20 @@ func TestAdminGetAlarmSettings_DBError(t *testing.T) {
 	}
 }
 
-// ── PUT alarm settings ────────────────────────────────────────────────────────
+// ── POST alarm subscribe ──────────────────────────────────────────────────────
 
-func TestAdminUpdateAlarmSettings_AllToggles(t *testing.T) {
-	h := newAdminHandler(&stubAdminQuerier{}, &stubAdminInviteService{})
+func TestAdminToggleAlarmSubscription_Subscribe(t *testing.T) {
+	q := &stubAdminQuerier{
+		user: &models.User{Username: "admin", Email: "admin@example.com"},
+	}
+	h := newAdminHandler(q, &stubAdminInviteService{})
 
 	r := newEngine()
-	r.PUT("/admin/system/alarm/settings", h.UpdateAlarmSettings)
+	ginContext(r, "uid-admin", testAdminUsername, true)
+	r.POST("/admin/system/alarm/subscribe", h.ToggleAlarmSubscription)
 
-	payload := map[string]any{
-		"notify_emails":           []string{"admin@example.com"},
-		"cpu_usage_enabled":       true,
-		"cpu_temp_enabled":        true,
-		"drive_temp_enabled":      true,
-		"drive_load_enabled":      true,
-		"network_traffic_enabled": true,
-		"api_error_rate_enabled":  true,
-	}
-	req := httptest.NewRequest(http.MethodPut, "/admin/system/alarm/settings", jsonBody(payload))
-	req.Header.Set("Content-Type", "application/json")
-	w := doRequest(r, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d (body: %s)", w.Code, w.Body.String())
-	}
-
-	var body map[string]any
-	decodeBody(w, &body) //nolint
-	for _, key := range []string{
-		"cpu_usage_enabled", "cpu_temp_enabled", "drive_temp_enabled",
-		"drive_load_enabled", "network_traffic_enabled", "api_error_rate_enabled",
-	} {
-		if body[key] != true {
-			t.Errorf("expected %s=true in response, got %v", key, body[key])
-		}
-	}
-	emails, _ := body["notify_emails"].([]any)
-	if len(emails) != 1 {
-		t.Errorf("expected 1 notify_email in response, got %d", len(emails))
-	}
-}
-
-func TestAdminUpdateAlarmSettings_AllDisabled(t *testing.T) {
-	h := newAdminHandler(&stubAdminQuerier{}, &stubAdminInviteService{})
-
-	r := newEngine()
-	r.PUT("/admin/system/alarm/settings", h.UpdateAlarmSettings)
-
-	payload := map[string]any{
-		"notify_emails":           []string{},
-		"cpu_usage_enabled":       false,
-		"cpu_temp_enabled":        false,
-		"drive_temp_enabled":      false,
-		"drive_load_enabled":      false,
-		"network_traffic_enabled": false,
-		"api_error_rate_enabled":  false,
-	}
-	req := httptest.NewRequest(http.MethodPut, "/admin/system/alarm/settings", jsonBody(payload))
+	payload := map[string]any{"alarm_type": "cpu_usage", "subscribed": true}
+	req := httptest.NewRequest(http.MethodPost, "/admin/system/alarm/subscribe", jsonBody(payload))
 	req.Header.Set("Content-Type", "application/json")
 	w := doRequest(r, req)
 
@@ -148,15 +108,18 @@ func TestAdminUpdateAlarmSettings_AllDisabled(t *testing.T) {
 	}
 }
 
-func TestAdminUpdateAlarmSettings_NilEmailsDefaultsToEmpty(t *testing.T) {
-	h := newAdminHandler(&stubAdminQuerier{}, &stubAdminInviteService{})
+func TestAdminToggleAlarmSubscription_Unsubscribe(t *testing.T) {
+	q := &stubAdminQuerier{
+		user: &models.User{Username: "admin", Email: "admin@example.com"},
+	}
+	h := newAdminHandler(q, &stubAdminInviteService{})
 
 	r := newEngine()
-	r.PUT("/admin/system/alarm/settings", h.UpdateAlarmSettings)
+	ginContext(r, "uid-admin", testAdminUsername, true)
+	r.POST("/admin/system/alarm/subscribe", h.ToggleAlarmSubscription)
 
-	// Omit notify_emails entirely; handler should default it to [].
-	payload := map[string]any{"cpu_usage_enabled": true}
-	req := httptest.NewRequest(http.MethodPut, "/admin/system/alarm/settings", jsonBody(payload))
+	payload := map[string]any{"alarm_type": "cpu_usage", "subscribed": false}
+	req := httptest.NewRequest(http.MethodPost, "/admin/system/alarm/subscribe", jsonBody(payload))
 	req.Header.Set("Content-Type", "application/json")
 	w := doRequest(r, req)
 
@@ -165,13 +128,19 @@ func TestAdminUpdateAlarmSettings_NilEmailsDefaultsToEmpty(t *testing.T) {
 	}
 }
 
-func TestAdminUpdateAlarmSettings_InvalidBody(t *testing.T) {
-	h := newAdminHandler(&stubAdminQuerier{}, &stubAdminInviteService{})
+func TestAdminToggleAlarmSubscription_MissingAlarmType(t *testing.T) {
+	q := &stubAdminQuerier{
+		user: &models.User{Username: "admin", Email: "admin@example.com"},
+	}
+	h := newAdminHandler(q, &stubAdminInviteService{})
 
 	r := newEngine()
-	r.PUT("/admin/system/alarm/settings", h.UpdateAlarmSettings)
+	ginContext(r, "uid-admin", testAdminUsername, true)
+	r.POST("/admin/system/alarm/subscribe", h.ToggleAlarmSubscription)
 
-	req := httptest.NewRequest(http.MethodPut, "/admin/system/alarm/settings", jsonBody("not-an-object"))
+	// alarm_type is required — omitting it should return 400
+	payload := map[string]any{"subscribed": true}
+	req := httptest.NewRequest(http.MethodPost, "/admin/system/alarm/subscribe", jsonBody(payload))
 	req.Header.Set("Content-Type", "application/json")
 	w := doRequest(r, req)
 
@@ -180,15 +149,18 @@ func TestAdminUpdateAlarmSettings_InvalidBody(t *testing.T) {
 	}
 }
 
-func TestAdminUpdateAlarmSettings_DBError(t *testing.T) {
-	q := &stubAdminQuerier{updatedAlarmSettingsErr: errors.New("db down")}
+func TestAdminToggleAlarmSubscription_UserLookupError(t *testing.T) {
+	q := &stubAdminQuerier{
+		userErr: errors.New("not found"),
+	}
 	h := newAdminHandler(q, &stubAdminInviteService{})
 
 	r := newEngine()
-	r.PUT("/admin/system/alarm/settings", h.UpdateAlarmSettings)
+	ginContext(r, "uid-admin", testAdminUsername, true)
+	r.POST("/admin/system/alarm/subscribe", h.ToggleAlarmSubscription)
 
-	payload := map[string]any{"cpu_usage_enabled": false}
-	req := httptest.NewRequest(http.MethodPut, "/admin/system/alarm/settings", jsonBody(payload))
+	payload := map[string]any{"alarm_type": "cpu_usage", "subscribed": true}
+	req := httptest.NewRequest(http.MethodPost, "/admin/system/alarm/subscribe", jsonBody(payload))
 	req.Header.Set("Content-Type", "application/json")
 	w := doRequest(r, req)
 
@@ -197,26 +169,51 @@ func TestAdminUpdateAlarmSettings_DBError(t *testing.T) {
 	}
 }
 
-func TestAdminUpdateAlarmSettings_MultipleEmails(t *testing.T) {
-	h := newAdminHandler(&stubAdminQuerier{}, &stubAdminInviteService{})
+func TestAdminToggleAlarmSubscription_DBError(t *testing.T) {
+	q := &stubAdminQuerier{
+		user:            &models.User{Username: "admin", Email: "admin@example.com"},
+		subscriptionErr: errors.New("db down"),
+	}
+	h := newAdminHandler(q, &stubAdminInviteService{})
 
 	r := newEngine()
-	r.PUT("/admin/system/alarm/settings", h.UpdateAlarmSettings)
+	ginContext(r, "uid-admin", testAdminUsername, true)
+	r.POST("/admin/system/alarm/subscribe", h.ToggleAlarmSubscription)
 
-	emails := []string{"a@example.com", "b@example.com", "c@example.com"}
-	payload := map[string]any{"notify_emails": emails}
-	req := httptest.NewRequest(http.MethodPut, "/admin/system/alarm/settings", jsonBody(payload))
+	payload := map[string]any{"alarm_type": "cpu_usage", "subscribed": true}
+	req := httptest.NewRequest(http.MethodPost, "/admin/system/alarm/subscribe", jsonBody(payload))
 	req.Header.Set("Content-Type", "application/json")
 	w := doRequest(r, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d (body: %s)", w.Code, w.Body.String())
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
 	}
+}
 
-	var body map[string]any
-	decodeBody(w, &body) //nolint
-	got, _ := body["notify_emails"].([]any)
-	if len(got) != 3 {
-		t.Errorf("expected 3 notify_emails in response, got %d", len(got))
+func TestAdminToggleAlarmSubscription_AllAlarmTypes(t *testing.T) {
+	alarmTypes := []string{
+		"cpu_usage", "cpu_temp", "drive_temp",
+		"drive_load", "network_traffic", "api_error_rate",
+	}
+	for _, at := range alarmTypes {
+		t.Run(at, func(t *testing.T) {
+			q := &stubAdminQuerier{
+				user: &models.User{Username: "admin", Email: "admin@example.com"},
+			}
+			h := newAdminHandler(q, &stubAdminInviteService{})
+
+			r := newEngine()
+			ginContext(r, "uid-admin", testAdminUsername, true)
+			r.POST("/admin/system/alarm/subscribe", h.ToggleAlarmSubscription)
+
+			payload := map[string]any{"alarm_type": at, "subscribed": true}
+			req := httptest.NewRequest(http.MethodPost, "/admin/system/alarm/subscribe", jsonBody(payload))
+			req.Header.Set("Content-Type", "application/json")
+			w := doRequest(r, req)
+
+			if w.Code != http.StatusOK {
+				t.Errorf("alarm type %q: expected 200, got %d (body: %s)", at, w.Code, w.Body.String())
+			}
+		})
 	}
 }

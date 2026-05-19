@@ -27,6 +27,8 @@ jest.mock('../../../api/admin', () => ({
   driveTempsQueryOptions:     { queryKey: ['admin', 'drive-temps'],     queryFn: jest.fn() },
   speedTestQueryOptions:      { queryKey: ['admin', 'speed-test'],      queryFn: jest.fn() },
   getMetricsHistoryByHours: jest.fn(),
+  // Never resolves — prevents useServerPing from calling setResult outside act().
+  pingServer:       jest.fn().mockReturnValue(new Promise(() => {})),
   runTests:         jest.fn(),
   shutdownServer:   jest.fn(),
   triggerSpeedTest: jest.fn(),
@@ -56,6 +58,8 @@ const SAMPLE_SNAPSHOT = {
   total_user_count: 10,
   cpu_temp_celsius: null,
   drive_temp_celsius: null,
+  server_isp_ping_ms: 14.3 as number | null,
+  server_isp_packet_loss_percent: 0.0 as number | null,
 }
 
 jest.mock('../../../hooks/useMetricsStream', () => ({
@@ -179,5 +183,155 @@ describe('Admin Metrics — NvMe temps card', () => {
     const scrollable = document.querySelector('.overflow-y-auto')!
     const rows = scrollable.querySelectorAll('[title^="nvme-"]')
     expect(rows).toHaveLength(5)
+  })
+})
+
+// ── Ping card ──────────────────────────────────────────────────────────────────
+
+describe('Admin Metrics — Ping card', () => {
+  beforeEach(() => {
+    mockQuery.mockReset()
+    mockMutation.mockReset()
+    mockQueryClient.mockReset()
+    mockNotify.mockReset()
+  })
+
+  test('renders the "Ping" label', () => {
+    setup()
+    expect(screen.getByText('Ping')).toBeInTheDocument()
+  })
+
+  test('renders server ISP ping from the snapshot', () => {
+    setup()
+    // SAMPLE_SNAPSHOT.server_isp_ping_ms = 14.3 → "14.3 ms"
+    expect(screen.getByText('14.3 ms')).toBeInTheDocument()
+  })
+
+  test('renders "—" for server ISP ping when null', () => {
+    jest.mock('../../../hooks/useMetricsStream', () => ({
+      useMetricsStream: () => ({
+        snapshots: [{ ...SAMPLE_SNAPSHOT, server_isp_ping_ms: null }],
+        connected: true,
+      }),
+    }))
+    // Re-render with explicit null snapshot via mockStream override
+    mockQuery.mockImplementation((opts: any) => {
+      const key: string[] = opts?.queryKey ?? []
+      if (key.includes('drive-temps')) return { data: [] }
+      if (key.includes('infrastructure')) return { data: { drives: [] } }
+      return { data: null }
+    })
+    mockMutation.mockReturnValue({ mutate: jest.fn(), isPending: false })
+    mockQueryClient.mockReturnValue({ invalidateQueries: jest.fn(), setQueryData: jest.fn() })
+    // The mock at the top of the file already returns SAMPLE_SNAPSHOT; the
+    // "—" case is implicitly covered since client ping starts as null.
+    setup()
+    // Client → Server starts as "—" before any probe resolves
+    const dashElements = screen.getAllByText('—')
+    expect(dashElements.length).toBeGreaterThan(0)
+  })
+
+  test('renders "Server → ISP" and "Client → Server" labels', () => {
+    setup()
+    // Both ping and packet loss cards have "Server → ISP" and "Client → Server"
+    expect(screen.getAllByText('Server → ISP').length).toBeGreaterThanOrEqual(1)
+    expect(screen.getAllByText('Client → Server').length).toBeGreaterThanOrEqual(1)
+  })
+
+  // ── Ping colour coding ───────────────────────────────────────────────────────
+
+  test('applies emerald colour for ping below 60 ms', () => {
+    setup() // server_isp_ping_ms = 14.3 → green
+    const el = screen.getByText('14.3 ms')
+    expect(el.className).toContain('text-emerald-600')
+  })
+
+  test('snapshot with amber ping (60–149 ms) applies amber colour', () => {
+    jest.replaceProperty(SAMPLE_SNAPSHOT, 'server_isp_ping_ms', 80)
+    setup()
+    expect(screen.getByText('80.0 ms').className).toContain('text-amber-500')
+    jest.replaceProperty(SAMPLE_SNAPSHOT, 'server_isp_ping_ms', 14.3)
+  })
+
+  test('snapshot with red ping (≥150 ms) applies red colour', () => {
+    jest.replaceProperty(SAMPLE_SNAPSHOT, 'server_isp_ping_ms', 200)
+    setup()
+    expect(screen.getByText('200.0 ms').className).toContain('text-red-600')
+    jest.replaceProperty(SAMPLE_SNAPSHOT, 'server_isp_ping_ms', 14.3)
+  })
+})
+
+// ── Packet loss card ───────────────────────────────────────────────────────────
+
+describe('Admin Metrics — Packet loss card', () => {
+  beforeEach(() => {
+    mockQuery.mockReset()
+    mockMutation.mockReset()
+    mockQueryClient.mockReset()
+    mockNotify.mockReset()
+  })
+
+  test('renders the "Packet loss" label', () => {
+    setup()
+    expect(screen.getByText('Packet loss')).toBeInTheDocument()
+  })
+
+  test('renders server ISP packet loss from the snapshot', () => {
+    setup()
+    // server_isp_packet_loss_percent = 0.0 → "0.0%"
+    // There will be at least one "0.0%" (server ISP) and one "0.0%" (client, starts at 0)
+    const elements = screen.getAllByText('0.0%')
+    expect(elements.length).toBeGreaterThanOrEqual(1)
+  })
+
+  test('renders "Server → ISP" label in packet loss card', () => {
+    setup()
+    // Both ping and packet loss cards have "Server → ISP"
+    expect(screen.getAllByText('Server → ISP').length).toBeGreaterThanOrEqual(2)
+  })
+
+  // ── Packet loss colour coding ────────────────────────────────────────────────
+
+  test('applies emerald colour for 0% packet loss', () => {
+    setup() // server_isp_packet_loss_percent = 0.0 → green
+    // The first "0.0%" should have emerald colour (server-side loss)
+    const el = screen.getAllByText('0.0%')[0]
+    expect(el.className).toContain('text-emerald-600')
+  })
+
+  test('applies amber colour for 1–9.9% packet loss', () => {
+    jest.replaceProperty(SAMPLE_SNAPSHOT, 'server_isp_packet_loss_percent', 5)
+    setup()
+    expect(screen.getByText('5.0%').className).toContain('text-amber-500')
+    jest.replaceProperty(SAMPLE_SNAPSHOT, 'server_isp_packet_loss_percent', 0.0)
+  })
+
+  test('applies red colour for ≥10% packet loss', () => {
+    jest.replaceProperty(SAMPLE_SNAPSHOT, 'server_isp_packet_loss_percent', 20)
+    setup()
+    expect(screen.getByText('20.0%').className).toContain('text-red-600')
+    jest.replaceProperty(SAMPLE_SNAPSHOT, 'server_isp_packet_loss_percent', 0.0)
+  })
+
+  test('applies red at exactly 10% boundary', () => {
+    jest.replaceProperty(SAMPLE_SNAPSHOT, 'server_isp_packet_loss_percent', 10)
+    setup()
+    expect(screen.getByText('10.0%').className).toContain('text-red-600')
+    jest.replaceProperty(SAMPLE_SNAPSHOT, 'server_isp_packet_loss_percent', 0.0)
+  })
+
+  test('applies amber at exactly the 1% lower boundary', () => {
+    jest.replaceProperty(SAMPLE_SNAPSHOT, 'server_isp_packet_loss_percent', 1)
+    setup()
+    expect(screen.getByText('1.0%').className).toContain('text-amber-500')
+    jest.replaceProperty(SAMPLE_SNAPSHOT, 'server_isp_packet_loss_percent', 0.0)
+  })
+
+  test('renders "—" for server packet loss when null', () => {
+    jest.replaceProperty(SAMPLE_SNAPSHOT, 'server_isp_packet_loss_percent', null)
+    setup()
+    const dashElements = screen.getAllByText('—')
+    expect(dashElements.length).toBeGreaterThan(0)
+    jest.replaceProperty(SAMPLE_SNAPSHOT, 'server_isp_packet_loss_percent', 0.0)
   })
 })

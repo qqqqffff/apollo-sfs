@@ -5,7 +5,7 @@ import type { QueryClient } from '@tanstack/react-query'
 import { AuthContext, AuthProvider, useAuth } from '../auth'
 import { AppIcon } from '../components/AppIcon'
 import { clearSkipDeleteCookie } from '../components/DeleteConfirmModal'
-import { NotificationProvider } from '../context/NotificationContext'
+import { NotificationProvider, useNotification } from '../context/NotificationContext'
 import { NotificationBanner } from '../components/NotificationBanner'
 
 export const Route = createRootRouteWithContext<{ queryClient: QueryClient; auth: AuthContext }>()({
@@ -34,17 +34,19 @@ function RootLayout() {
   const { isAuthenticated } = useAuth()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
+  const { notify } = useNotification()
 
   useEffect(() => {
     function handleSessionExpired() {
       if (window.location.pathname === '/login') return
       clearSkipDeleteCookie()
       queryClient.clear()
+      notify('error', 'Your session has expired. Please sign in again.')
       navigate({ to: '/login' })
     }
     window.addEventListener('apollo:session-expired', handleSessionExpired)
     return () => window.removeEventListener('apollo:session-expired', handleSessionExpired)
-  }, [navigate, queryClient])
+  }, [navigate, notify, queryClient])
 
   return (
     <>

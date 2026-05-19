@@ -1,4 +1,6 @@
--- Physical server registry. Each server hosts one MinIO instance.
+-- Physical server registry. Each server hosts one MinIO instance that may serve
+-- one or more drives (see `drives` table). Each drive maps to its own MinIO
+-- bucket on the server's endpoint.
 -- MinIO credentials are stored AES-256-GCM encrypted with KEY_ENCRYPTION_KEY.
 -- Names are auto-generated as "{STATE}-{NNNN}" (e.g. "NH-0001") where STATE
 -- is the 2-letter location code and NNNN is a zero-padded sequential number.

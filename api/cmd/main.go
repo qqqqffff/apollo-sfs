@@ -206,7 +206,6 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		cfg.KeycloakRealm,
 		cfg.KeycloakClientID,
 		cfg.KeycloakClientSecret,
-		cfg.TokenRefreshThreshold,
 		cfg.CookieDomain,
 		cfg.CookieSecure,
 	)
@@ -245,10 +244,10 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	}
 
 	// ── Protected — valid JWT cookie required on every request ───────────────
-	// RequireAuth validates the token and injects userID + exp into Gin context.
-	// ProactiveRefresh silently refreshes the token when it is close to expiring.
+	// RequireAuth validates the token; if the access token is expired it
+	// transparently refreshes it via the refresh token before continuing.
 	protected := v1.Group("")
-	protected.Use(mw.RequireAuth(), mw.ProactiveRefresh(), mw.APIRateLimit(), func(c *gin.Context) {
+	protected.Use(mw.RequireAuth(), mw.APIRateLimit(), func(c *gin.Context) {
 		c.Next()
 		apiCounter.RecordRequest(c.Writer.Status() >= 500)
 	})
@@ -305,6 +304,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 			adminGroup.GET("/system/metrics", adminHandler.GetMetrics)
 			adminGroup.GET("/system/metrics/history", adminHandler.GetMetricsHistory)
 			adminGroup.GET("/system/metrics/stream", adminHandler.StreamMetrics)
+			adminGroup.GET("/system/ping", adminHandler.PingServer)
 
 			adminGroup.GET("/system/infrastructure", adminHandler.GetInfrastructure)
 			adminGroup.GET("/system/capacity", adminHandler.GetCapacity)
@@ -331,7 +331,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 			adminGroup.GET("/system/drive-temps", adminHandler.GetDriveTemps)
 
 			adminGroup.GET("/system/alarm/settings", adminHandler.GetAlarmSettings)
-			adminGroup.PUT("/system/alarm/settings", adminHandler.UpdateAlarmSettings)
+			adminGroup.POST("/system/alarm/subscribe", adminHandler.ToggleAlarmSubscription)
 		}
 	}
 

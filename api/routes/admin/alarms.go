@@ -4,8 +4,6 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-
-	"apollo-sfs.com/api/db"
 )
 
 // GetAlarmSettings handles GET /api/v1/admin/system/alarm/settings.
@@ -18,38 +16,30 @@ func (h *Handler) GetAlarmSettings(c *gin.Context) {
 	c.JSON(http.StatusOK, settings)
 }
 
-type updateAlarmSettingsRequest struct {
-	NotifyEmails          []string `json:"notify_emails"`
-	CPUUsageEnabled       bool     `json:"cpu_usage_enabled"`
-	CPUTempEnabled        bool     `json:"cpu_temp_enabled"`
-	DriveTempEnabled      bool     `json:"drive_temp_enabled"`
-	DriveLoadEnabled      bool     `json:"drive_load_enabled"`
-	NetworkTrafficEnabled bool     `json:"network_traffic_enabled"`
-	APIErrorRateEnabled   bool     `json:"api_error_rate_enabled"`
+type toggleAlarmSubscriptionRequest struct {
+	AlarmType  string `json:"alarm_type"  binding:"required"`
+	Subscribed bool   `json:"subscribed"`
 }
 
-// UpdateAlarmSettings handles PUT /api/v1/admin/system/alarm/settings.
-func (h *Handler) UpdateAlarmSettings(c *gin.Context) {
-	var req updateAlarmSettingsRequest
+// ToggleAlarmSubscription handles POST /api/v1/admin/system/alarm/subscribe.
+// Adds or removes the current user's email from the named alarm's subscriber list.
+func (h *Handler) ToggleAlarmSubscription(c *gin.Context) {
+	var req toggleAlarmSubscriptionRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "alarm_type is required"})
 		return
 	}
-	if req.NotifyEmails == nil {
-		req.NotifyEmails = []string{}
+
+	username := c.GetString("username")
+	user, err := h.queries.GetUserByUsername(c.Request.Context(), username)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not resolve user"})
+		return
 	}
 
-	settings, err := h.queries.UpdateAlarmSettings(c.Request.Context(), db.UpdateAlarmSettingsParams{
-		NotifyEmails:          req.NotifyEmails,
-		CPUUsageEnabled:       req.CPUUsageEnabled,
-		CPUTempEnabled:        req.CPUTempEnabled,
-		DriveTempEnabled:      req.DriveTempEnabled,
-		DriveLoadEnabled:      req.DriveLoadEnabled,
-		NetworkTrafficEnabled: req.NetworkTrafficEnabled,
-		APIErrorRateEnabled:   req.APIErrorRateEnabled,
-	})
+	settings, err := h.queries.SetAlarmSubscription(c.Request.Context(), req.AlarmType, user.Email, req.Subscribed)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not update alarm settings"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 	c.JSON(http.StatusOK, settings)

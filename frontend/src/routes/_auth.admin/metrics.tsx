@@ -1,12 +1,13 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   addDrive,
   createServer,
   driveTempsQueryOptions,
   getMetricsHistoryByHours,
   infrastructureQueryOptions,
+  pingServer,
   runTests,
   shutdownServer,
   speedTestQueryOptions,
@@ -171,6 +172,8 @@ function RouteComponent() {
   const hasDriveTemp = latest?.drive_temp_celsius != null
   const hasTemps = hasCpuTemp || hasDriveTemp
 
+  const { pingMs: clientPingMs, packetLossPercent: clientPacketLoss } = useServerPing()
+
   const { data: driveTemps } = useQuery(driveTempsQueryOptions)
 
   const { data: speedTest, error: speedTestError } = useQuery({
@@ -293,6 +296,14 @@ function RouteComponent() {
           {(driveTemps?.length ?? 0) > 0 && (
             <NvmeTempsCard temps={driveTemps!} />
           )}
+          <PingCard
+            serverMs={latest?.server_isp_ping_ms ?? null}
+            clientMs={clientPingMs}
+          />
+          <PacketLossCard
+            serverLoss={latest?.server_isp_packet_loss_percent ?? null}
+            clientLoss={clientPacketLoss}
+          />
         </div>
       )}
 
@@ -629,6 +640,64 @@ function NvmeTempsCard({ temps }: { temps: DriveTemp[] }) {
   )
 }
 
+function pingColor(ms: number | null): string {
+  if (ms == null) return 'text-gray-900'
+  if (ms >= 150) return 'text-red-600'
+  if (ms >= 60) return 'text-amber-500'
+  return 'text-emerald-600'
+}
+
+function lossColor(pct: number | null): string {
+  if (pct == null) return 'text-gray-900'
+  if (pct >= 10) return 'text-red-600'
+  if (pct >= 1) return 'text-amber-500'
+  return 'text-emerald-600'
+}
+
+function PingCard({ serverMs, clientMs }: { serverMs: number | null; clientMs: number | null }) {
+  return (
+    <div className="bg-white border border-gray-200 rounded-xl px-4 py-3">
+      <div className="text-xs text-gray-400 mb-2">Ping</div>
+      <div className="flex flex-col gap-1">
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-xs text-gray-500">Server → ISP</span>
+          <span className={`text-sm font-semibold tabular-nums ${pingColor(serverMs)}`}>
+            {serverMs != null ? `${serverMs.toFixed(1)} ms` : '—'}
+          </span>
+        </div>
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-xs text-gray-500">Client → Server</span>
+          <span className={`text-sm font-semibold tabular-nums ${pingColor(clientMs)}`}>
+            {clientMs != null ? `${clientMs.toFixed(1)} ms` : '—'}
+          </span>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function PacketLossCard({ serverLoss, clientLoss }: { serverLoss: number | null; clientLoss: number }) {
+  return (
+    <div className="bg-white border border-gray-200 rounded-xl px-4 py-3">
+      <div className="text-xs text-gray-400 mb-2">Packet loss</div>
+      <div className="flex flex-col gap-1">
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-xs text-gray-500">Server → ISP</span>
+          <span className={`text-sm font-semibold tabular-nums ${lossColor(serverLoss)}`}>
+            {serverLoss != null ? `${serverLoss.toFixed(1)}%` : '—'}
+          </span>
+        </div>
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-xs text-gray-500">Client → Server</span>
+          <span className={`text-sm font-semibold tabular-nums ${lossColor(clientLoss)}`}>
+            {clientLoss.toFixed(1)}%
+          </span>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function NetworkTrafficCard({ sent, recv }: { sent: string; recv: string }) {
   return (
     <div className="bg-white border border-gray-200 rounded-xl px-4 py-3">
@@ -645,6 +714,42 @@ function NetworkTrafficCard({ sent, recv }: { sent: string; recv: string }) {
       </div>
     </div>
   )
+}
+
+const PING_WINDOW = 20 // rolling probe count (~100 s at 5 s intervals)
+
+function useServerPing() {
+  const [result, setResult] = useState<{ pingMs: number | null; packetLossPercent: number }>({
+    pingMs: null,
+    packetLossPercent: 0,
+  })
+  const probesRef = useRef<Array<number | null>>([])
+
+  useEffect(() => {
+    async function probe() {
+      let rtt: number | null = null
+      try {
+        rtt = await pingServer()
+      } catch {
+        // timeout or network error — counts as lost
+      }
+      probesRef.current = [...probesRef.current, rtt].slice(-PING_WINDOW)
+      const probes = probesRef.current
+      const successful = probes.filter((p): p is number => p !== null)
+      setResult({
+        pingMs: successful.length > 0
+          ? successful.reduce((s, v) => s + v, 0) / successful.length
+          : null,
+        packetLossPercent: ((probes.length - successful.length) / probes.length) * 100,
+      })
+    }
+
+    probe()
+    const id = setInterval(probe, 5000)
+    return () => clearInterval(id)
+  }, [])
+
+  return result
 }
 
 function formatBytesPerSec(bps: number): string {

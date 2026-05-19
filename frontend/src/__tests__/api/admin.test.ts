@@ -9,6 +9,7 @@ import {
   resendInvitation,
   getMetrics,
   getMetricsHistoryByHours,
+  pingServer,
   listInfrastructure,
   getCapacity,
   createServer,
@@ -32,7 +33,7 @@ import {
   adminInterestInfiniteQueryOptions,
   interestFormSettingsQueryOptions,
   getAlarmSettings,
-  updateAlarmSettings,
+  toggleAlarmSubscription,
   alarmSettingsQueryOptions,
   getDriveTemps,
   driveTempsQueryOptions,
@@ -167,6 +168,34 @@ describe('getMetricsHistoryByHours', () => {
     mockFetch(200, [])
     await getMetricsHistoryByHours(24)
     expect(lastUrl()).toBe('/api/v1/admin/system/metrics/history?hours=24')
+  })
+})
+
+describe('pingServer', () => {
+  beforeEach(() => {
+    jest.spyOn(performance, 'now')
+      .mockReturnValueOnce(0)
+      .mockReturnValueOnce(25)
+  })
+  afterEach(() => jest.restoreAllMocks())
+
+  it('GETs /api/v1/admin/system/ping', async () => {
+    mock204()
+    await pingServer()
+    expect(lastUrl()).toBe('/api/v1/admin/system/ping')
+  })
+
+  it('returns the measured round-trip time in milliseconds', async () => {
+    mock204()
+    const rtt = await pingServer()
+    expect(rtt).toBe(25)
+  })
+
+  it('uses a 5-second AbortSignal timeout', async () => {
+    mock204()
+    await pingServer()
+    const signal = lastInit().signal as AbortSignal
+    expect(signal).toBeDefined()
   })
 })
 
@@ -440,13 +469,18 @@ describe('shutdownServer', () => {
 // ── Alarm settings ─────────────────────────────────────────────────────────────
 
 const ALARM_DEFAULTS = {
-  notify_emails: [],
-  cpu_usage_enabled: false,
-  cpu_temp_enabled: false,
-  drive_temp_enabled: false,
-  drive_load_enabled: false,
-  network_traffic_enabled: false,
-  api_error_rate_enabled: false,
+  cpu_usage_emails: [] as string[],
+  cpu_usage_last_fired_at: null,
+  cpu_temp_emails: [] as string[],
+  cpu_temp_last_fired_at: null,
+  drive_temp_emails: [] as string[],
+  drive_temp_last_fired_at: null,
+  drive_load_emails: [] as string[],
+  drive_load_last_fired_at: null,
+  network_traffic_emails: [] as string[],
+  network_traffic_last_fired_at: null,
+  api_error_rate_emails: [] as string[],
+  api_error_rate_last_fired_at: null,
   updated_at: '2026-01-01T00:00:00Z',
 }
 
@@ -455,57 +489,36 @@ describe('getAlarmSettings', () => {
     mockFetch(200, ALARM_DEFAULTS)
     const result = await getAlarmSettings()
     expect(lastUrl()).toBe('/api/v1/admin/system/alarm/settings')
-    expect(lastInit().method).toBeUndefined() // GET has no explicit method set
+    expect(lastInit().method).toBeUndefined()
     expect(result).toEqual(ALARM_DEFAULTS)
   })
 })
 
-describe('updateAlarmSettings', () => {
-  it('PUTs /admin/system/alarm/settings with all fields', async () => {
-    const payload = {
-      notify_emails: ['ops@example.com'],
-      cpu_usage_enabled: true,
-      cpu_temp_enabled: false,
-      drive_temp_enabled: true,
-      drive_load_enabled: false,
-      network_traffic_enabled: true,
-      api_error_rate_enabled: false,
-    }
-    mockFetch(200, { ...payload, updated_at: '2026-01-01T00:00:00Z' })
-    await updateAlarmSettings(payload)
-    expect(lastUrl()).toBe('/api/v1/admin/system/alarm/settings')
-    expect(lastInit().method).toBe('PUT')
-    expect(lastBody()).toEqual(payload)
+describe('toggleAlarmSubscription', () => {
+  it('POSTs /admin/system/alarm/subscribe with subscribe=true', async () => {
+    mockFetch(200, ALARM_DEFAULTS)
+    await toggleAlarmSubscription('cpu_usage', true)
+    expect(lastUrl()).toBe('/api/v1/admin/system/alarm/subscribe')
+    expect(lastInit().method).toBe('POST')
+    expect(lastBody()).toEqual({ alarm_type: 'cpu_usage', subscribed: true })
   })
 
-  it('sends empty notify_emails array', async () => {
-    const payload = {
-      notify_emails: [],
-      cpu_usage_enabled: false,
-      cpu_temp_enabled: false,
-      drive_temp_enabled: false,
-      drive_load_enabled: false,
-      network_traffic_enabled: false,
-      api_error_rate_enabled: false,
-    }
-    mockFetch(200, { ...payload, updated_at: '2026-01-01T00:00:00Z' })
-    await updateAlarmSettings(payload)
-    expect(lastBody().notify_emails).toEqual([])
+  it('POSTs /admin/system/alarm/subscribe with subscribe=false', async () => {
+    mockFetch(200, ALARM_DEFAULTS)
+    await toggleAlarmSubscription('cpu_temp', false)
+    expect(lastBody()).toEqual({ alarm_type: 'cpu_temp', subscribed: false })
   })
 
-  it('sends multiple notify_emails', async () => {
-    const payload = {
-      notify_emails: ['a@example.com', 'b@example.com', 'c@example.com'],
-      cpu_usage_enabled: false,
-      cpu_temp_enabled: false,
-      drive_temp_enabled: false,
-      drive_load_enabled: false,
-      network_traffic_enabled: false,
-      api_error_rate_enabled: false,
+  it('sends correct alarm_type for each type', async () => {
+    const types = [
+      'cpu_usage', 'cpu_temp', 'drive_temp',
+      'drive_load', 'network_traffic', 'api_error_rate',
+    ] as const
+    for (const t of types) {
+      mockFetch(200, ALARM_DEFAULTS)
+      await toggleAlarmSubscription(t, true)
+      expect(lastBody().alarm_type).toBe(t)
     }
-    mockFetch(200, { ...payload, updated_at: '2026-01-01T00:00:00Z' })
-    await updateAlarmSettings(payload)
-    expect(lastBody().notify_emails).toHaveLength(3)
   })
 })
 

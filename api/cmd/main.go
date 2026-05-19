@@ -328,6 +328,8 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 			adminGroup.GET("/system/speed-test", adminHandler.GetSpeedTest)
 			adminGroup.POST("/system/speed-test", adminHandler.TriggerSpeedTest)
 
+			adminGroup.GET("/system/drive-temps", adminHandler.GetDriveTemps)
+
 			adminGroup.GET("/system/alarm/settings", adminHandler.GetAlarmSettings)
 			adminGroup.PUT("/system/alarm/settings", adminHandler.UpdateAlarmSettings)
 		}

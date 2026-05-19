@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import {
   addDrive,
   createServer,
+  driveTempsQueryOptions,
   getMetricsHistoryByHours,
   infrastructureQueryOptions,
   runTests,
@@ -13,7 +14,7 @@ import {
   updateDrive,
   updateServer,
 } from '../../api/admin'
-import type { DriveSummary, TestRunResponse } from '../../api/admin'
+import type { DriveTemp, DriveSummary, TestRunResponse } from '../../api/admin'
 import { useMetricsStream } from '../../hooks/useMetricsStream'
 import { BarGraph } from '../../components/BarGraph'
 import { LineGraph } from '../../components/LineGraph'
@@ -170,6 +171,8 @@ function RouteComponent() {
   const hasDriveTemp = latest?.drive_temp_celsius != null
   const hasTemps = hasCpuTemp || hasDriveTemp
 
+  const { data: driveTemps } = useQuery(driveTempsQueryOptions)
+
   const { data: speedTest, error: speedTestError } = useQuery({
     ...speedTestQueryOptions,
     retry: false,
@@ -286,6 +289,9 @@ function RouteComponent() {
           )}
           {hasDriveTemp && (
             <StatCard label="Drive temp" value={`${latest.drive_temp_celsius!.toFixed(1)}°C`} />
+          )}
+          {(driveTemps?.length ?? 0) > 0 && (
+            <NvmeTempsCard temps={driveTemps!} />
           )}
         </div>
       )}
@@ -595,6 +601,30 @@ function OutputBlock({ label, output }: { label: string; output: string }) {
       <pre className="bg-gray-50 border border-gray-200 rounded-lg p-3 text-xs text-gray-700 overflow-x-auto whitespace-pre-wrap max-h-60 overflow-y-auto m-0">
         {output || '(no output)'}
       </pre>
+    </div>
+  )
+}
+
+function tempColor(c: number): string {
+  if (c >= 60) return 'text-red-600'
+  if (c >= 45) return 'text-amber-500'
+  return 'text-emerald-600'
+}
+
+function NvmeTempsCard({ temps }: { temps: DriveTemp[] }) {
+  return (
+    <div className="bg-white border border-gray-200 rounded-xl px-4 py-3">
+      <div className="text-xs text-gray-400 mb-2">NVMe temps</div>
+      <div className="flex flex-col gap-1 max-h-28 overflow-y-auto pr-1">
+        {temps.map((d) => (
+          <div key={d.name} className="flex items-center justify-between gap-2">
+            <span className="text-xs text-gray-500 truncate" title={d.name}>{d.name}</span>
+            <span className={`text-xs font-semibold tabular-nums shrink-0 ${tempColor(d.temp_celsius)}`}>
+              {d.temp_celsius.toFixed(1)}°C
+            </span>
+          </div>
+        ))}
+      </div>
     </div>
   )
 }

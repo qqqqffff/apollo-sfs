@@ -34,6 +34,8 @@ import {
   getAlarmSettings,
   updateAlarmSettings,
   alarmSettingsQueryOptions,
+  getDriveTemps,
+  driveTempsQueryOptions,
 } from '../../api/admin'
 import type { InterestSubmission, PageResult } from '../../types/api'
 
@@ -516,5 +518,53 @@ describe('alarmSettingsQueryOptions', () => {
     mockFetch(200, ALARM_DEFAULTS)
     alarmSettingsQueryOptions.queryFn()
     expect(lastUrl()).toBe('/api/v1/admin/system/alarm/settings')
+  })
+})
+
+// ── Drive temperatures ─────────────────────────────────────────────────────────
+
+const DRIVE_TEMPS = [
+  { name: 'nvme-pci-0100 Composite', temp_celsius: 38.5 },
+  { name: 'nvme-pci-0200 Composite', temp_celsius: 52.0 },
+]
+
+describe('getDriveTemps', () => {
+  it('GETs /admin/system/drive-temps', async () => {
+    mockFetch(200, DRIVE_TEMPS)
+    await getDriveTemps()
+    expect(lastUrl()).toBe('/api/v1/admin/system/drive-temps')
+    expect(lastInit().method).toBeUndefined()
+  })
+
+  it('returns the array of drive temps', async () => {
+    mockFetch(200, DRIVE_TEMPS)
+    const result = await getDriveTemps()
+    expect(result).toEqual(DRIVE_TEMPS)
+  })
+
+  it('returns an empty array when no sensors are available', async () => {
+    mockFetch(200, [])
+    const result = await getDriveTemps()
+    expect(result).toEqual([])
+  })
+})
+
+describe('driveTempsQueryOptions', () => {
+  it('has correct queryKey', () => {
+    expect(driveTempsQueryOptions.queryKey).toEqual(['admin', 'drive-temps'])
+  })
+
+  it('has staleTime of 10 seconds', () => {
+    expect(driveTempsQueryOptions.staleTime).toBe(10_000)
+  })
+
+  it('has refetchInterval of 10 seconds', () => {
+    expect(driveTempsQueryOptions.refetchInterval).toBe(10_000)
+  })
+
+  it('queryFn calls getDriveTemps', () => {
+    mockFetch(200, DRIVE_TEMPS)
+    driveTempsQueryOptions.queryFn()
+    expect(lastUrl()).toBe('/api/v1/admin/system/drive-temps')
   })
 })

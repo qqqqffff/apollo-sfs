@@ -197,6 +197,24 @@ export const interestFormSettingsQueryOptions = {
   queryFn: getInterestFormSettings,
 }
 
+// ── Drive temperatures ─────────────────────────────────────────────────────────
+
+export interface DriveTemp {
+  name: string
+  temp_celsius: number
+}
+
+export function getDriveTemps() {
+  return get<DriveTemp[]>('/admin/system/drive-temps')
+}
+
+export const driveTempsQueryOptions = {
+  queryKey: ['admin', 'drive-temps'] as const,
+  queryFn: getDriveTemps,
+  staleTime: 10_000,
+  refetchInterval: 10_000,
+}
+
 // ── Speed test ─────────────────────────────────────────────────────────────────
 
 export interface SpeedTestResult {

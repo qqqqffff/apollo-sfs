@@ -9,6 +9,7 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
+import { Route as SuspendedRouteImport } from './routes/suspended'
 import { Route as RegisterRouteImport } from './routes/register'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as InterestRouteImport } from './routes/interest'
@@ -22,9 +23,15 @@ import { Route as AuthAdminUsersRouteImport } from './routes/_auth.admin/users'
 import { Route as AuthAdminMetricsRouteImport } from './routes/_auth.admin/metrics'
 import { Route as AuthAdminInvitationsRouteImport } from './routes/_auth.admin/invitations'
 import { Route as AuthAdminInterestRouteImport } from './routes/_auth.admin/interest'
+import { Route as AuthAdminBansRouteImport } from './routes/_auth.admin/bans'
 import { Route as AuthAdminBannedIpsRouteImport } from './routes/_auth.admin/banned-ips'
 import { Route as AuthAdminAlarmRouteImport } from './routes/_auth.admin/alarm'
 
+const SuspendedRoute = SuspendedRouteImport.update({
+  id: '/suspended',
+  path: '/suspended',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const RegisterRoute = RegisterRouteImport.update({
   id: '/register',
   path: '/register',
@@ -89,6 +96,11 @@ const AuthAdminInterestRoute = AuthAdminInterestRouteImport.update({
   path: '/admin/interest',
   getParentRoute: () => AuthRoute,
 } as any)
+const AuthAdminBansRoute = AuthAdminBansRouteImport.update({
+  id: '/admin/bans',
+  path: '/admin/bans',
+  getParentRoute: () => AuthRoute,
+} as any)
 const AuthAdminBannedIpsRoute = AuthAdminBannedIpsRouteImport.update({
   id: '/admin/banned-ips',
   path: '/admin/banned-ips',
@@ -106,8 +118,10 @@ export interface FileRoutesByFullPath {
   '/interest': typeof InterestRoute
   '/login': typeof LoginRoute
   '/register': typeof RegisterRoute
+  '/suspended': typeof SuspendedRoute
   '/admin/alarm': typeof AuthAdminAlarmRoute
   '/admin/banned-ips': typeof AuthAdminBannedIpsRoute
+  '/admin/bans': typeof AuthAdminBansRoute
   '/admin/interest': typeof AuthAdminInterestRoute
   '/admin/invitations': typeof AuthAdminInvitationsRoute
   '/admin/metrics': typeof AuthAdminMetricsRoute
@@ -122,8 +136,10 @@ export interface FileRoutesByTo {
   '/interest': typeof InterestRoute
   '/login': typeof LoginRoute
   '/register': typeof RegisterRoute
+  '/suspended': typeof SuspendedRoute
   '/admin/alarm': typeof AuthAdminAlarmRoute
   '/admin/banned-ips': typeof AuthAdminBannedIpsRoute
+  '/admin/bans': typeof AuthAdminBansRoute
   '/admin/interest': typeof AuthAdminInterestRoute
   '/admin/invitations': typeof AuthAdminInvitationsRoute
   '/admin/metrics': typeof AuthAdminMetricsRoute
@@ -140,8 +156,10 @@ export interface FileRoutesById {
   '/interest': typeof InterestRoute
   '/login': typeof LoginRoute
   '/register': typeof RegisterRoute
+  '/suspended': typeof SuspendedRoute
   '/_auth/admin/alarm': typeof AuthAdminAlarmRoute
   '/_auth/admin/banned-ips': typeof AuthAdminBannedIpsRoute
+  '/_auth/admin/bans': typeof AuthAdminBansRoute
   '/_auth/admin/interest': typeof AuthAdminInterestRoute
   '/_auth/admin/invitations': typeof AuthAdminInvitationsRoute
   '/_auth/admin/metrics': typeof AuthAdminMetricsRoute
@@ -158,8 +176,10 @@ export interface FileRouteTypes {
     | '/interest'
     | '/login'
     | '/register'
+    | '/suspended'
     | '/admin/alarm'
     | '/admin/banned-ips'
+    | '/admin/bans'
     | '/admin/interest'
     | '/admin/invitations'
     | '/admin/metrics'
@@ -174,8 +194,10 @@ export interface FileRouteTypes {
     | '/interest'
     | '/login'
     | '/register'
+    | '/suspended'
     | '/admin/alarm'
     | '/admin/banned-ips'
+    | '/admin/bans'
     | '/admin/interest'
     | '/admin/invitations'
     | '/admin/metrics'
@@ -191,8 +213,10 @@ export interface FileRouteTypes {
     | '/interest'
     | '/login'
     | '/register'
+    | '/suspended'
     | '/_auth/admin/alarm'
     | '/_auth/admin/banned-ips'
+    | '/_auth/admin/bans'
     | '/_auth/admin/interest'
     | '/_auth/admin/invitations'
     | '/_auth/admin/metrics'
@@ -209,10 +233,18 @@ export interface RootRouteChildren {
   InterestRoute: typeof InterestRoute
   LoginRoute: typeof LoginRoute
   RegisterRoute: typeof RegisterRoute
+  SuspendedRoute: typeof SuspendedRoute
 }
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
+    '/suspended': {
+      id: '/suspended'
+      path: '/suspended'
+      fullPath: '/suspended'
+      preLoaderRoute: typeof SuspendedRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/register': {
       id: '/register'
       path: '/register'
@@ -304,6 +336,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthAdminInterestRouteImport
       parentRoute: typeof AuthRoute
     }
+    '/_auth/admin/bans': {
+      id: '/_auth/admin/bans'
+      path: '/admin/bans'
+      fullPath: '/admin/bans'
+      preLoaderRoute: typeof AuthAdminBansRouteImport
+      parentRoute: typeof AuthRoute
+    }
     '/_auth/admin/banned-ips': {
       id: '/_auth/admin/banned-ips'
       path: '/admin/banned-ips'
@@ -324,6 +363,7 @@ declare module '@tanstack/react-router' {
 interface AuthRouteChildren {
   AuthAdminAlarmRoute: typeof AuthAdminAlarmRoute
   AuthAdminBannedIpsRoute: typeof AuthAdminBannedIpsRoute
+  AuthAdminBansRoute: typeof AuthAdminBansRoute
   AuthAdminInterestRoute: typeof AuthAdminInterestRoute
   AuthAdminInvitationsRoute: typeof AuthAdminInvitationsRoute
   AuthAdminMetricsRoute: typeof AuthAdminMetricsRoute
@@ -336,6 +376,7 @@ interface AuthRouteChildren {
 const AuthRouteChildren: AuthRouteChildren = {
   AuthAdminAlarmRoute: AuthAdminAlarmRoute,
   AuthAdminBannedIpsRoute: AuthAdminBannedIpsRoute,
+  AuthAdminBansRoute: AuthAdminBansRoute,
   AuthAdminInterestRoute: AuthAdminInterestRoute,
   AuthAdminInvitationsRoute: AuthAdminInvitationsRoute,
   AuthAdminMetricsRoute: AuthAdminMetricsRoute,
@@ -354,6 +395,7 @@ const rootRouteChildren: RootRouteChildren = {
   InterestRoute: InterestRoute,
   LoginRoute: LoginRoute,
   RegisterRoute: RegisterRoute,
+  SuspendedRoute: SuspendedRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

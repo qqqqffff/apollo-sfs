@@ -6,6 +6,7 @@ import { AuthContext, AuthProvider, useAuth } from '../auth'
 import { AppIcon } from '../components/AppIcon'
 import { clearSkipDeleteCookie } from '../components/DeleteConfirmModal'
 import { NotificationProvider, useNotification } from '../context/NotificationContext'
+import { ImpersonationProvider } from '../context/ImpersonationContext'
 import { NotificationBanner } from '../components/NotificationBanner'
 
 export const Route = createRootRouteWithContext<{ queryClient: QueryClient; auth: AuthContext }>()({
@@ -24,7 +25,9 @@ function Root() {
   return (
     <NotificationProvider>
       <AuthProvider>
-        <RootLayout />
+        <ImpersonationProvider>
+          <RootLayout />
+        </ImpersonationProvider>
       </AuthProvider>
     </NotificationProvider>
   )

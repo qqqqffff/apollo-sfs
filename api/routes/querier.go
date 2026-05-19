@@ -16,6 +16,11 @@ type Querier interface {
 	// Me
 	GetUserByUsername(ctx context.Context, username string) (*models.User, error)
 
+	// Ban / suspension enforcement (checked on every /me call)
+	GetActiveBan(ctx context.Context, username string) (*models.UserBan, error)
+	AutoPardonExpiredSuspension(ctx context.Context, username string) error
+	AddBannedIP(ctx context.Context, ip, jail string) error
+
 	// Search
 	SearchFoldersByUser(ctx context.Context, userID uuid.UUID, term string, in db.PageInput) (*db.PageResult[models.Folder], error)
 	SearchFilesByUser(ctx context.Context, userID uuid.UUID, term string, in db.PageInput) (*db.PageResult[models.File], error)
@@ -27,4 +32,8 @@ type Querier interface {
 	ExistsInterestSubmissionByEmail(ctx context.Context, email string) (bool, error)
 	CreateInterestSubmission(ctx context.Context, s *models.InterestSubmission) error
 	ListAdminEmails(ctx context.Context) ([]string, error)
+
+	// Audit logs
+	InsertAuditLog(ctx context.Context, in db.AuditInput) error
+	ListAuditLogsForUser(ctx context.Context, username string, in db.PageInput) (*db.PageResult[models.AuditLog], error)
 }

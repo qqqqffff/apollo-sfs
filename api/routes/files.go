@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	"apollo-sfs.com/api/db"
 	"apollo-sfs.com/api/models"
 	"apollo-sfs.com/api/routes/services"
 	"apollo-sfs.com/api/sanitize"
@@ -105,6 +106,16 @@ func (h *Handler) UploadFile(c *gin.Context) {
 		s := file.FolderID.String()
 		folderIDStr = &s
 	}
+
+	h.logAudit(db.AuditInput{
+		TargetUsername: username,
+		ActorUsername:  username,
+		Action:         "file_uploaded",
+		ResourceType:   strPtr("file"),
+		ResourceID:     &file.ID,
+		ResourceName:   &file.Name,
+	})
+
 	c.JSON(http.StatusCreated, uploadResponse{
 		ID:        file.ID.String(),
 		Name:      file.Name,
@@ -464,6 +475,16 @@ func (h *Handler) UpdateFile(c *gin.Context) {
 		return
 	}
 
+	username := c.GetString("username")
+	h.logAudit(db.AuditInput{
+		TargetUsername: username,
+		ActorUsername:  username,
+		Action:         "file_renamed",
+		ResourceType:   strPtr("file"),
+		ResourceID:     &fileID,
+		ResourceName:   &updated.Name,
+	})
+
 	c.JSON(http.StatusOK, updated)
 }
 
@@ -481,6 +502,12 @@ func (h *Handler) DeleteFile(c *gin.Context) {
 	userID, _ := uuid.Parse(c.GetString("userID"))
 	username := c.GetString("username")
 
+	// Fetch name before deletion so it appears in the audit record.
+	var deletedName string
+	if meta, err := h.files.GetMetadata(c.Request.Context(), fileID, userID); err == nil && meta != nil {
+		deletedName = meta.Name
+	}
+
 	if err := h.files.Delete(c.Request.Context(), fileID, userID, username); err != nil {
 		if errors.Is(err, services.ErrNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "file not found"})
@@ -489,6 +516,18 @@ func (h *Handler) DeleteFile(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not delete file"})
 		return
 	}
+
+	entry := db.AuditInput{
+		TargetUsername: username,
+		ActorUsername:  username,
+		Action:         "file_deleted",
+		ResourceType:   strPtr("file"),
+		ResourceID:     &fileID,
+	}
+	if deletedName != "" {
+		entry.ResourceName = &deletedName
+	}
+	h.logAudit(entry)
 
 	c.JSON(http.StatusOK, gin.H{"message": "file deleted"})
 }
@@ -551,6 +590,14 @@ func (h *Handler) InitUpload(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not initialise upload"})
 		return
 	}
+
+	h.logAudit(db.AuditInput{
+		TargetUsername: username,
+		ActorUsername:  username,
+		Action:         "file_upload_started",
+		ResourceType:   strPtr("file"),
+		ResourceName:   &name,
+	})
 
 	c.JSON(http.StatusCreated, gin.H{"upload_id": sess.ID.String()})
 }
@@ -662,6 +709,15 @@ func (h *Handler) CompleteUpload(c *gin.Context) {
 	}
 
 	go h.uploads.Delete(uploadID)
+
+	h.logAudit(db.AuditInput{
+		TargetUsername: sess.Username,
+		ActorUsername:  sess.Username,
+		Action:         "file_uploaded",
+		ResourceType:   strPtr("file"),
+		ResourceID:     &file.ID,
+		ResourceName:   &file.Name,
+	})
 
 	var folderIDStr *string
 	if file.FolderID != nil {

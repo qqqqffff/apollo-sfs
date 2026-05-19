@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"apollo-sfs.com/api/db"
 	"apollo-sfs.com/api/models"
 )
@@ -593,6 +595,28 @@ func parseActionToken(token string) (sub string, exp int64, err error) {
 		return "", 0, fmt.Errorf("token is missing subject claim")
 	}
 	return claims.Sub, claims.Exp, nil
+}
+
+// GetUserKcID returns the Keycloak subject UUID for the given username.
+// Used by admin handlers to resolve a preferred_username to the UUID that
+// folders and files are keyed on.
+func (s *AuthService) GetUserKcID(ctx context.Context, username string) (uuid.UUID, error) {
+	adminToken, err := s.adminToken(ctx)
+	if err != nil {
+		return uuid.UUID{}, fmt.Errorf("get user kc id: admin token: %w", err)
+	}
+	kcID, err := s.kcFindUserByUsername(ctx, adminToken, username)
+	if err != nil {
+		return uuid.UUID{}, fmt.Errorf("get user kc id: lookup: %w", err)
+	}
+	if kcID == "" {
+		return uuid.UUID{}, fmt.Errorf("user %q not found in keycloak", username)
+	}
+	id, err := uuid.Parse(kcID)
+	if err != nil {
+		return uuid.UUID{}, fmt.Errorf("get user kc id: parse UUID %q: %w", kcID, err)
+	}
+	return id, nil
 }
 
 // ChangePassword verifies the user's current password via an ROPC grant, then

@@ -456,6 +456,39 @@ func (s *FileService) Delete(ctx context.Context, fileID, userID uuid.UUID, user
 	return nil
 }
 
+// AdminDeleteAllFiles deletes every file owned by username from MinIO and the
+// database, then resets the user's storage counters to zero. Intended for the
+// permanent-ban flow where all content must be purged immediately.
+func (s *FileService) AdminDeleteAllFiles(ctx context.Context, username string) error {
+	storage, _, err := s.storageFor(ctx, username)
+	if err != nil {
+		return fmt.Errorf("AdminDeleteAllFiles: %w", err)
+	}
+
+	files, err := s.queries.GetAllUserFiles(ctx, username)
+	if err != nil {
+		return fmt.Errorf("AdminDeleteAllFiles list: %w", err)
+	}
+
+	for _, f := range files {
+		// Remove video variant blobs first (DB rows cascade-delete with parent).
+		if variants, err := s.queries.ListVideoVariants(ctx, f.ID); err == nil {
+			for _, v := range variants {
+				_ = storage.RemoveObject(ctx, v.MinIOObjectKey)
+			}
+		}
+		_ = storage.RemoveObject(ctx, f.MinIOObjectKey)
+	}
+
+	if err := s.queries.DeleteAllUserFileRows(ctx, username); err != nil {
+		return fmt.Errorf("AdminDeleteAllFiles delete rows: %w", err)
+	}
+	if err := s.queries.ResetUserStorage(ctx, username); err != nil {
+		return fmt.Errorf("AdminDeleteAllFiles reset storage: %w", err)
+	}
+	return nil
+}
+
 // GetVariant returns the video_variants row for fileID/quality.
 // Returns ErrNotFound if no variant exists or it is not yet ready.
 func (s *FileService) GetVariant(ctx context.Context, fileID uuid.UUID, quality string) (*models.VideoVariant, error) {

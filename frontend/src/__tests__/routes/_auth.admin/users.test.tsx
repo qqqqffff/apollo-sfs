@@ -2,8 +2,10 @@ import React from 'react'
 import { render, screen, fireEvent } from '@testing-library/react'
 import '@testing-library/jest-dom'
 
+const mockNavigate = jest.fn()
 jest.mock('@tanstack/react-router', () => ({
   createFileRoute: () => (opts: any) => ({ options: opts }),
+  useNavigate: () => mockNavigate,
 }))
 
 const mockInfiniteQuery = jest.fn()
@@ -24,10 +26,17 @@ jest.mock('../../../context/NotificationContext', () => ({
   useNotification: () => ({ notify: mockNotify }),
 }))
 
+const mockImpersonate = jest.fn()
+jest.mock('../../../context/ImpersonationContext', () => ({
+  useImpersonation: () => ({ impersonate: mockImpersonate, clearImpersonation: jest.fn(), impersonatedUser: null }),
+}))
+
 jest.mock('../../../api/admin', () => ({
   adminUsersInfiniteQueryOptions: { queryKey: ['admin', 'users'], queryFn: jest.fn() },
   updateUserQuota: jest.fn(),
   updateUsername: jest.fn(),
+  logImpersonationAccess: jest.fn().mockResolvedValue({ ok: true }),
+  getAdminAuditLogs: jest.fn(),
 }))
 
 jest.mock('../../../api/client', () => ({
@@ -69,7 +78,11 @@ function setup(overrides: { isLoading?: boolean; error?: Error | null; users?: t
 }
 
 describe('Admin Users page', () => {
-  beforeEach(() => mockNotify.mockReset())
+  beforeEach(() => {
+    mockNotify.mockReset()
+    mockImpersonate.mockReset()
+    mockNavigate.mockReset()
+  })
 
   test('renders Users heading', () => {
     setup()
@@ -134,5 +147,12 @@ describe('Admin Users page', () => {
   test('does not show "Load more" when no next page', () => {
     setup()
     expect(screen.queryByRole('button', { name: /load more/i })).not.toBeInTheDocument()
+  })
+
+  test('clicking a username calls impersonate and navigates to /client', () => {
+    setup()
+    fireEvent.click(screen.getAllByTitle(/view files as this user/i)[0])
+    expect(mockImpersonate).toHaveBeenCalledWith(expect.objectContaining({ username: 'alice' }))
+    expect(mockNavigate).toHaveBeenCalledWith(expect.objectContaining({ to: '/client' }))
   })
 })

@@ -144,4 +144,18 @@ describe('Admin Invitations page', () => {
     fireEvent.click(screen.getByRole('button', { name: /custom/i }))
     expect(screen.getByPlaceholderText('GB')).toBeInTheDocument()
   })
+
+  test('renders Grant admin access checkbox unchecked by default', () => {
+    setup()
+    const checkbox = screen.getByRole('checkbox', { name: /grant admin access/i })
+    expect(checkbox).toBeInTheDocument()
+    expect(checkbox).not.toBeChecked()
+  })
+
+  test('Grant admin access checkbox can be toggled', () => {
+    setup()
+    const checkbox = screen.getByRole('checkbox', { name: /grant admin access/i })
+    fireEvent.click(checkbox)
+    expect(checkbox).toBeChecked()
+  })
 })

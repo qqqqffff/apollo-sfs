@@ -6,6 +6,7 @@ export interface User {
   last_seen_at: string | null
   created_at: string
   is_admin: boolean
+  active_ban?: UserBan | null
 }
 
 export interface File {
@@ -50,6 +51,7 @@ export interface Invitation {
   revoked_at: string | null
   created_at: string
   initial_quota_bytes: number
+  grant_admin: boolean
   invitation_url?: string
 }
 
@@ -92,4 +94,52 @@ export interface BannedIP {
   ban_count: number
   country: string
   city: string
+}
+
+export interface AuditLog {
+  id: string
+  target_username: string
+  actor_username: string
+  action: string
+  resource_type: string | null
+  resource_id: string | null
+  resource_name: string | null
+  created_at: string
+}
+
+export type BanType = 'banned' | 'suspended'
+
+export interface UserBan {
+  id: number
+  username: string
+  ban_type: BanType
+  violation_code: string
+  comments: string
+  banned_by: string
+  banned_at: string
+  expires_at: string | null
+  pardoned_at: string | null
+  pardoned_by: string | null
+}
+
+export interface AccountRestriction {
+  error: 'banned' | 'suspended'
+  violation_code: string
+  comments: string
+  banned_at: string
+  expires_at?: string | null
+}
+
+export const VIOLATION_CODES: Record<string, string> = {
+  illegal_activity:    'Illegal or fraudulent activity (§4)',
+  third_party_rights:  'Violation of third-party rights (§4)',
+  violence_harm:       'Violence and serious harm (§4)',
+  child_exploitation:  'Child exploitation (§4)',
+  system_attacks:      'System attacks (§4)',
+  spam:                'Unsolicited bulk communications (§4)',
+  reverse_engineering: 'Reverse engineering or circumvention (§4)',
+  unauthorized_resale: 'Unauthorized resale or redistribution (§4)',
+  security_risk:       'Security risk to service or users (§6)',
+  material_breach:     'Material breach of agreement (§6)',
+  other:               'Other / unspecified reason',
 }

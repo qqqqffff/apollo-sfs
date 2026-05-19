@@ -214,7 +214,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 
 	h := routes.NewHandler(queries, fileSvc, folderSvc, inviteSvc, favSvc, authSvc, uploadStore, emailSvc, cfg.TurnstileSecretKey)
 	authHandler := auth.NewHandler(authSvc)
-	adminHandler := admin.NewHandler(queries, inviteSvc, metricsSvc, authSvc, registry, geoReader, cfg.BackendTestURL, cfg.AppDir, cfg.FrontendTestURL, cfg.FrontendE2EURL, shutdownCh)
+	adminHandler := admin.NewHandler(queries, inviteSvc, metricsSvc, authSvc, fileSvc, registry, geoReader, cfg.BackendTestURL, cfg.AppDir, cfg.FrontendTestURL, cfg.FrontendE2EURL, shutdownCh)
 	metricsSvc.SetSpeedTestProvider(adminHandler)
 	go adminHandler.SpeedTestLoop(context.Background())
 
@@ -296,6 +296,11 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 			adminGroup.GET("/users/:user_id", adminHandler.GetUser)
 			adminGroup.PATCH("/users/:user_id/quota", adminHandler.UpdateUserQuota)
 			adminGroup.PATCH("/users/:user_id/username", adminHandler.UpdateUsername)
+			adminGroup.GET("/users/:user_id/folders", h.AdminListUserFolders)
+			adminGroup.GET("/users/:user_id/folders/:folder_id", h.AdminGetUserFolder)
+			adminGroup.GET("/users/:user_id/favorites", h.AdminGetUserFavorites)
+			adminGroup.GET("/users/:user_id/audit-logs", h.AdminGetUserAuditLogs)
+			adminGroup.POST("/users/:user_id/audit-logs", h.AdminLogImpersonation)
 
 			adminGroup.POST("/invitations", adminHandler.CreateInvitation)
 			adminGroup.GET("/invitations", adminHandler.GetInvitations)
@@ -317,6 +322,11 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 			adminGroup.GET("/banned-ips", adminHandler.ListBannedIPs)
 			adminGroup.POST("/banned-ips/:id/unban", adminHandler.UnbanIP)
 			adminGroup.POST("/banned-ips/:id/extend", adminHandler.ExtendBan)
+
+			adminGroup.POST("/users/:user_id/ban", adminHandler.BanUser)
+			adminGroup.POST("/users/:user_id/suspend", adminHandler.SuspendUser)
+			adminGroup.POST("/users/:user_id/pardon", adminHandler.PardonUser)
+			adminGroup.GET("/bans", adminHandler.ListUserBans)
 
 			adminGroup.GET("/interest", adminHandler.ListInterestSubmissions)
 			adminGroup.GET("/interest/settings", adminHandler.GetInterestFormSettings)

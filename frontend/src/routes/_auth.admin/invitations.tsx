@@ -38,6 +38,7 @@ function RouteComponent() {
   const [quotaBytes, setQuotaBytes] = useState(10 * GB)
   const [customGb, setCustomGb] = useState('')
   const [useCustom, setUseCustom] = useState(false)
+  const [grantAdmin, setGrantAdmin] = useState(false)
   const { notify } = useNotification()
   const [createError, setCreateError] = useState<string | null>(null)
   const [copiedId, setCopiedId] = useState<string | null>(null)
@@ -49,9 +50,10 @@ function RouteComponent() {
     : quotaBytes
 
   const createMutation = useMutation({
-    mutationFn: () => createInvitation(email, effectiveQuota),
+    mutationFn: () => createInvitation(email, effectiveQuota, grantAdmin),
     onSuccess: () => {
       setEmail('')
+      setGrantAdmin(false)
       setCreateError(null)
       queryClient.invalidateQueries({ queryKey: ['admin', 'invitations'] })
       notify('success', 'Invitation sent')
@@ -188,6 +190,15 @@ function RouteComponent() {
             </div>
           )}
         </div>
+        <label className="flex items-center gap-2 cursor-pointer select-none w-fit">
+          <input
+            type="checkbox"
+            checked={grantAdmin}
+            onChange={(e) => setGrantAdmin(e.target.checked)}
+            className="w-4 h-4 rounded border-gray-300 accent-blue-600 cursor-pointer"
+          />
+          <span className="text-xs text-gray-600">Grant admin access</span>
+        </label>
       </form>
       {createError && <p className="text-sm text-red-500 mb-4">{createError}</p>}
 

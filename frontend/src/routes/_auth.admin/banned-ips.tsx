@@ -87,7 +87,7 @@ function RouteComponent() {
         </div>
       ) : (
         <div className="bg-white rounded-xl border border-gray-200 overflow-x-auto">
-          <table className="w-full min-w-[720px] text-sm border-collapse">
+          <table className="w-full min-w-180 text-sm border-collapse">
             <thead>
               <tr className="bg-gray-50 border-b border-gray-200">
                 {['IP Address', 'Location', 'Banned At', 'Bans', 'Jail', ''].map((h) => (

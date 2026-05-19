@@ -156,4 +156,20 @@ describe('Admin Interest submissions page', () => {
     fireEvent.click(cancelBtn)
     expect(screen.queryByText(/choose storage quota/i)).not.toBeInTheDocument()
   })
+
+  test('Grant admin access checkbox is shown in provision panel', () => {
+    setup([SUBMISSIONS[0]])
+    fireEvent.click(screen.getByRole('button', { name: /provision/i }))
+    const checkbox = screen.getByRole('checkbox', { name: /grant admin access/i })
+    expect(checkbox).toBeInTheDocument()
+    expect(checkbox).not.toBeChecked()
+  })
+
+  test('Grant admin access checkbox can be toggled in provision panel', () => {
+    setup([SUBMISSIONS[0]])
+    fireEvent.click(screen.getByRole('button', { name: /provision/i }))
+    const checkbox = screen.getByRole('checkbox', { name: /grant admin access/i })
+    fireEvent.click(checkbox)
+    expect(checkbox).toBeChecked()
+  })
 })

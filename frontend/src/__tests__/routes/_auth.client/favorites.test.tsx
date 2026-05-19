@@ -23,10 +23,19 @@ jest.mock('../../../context/NotificationContext', () => ({
   useNotification: () => ({ notify: mockNotify }),
 }))
 
+let mockImpersonatedUser: any = null
+jest.mock('../../../context/ImpersonationContext', () => ({
+  useImpersonation: () => ({ impersonatedUser: mockImpersonatedUser, impersonate: jest.fn(), clearImpersonation: jest.fn() }),
+}))
+
 jest.mock('../../../api/favorites', () => ({
   favoritesQueryOptions: { queryKey: ['favorites'], queryFn: jest.fn() },
   unfavoriteFile:   jest.fn(),
   unfavoriteFolder: jest.fn(),
+}))
+
+jest.mock('../../../api/admin', () => ({
+  adminGetUserFavorites: jest.fn(),
 }))
 
 jest.mock('../../../components/FilePreviewModal', () => ({
@@ -53,6 +62,8 @@ function setup(
   overrides: { isLoading?: boolean } = {},
 ) {
   const { isLoading = false } = overrides
+  // The component calls useQuery twice (own data + admin data), one enabled at a time.
+  // mockReturnValue covers both calls with the same result shape.
   mockQuery.mockReturnValue({ data, isLoading })
   mockMutation.mockReturnValue({ mutate: jest.fn(), isPending: false })
   mockQueryClient.mockReturnValue({ invalidateQueries: jest.fn() })
@@ -60,7 +71,10 @@ function setup(
 }
 
 describe('Client Favorites page', () => {
-  beforeEach(() => mockNotify.mockReset())
+  beforeEach(() => {
+    mockNotify.mockReset()
+    mockImpersonatedUser = null
+  })
 
   test('renders Favorites heading', () => {
     setup()
@@ -115,5 +129,23 @@ describe('Client Favorites page', () => {
     setup({ files: [], folders: FOLDERS })
     expect(screen.getByText('Photos')).toBeInTheDocument()
     expect(screen.queryByText('report.pdf')).not.toBeInTheDocument()
+  })
+
+  test('in read-only mode heading shows impersonated username', () => {
+    mockImpersonatedUser = { username: 'bob', email: 'bob@example.com' }
+    setup()
+    expect(screen.getByRole('heading', { name: /bob's favorites/i })).toBeInTheDocument()
+  })
+
+  test('in read-only mode remove-from-favorites buttons are hidden', () => {
+    mockImpersonatedUser = { username: 'bob', email: 'bob@example.com' }
+    setup()
+    expect(screen.queryByTitle(/remove from favorites/i)).not.toBeInTheDocument()
+  })
+
+  test('in read-only mode shows empty state message for other user', () => {
+    mockImpersonatedUser = { username: 'bob', email: 'bob@example.com' }
+    setup({ files: [], folders: [] })
+    expect(screen.getByText(/this user has no favorites/i)).toBeInTheDocument()
   })
 })

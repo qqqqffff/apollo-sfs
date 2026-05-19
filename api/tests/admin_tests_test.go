@@ -11,7 +11,7 @@ import (
 
 // newTestRunnerHandler constructs a Handler with test-runner params only.
 func newTestRunnerHandler(apiDir, frontendTestURL, frontendE2EURL string) *admin.Handler {
-	return admin.NewHandler(&stubAdminQuerier{}, &stubAdminInviteService{}, nil, nil, nil, nil, "", apiDir, frontendTestURL, frontendE2EURL, nil)
+	return admin.NewHandler(&stubAdminQuerier{}, &stubAdminInviteService{}, nil, nil, nil, nil, nil, "", apiDir, frontendTestURL, frontendE2EURL, nil)
 }
 
 // ── Neither suite configured ──────────────────────────────────────────────────

@@ -1,29 +1,42 @@
 import { createFileRoute, Link, Outlet, redirect, useNavigate } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState, useEffect, useRef } from 'react'
-import { MdMenu, MdClose } from 'react-icons/md'
+import { MdMenu, MdClose, MdBlock, MdLockClock, MdLockOpen } from 'react-icons/md'
 import { AppIcon } from '../components/AppIcon'
 import { meQueryOptions } from '../api/me'
 import { logout } from '../api/auth'
+import { banUser, suspendUser, pardonUser } from '../api/admin'
 import { clearSkipDeleteCookie } from '../components/DeleteConfirmModal'
+import { useImpersonation } from '../context/ImpersonationContext'
+import { useNotification } from '../context/NotificationContext'
+import { BanSuspendModal } from '../components/BanSuspendModal'
+import type { UserBan } from '../types/api'
 
 export const Route = createFileRoute('/_auth')({
   beforeLoad: async ({ context }) => {
-    const user = await context.auth.validateAuth()
-    if (!user) {
+    const result = await context.auth.validateAuth()
+    if (result === 'banned' || result === 'suspended') {
+      throw redirect({ to: '/suspended' })
+    }
+    if (!result) {
       clearSkipDeleteCookie()
       throw redirect({ to: '/login' })
     }
-    return { user }
+    return { user: result }
   },
   component: RouteComponent,
 })
+
+type BanModalMode = 'ban' | 'suspend'
 
 function RouteComponent() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const { data: user } = useQuery(meQueryOptions)
+  const { impersonatedUser, clearImpersonation } = useImpersonation()
+  const { notify } = useNotification()
   const [menuOpen, setMenuOpen] = useState(false)
+  const [banModal, setBanModal] = useState<BanModalMode | null>(null)
   const menuRef = useRef<HTMLDivElement>(null)
 
   const logoutMutation = useMutation({
@@ -34,6 +47,52 @@ function RouteComponent() {
       navigate({ to: '/login' })
     },
   })
+
+  const banMutation = useMutation({
+    mutationFn: ({ violationCode, comments }: { violationCode: string; comments: string }) =>
+      banUser(impersonatedUser!.username, violationCode, comments),
+    onSuccess: () => {
+      setBanModal(null)
+      clearImpersonation()
+      queryClient.invalidateQueries({ queryKey: ['admin', 'users'] })
+      queryClient.invalidateQueries({ queryKey: ['admin', 'bans'] })
+      notify('success', 'User banned and files deleted')
+      navigate({ to: '/admin/users' })
+    },
+    onError: () => notify('error', 'Failed to ban user'),
+  })
+
+  const suspendMutation = useMutation({
+    mutationFn: ({ violationCode, comments, hours }: { violationCode: string; comments: string; hours: number }) =>
+      suspendUser(impersonatedUser!.username, violationCode, comments, hours),
+    onSuccess: () => {
+      setBanModal(null)
+      clearImpersonation()
+      queryClient.invalidateQueries({ queryKey: ['admin', 'users'] })
+      queryClient.invalidateQueries({ queryKey: ['admin', 'bans'] })
+      notify('success', 'User suspended')
+      navigate({ to: '/admin/users' })
+    },
+    onError: () => notify('error', 'Failed to suspend user'),
+  })
+
+  const pardonMutation = useMutation({
+    mutationFn: () => pardonUser(impersonatedUser!.username),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['admin', 'users'] })
+      queryClient.invalidateQueries({ queryKey: ['admin', 'bans'] })
+      notify('success', 'User pardoned')
+    },
+    onError: () => notify('error', 'Failed to pardon user'),
+  })
+
+  function handleBanConfirm(violationCode: string, comments: string, hours?: number) {
+    if (banModal === 'ban') {
+      banMutation.mutate({ violationCode, comments })
+    } else {
+      suspendMutation.mutate({ violationCode, comments, hours: hours! })
+    }
+  }
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -47,6 +106,10 @@ function RouteComponent() {
   }, [menuOpen])
 
   function closeMenu() { setMenuOpen(false) }
+
+  const activeBan = impersonatedUser?.active_ban as UserBan | null | undefined
+  const isImpersonatedBanned = activeBan?.ban_type === 'banned'
+  const isImpersonatedSuspended = activeBan?.ban_type === 'suspended'
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -68,7 +131,7 @@ function RouteComponent() {
                 <NavLink to="/admin/users" onClick={closeMenu}>Users</NavLink>
                 <NavLink to="/admin/invitations" onClick={closeMenu}>Invitations</NavLink>
                 <NavLink to="/admin/interest" onClick={closeMenu}>Interest</NavLink>
-                <NavLink to="/admin/banned-ips" onClick={closeMenu}>Banned IPs</NavLink>
+                <NavLink to="/admin/bans" onClick={closeMenu}>Bans & Suspensions</NavLink>
                 <NavLink to="/admin/metrics" onClick={closeMenu}>Metrics</NavLink>
                 <NavLink to="/admin/alarm" onClick={closeMenu}>Alarms</NavLink>
               </>
@@ -76,8 +139,57 @@ function RouteComponent() {
           </div>
         </div>
 
-        {/* Right: username + sign out + mobile toggle */}
-        <div className="flex items-center gap-3 shrink-0">
+        {/* Right: impersonation badge + ban controls + username + sign out */}
+        <div className="flex items-center gap-2 shrink-0">
+          {impersonatedUser && (
+            <>
+              {/* Ban / suspend / pardon icons shown while impersonating */}
+              {user?.is_admin && (
+                <div className="hidden sm:flex items-center gap-1">
+                  {isImpersonatedBanned || isImpersonatedSuspended ? (
+                    <button
+                      onClick={() => {
+                        if (confirm(`Pardon ${impersonatedUser.username}?`))
+                          pardonMutation.mutate()
+                      }}
+                      disabled={pardonMutation.isPending}
+                      title="Pardon user"
+                      className="flex items-center justify-center w-7 h-7 rounded-full text-green-600 hover:bg-green-100 cursor-pointer bg-transparent border-0 transition-colors disabled:opacity-40"
+                    >
+                      <MdLockOpen className="text-base" />
+                    </button>
+                  ) : (
+                    <>
+                      <button
+                        onClick={() => setBanModal('suspend')}
+                        title="Suspend user"
+                        className="flex items-center justify-center w-7 h-7 rounded-full text-amber-500 hover:bg-amber-100 cursor-pointer bg-transparent border-0 transition-colors"
+                      >
+                        <MdLockClock className="text-base" />
+                      </button>
+                      <button
+                        onClick={() => setBanModal('ban')}
+                        title="Ban user"
+                        className="flex items-center justify-center w-7 h-7 rounded-full text-red-500 hover:bg-red-100 cursor-pointer bg-transparent border-0 transition-colors"
+                      >
+                        <MdBlock className="text-base" />
+                      </button>
+                    </>
+                  )}
+                </div>
+              )}
+
+              <button
+                onClick={clearImpersonation}
+                title="Exit impersonation — return to your own files"
+                className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-amber-100 text-amber-800 border border-amber-300 hover:bg-amber-200 cursor-pointer transition-colors whitespace-nowrap"
+              >
+                <span className="hidden sm:inline">Viewing</span>
+                <span className="font-semibold">{impersonatedUser.username}</span>
+                <MdClose className="text-sm" />
+              </button>
+            </>
+          )}
           <Link
             to="/client/profile"
             className="text-sm text-gray-500 hover:text-gray-900 transition-colors truncate max-w-24 xl:max-w-36 2xl:max-w-56"
@@ -114,7 +226,7 @@ function RouteComponent() {
               <MobileNavLink to="/admin/users" onClick={closeMenu}>Users</MobileNavLink>
               <MobileNavLink to="/admin/invitations" onClick={closeMenu}>Invitations</MobileNavLink>
               <MobileNavLink to="/admin/interest" onClick={closeMenu}>Interest</MobileNavLink>
-              <MobileNavLink to="/admin/banned-ips" onClick={closeMenu}>Banned IPs</MobileNavLink>
+              <MobileNavLink to="/admin/bans" onClick={closeMenu}>Bans & Suspensions</MobileNavLink>
               <MobileNavLink to="/admin/metrics" onClick={closeMenu}>Metrics</MobileNavLink>
               <MobileNavLink to="/admin/alarm" onClick={closeMenu}>Alarms</MobileNavLink>
             </>
@@ -134,6 +246,16 @@ function RouteComponent() {
       <main className="max-w-5xl mx-auto px-4 sm:px-6 py-6 sm:py-8">
         <Outlet />
       </main>
+
+      {banModal && impersonatedUser && (
+        <BanSuspendModal
+          username={impersonatedUser.username}
+          mode={banModal}
+          onConfirm={handleBanConfirm}
+          onClose={() => setBanModal(null)}
+          isPending={banMutation.isPending || suspendMutation.isPending}
+        />
+      )}
     </div>
   )
 }

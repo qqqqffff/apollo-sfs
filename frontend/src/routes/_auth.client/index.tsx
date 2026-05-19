@@ -29,6 +29,7 @@ import { useFileDrag } from '../../hooks/useFileDrag'
 import { useSort, sortedFolders, sortedFiles } from '../../hooks/useSort'
 import { useInfiniteFolderContents } from '../../hooks/useInfiniteFolderContents'
 import { useFavorites } from '../../hooks/useFavorites'
+import { useImpersonation } from '../../context/ImpersonationContext'
 
 export const Route = createFileRoute('/_auth/client/')({
   validateSearch: (search: Record<string, unknown>) => ({
@@ -98,6 +99,8 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
   const queryClient = useQueryClient()
   const { notify } = useNotification()
   const { data: user } = useQuery(meQueryOptions)
+  const { impersonatedUser } = useImpersonation()
+  const readOnly = impersonatedUser !== null
   const fileRef = useRef<HTMLInputElement>(null)
   const [pendingFiles, setPendingFiles] = useState<globalThis.File[]>([])
   const [pendingDelete, setPendingDelete] = useState<{ type: 'file' | 'folder'; id: string; name: string } | null>(null)
@@ -105,7 +108,7 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
   const [creatingFolder, setCreatingFolder] = useState(false)
   const [newFolderName, setNewFolderName] = useState('')
   const { progress, startUpload, dismiss } = useFileUpload()
-  const { isDragging } = useDragDrop((dropped) => setPendingFiles(dropped))
+  const { isDragging } = useDragDrop((dropped) => { if (!readOnly) setPendingFiles(dropped) })
   const { sort, onSort } = useSort()
   const { favoriteFileIds, favoriteFolderIds, toggleFile, toggleFolder } = useFavorites()
 
@@ -118,7 +121,7 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
     hasNextPage,
     isFetchingNextPage,
     fetchNextPage,
-  } = useInfiniteFolderContents(folderId, search)
+  } = useInfiniteFolderContents(folderId, search, impersonatedUser?.username)
 
   const moveFileMutation = useMutation({
     mutationFn: ({ fileId, targetFolderId }: { fileId: string; targetFolderId: string }) =>
@@ -213,6 +216,7 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
   const uploadFolderId: string | null = folderId === 'root' ? null : folderId
   const hasContent = rawSubfolders.length > 0 || rawFiles.length > 0
   const noResults = search && !isLoading && !hasNextPage && !hasContent
+  const viewingUser = impersonatedUser ?? user
 
   return (
     <div>
@@ -222,38 +226,42 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
           {folder && <h2 className="text-lg font-semibold text-gray-900 m-0">{folder.name}</h2>}
         </div>
       ) : (
-        <h2 className="text-lg font-semibold text-gray-900 mb-5 mt-0">My Files</h2>
+        <h2 className="text-lg font-semibold text-gray-900 mb-5 mt-0">
+          {readOnly ? `${impersonatedUser!.username}'s Files` : 'My Files'}
+        </h2>
       )}
 
-      <div className="flex gap-2 mb-4">
-        <button
-          onClick={() => { setCreatingFolder(true); setNewFolderName('') }}
-          disabled={creatingFolder}
-          className="inline-flex items-center gap-1.5 px-3 py-2 text-sm border border-gray-200 rounded-lg text-gray-700 hover:bg-gray-50 cursor-pointer transition-colors disabled:opacity-40"
-        >
-          <MdCreateNewFolder className="text-base text-gray-500" /> New folder
-        </button>
-        <input
-          ref={fileRef}
-          type="file"
-          multiple
-          className="hidden"
-          onChange={(e) => {
-            const selected = Array.from(e.target.files ?? [])
-            if (selected.length > 0) setPendingFiles(selected)
-            e.target.value = ''
-          }}
-        />
-        <button
-          onClick={() => fileRef.current?.click()}
-          className="inline-flex items-center gap-1.5 px-3 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium cursor-pointer transition-colors"
-        >
-          <MdUploadFile className="text-base" /> Upload
-        </button>
-      </div>
+      {!readOnly && (
+        <div className="flex gap-2 mb-4">
+          <button
+            onClick={() => { setCreatingFolder(true); setNewFolderName('') }}
+            disabled={creatingFolder}
+            className="inline-flex items-center gap-1.5 px-3 py-2 text-sm border border-gray-200 rounded-lg text-gray-700 hover:bg-gray-50 cursor-pointer transition-colors disabled:opacity-40"
+          >
+            <MdCreateNewFolder className="text-base text-gray-500" /> New folder
+          </button>
+          <input
+            ref={fileRef}
+            type="file"
+            multiple
+            className="hidden"
+            onChange={(e) => {
+              const selected = Array.from(e.target.files ?? [])
+              if (selected.length > 0) setPendingFiles(selected)
+              e.target.value = ''
+            }}
+          />
+          <button
+            onClick={() => fileRef.current?.click()}
+            className="inline-flex items-center gap-1.5 px-3 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium cursor-pointer transition-colors"
+          >
+            <MdUploadFile className="text-base" /> Upload
+          </button>
+        </div>
+      )}
 
-      {user && (
-        <QuotaBar used={user.storage_used_bytes} quota={user.storage_quota_bytes} />
+      {viewingUser && (
+        <QuotaBar used={viewingUser.storage_used_bytes} quota={viewingUser.storage_quota_bytes} />
       )}
 
       <SearchBar value={search} onChange={setSearch} />
@@ -306,9 +314,11 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
             {subfolders.map((f) => (
               <li
                 key={f.id}
-                {...getFolderDragHandlers(f)}
-                {...getFolderDropHandlers(f)}
-                className={`flex items-center gap-2 px-2 py-1.5 rounded-lg transition-colors cursor-grab ${
+                {...(!readOnly ? getFolderDragHandlers(f) : {})}
+                {...(!readOnly ? getFolderDropHandlers(f) : {})}
+                className={`flex items-center gap-2 px-2 py-1.5 rounded-lg transition-colors ${
+                  !readOnly ? 'cursor-grab' : ''
+                } ${
                   dragOverFolderId === f.id
                     ? 'bg-blue-50 ring-2 ring-blue-300 ring-inset'
                     : 'hover:bg-gray-50'
@@ -321,13 +331,17 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
                   <MdFolder className="text-blue-400 text-lg shrink-0" />
                   {f.name}
                 </button>
-                <StarButton active={favoriteFolderIds.has(f.id)} onClick={() => toggleFolder(f.id)} title={favoriteFolderIds.has(f.id) ? 'Remove from favorites' : 'Add to favorites'} />
-                <button
-                  onClick={() => handleDeleteClick('folder', f.id, f.name)}
-                  className="text-xs text-gray-400 hover:text-red-500 cursor-pointer bg-transparent border-0 px-1 transition-colors"
-                >
-                  Delete
-                </button>
+                {!readOnly && (
+                  <>
+                    <StarButton active={favoriteFolderIds.has(f.id)} onClick={() => toggleFolder(f.id)} title={favoriteFolderIds.has(f.id) ? 'Remove from favorites' : 'Add to favorites'} />
+                    <button
+                      onClick={() => handleDeleteClick('folder', f.id, f.name)}
+                      className="text-xs text-gray-400 hover:text-red-500 cursor-pointer bg-transparent border-0 px-1 transition-colors"
+                    >
+                      Delete
+                    </button>
+                  </>
+                )}
               </li>
             ))}
           </ul>
@@ -341,8 +355,8 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
             {files.map((f) => (
               <li
                 key={f.id}
-                {...getFileDragHandlers(f)}
-                className={`flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-gray-50 transition-colors cursor-grab ${draggingFileId === f.id ? 'opacity-40' : ''}`}
+                {...(!readOnly ? getFileDragHandlers(f) : {})}
+                className={`flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-gray-50 transition-colors ${!readOnly ? 'cursor-grab' : ''} ${draggingFileId === f.id ? 'opacity-40' : ''}`}
               >
                 <button
                   onClick={() => openFile(f.id)}
@@ -352,13 +366,17 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
                   <span className="truncate">{f.name}</span>
                 </button>
                 <span className="text-xs text-gray-400 shrink-0">{formatSize(f.size_bytes)}</span>
-                <StarButton active={favoriteFileIds.has(f.id)} onClick={() => toggleFile(f.id)} title={favoriteFileIds.has(f.id) ? 'Remove from favorites' : 'Add to favorites'} />
-                <button
-                  onClick={() => handleDeleteClick('file', f.id, f.name)}
-                  className="text-xs text-gray-400 hover:text-red-500 cursor-pointer bg-transparent border-0 px-1 transition-colors"
-                >
-                  Delete
-                </button>
+                {!readOnly && (
+                  <>
+                    <StarButton active={favoriteFileIds.has(f.id)} onClick={() => toggleFile(f.id)} title={favoriteFileIds.has(f.id) ? 'Remove from favorites' : 'Add to favorites'} />
+                    <button
+                      onClick={() => handleDeleteClick('file', f.id, f.name)}
+                      className="text-xs text-gray-400 hover:text-red-500 cursor-pointer bg-transparent border-0 px-1 transition-colors"
+                    >
+                      Delete
+                    </button>
+                  </>
+                )}
               </li>
             ))}
           </ul>
@@ -375,7 +393,7 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
         </button>
       )}
 
-      {pendingFiles.length > 0 && user && (
+      {pendingFiles.length > 0 && user && !readOnly && (
         <UploadModal
           files={pendingFiles}
           folderName={folderId === 'root' ? 'My Files' : (folder?.name ?? 'This folder')}
@@ -407,7 +425,7 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
         />
       )}
 
-      {isDragging && (
+      {isDragging && !readOnly && (
         <div className="fixed inset-0 bg-blue-500/10 border-4 border-dashed border-blue-400 flex items-center justify-center z-999 pointer-events-none">
           <div className="bg-white/95 rounded-2xl px-12 py-6 text-center shadow-xl">
             <MdFolderOpen className="text-5xl text-blue-500 mx-auto mb-2" />

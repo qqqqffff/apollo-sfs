@@ -10,6 +10,17 @@ import (
 	"apollo-sfs.com/api/routes/services"
 )
 
+// FavServicer is the subset of *services.FavoriteService used by route handlers.
+type FavServicer interface {
+	List(ctx context.Context, userID uuid.UUID) (*services.FavoriteList, error)
+	AddFile(ctx context.Context, userID, fileID uuid.UUID) error
+	RemoveFile(ctx context.Context, userID, fileID uuid.UUID) error
+	AddFolder(ctx context.Context, userID, folderID uuid.UUID) error
+	RemoveFolder(ctx context.Context, userID, folderID uuid.UUID) error
+}
+
+var _ FavServicer = (*services.FavoriteService)(nil)
+
 // InviteService is the subset of *services.InviteService used by route handlers.
 type InviteService interface {
 	Validate(ctx context.Context, token string) (*services.InviteValidation, error)
@@ -28,6 +39,7 @@ type FileServicer interface {
 	Move(ctx context.Context, fileID, userID, newFolderID uuid.UUID) (*models.File, error)
 	Rename(ctx context.Context, fileID, userID uuid.UUID, name string) (*models.File, error)
 	Delete(ctx context.Context, fileID, userID uuid.UUID, username string) error
+	AdminDeleteAllFiles(ctx context.Context, username string) error
 	BeginChunkedUpload(ctx context.Context, sess *services.UploadSession) error
 	EncryptAndUploadPart(ctx context.Context, sess *services.UploadSession, index int, data []byte)
 	FinalizeChunkedUpload(ctx context.Context, sess *services.UploadSession) (*models.File, error)
@@ -55,7 +67,7 @@ type Handler struct {
 	files           FileServicer
 	folders         FolderServicer
 	invites         InviteService
-	favorites       *services.FavoriteService
+	favorites       FavServicer
 	auth            *services.AuthService
 	uploads         *services.UploadSessionStore
 	email           *services.EmailService
@@ -63,10 +75,12 @@ type Handler struct {
 	// verifyCaptcha overrides the real Turnstile HTTP call. When nil the
 	// production verifyTurnstile function is used.
 	verifyCaptcha func(secret, token, ip string) (bool, error)
+	// resolveKcID overrides Keycloak username→UUID lookup in tests.
+	resolveKcID func(ctx context.Context, username string) (uuid.UUID, error)
 }
 
 // NewHandler constructs a Handler with the given dependencies.
-func NewHandler(q Querier, fileSvc FileServicer, folderSvc FolderServicer, inviteSvc InviteService, favSvc *services.FavoriteService, authSvc *services.AuthService, uploadStore *services.UploadSessionStore, emailSvc *services.EmailService, turnstileSecret string) *Handler {
+func NewHandler(q Querier, fileSvc FileServicer, folderSvc FolderServicer, inviteSvc InviteService, favSvc FavServicer, authSvc *services.AuthService, uploadStore *services.UploadSessionStore, emailSvc *services.EmailService, turnstileSecret string) *Handler {
 	return &Handler{
 		queries:         q,
 		files:           fileSvc,
@@ -90,4 +104,10 @@ func SetVerifyCaptcha(h *Handler, fn func(secret, token, ip string) (bool, error
 // Provided so test packages can inject stub implementations.
 func SetInviteService(h *Handler, svc InviteService) {
 	h.invites = svc
+}
+
+// SetKcIDResolver replaces the Keycloak username→UUID resolver. Intended for
+// tests that need to bypass real Keycloak API calls.
+func SetKcIDResolver(h *Handler, fn func(ctx context.Context, username string) (uuid.UUID, error)) {
+	h.resolveKcID = fn
 }

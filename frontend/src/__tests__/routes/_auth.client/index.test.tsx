@@ -27,6 +27,11 @@ jest.mock('../../../context/NotificationContext', () => ({
   useNotification: () => ({ notify: mockNotify }),
 }))
 
+let mockImpersonatedUser: any = null
+jest.mock('../../../context/ImpersonationContext', () => ({
+  useImpersonation: () => ({ impersonatedUser: mockImpersonatedUser, impersonate: jest.fn(), clearImpersonation: jest.fn() }),
+}))
+
 // Hook mocks
 jest.mock('../../../hooks/useFileUpload', () => ({
   useFileUpload: () => ({ progress: null, startUpload: jest.fn(), dismiss: jest.fn() }),
@@ -163,6 +168,7 @@ describe('Client Files (index) page', () => {
   beforeEach(() => {
     mockNavigate.mockReset()
     mockNotify.mockReset()
+    mockImpersonatedUser = null
   })
 
   test('renders My Files heading at root', () => {
@@ -254,5 +260,24 @@ describe('Client Files (index) page', () => {
   test('delete buttons are present for each item', () => {
     setup()
     expect(screen.getAllByRole('button', { name: /delete/i })).toHaveLength(4)
+  })
+
+  test('in read-only mode heading shows impersonated username', () => {
+    mockImpersonatedUser = { username: 'bob', email: 'bob@example.com', storage_used_bytes: 0, storage_quota_bytes: 10 * 1024 ** 3 }
+    setup()
+    expect(screen.getByRole('heading', { name: /bob's files/i })).toBeInTheDocument()
+  })
+
+  test('in read-only mode upload and new folder buttons are hidden', () => {
+    mockImpersonatedUser = { username: 'bob', email: 'bob@example.com', storage_used_bytes: 0, storage_quota_bytes: 10 * 1024 ** 3 }
+    setup()
+    expect(screen.queryByRole('button', { name: /upload/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /new folder/i })).not.toBeInTheDocument()
+  })
+
+  test('in read-only mode delete buttons are hidden', () => {
+    mockImpersonatedUser = { username: 'bob', email: 'bob@example.com', storage_used_bytes: 0, storage_quota_bytes: 10 * 1024 ** 3 }
+    setup()
+    expect(screen.queryByRole('button', { name: /delete/i })).not.toBeInTheDocument()
   })
 })

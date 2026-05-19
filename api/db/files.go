@@ -280,3 +280,37 @@ func (q *Queries) DeleteFile(ctx context.Context, id uuid.UUID) error {
 	}
 	return nil
 }
+
+// GetAllUserFiles returns all file records owned by username (no pagination).
+// Used for bulk deletion during a permanent ban.
+func (q *Queries) GetAllUserFiles(ctx context.Context, username string) ([]models.File, error) {
+	rows, err := q.db.QueryContext(ctx, `
+		SELECT`+fileColumns+`
+		FROM files WHERE user_id = $1::uuid
+	`, username)
+	if err != nil {
+		return nil, fmt.Errorf("GetAllUserFiles: %w", err)
+	}
+	defer rows.Close()
+
+	files := make([]models.File, 0)
+	for rows.Next() {
+		f, err := scanFileRow(rows)
+		if err != nil {
+			return nil, fmt.Errorf("GetAllUserFiles scan: %w", err)
+		}
+		files = append(files, *f)
+	}
+	return files, rows.Err()
+}
+
+// DeleteAllUserFileRows bulk-deletes every file row for username.
+// The caller must delete the MinIO objects first.
+func (q *Queries) DeleteAllUserFileRows(ctx context.Context, username string) error {
+	_, err := q.db.ExecContext(ctx,
+		`DELETE FROM files WHERE user_id = $1::uuid`, username)
+	if err != nil {
+		return fmt.Errorf("DeleteAllUserFileRows: %w", err)
+	}
+	return nil
+}

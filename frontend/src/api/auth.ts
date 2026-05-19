@@ -37,6 +37,13 @@ export function resetPassword(token: string, new_password: string) {
   return post<{ message: string }>('/auth/reset_password', { token, new_password })
 }
 
+export interface InviteValidation {
+  email: string
+  invited_by_user_id: string
+  expires_at: string
+  grant_admin: boolean
+}
+
 export function validateInviteToken(token: string) {
-  return get<{ valid: boolean }>(`/invitations/${token}`)
+  return get<InviteValidation>(`/invitations/${token}`)
 }

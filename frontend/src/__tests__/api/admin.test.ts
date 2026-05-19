@@ -131,7 +131,7 @@ describe('createInvitation', () => {
     await createInvitation('bob@example.com', 5 * 1024 ** 3)
     expect(lastUrl()).toBe('/api/v1/admin/invitations')
     expect(lastInit().method).toBe('POST')
-    expect(lastBody()).toEqual({ email: 'bob@example.com', initial_quota_bytes: 5 * 1024 ** 3 })
+    expect(lastBody()).toEqual({ email: 'bob@example.com', initial_quota_bytes: 5 * 1024 ** 3, grant_admin: false })
   })
 })
 
@@ -338,7 +338,7 @@ describe('provisionInterestSubmission', () => {
     await provisionInterestSubmission('sub-1', 10 * 1024 ** 3)
     expect(lastUrl()).toBe('/api/v1/admin/interest/sub-1/provision')
     expect(lastInit().method).toBe('POST')
-    expect(lastBody()).toEqual({ initial_quota_bytes: 10 * 1024 ** 3 })
+    expect(lastBody()).toEqual({ initial_quota_bytes: 10 * 1024 ** 3, grant_admin: false })
   })
 })
 

@@ -69,6 +69,8 @@ func ginContext(r *gin.Engine, userID, username string, isAdmin bool) {
 type stubQuerier struct {
 	user                *models.User
 	userErr             error
+	activeBan           *models.UserBan
+	activeBanErr        error
 	interestSettings    *models.InterestFormSettings
 	interestSettingsErr error
 	todayCount          int
@@ -85,6 +87,11 @@ type stubQuerier struct {
 func (s *stubQuerier) GetUserByUsername(_ context.Context, _ string) (*models.User, error) {
 	return s.user, s.userErr
 }
+func (s *stubQuerier) GetActiveBan(_ context.Context, _ string) (*models.UserBan, error) {
+	return s.activeBan, s.activeBanErr
+}
+func (s *stubQuerier) AutoPardonExpiredSuspension(_ context.Context, _ string) error { return nil }
+func (s *stubQuerier) AddBannedIP(_ context.Context, _, _ string) error              { return nil }
 func (s *stubQuerier) GetInterestFormSettings(_ context.Context) (*models.InterestFormSettings, error) {
 	if s.interestSettings == nil && s.interestSettingsErr == nil {
 		return &models.InterestFormSettings{DailyCap: 100, UpdatedAt: time.Now()}, nil
@@ -111,6 +118,10 @@ func (s *stubQuerier) SearchFoldersByUser(_ context.Context, _ uuid.UUID, _ stri
 }
 func (s *stubQuerier) SearchFilesByUser(_ context.Context, _ uuid.UUID, _ string, _ db.PageInput) (*db.PageResult[models.File], error) {
 	return &db.PageResult[models.File]{}, nil
+}
+func (s *stubQuerier) InsertAuditLog(_ context.Context, _ db.AuditInput) error { return nil }
+func (s *stubQuerier) ListAuditLogsForUser(_ context.Context, _ string, _ db.PageInput) (*db.PageResult[models.AuditLog], error) {
+	return &db.PageResult[models.AuditLog]{Items: []models.AuditLog{}}, nil
 }
 
 // ── Stub InviteService (routes package) ───────────────────────────────────────
@@ -175,6 +186,17 @@ func (s *stubAdminQuerier) ListBannedIPs(_ context.Context, _ bool, _ db.PageInp
 }
 func (s *stubAdminQuerier) UnbanIP(_ context.Context, _ int64) error        { return nil }
 func (s *stubAdminQuerier) ExtendBan(_ context.Context, _ int64) error      { return nil }
+func (s *stubAdminQuerier) AddBannedIP(_ context.Context, _, _ string) error { return nil }
+func (s *stubAdminQuerier) CreateBan(_ context.Context, _ db.CreateBanParams) (*models.UserBan, error) {
+	return &models.UserBan{}, nil
+}
+func (s *stubAdminQuerier) GetActiveBan(_ context.Context, _ string) (*models.UserBan, error) {
+	return nil, nil
+}
+func (s *stubAdminQuerier) PardonAllActiveBans(_ context.Context, _, _ string) error { return nil }
+func (s *stubAdminQuerier) ListUserBans(_ context.Context, _ bool, _ db.PageInput) (*db.PageResult[models.UserBan], error) {
+	return &db.PageResult[models.UserBan]{Items: []models.UserBan{}}, nil
+}
 func (s *stubAdminQuerier) GetDriveSummaries(_ context.Context) ([]models.DriveSummary, error) {
 	return []models.DriveSummary{}, nil
 }
@@ -274,7 +296,7 @@ type stubAdminInviteService struct {
 	revokeErr error
 }
 
-func (s *stubAdminInviteService) Create(_ context.Context, _ uuid.UUID, _, _ string, _ int64) (*models.Invitation, error) {
+func (s *stubAdminInviteService) Create(_ context.Context, _ uuid.UUID, _, _ string, _ int64, _ bool) (*models.Invitation, error) {
 	return s.inv, s.invErr
 }
 func (s *stubAdminInviteService) List(_ context.Context, _ db.PageInput) (*db.PageResult[models.Invitation], error) {
@@ -345,6 +367,7 @@ func (s *stubFileService) EncryptAndUploadPart(_ context.Context, _ *services.Up
 func (s *stubFileService) FinalizeChunkedUpload(_ context.Context, _ *services.UploadSession) (*models.File, error) {
 	return s.file, s.fileErr
 }
+func (s *stubFileService) AdminDeleteAllFiles(_ context.Context, _ string) error { return s.fileErr }
 
 // ── Stub FolderServicer ───────────────────────────────────────────────────────
 
@@ -412,12 +435,17 @@ func newFolderHandler(folderSvc routes.FolderServicer) *routes.Handler {
 
 // newAdminHandler builds an admin.Handler with only querier and invite service set.
 func newAdminHandler(q admin.AdminQuerier, inv admin.AdminInviteService) *admin.Handler {
-	return admin.NewHandler(q, inv, nil, nil, nil, nil, "", "", "", "", nil)
+	return admin.NewHandler(q, inv, nil, nil, nil, nil, nil, "", "", "", "", nil)
 }
 
 // newMetricsAdminHandler builds an admin.Handler wired with the given metrics stub.
 func newMetricsAdminHandler(q admin.AdminQuerier, m admin.MetricsServicer) *admin.Handler {
-	return admin.NewHandler(q, &stubAdminInviteService{}, m, nil, nil, nil, "", "", "", "", nil)
+	return admin.NewHandler(q, &stubAdminInviteService{}, m, nil, nil, nil, nil, "", "", "", "", nil)
+}
+
+// newAdminHandlerWithFiles builds an admin.Handler wired with the given file service stub.
+func newAdminHandlerWithFiles(q admin.AdminQuerier, fileSvc routes.FileServicer) *admin.Handler {
+	return admin.NewHandler(q, &stubAdminInviteService{}, nil, nil, fileSvc, nil, nil, "", "", "", "", nil)
 }
 
 // ── Stub MetricsService ───────────────────────────────────────────────────────
@@ -451,6 +479,40 @@ func (s *stubMetricsService) GetHistoryByDate(_ context.Context, _ string, _ db.
 }
 func (s *stubMetricsService) Hub() *services.Hub { return nil }
 
+// ── Stub FavServicer ──────────────────────────────────────────────────────────
+
+type stubFavService struct {
+	list    *services.FavoriteList
+	listErr error
+}
+
+func (s *stubFavService) List(_ context.Context, _ uuid.UUID) (*services.FavoriteList, error) {
+	if s.list != nil {
+		return s.list, s.listErr
+	}
+	return &services.FavoriteList{
+		Files:   []models.File{},
+		Folders: []models.Folder{},
+	}, s.listErr
+}
+func (s *stubFavService) AddFile(_ context.Context, _, _ uuid.UUID) error    { return nil }
+func (s *stubFavService) RemoveFile(_ context.Context, _, _ uuid.UUID) error { return nil }
+func (s *stubFavService) AddFolder(_ context.Context, _, _ uuid.UUID) error  { return nil }
+func (s *stubFavService) RemoveFolder(_ context.Context, _, _ uuid.UUID) error { return nil }
+
+// newAdminBrowseHandler builds a routes.Handler wired for admin browse tests.
+// kcResolver is injected in place of a real Keycloak lookup.
+func newAdminBrowseHandler(
+	q routes.Querier,
+	folderSvc routes.FolderServicer,
+	favSvc routes.FavServicer,
+	kcResolver func(ctx context.Context, username string) (uuid.UUID, error),
+) *routes.Handler {
+	h := routes.NewHandler(q, nil, folderSvc, nil, favSvc, nil, nil, nil, "")
+	routes.SetKcIDResolver(h, kcResolver)
+	return h
+}
+
 // sampleUser returns a minimal populated User for tests.
 func sampleUser() *models.User {
 	return &models.User{
@@ -460,6 +522,19 @@ func sampleUser() *models.User {
 		StorageQuotaBytes: 10 * 1024 * 1024 * 1024,
 		CreatedAt:         time.Now(),
 		IsAdmin:           false,
+	}
+}
+
+// sampleBan returns a minimal UserBan of the given type ("banned" or "suspended").
+func sampleBan(banType string) *models.UserBan {
+	return &models.UserBan{
+		ID:            1,
+		Username:      "alice",
+		BanType:       banType,
+		ViolationCode: "spam",
+		Comments:      "test ban",
+		BannedBy:      "admin",
+		BannedAt:      time.Now(),
 	}
 }
 

@@ -1,5 +1,46 @@
 import { del, get, patch, post, put } from './client'
-import type { BannedIP, Invitation, InterestSubmission, InterestFormSettings, PageResult, User } from '../types/api'
+import type { AuditLog, BannedIP, FavoriteList, FolderContents, Invitation, InterestSubmission, InterestFormSettings, PageResult, User, UserBan } from '../types/api'
+
+// ── Admin user file browsing ───────────────────────────────────────────────────
+
+interface AdminFolderParams {
+  folderCursor?: string
+  fileCursor?: string
+  folderLimit?: number
+  fileLimit?: number
+}
+
+function adminFolderQS(p: AdminFolderParams): string {
+  const params = new URLSearchParams()
+  if (p.folderCursor) params.set('folder_cursor', p.folderCursor)
+  if (p.fileCursor) params.set('file_cursor', p.fileCursor)
+  if (p.folderLimit !== undefined) params.set('folder_limit', String(p.folderLimit))
+  if (p.fileLimit !== undefined) params.set('file_limit', String(p.fileLimit))
+  return params.size ? `?${params}` : ''
+}
+
+export function adminListUserRoot(username: string, p: AdminFolderParams = {}) {
+  return get<FolderContents>(`/admin/users/${encodeURIComponent(username)}/folders${adminFolderQS(p)}`)
+}
+
+export function adminGetUserFolder(username: string, folderId: string, p: AdminFolderParams = {}) {
+  return get<FolderContents>(`/admin/users/${encodeURIComponent(username)}/folders/${folderId}${adminFolderQS(p)}`)
+}
+
+export function adminGetUserFavorites(username: string) {
+  return get<FavoriteList>(`/admin/users/${encodeURIComponent(username)}/favorites`)
+}
+
+export function getAdminAuditLogs(username: string, cursor?: string) {
+  const params = new URLSearchParams()
+  if (cursor) params.set('cursor', cursor)
+  const qs = params.size ? `?${params}` : ''
+  return get<PageResult<AuditLog>>(`/admin/users/${encodeURIComponent(username)}/audit-logs${qs}`)
+}
+
+export function logImpersonationAccess(username: string) {
+  return post<{ ok: boolean }>(`/admin/users/${encodeURIComponent(username)}/audit-logs`, {})
+}
 
 // ── Users ──────────────────────────────────────────────────────────────────────
 
@@ -32,8 +73,8 @@ export function listInvitations(cursor?: string) {
   return get<PageResult<Invitation>>(`/admin/invitations${qs}`)
 }
 
-export function createInvitation(email: string, initialQuotaBytes: number) {
-  return post<Invitation>('/admin/invitations', { email, initial_quota_bytes: initialQuotaBytes })
+export function createInvitation(email: string, initialQuotaBytes: number, grantAdmin = false) {
+  return post<Invitation>('/admin/invitations', { email, initial_quota_bytes: initialQuotaBytes, grant_admin: grantAdmin })
 }
 
 export function revokeInvitation(id: string) {
@@ -175,6 +216,43 @@ export function extendBan(id: number) {
   return post<{ message: string }>(`/admin/banned-ips/${id}/extend`)
 }
 
+// ── User bans / suspensions ────────────────────────────────────────────────────
+
+export function banUser(username: string, violationCode: string, comments: string) {
+  return post<{ message: string }>(`/admin/users/${encodeURIComponent(username)}/ban`, {
+    violation_code: violationCode,
+    comments,
+  })
+}
+
+export function suspendUser(username: string, violationCode: string, comments: string, hours: number) {
+  return post<{ message: string }>(`/admin/users/${encodeURIComponent(username)}/suspend`, {
+    violation_code: violationCode,
+    comments,
+    hours,
+  })
+}
+
+export function pardonUser(username: string) {
+  return post<{ message: string }>(`/admin/users/${encodeURIComponent(username)}/pardon`)
+}
+
+export function listUserBans(status: BanStatus, cursor?: string, limit?: number) {
+  const params = new URLSearchParams({ status })
+  if (cursor) params.set('cursor', cursor)
+  if (limit) params.set('limit', String(limit))
+  return get<PageResult<UserBan>>(`/admin/bans?${params}`)
+}
+
+export const adminUserBansInfiniteQueryOptions = {
+  queryKey: ['admin', 'bans'] as const,
+  queryFn: ({ pageParam }: { pageParam: string | undefined }) =>
+    listUserBans('active', pageParam),
+  initialPageParam: undefined as string | undefined,
+  getNextPageParam: (lastPage: PageResult<UserBan>) =>
+    lastPage.next_token || undefined,
+}
+
 // ── Interest form ──────────────────────────────────────────────────────────────
 
 export function listInterestSubmissions(cursor?: string) {
@@ -192,8 +270,8 @@ export function updateInterestFormSettings(dailyCap: number) {
   return put<InterestFormSettings>('/admin/interest/settings', { daily_cap: dailyCap })
 }
 
-export function provisionInterestSubmission(id: string, initialQuotaBytes: number) {
-  return post<Invitation>(`/admin/interest/${id}/provision`, { initial_quota_bytes: initialQuotaBytes })
+export function provisionInterestSubmission(id: string, initialQuotaBytes: number, grantAdmin = false) {
+  return post<Invitation>(`/admin/interest/${id}/provision`, { initial_quota_bytes: initialQuotaBytes, grant_admin: grantAdmin })
 }
 
 export const adminInterestInfiniteQueryOptions = {

@@ -3,7 +3,9 @@ package routes
 import (
 	"database/sql"
 	"errors"
+	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -63,7 +65,43 @@ func (h *Handler) Me(c *gin.Context) {
 		return
 	}
 
-	user, err := h.queries.GetUserByUsername(c.Request.Context(), username.(string))
+	ctx := c.Request.Context()
+	uname := username.(string)
+
+	// Auto-pardon any expired suspensions before checking ban status.
+	_ = h.queries.AutoPardonExpiredSuspension(ctx, uname)
+
+	ban, err := h.queries.GetActiveBan(ctx, uname)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+		return
+	}
+	if ban != nil {
+		if ban.BanType == "banned" {
+			// Add the requester's IP to the blocklist for hardware-level enforcement.
+			if ip := clientIP(c); ip != "" {
+				_ = h.queries.AddBannedIP(ctx, ip, "user-ban")
+			}
+			c.JSON(http.StatusForbidden, gin.H{
+				"error":          "banned",
+				"violation_code": ban.ViolationCode,
+				"comments":       ban.Comments,
+				"banned_at":      ban.BannedAt,
+			})
+			return
+		}
+		// Suspended
+		c.JSON(http.StatusForbidden, gin.H{
+			"error":          "suspended",
+			"violation_code": ban.ViolationCode,
+			"comments":       ban.Comments,
+			"expires_at":     ban.ExpiresAt,
+			"banned_at":      ban.BannedAt,
+		})
+		return
+	}
+
+	user, err := h.queries.GetUserByUsername(ctx, uname)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
@@ -100,4 +138,17 @@ func (h *Handler) Me(c *gin.Context) {
 		CreatedAt:         user.CreatedAt,
 		IsAdmin:           isAdmin,
 	})
+}
+
+// clientIP extracts the real client IP from the request, preferring
+// X-Real-IP (set by nginx) over the remote address.
+func clientIP(c *gin.Context) string {
+	if ip := c.GetHeader("X-Real-IP"); ip != "" {
+		return strings.TrimSpace(ip)
+	}
+	host, _, err := net.SplitHostPort(c.Request.RemoteAddr)
+	if err != nil {
+		return c.Request.RemoteAddr
+	}
+	return host
 }

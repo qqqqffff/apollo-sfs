@@ -6,6 +6,7 @@ import (
 
 	"github.com/oschwald/geoip2-golang"
 
+	"apollo-sfs.com/api/routes"
 	"apollo-sfs.com/api/routes/services"
 )
 
@@ -18,6 +19,7 @@ type Handler struct {
 	invites  AdminInviteService
 	metrics  MetricsServicer
 	auth     *services.AuthService
+	files    routes.FileServicer
 	registry *services.MinIORegistry
 	geo      *geoip2.Reader
 	// backendTestURL is the POST endpoint of the api-tests sidecar container.
@@ -50,6 +52,6 @@ type Handler struct {
 // frontendTestURL: internal URL of the Jest sidecar (FRONTEND_TEST_URL env var). "" disables unit tests.
 // frontendE2EURL:  internal URL of the Playwright sidecar (FRONTEND_E2E_URL env var). "" disables E2E tests.
 // shutdownCh:      channel closed by the Shutdown endpoint to trigger graceful server exit. nil disables the endpoint.
-func NewHandler(queries AdminQuerier, inviteSvc AdminInviteService, metricsSvc MetricsServicer, authSvc *services.AuthService, registry *services.MinIORegistry, geoReader *geoip2.Reader, backendTestURL, apiDir, frontendTestURL, frontendE2EURL string, shutdownCh chan struct{}) *Handler {
-	return &Handler{queries: queries, invites: inviteSvc, metrics: metricsSvc, auth: authSvc, registry: registry, geo: geoReader, backendTestURL: backendTestURL, apiDir: apiDir, frontendTestURL: frontendTestURL, frontendE2EURL: frontendE2EURL, shutdownCh: shutdownCh}
+func NewHandler(queries AdminQuerier, inviteSvc AdminInviteService, metricsSvc MetricsServicer, authSvc *services.AuthService, fileSvc routes.FileServicer, registry *services.MinIORegistry, geoReader *geoip2.Reader, backendTestURL, apiDir, frontendTestURL, frontendE2EURL string, shutdownCh chan struct{}) *Handler {
+	return &Handler{queries: queries, invites: inviteSvc, metrics: metricsSvc, auth: authSvc, files: fileSvc, registry: registry, geo: geoReader, backendTestURL: backendTestURL, apiDir: apiDir, frontendTestURL: frontendTestURL, frontendE2EURL: frontendE2EURL, shutdownCh: shutdownCh}
 }

@@ -26,6 +26,13 @@ type AdminQuerier interface {
 	ListBannedIPs(ctx context.Context, activeOnly bool, in db.PageInput) (*db.PageResult[models.BannedIP], error)
 	UnbanIP(ctx context.Context, id int64) error
 	ExtendBan(ctx context.Context, id int64) error
+	AddBannedIP(ctx context.Context, ip, jail string) error
+
+	// User bans / suspensions
+	CreateBan(ctx context.Context, p db.CreateBanParams) (*models.UserBan, error)
+	GetActiveBan(ctx context.Context, username string) (*models.UserBan, error)
+	PardonAllActiveBans(ctx context.Context, username, pardonedBy string) error
+	ListUserBans(ctx context.Context, activeOnly bool, in db.PageInput) (*db.PageResult[models.UserBan], error)
 
 	// Infrastructure
 	GetDriveSummaries(ctx context.Context) ([]models.DriveSummary, error)
@@ -53,7 +60,7 @@ type AdminQuerier interface {
 
 // AdminInviteService is the subset of *services.InviteService used by admin handlers.
 type AdminInviteService interface {
-	Create(ctx context.Context, invitedByUserID uuid.UUID, invitedByUsername, email string, initialQuotaBytes int64) (*models.Invitation, error)
+	Create(ctx context.Context, invitedByUserID uuid.UUID, invitedByUsername, email string, initialQuotaBytes int64, grantAdmin bool) (*models.Invitation, error)
 	List(ctx context.Context, page db.PageInput) (*db.PageResult[models.Invitation], error)
 	InvitationURL(token string) string
 	Resend(ctx context.Context, id uuid.UUID, byUsername string) error

@@ -8,6 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	"apollo-sfs.com/api/db"
 	"apollo-sfs.com/api/routes/services"
 )
 
@@ -46,6 +47,14 @@ func (h *Handler) FavoriteFile(c *gin.Context) {
 		}
 		return
 	}
+	username := c.GetString("username")
+	h.logAudit(db.AuditInput{
+		TargetUsername: username,
+		ActorUsername:  username,
+		Action:         "file_favorited",
+		ResourceType:   strPtr("file"),
+		ResourceID:     &fileID,
+	})
 	c.Status(http.StatusNoContent)
 }
 
@@ -63,6 +72,14 @@ func (h *Handler) UnfavoriteFile(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not remove favorite"})
 		return
 	}
+	username := c.GetString("username")
+	h.logAudit(db.AuditInput{
+		TargetUsername: username,
+		ActorUsername:  username,
+		Action:         "file_unfavorited",
+		ResourceType:   strPtr("file"),
+		ResourceID:     &fileID,
+	})
 	c.Status(http.StatusNoContent)
 }
 
@@ -87,6 +104,14 @@ func (h *Handler) FavoriteFolder(c *gin.Context) {
 		}
 		return
 	}
+	username := c.GetString("username")
+	h.logAudit(db.AuditInput{
+		TargetUsername: username,
+		ActorUsername:  username,
+		Action:         "folder_favorited",
+		ResourceType:   strPtr("folder"),
+		ResourceID:     &folderID,
+	})
 	c.Status(http.StatusNoContent)
 }
 
@@ -104,5 +129,13 @@ func (h *Handler) UnfavoriteFolder(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not remove favorite"})
 		return
 	}
+	username := c.GetString("username")
+	h.logAudit(db.AuditInput{
+		TargetUsername: username,
+		ActorUsername:  username,
+		Action:         "folder_unfavorited",
+		ResourceType:   strPtr("folder"),
+		ResourceID:     &folderID,
+	})
 	c.Status(http.StatusNoContent)
 }

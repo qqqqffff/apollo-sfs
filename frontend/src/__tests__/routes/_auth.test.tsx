@@ -40,6 +40,32 @@ jest.mock('../../components/DeleteConfirmModal', () => ({
   clearSkipDeleteCookie: jest.fn(),
 }))
 
+const mockImpersonate = jest.fn()
+const mockClearImpersonation = jest.fn()
+let mockImpersonatedUser: any = null
+
+jest.mock('../../context/ImpersonationContext', () => ({
+  useImpersonation: () => ({
+    impersonatedUser: mockImpersonatedUser,
+    impersonate: mockImpersonate,
+    clearImpersonation: mockClearImpersonation,
+  }),
+}))
+
+jest.mock('../../context/NotificationContext', () => ({
+  useNotification: () => ({ notify: jest.fn() }),
+}))
+
+jest.mock('../../api/admin', () => ({
+  banUser: jest.fn(),
+  suspendUser: jest.fn(),
+  pardonUser: jest.fn(),
+}))
+
+jest.mock('../../components/BanSuspendModal', () => ({
+  BanSuspendModal: () => null,
+}))
+
 import { Route } from '../../routes/_auth'
 
 const Nav = Route.options.component as React.ComponentType
@@ -53,6 +79,7 @@ function renderNav(userOverrides: UserPartial = {}) {
   } : null
 
   mockUseQuery.mockReturnValue({ data: user })
+  // _auth uses 4 mutations: logout, ban, suspend, pardon — return a stub for each call
   mockUseMutation.mockReturnValue({ mutate: mockLogoutMutate, isPending: false })
   mockUseQueryClient.mockReturnValue({ clear: jest.fn(), invalidateQueries: jest.fn() })
 
@@ -63,6 +90,9 @@ describe('_auth layout nav', () => {
   beforeEach(() => {
     mockNavigate.mockReset()
     mockLogoutMutate.mockReset()
+    mockImpersonate.mockReset()
+    mockClearImpersonation.mockReset()
+    mockImpersonatedUser = null
   })
 
   test('renders brand name', () => {
@@ -87,7 +117,7 @@ describe('_auth layout nav', () => {
     expect(screen.getByRole('link', { name: 'Users' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Invitations' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Interest' })).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: 'Banned IPs' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Bans & Suspensions' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Metrics' })).toBeInTheDocument()
   })
 
@@ -129,5 +159,23 @@ describe('_auth layout nav', () => {
     renderNav({ username: 'alice' })
     fireEvent.click(screen.getByRole('button', { name: /sign out/i }))
     expect(mockLogoutMutate).toHaveBeenCalledTimes(1)
+  })
+
+  test('impersonation badge not shown when no impersonated user', () => {
+    renderNav({ username: 'alice' })
+    expect(screen.queryByText('bob')).not.toBeInTheDocument()
+  })
+
+  test('impersonation badge shown when impersonating a user', () => {
+    mockImpersonatedUser = { username: 'bob', email: 'bob@example.com' }
+    renderNav({ username: 'alice' })
+    expect(screen.getByText('bob')).toBeInTheDocument()
+  })
+
+  test('clicking impersonation badge calls clearImpersonation', () => {
+    mockImpersonatedUser = { username: 'bob', email: 'bob@example.com' }
+    renderNav({ username: 'alice' })
+    fireEvent.click(screen.getByTitle(/exit impersonation/i))
+    expect(mockClearImpersonation).toHaveBeenCalledTimes(1)
   })
 })

@@ -94,6 +94,25 @@ func (q *Queries) UnbanIP(ctx context.Context, id int64) error {
 	return nil
 }
 
+// AddBannedIP upserts an IP into the banned_ips table with the given jail name.
+// If the IP is already present and active the ban_count is incremented; if it
+// was previously unbanned a new active record is inserted.
+func (q *Queries) AddBannedIP(ctx context.Context, ip, jail string) error {
+	_, err := q.db.ExecContext(ctx, `
+		INSERT INTO banned_ips (ip, jail, banned_at, ban_count)
+		VALUES ($1::inet, $2, NOW(), 1)
+		ON CONFLICT (ip)
+		DO UPDATE SET banned_at   = EXCLUDED.banned_at,
+		              unbanned_at = NULL,
+		              ban_count   = banned_ips.ban_count + 1,
+		              jail        = EXCLUDED.jail
+	`, ip, jail)
+	if err != nil {
+		return fmt.Errorf("AddBannedIP: %w", err)
+	}
+	return nil
+}
+
 // ExtendBan resets banned_at to NOW(), clears unbanned_at, and increments
 // ban_count — effectively re-banning the IP in the audit record.
 func (q *Queries) ExtendBan(ctx context.Context, id int64) error {

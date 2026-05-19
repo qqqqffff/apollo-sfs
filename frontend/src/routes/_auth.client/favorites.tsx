@@ -2,10 +2,12 @@ import { createFileRoute, Link } from '@tanstack/react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { MdFolder, MdInsertDriveFile, MdStar } from 'react-icons/md'
 import { favoritesQueryOptions, unfavoriteFile, unfavoriteFolder } from '../../api/favorites'
+import { adminGetUserFavorites } from '../../api/admin'
 import { canPreview, FilePreviewModal } from '../../components/FilePreviewModal'
 import { useState } from 'react'
 import type { File as ApiFile } from '../../types/api'
 import { useNotification } from '../../context/NotificationContext'
+import { useImpersonation } from '../../context/ImpersonationContext'
 
 export const Route = createFileRoute('/_auth/client/favorites')({
   component: RouteComponent,
@@ -14,7 +16,17 @@ export const Route = createFileRoute('/_auth/client/favorites')({
 function RouteComponent() {
   const queryClient = useQueryClient()
   const { notify } = useNotification()
-  const { data, isLoading } = useQuery(favoritesQueryOptions)
+  const { impersonatedUser } = useImpersonation()
+  const readOnly = impersonatedUser !== null
+
+  const { data: ownData, isLoading: ownLoading } = useQuery({ ...favoritesQueryOptions, enabled: !readOnly })
+  const { data: adminData, isLoading: adminLoading } = useQuery({
+    queryKey: ['admin', 'favorites', impersonatedUser?.username ?? ''] as const,
+    queryFn: () => adminGetUserFavorites(impersonatedUser!.username),
+    enabled: readOnly,
+  })
+  const data = readOnly ? adminData : ownData
+  const isLoading = readOnly ? adminLoading : ownLoading
   const [previewFile, setPreviewFile] = useState<ApiFile | null>(null)
 
   const removeFileMutation = useMutation({
@@ -37,11 +49,15 @@ function RouteComponent() {
 
   return (
     <div>
-      <h2 className="text-lg font-semibold text-gray-900 mb-6 mt-0">Favorites</h2>
+      <h2 className="text-lg font-semibold text-gray-900 mb-6 mt-0">
+        {readOnly ? `${impersonatedUser!.username}'s Favorites` : 'Favorites'}
+      </h2>
 
       {isEmpty && (
         <p className="text-sm text-gray-400">
-          No favorites yet. Star files or folders to find them here quickly.
+          {readOnly
+            ? 'This user has no favorites.'
+            : 'No favorites yet. Star files or folders to find them here quickly.'}
         </p>
       )}
 
@@ -59,14 +75,16 @@ function RouteComponent() {
                 >
                   {folder.name}
                 </Link>
-                <button
-                  onClick={() => removeFolderMutation.mutate(folder.id)}
-                  disabled={removeFolderMutation.isPending}
-                  title="Remove from favorites"
-                  className="text-amber-400 hover:text-amber-500 cursor-pointer disabled:opacity-50 bg-transparent border-0 p-0.5"
-                >
-                  <MdStar className="text-lg" />
-                </button>
+                {!readOnly && (
+                  <button
+                    onClick={() => removeFolderMutation.mutate(folder.id)}
+                    disabled={removeFolderMutation.isPending}
+                    title="Remove from favorites"
+                    className="text-amber-400 hover:text-amber-500 cursor-pointer disabled:opacity-50 bg-transparent border-0 p-0.5"
+                  >
+                    <MdStar className="text-lg" />
+                  </button>
+                )}
               </li>
             ))}
           </ul>
@@ -95,14 +113,16 @@ function RouteComponent() {
                     Preview
                   </button>
                 )}
-                <button
-                  onClick={() => removeFileMutation.mutate(file.id)}
-                  disabled={removeFileMutation.isPending}
-                  title="Remove from favorites"
-                  className="text-amber-400 hover:text-amber-500 cursor-pointer disabled:opacity-50 bg-transparent border-0 p-0.5"
-                >
-                  <MdStar className="text-lg" />
-                </button>
+                {!readOnly && (
+                  <button
+                    onClick={() => removeFileMutation.mutate(file.id)}
+                    disabled={removeFileMutation.isPending}
+                    title="Remove from favorites"
+                    className="text-amber-400 hover:text-amber-500 cursor-pointer disabled:opacity-50 bg-transparent border-0 p-0.5"
+                  >
+                    <MdStar className="text-lg" />
+                  </button>
+                )}
               </li>
             ))}
           </ul>

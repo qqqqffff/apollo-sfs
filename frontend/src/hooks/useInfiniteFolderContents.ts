@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
 import { useInfiniteQuery } from '@tanstack/react-query'
 import { listRoot, getFolder } from '../api/folders'
+import { adminListUserRoot, adminGetUserFolder } from '../api/admin'
 import { searchContent } from '../api/search'
 import type { Folder, File, FolderContents } from '../types/api'
 
@@ -19,13 +20,18 @@ const INITIAL_PARAM: PageParam = {
   fileDone: false,
 }
 
-function fetchPage(folderId: string | 'root', search: string, param: PageParam) {
+function fetchPage(folderId: string | 'root', search: string, param: PageParam, asUsername?: string) {
   const p = {
     folderCursor: param.folderDone ? undefined : param.folderCursor,
     fileCursor: param.fileDone ? undefined : param.fileCursor,
     // limit=0 tells the backend to skip that list (no DB query)
     folderLimit: param.folderDone ? 0 : undefined,
     fileLimit: param.fileDone ? 0 : undefined,
+  }
+  if (asUsername) {
+    return folderId === 'root'
+      ? adminListUserRoot(asUsername, p)
+      : adminGetUserFolder(asUsername, folderId, p)
   }
   if (search) return searchContent(search, p)
   return folderId === 'root' ? listRoot(p) : getFolder(folderId, p)
@@ -54,11 +60,12 @@ export interface InfiniteFolderContents {
 export function useInfiniteFolderContents(
   folderId: string | 'root',
   search: string,
+  asUsername?: string,
 ): InfiniteFolderContents {
   const query = useInfiniteQuery({
-    // Key includes search so switching modes (search vs browse) gets a fresh query
-    queryKey: ['folders', folderId, 'contents', search],
-    queryFn: ({ pageParam }) => fetchPage(folderId, search, pageParam as PageParam),
+    // Key includes asUsername so impersonated browsing is isolated from own data
+    queryKey: ['folders', folderId, 'contents', search, asUsername ?? ''],
+    queryFn: ({ pageParam }) => fetchPage(folderId, search, pageParam as PageParam, asUsername),
     initialPageParam: INITIAL_PARAM as PageParam,
     getNextPageParam: (lastPage, _allPages, lastPageParam) =>
       nextParam(lastPage, lastPageParam as PageParam),

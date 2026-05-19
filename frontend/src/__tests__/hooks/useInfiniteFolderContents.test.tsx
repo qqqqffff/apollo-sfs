@@ -15,12 +15,20 @@ jest.mock('../../api/search', () => ({
   searchContent: jest.fn(),
 }))
 
+jest.mock('../../api/admin', () => ({
+  adminListUserRoot:   jest.fn(),
+  adminGetUserFolder:  jest.fn(),
+}))
+
 import { listRoot, getFolder } from '../../api/folders'
 import { searchContent } from '../../api/search'
+import { adminListUserRoot, adminGetUserFolder } from '../../api/admin'
 
-const mockListRoot      = listRoot      as jest.Mock
-const mockGetFolder     = getFolder     as jest.Mock
-const mockSearchContent = searchContent as jest.Mock
+const mockListRoot          = listRoot          as jest.Mock
+const mockGetFolder         = getFolder         as jest.Mock
+const mockSearchContent     = searchContent     as jest.Mock
+const mockAdminListUserRoot = adminListUserRoot as jest.Mock
+const mockAdminGetUserFolder = adminGetUserFolder as jest.Mock
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -62,6 +70,8 @@ describe('useInfiniteFolderContents', () => {
     mockListRoot.mockReset()
     mockGetFolder.mockReset()
     mockSearchContent.mockReset()
+    mockAdminListUserRoot.mockReset()
+    mockAdminGetUserFolder.mockReset()
   })
 
   it('starts in loading state with empty arrays', () => {
@@ -154,5 +164,21 @@ describe('useInfiniteFolderContents', () => {
     const { result } = renderHook(() => useInfiniteFolderContents('root', ''), { wrapper })
     await waitFor(() => !result.current.isLoading)
     expect(typeof result.current.fetchNextPage).toBe('function')
+  })
+
+  it('calls adminListUserRoot when asUsername is provided and folderId=root', async () => {
+    mockAdminListUserRoot.mockResolvedValue(page([{ id: 'fold-a', name: 'Alpha' }], []))
+    const { wrapper } = makeWrapper()
+    renderHook(() => useInfiniteFolderContents('root', '', 'bob'), { wrapper })
+    await waitFor(() => expect(mockAdminListUserRoot).toHaveBeenCalledWith('bob', expect.any(Object)))
+    expect(mockListRoot).not.toHaveBeenCalled()
+  })
+
+  it('calls adminGetUserFolder when asUsername is provided and folderId is set', async () => {
+    mockAdminGetUserFolder.mockResolvedValue(page([], [{ id: 'f1', name: 'doc.pdf' }]))
+    const { wrapper } = makeWrapper()
+    renderHook(() => useInfiniteFolderContents('fold-xyz', '', 'bob'), { wrapper })
+    await waitFor(() => expect(mockAdminGetUserFolder).toHaveBeenCalledWith('bob', 'fold-xyz', expect.any(Object)))
+    expect(mockGetFolder).not.toHaveBeenCalled()
   })
 })

@@ -17,7 +17,6 @@ import {
 } from '../../api/admin'
 import type { DriveTemp, DriveSummary, TestRunResponse } from '../../api/admin'
 import { useMetricsStream } from '../../hooks/useMetricsStream'
-import { BarGraph } from '../../components/BarGraph'
 import { LineGraph } from '../../components/LineGraph'
 import type { LinePoint } from '../../components/LineGraph'
 import { useNotification } from '../../context/NotificationContext'
@@ -31,8 +30,26 @@ const GB = 1024 ** 3
 type HourWindow = 1 | 12 | 24 | 48 | 72
 const HOUR_OPTIONS: HourWindow[] = [1, 12, 24, 48, 72]
 
+type MetricKey = 'total_users' | 'active_users' | 'disk' | 'memory' | 'traffic' | 'ping' | 'loss' | 'cpu_temp' | 'drive_temp'
+
+const METRIC_LABELS: Record<MetricKey, string> = {
+  total_users:  'Total users',
+  active_users: 'Active users',
+  disk:         'Disk committed',
+  memory:       'Memory',
+  traffic:      'Network traffic',
+  ping:         'Ping',
+  loss:         'Packet loss',
+  cpu_temp:     'CPU temperature',
+  drive_temp:   'Drive temperature',
+}
+
 function formatTempY(v: number): string {
   return `${v.toFixed(1)}°C`
+}
+
+function formatCount(v: number): string {
+  return v.toFixed(0)
 }
 
 function RouteComponent() {
@@ -40,7 +57,7 @@ function RouteComponent() {
   const queryClient = useQueryClient()
   const { snapshots, connected } = useMetricsStream()
   const [hours, setHours] = useState<HourWindow>(12)
-  const [selectedNetMetric, setSelectedNetMetric] = useState<'traffic' | 'ping' | 'loss'>('traffic')
+  const [selectedMetric, setSelectedMetric] = useState<MetricKey>('traffic')
 
   const { data: infraData } = useQuery(infrastructureQueryOptions)
   const drives = infraData?.drives ?? []
@@ -95,7 +112,6 @@ function RouteComponent() {
 
   const latest = snapshots[snapshots.length - 1]
 
-  const cpuPct = latest?.cpu_percent ?? 0
   const memPct =
     latest && latest.memory_total_bytes > 0
       ? (latest.memory_used_bytes / latest.memory_total_bytes) * 100
@@ -112,24 +128,7 @@ function RouteComponent() {
       ? (diskCommittedBytes / latest.disk_total_bytes) * 100
       : 0
 
-  const bars = [
-    { label: 'CPU',    value: cpuPct,          color: '#f59e0b' },
-    { label: 'Memory', value: memPct,           color: '#8b5cf6',
-      detail: latest
-        ? `${(latest.memory_used_bytes / GB).toFixed(1)} / ${(latest.memory_total_bytes / GB).toFixed(1)} GB`
-        : undefined },
-    { label: 'Disk',   value: diskCommittedPct, color: '#3b82f6',
-      detail: latest
-        ? `${(diskUsedBytes / GB).toFixed(1)} used · ${(quotaOverheadBytes / GB).toFixed(1)} reserved / ${(latest.disk_total_bytes / GB).toFixed(0)} GB`
-        : undefined },
-  ]
-
   const nowMs = Date.now()
-
-  // Storage line points
-  const wsStoragePoints: LinePoint[] = snapshots
-    .filter(s => new Date(s.sampled_at).getTime() >= nowMs - 60 * 60 * 1000)
-    .map(s => ({ x: new Date(s.sampled_at).getTime(), y: s.storage_total_used_bytes }))
 
   // Temperature line points (live)
   const wsCpuTempPoints: LinePoint[] = snapshots
@@ -152,11 +151,6 @@ function RouteComponent() {
     if (historyError) notify('error', 'Failed to load metrics history')
   }, [historyError, notify])
 
-  const historyStoragePoints: LinePoint[] = (historySnaps ?? []).map(s => ({
-    x: new Date(s.sampled_at).getTime(),
-    y: s.storage_total_used_bytes,
-  }))
-
   const historyCpuTempPoints: LinePoint[] = (historySnaps ?? [])
     .filter(s => s.cpu_temp_celsius != null)
     .map(s => ({ x: new Date(s.sampled_at).getTime(), y: s.cpu_temp_celsius! }))
@@ -165,9 +159,10 @@ function RouteComponent() {
     .filter(s => s.drive_temp_celsius != null)
     .map(s => ({ x: new Date(s.sampled_at).getTime(), y: s.drive_temp_celsius! }))
 
-  const storagePoints = hours === 1 ? wsStoragePoints : historyStoragePoints
   const cpuTempPoints = hours === 1 ? wsCpuTempPoints : historyCpuTempPoints
   const driveTempPoints = hours === 1 ? wsDriveTempPoints : historyDriveTempPoints
+
+  const { pingMs: clientPingMs, packetLossPercent: clientPacketLoss, history: clientPingHistory } = useServerPing()
 
   // Network rate line points (live — derived from consecutive snapshot diffs)
   const wsNetUploadPoints: LinePoint[] = []
@@ -215,14 +210,36 @@ function RouteComponent() {
 
   const netUploadPoints = hours === 1 ? wsNetUploadPoints : histNetUploadPoints
   const netDownloadPoints = hours === 1 ? wsNetDownloadPoints : histNetDownloadPoints
-  const netPingPoints = hours === 1 ? wsPingPoints : histPingPoints
+  const serverPingPoints = hours === 1 ? wsPingPoints : histPingPoints
+  // Fall back to client HTTP ping history when server ICMP data is unavailable
+  const netPingPoints = serverPingPoints.length >= 2 ? serverPingPoints : clientPingHistory
   const netLossPoints = hours === 1 ? wsLossPoints : histLossPoints
+
+  // Additional metric line points (live)
+  const wsUsersPoints: LinePoint[] = recentSnapsForNet.map(s => ({ x: new Date(s.sampled_at).getTime(), y: s.total_user_count }))
+  const wsActiveUsersPoints: LinePoint[] = recentSnapsForNet.map(s => ({ x: new Date(s.sampled_at).getTime(), y: s.active_user_count }))
+  const wsDiskPoints: LinePoint[] = recentSnapsForNet.map(s => ({
+    x: new Date(s.sampled_at).getTime(),
+    y: (s.disk_total_bytes - s.disk_free_bytes) + Math.max(0, s.storage_total_quota_bytes - s.storage_total_used_bytes),
+  }))
+  const wsMemoryPoints: LinePoint[] = recentSnapsForNet.map(s => ({ x: new Date(s.sampled_at).getTime(), y: s.memory_used_bytes }))
+
+  // Additional metric line points (history)
+  const histUsersPoints: LinePoint[] = histSnaps.map(s => ({ x: new Date(s.sampled_at).getTime(), y: s.total_user_count }))
+  const histActiveUsersPoints: LinePoint[] = histSnaps.map(s => ({ x: new Date(s.sampled_at).getTime(), y: s.active_user_count }))
+  const histDiskPoints: LinePoint[] = histSnaps.map(s => ({
+    x: new Date(s.sampled_at).getTime(),
+    y: (s.disk_total_bytes - s.disk_free_bytes) + Math.max(0, s.storage_total_quota_bytes - s.storage_total_used_bytes),
+  }))
+  const histMemoryPoints: LinePoint[] = histSnaps.map(s => ({ x: new Date(s.sampled_at).getTime(), y: s.memory_used_bytes }))
+
+  const usersPoints = hours === 1 ? wsUsersPoints : histUsersPoints
+  const activeUsersPoints = hours === 1 ? wsActiveUsersPoints : histActiveUsersPoints
+  const diskPoints = hours === 1 ? wsDiskPoints : histDiskPoints
+  const memoryPoints = hours === 1 ? wsMemoryPoints : histMemoryPoints
 
   const hasCpuTemp = latest?.cpu_temp_celsius != null
   const hasDriveTemp = latest?.drive_temp_celsius != null
-  const hasTemps = hasCpuTemp || hasDriveTemp
-
-  const { pingMs: clientPingMs, packetLossPercent: clientPacketLoss } = useServerPing()
 
   const { data: driveTemps } = useQuery(driveTempsQueryOptions)
 
@@ -333,32 +350,56 @@ function RouteComponent() {
 
       {latest && (
         <div className="grid grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-3 mb-8">
-          <StatCard label="Total users"    value={String(latest.total_user_count)} />
-          <StatCard label="Active (5 min)" value={String(latest.active_user_count)} />
+          <StatCard
+            label="Total users"
+            value={String(latest.total_user_count)}
+            selected={selectedMetric === 'total_users'}
+            onClick={() => setSelectedMetric('total_users')}
+          />
+          <StatCard
+            label="Active (5 min)"
+            value={String(latest.active_user_count)}
+            selected={selectedMetric === 'active_users'}
+            onClick={() => setSelectedMetric('active_users')}
+          />
           <StatCard
             label="Disk committed"
             value={`${(diskCommittedBytes / GB).toFixed(1)} GB`}
             sub={`${diskCommittedPct.toFixed(1)}% of ${(latest.disk_total_bytes / GB).toFixed(0)} GB`}
+            selected={selectedMetric === 'disk'}
+            onClick={() => setSelectedMetric('disk')}
           />
           <StatCard
             label="Memory"
             value={`${(latest.memory_used_bytes / GB).toFixed(2)} GB`}
             sub={`${memPct.toFixed(1)}% of ${(latest.memory_total_bytes / GB).toFixed(1)} GB`}
+            selected={selectedMetric === 'memory'}
+            onClick={() => setSelectedMetric('memory')}
           />
           {netSentRate !== null && (
             <NetworkTrafficCard
               sent={netSentRate!}
               recv={netRecvRate!}
-              selected={selectedNetMetric === 'traffic'}
-              onClick={() => setSelectedNetMetric('traffic')}
+              selected={selectedMetric === 'traffic'}
+              onClick={() => setSelectedMetric('traffic')}
             />
           )}
           <SpeedTestCard result={liveSpeedTest} onRun={() => speedTestMutation.mutate()} pending={speedTestMutation.isPending} />
           {hasCpuTemp && (
-            <StatCard label="CPU temp" value={`${latest.cpu_temp_celsius!.toFixed(1)}°C`} />
+            <StatCard
+              label="CPU temp"
+              value={`${latest.cpu_temp_celsius!.toFixed(1)}°C`}
+              selected={selectedMetric === 'cpu_temp'}
+              onClick={() => setSelectedMetric('cpu_temp')}
+            />
           )}
           {hasDriveTemp && (
-            <StatCard label="Drive temp" value={`${latest.drive_temp_celsius!.toFixed(1)}°C`} />
+            <StatCard
+              label="Drive temp"
+              value={`${latest.drive_temp_celsius!.toFixed(1)}°C`}
+              selected={selectedMetric === 'drive_temp'}
+              onClick={() => setSelectedMetric('drive_temp')}
+            />
           )}
           {(driveTemps?.length ?? 0) > 0 && (
             <NvmeTempsCard temps={driveTemps!} />
@@ -366,21 +407,21 @@ function RouteComponent() {
           <PingCard
             serverMs={latest?.server_isp_ping_ms ?? null}
             clientMs={clientPingMs}
-            selected={selectedNetMetric === 'ping'}
-            onClick={() => setSelectedNetMetric('ping')}
+            selected={selectedMetric === 'ping'}
+            onClick={() => setSelectedMetric('ping')}
           />
           <PacketLossCard
             serverLoss={latest?.server_isp_packet_loss_percent ?? null}
             clientLoss={clientPacketLoss}
-            selected={selectedNetMetric === 'loss'}
-            onClick={() => setSelectedNetMetric('loss')}
+            selected={selectedMetric === 'loss'}
+            onClick={() => setSelectedMetric('loss')}
           />
         </div>
       )}
 
       <section className="mb-10">
         <div className="flex items-center gap-3 mb-3">
-          <h3 className="text-sm font-semibold text-gray-600 m-0">Network over time</h3>
+          <h3 className="text-sm font-semibold text-gray-600 m-0">{METRIC_LABELS[selectedMetric]} over time</h3>
           <div className="flex gap-1">
             {HOUR_OPTIONS.map(h => (
               <button
@@ -398,97 +439,44 @@ function RouteComponent() {
           </div>
         </div>
         <div className="bg-white border border-gray-200 rounded-xl px-6 py-4">
-          {selectedNetMetric === 'traffic' && (
+          {selectedMetric === 'traffic' && (
             <div className="grid grid-cols-2 gap-4">
               <div>
                 <div className="text-xs text-gray-400 mb-2">↑ Upload</div>
-                <LineGraph points={netUploadPoints} width={halfGraphW} height={160} color="#3b82f6" formatY={formatBytesPerSec} />
+                <LineGraph points={netUploadPoints} width={halfGraphW} height={180} color="#3b82f6" formatY={formatBytesPerSec} />
               </div>
               <div>
                 <div className="text-xs text-gray-400 mb-2">↓ Download</div>
-                <LineGraph points={netDownloadPoints} width={halfGraphW} height={160} color="#10b981" formatY={formatBytesPerSec} />
+                <LineGraph points={netDownloadPoints} width={halfGraphW} height={180} color="#10b981" formatY={formatBytesPerSec} />
               </div>
             </div>
           )}
-          {selectedNetMetric === 'ping' && (
-            <LineGraph points={netPingPoints} width={graphW} height={160} color="#f59e0b" formatY={(v) => `${v.toFixed(1)} ms`} />
+          {selectedMetric === 'ping' && (
+            <LineGraph points={netPingPoints} width={graphW} height={200} color="#f59e0b" formatY={(v) => `${v.toFixed(1)} ms`} />
           )}
-          {selectedNetMetric === 'loss' && (
-            <LineGraph points={netLossPoints} width={graphW} height={160} color="#ef4444" formatY={(v) => `${v.toFixed(1)}%`} />
+          {selectedMetric === 'loss' && (
+            <LineGraph points={netLossPoints} width={graphW} height={200} color="#ef4444" formatY={(v) => `${v.toFixed(1)}%`} />
+          )}
+          {selectedMetric === 'total_users' && (
+            <LineGraph points={usersPoints} width={graphW} height={200} color="#8b5cf6" formatY={formatCount} />
+          )}
+          {selectedMetric === 'active_users' && (
+            <LineGraph points={activeUsersPoints} width={graphW} height={200} color="#06b6d4" formatY={formatCount} />
+          )}
+          {selectedMetric === 'disk' && (
+            <LineGraph points={diskPoints} width={graphW} height={200} color="#3b82f6" />
+          )}
+          {selectedMetric === 'memory' && (
+            <LineGraph points={memoryPoints} width={graphW} height={200} color="#8b5cf6" />
+          )}
+          {selectedMetric === 'cpu_temp' && (
+            <LineGraph points={cpuTempPoints} width={graphW} height={200} color="#f59e0b" formatY={formatTempY} />
+          )}
+          {selectedMetric === 'drive_temp' && (
+            <LineGraph points={driveTempPoints} width={graphW} height={200} color="#10b981" formatY={formatTempY} />
           )}
         </div>
       </section>
-
-      <section className="mb-10">
-        <h3 className="text-sm font-semibold text-gray-600 mb-3 mt-0">Live utilisation</h3>
-        <div className="bg-white border border-gray-200 rounded-xl px-6 py-4">
-          {snapshots.length === 0 ? (
-            <p className="text-sm text-gray-400 m-0">Waiting for first snapshot…</p>
-          ) : (
-            <BarGraph bars={bars} height={220} />
-          )}
-        </div>
-      </section>
-
-      <section className="mb-10">
-        <div className="flex items-center gap-3 mb-3">
-          <h3 className="text-sm font-semibold text-gray-600 m-0">Storage over time</h3>
-          <div className="flex gap-1">
-            {HOUR_OPTIONS.map(h => (
-              <button
-                key={h}
-                onClick={() => setHours(h)}
-                className={`px-2.5 py-1 text-xs rounded-md border cursor-pointer transition-colors ${
-                  hours === h
-                    ? 'bg-blue-600 text-white border-blue-600'
-                    : 'bg-white text-gray-600 border-gray-200 hover:border-gray-400'
-                }`}
-              >
-                {h}hr
-              </button>
-            ))}
-          </div>
-        </div>
-        <div className="bg-white border border-gray-200 rounded-xl px-6 py-4">
-          <LineGraph
-            points={storagePoints}
-            width={graphW}
-            height={200}
-          />
-        </div>
-      </section>
-
-      {hasTemps && (
-        <section className="mb-10">
-          <h3 className="text-sm font-semibold text-gray-600 mb-3 mt-0">Temperature over time</h3>
-          <div className={`grid gap-4 ${hasCpuTemp && hasDriveTemp ? 'grid-cols-2' : 'grid-cols-1'}`}>
-            {hasCpuTemp && (
-              <div className="bg-white border border-gray-200 rounded-xl px-6 py-4">
-                <div className="text-xs text-gray-400 mb-2">CPU</div>
-                <LineGraph
-                  points={cpuTempPoints}
-                  width={hasDriveTemp ? halfGraphW : graphW}
-                  height={160}
-                  color="#f59e0b"
-                  formatY={formatTempY}
-                />
-              </div>
-            )}
-            {hasDriveTemp && (
-              <div className="bg-white border border-gray-200 rounded-xl px-6 py-4">
-                <div className="text-xs text-gray-400 mb-2">Drive</div>
-                <LineGraph
-                  points={driveTempPoints}
-                  width={hasCpuTemp ? halfGraphW : graphW}
-                  height={160}
-                  color="#10b981"
-                  formatY={formatTempY}
-                />
-              </div>
-            )}
-          </div>
-        </section>
-      )}
 
       <section className="mb-10">
         <div className="flex items-center justify-between mb-3">
@@ -589,9 +577,12 @@ function RouteComponent() {
   )
 }
 
-function StatCard({ label, value, sub }: { label: string; value: string; sub?: string }) {
+function StatCard({ label, value, sub, selected, onClick }: { label: string; value: string; sub?: string; selected?: boolean; onClick?: () => void }) {
   return (
-    <div className="bg-white border border-gray-200 rounded-xl px-4 py-3">
+    <div
+      className={`bg-white border rounded-xl px-4 py-3 transition-colors ${onClick ? 'cursor-pointer' : ''} ${selected ? 'border-blue-500 ring-1 ring-blue-500' : onClick ? 'border-gray-200 hover:border-gray-300' : 'border-gray-200'}`}
+      onClick={onClick}
+    >
       <div className="text-xs text-gray-400 mb-1">{label}</div>
       <div className="text-xl font-semibold text-gray-900">{value}</div>
       {sub && <div className="text-xs text-gray-400 mt-0.5">{sub}</div>}
@@ -736,7 +727,7 @@ function tempColor(c: number): string {
 
 function NvmeTempsCard({ temps }: { temps: DriveTemp[] }) {
   return (
-    <div className="bg-white border border-gray-200 rounded-xl px-4 py-3">
+    <div className="bg-white border border-gray-200 rounded-xl px-4 py-3 cursor-default hover:border-gray-300 transition-colors">
       <div className="text-xs text-gray-400 mb-2">NVMe temps</div>
       <div className="flex flex-col gap-1 max-h-28 overflow-y-auto pr-1">
         {temps.map((d) => (
@@ -837,14 +828,15 @@ function NetworkTrafficCard({ sent, recv, selected, onClick }: { sent: string; r
   )
 }
 
-const PING_WINDOW = 20 // rolling probe count (~100 s at 5 s intervals)
+const PING_HISTORY_MS = 60 * 60 * 1000 // keep up to 1 hour of probe history for the graph
 
 function useServerPing() {
-  const [result, setResult] = useState<{ pingMs: number | null; packetLossPercent: number }>({
+  const [result, setResult] = useState<{ pingMs: number | null; packetLossPercent: number; history: LinePoint[] }>({
     pingMs: null,
     packetLossPercent: 0,
+    history: [],
   })
-  const probesRef = useRef<Array<number | null>>([])
+  const probesRef = useRef<Array<{ t: number; rtt: number | null }>>([])
 
   useEffect(() => {
     async function probe() {
@@ -854,14 +846,17 @@ function useServerPing() {
       } catch {
         // timeout or network error — counts as lost
       }
-      probesRef.current = [...probesRef.current, rtt].slice(-PING_WINDOW)
+      const now = Date.now()
+      const cutoff = now - PING_HISTORY_MS
+      probesRef.current = [...probesRef.current, { t: now, rtt }].filter(p => p.t >= cutoff)
       const probes = probesRef.current
-      const successful = probes.filter((p): p is number => p !== null)
+      const successful = probes.filter((p): p is { t: number; rtt: number } => p.rtt !== null)
       setResult({
         pingMs: successful.length > 0
-          ? successful.reduce((s, v) => s + v, 0) / successful.length
+          ? successful.reduce((s, v) => s + v.rtt, 0) / successful.length
           : null,
         packetLossPercent: ((probes.length - successful.length) / probes.length) * 100,
+        history: successful.map(p => ({ x: p.t, y: p.rtt })),
       })
     }
 

@@ -57,17 +57,19 @@ function RouteComponent() {
   const [quotaBytes, setQuotaBytes] = useState(10 * GB)
   const [useCustom, setUseCustom] = useState(false)
   const [customGb, setCustomGb] = useState('')
+  const [grantAdmin, setGrantAdmin] = useState(false)
   const [pendingProvisionId, setPendingProvisionId] = useState<string | null>(null)
 
   const effectiveQuota = useCustom ? Math.round((parseFloat(customGb) || 0) * GB) : quotaBytes
 
   const provisionMutation = useMutation({
-    mutationFn: (id: string) => provisionInterestSubmission(id, effectiveQuota),
+    mutationFn: (id: string) => provisionInterestSubmission(id, effectiveQuota, grantAdmin),
     onMutate: (id) => setPendingProvisionId(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['admin', 'interest'] })
       setProvisioningId(null)
       setPendingProvisionId(null)
+      setGrantAdmin(false)
       notify('success', 'Invitation sent')
     },
     onError: (err) => {
@@ -187,6 +189,15 @@ function RouteComponent() {
               </div>
             )}
           </div>
+          <label className="flex items-center gap-2 cursor-pointer select-none w-fit">
+            <input
+              type="checkbox"
+              checked={grantAdmin}
+              onChange={(e) => setGrantAdmin(e.target.checked)}
+              className="w-4 h-4 rounded border-gray-300 accent-blue-600 cursor-pointer"
+            />
+            <span className="text-xs text-gray-600">Grant admin access</span>
+          </label>
           <div className="flex items-center gap-2">
             <button
               onClick={() => provisionMutation.mutate(provisioningId)}

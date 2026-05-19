@@ -125,6 +125,16 @@ func (h *Handler) CreateFolder(c *gin.Context) {
 		return
 	}
 
+	username := c.GetString("username")
+	h.logAudit(db.AuditInput{
+		TargetUsername: username,
+		ActorUsername:  username,
+		Action:         "folder_created",
+		ResourceType:   strPtr("folder"),
+		ResourceID:     &folder.ID,
+		ResourceName:   &folder.Name,
+	})
+
 	c.JSON(http.StatusCreated, folder)
 }
 
@@ -169,6 +179,16 @@ func (h *Handler) UpdateFolder(c *gin.Context) {
 		}
 		return
 	}
+
+	username := c.GetString("username")
+	h.logAudit(db.AuditInput{
+		TargetUsername: username,
+		ActorUsername:  username,
+		Action:         "folder_renamed",
+		ResourceType:   strPtr("folder"),
+		ResourceID:     &folderID,
+		ResourceName:   &updated.Name,
+	})
 
 	c.JSON(http.StatusOK, updated)
 }

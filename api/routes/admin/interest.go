@@ -65,6 +65,7 @@ func (h *Handler) UpdateInterestFormSettings(c *gin.Context) {
 
 type provisionInterestRequest struct {
 	InitialQuotaBytes int64 `json:"initial_quota_bytes"`
+	GrantAdmin        bool  `json:"grant_admin"`
 }
 
 // ProvisionInterestSubmission handles POST /api/v1/admin/interest/:id/provision.
@@ -111,7 +112,7 @@ func (h *Handler) ProvisionInterestSubmission(c *gin.Context) {
 	}
 
 	// Create the invitation via the invite service (same as standard invite flow).
-	inv, err := h.invites.Create(ctx, adminID, invitedByUsername.(string), submission.Email, req.InitialQuotaBytes)
+	inv, err := h.invites.Create(ctx, adminID, invitedByUsername.(string), submission.Email, req.InitialQuotaBytes, req.GrantAdmin)
 	if err != nil {
 		if errors.Is(err, services.ErrInviteAlreadyPending) {
 			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})

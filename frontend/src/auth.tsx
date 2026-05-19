@@ -4,19 +4,34 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { login as apiLogin, logout as apiLogout } from './api/auth'
 import { getMe, meQueryOptions } from './api/me'
 import type { User } from './types/api'
+import { ApiError } from './api/client'
 
-type LoginReturnType = 'fail' | 'admin' | 'client' | 'nextStep'
+type LoginReturnType = 'fail' | 'admin' | 'client' | 'nextStep' | 'banned' | 'suspended'
 
 export interface AuthContext {
   user: User | null
   isLoading: boolean
   isAuthenticated: boolean
-  validateAuth: () => Promise<boolean>
+  validateAuth: () => Promise<boolean | 'banned' | 'suspended'>
   login: (username: string, password: string) => Promise<LoginReturnType>
   confirmLogin: (username: string, password: string) => Promise<LoginReturnType>
   logout: () => Promise<'success' | 'fail'>
   admin: boolean
   updateProfile: (updatedUser: User) => Promise<'success' | 'fail'>
+}
+
+function storeRestriction(body: Record<string, unknown>) {
+  try {
+    sessionStorage.setItem('apollo_restriction', JSON.stringify(body))
+  } catch { /* ignore */ }
+}
+
+function isRestriction(err: unknown): err is ApiError {
+  return (
+    err instanceof ApiError &&
+    err.status === 403 &&
+    (err.body.error === 'banned' || err.body.error === 'suspended')
+  )
 }
 
 const AuthContext = createContext<AuthContext | null>(null)
@@ -25,11 +40,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const queryClient = useQueryClient()
   const { data: user, isLoading } = useQuery(meQueryOptions)
 
-  const validateAuth = useCallback(async (): Promise<boolean> => {
+  const validateAuth = useCallback(async (): Promise<boolean | 'banned' | 'suspended'> => {
     try {
       const me = await queryClient.fetchQuery(meQueryOptions)
       return !!me
-    } catch {
+    } catch (err) {
+      if (isRestriction(err)) {
+        storeRestriction(err.body)
+        return err.body.error as 'banned' | 'suspended'
+      }
       return false
     }
   }, [queryClient])
@@ -44,7 +63,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         })
         await queryClient.invalidateQueries({ queryKey: ['me'] })
         return me.is_admin ? 'admin' : 'client'
-      } catch {
+      } catch (err) {
+        if (isRestriction(err)) {
+          storeRestriction(err.body)
+          return err.body.error as 'banned' | 'suspended'
+        }
         return 'fail'
       }
     },

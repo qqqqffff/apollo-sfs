@@ -83,10 +83,20 @@ func (q *Queries) ListUsers(ctx context.Context, in PageInput) (*PageResult[mode
 		return nil, fmt.Errorf("ListUsers: %w", err)
 	}
 
+	// Include each user's active ban (if any) via a lateral join.
 	rows, err := q.db.QueryContext(ctx, `
-		SELECT`+userColumns+`
-		FROM users
-		ORDER BY created_at DESC
+		SELECT`+userColumns+`,
+		       b.id, b.ban_type, b.violation_code, b.comments, b.banned_by,
+		       b.banned_at, b.expires_at, b.pardoned_at, b.pardoned_by
+		FROM   users u
+		LEFT JOIN LATERAL (
+		  SELECT * FROM user_bans
+		  WHERE  username   = u.username
+		    AND  pardoned_at IS NULL
+		  ORDER  BY banned_at DESC
+		  LIMIT  1
+		) b ON TRUE
+		ORDER BY u.created_at DESC
 		LIMIT $1 OFFSET $2
 	`, limit, offset)
 	if err != nil {
@@ -96,7 +106,7 @@ func (q *Queries) ListUsers(ctx context.Context, in PageInput) (*PageResult[mode
 
 	var users []models.User
 	for rows.Next() {
-		u, err := scanUserRow(rows)
+		u, err := scanUserWithBanRow(rows)
 		if err != nil {
 			return nil, fmt.Errorf("ListUsers scan: %w", err)
 		}
@@ -109,6 +119,57 @@ func (q *Queries) ListUsers(ctx context.Context, in PageInput) (*PageResult[mode
 		Items:     users,
 		NextToken: offsetNextToken(len(users), limit, offset),
 	}, nil
+}
+
+func scanUserWithBanRow(rows *sql.Rows) (*models.User, error) {
+	var u models.User
+	var lastSeenAt sql.NullTime
+	// Ban columns — all nullable because of the LEFT JOIN.
+	var (
+		banID            sql.NullInt64
+		banType          sql.NullString
+		violationCode    sql.NullString
+		comments         sql.NullString
+		bannedBy         sql.NullString
+		bannedAt         sql.NullTime
+		expiresAt        sql.NullTime
+		pardonedAt       sql.NullTime
+		pardonedBy       sql.NullString
+	)
+	err := rows.Scan(
+		&u.Username, &u.Email, &u.EncryptedKey, &u.KeyNonce, &u.MasterKeyVersion,
+		&u.StorageUsedBytes, &u.StorageQuotaBytes, &lastSeenAt, &u.CreatedAt, &u.IsAdmin,
+		&banID, &banType, &violationCode, &comments, &bannedBy,
+		&bannedAt, &expiresAt, &pardonedAt, &pardonedBy,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if lastSeenAt.Valid {
+		u.LastSeenAt = &lastSeenAt.Time
+	}
+	if banID.Valid {
+		b := &models.UserBan{
+			ID:            banID.Int64,
+			Username:      u.Username,
+			BanType:       banType.String,
+			ViolationCode: violationCode.String,
+			Comments:      comments.String,
+			BannedBy:      bannedBy.String,
+			BannedAt:      bannedAt.Time,
+		}
+		if expiresAt.Valid {
+			b.ExpiresAt = &expiresAt.Time
+		}
+		if pardonedAt.Valid {
+			b.PardonedAt = &pardonedAt.Time
+		}
+		if pardonedBy.Valid {
+			b.PardonedBy = &pardonedBy.String
+		}
+		u.ActiveBan = b
+	}
+	return &u, nil
 }
 
 // UpdateLastSeenAt stamps the current time and syncs is_admin from the JWT.
@@ -258,6 +319,19 @@ func (q *Queries) UpdateUserQuota(ctx context.Context, username string, quotaByt
 	)
 	if err != nil {
 		return fmt.Errorf("UpdateUserQuota %q: %w", username, err)
+	}
+	return nil
+}
+
+// ResetUserStorage sets storage_used_bytes = 0 and storage_quota_bytes = 0.
+// Used after all user files are deleted on a permanent ban.
+func (q *Queries) ResetUserStorage(ctx context.Context, username string) error {
+	_, err := q.db.ExecContext(ctx,
+		`UPDATE users SET storage_used_bytes = 0, storage_quota_bytes = 0 WHERE username = $1`,
+		username,
+	)
+	if err != nil {
+		return fmt.Errorf("ResetUserStorage %q: %w", username, err)
 	}
 	return nil
 }

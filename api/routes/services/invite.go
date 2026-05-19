@@ -25,9 +25,10 @@ const defaultInviteTokenTTL = 7 * 24 * time.Hour
 // InviteValidation is returned by Validate and contains only the information
 // the registration page needs. The raw token is never included.
 type InviteValidation struct {
-	Email          string    `json:"email"`
+	Email           string    `json:"email"`
 	InvitedByUserID uuid.UUID `json:"invited_by_user_id"`
-	ExpiresAt      time.Time `json:"expires_at"`
+	ExpiresAt       time.Time `json:"expires_at"`
+	GrantAdmin      bool      `json:"grant_admin"`
 }
 
 // ── Service ───────────────────────────────────────────────────────────────────
@@ -72,6 +73,7 @@ func (s *InviteService) Create(
 	invitedByUsername string,
 	email string,
 	initialQuotaBytes int64,
+	grantAdmin bool,
 ) (*models.Invitation, error) {
 	token, err := generateInviteToken()
 	if err != nil {
@@ -90,6 +92,7 @@ func (s *InviteService) Create(
 		Token:             token,
 		TokenExpiresAt:    expiresAt,
 		InitialQuotaBytes: initialQuotaBytes,
+		GrantAdmin:        grantAdmin,
 	}
 
 	if err := s.queries.CreateInvitation(ctx, inv); err != nil {
@@ -141,6 +144,7 @@ func (s *InviteService) Validate(ctx context.Context, token string) (*InviteVali
 		Email:           inv.Email,
 		InvitedByUserID: inv.InvitedByUserID,
 		ExpiresAt:       inv.TokenExpiresAt,
+		GrantAdmin:      inv.GrantAdmin,
 	}, nil
 }
 

@@ -135,3 +135,64 @@ func TestMe_RegistersRoute(t *testing.T) {
 	h := routes.NewHandler(&stubQuerier{user: sampleUser()}, nil, nil, nil, nil, nil, nil, nil, "")
 	_ = h // ensure the handler is constructible; handler registration tested in other tests
 }
+
+func TestMe_BannedUser_Returns403(t *testing.T) {
+	ban := sampleBan("banned")
+	q := &stubQuerier{user: sampleUser(), activeBan: ban}
+	h := newRoutesHandler(q, nil)
+
+	r := newEngine()
+	ginContext(r, "uid", "alice", false)
+	r.GET("/me", h.Me)
+
+	req := httptest.NewRequest(http.MethodGet, "/me", nil)
+	w := doRequest(r, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for banned user, got %d (body: %s)", w.Code, w.Body.String())
+	}
+	var body map[string]any
+	decodeBody(w, &body) //nolint
+	if body["error"] != "banned" {
+		t.Errorf("expected error='banned', got %v", body["error"])
+	}
+}
+
+func TestMe_SuspendedUser_Returns403(t *testing.T) {
+	ban := sampleBan("suspended")
+	q := &stubQuerier{user: sampleUser(), activeBan: ban}
+	h := newRoutesHandler(q, nil)
+
+	r := newEngine()
+	ginContext(r, "uid", "alice", false)
+	r.GET("/me", h.Me)
+
+	req := httptest.NewRequest(http.MethodGet, "/me", nil)
+	w := doRequest(r, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for suspended user, got %d (body: %s)", w.Code, w.Body.String())
+	}
+	var body map[string]any
+	decodeBody(w, &body) //nolint
+	if body["error"] != "suspended" {
+		t.Errorf("expected error='suspended', got %v", body["error"])
+	}
+}
+
+func TestMe_ExpiredSuspension_AutoPardoned(t *testing.T) {
+	// activeBan is nil — AutoPardonExpiredSuspension has already cleared it
+	q := &stubQuerier{user: sampleUser(), activeBan: nil}
+	h := newRoutesHandler(q, nil)
+
+	r := newEngine()
+	ginContext(r, "uid", "alice", false)
+	r.GET("/me", h.Me)
+
+	req := httptest.NewRequest(http.MethodGet, "/me", nil)
+	w := doRequest(r, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 after auto-pardon, got %d (body: %s)", w.Code, w.Body.String())
+	}
+}

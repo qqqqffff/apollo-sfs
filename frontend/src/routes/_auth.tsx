@@ -60,7 +60,7 @@ function RouteComponent() {
               Apollo SFS
             </span>
           </div>
-          <div className="hidden sm:flex items-center gap-1">
+          <div className="hidden xl:flex items-center gap-1">
             <NavLink to="/client" exact onClick={closeMenu}>Files</NavLink>
             <NavLink to="/client/favorites" onClick={closeMenu}>Favorites</NavLink>
             {user?.is_admin && (
@@ -80,21 +80,21 @@ function RouteComponent() {
         <div className="flex items-center gap-3 shrink-0">
           <Link
             to="/client/profile"
-            className="text-sm text-gray-500 hover:text-gray-900 transition-colors truncate max-w-20 sm:max-w-36 md:max-w-56"
+            className="text-sm text-gray-500 hover:text-gray-900 transition-colors truncate max-w-24 xl:max-w-36 2xl:max-w-56"
           >
             {user?.username}
           </Link>
           <button
             onClick={() => logoutMutation.mutate()}
             disabled={logoutMutation.isPending}
-            className="hidden sm:block text-sm text-gray-500 hover:text-gray-900 disabled:opacity-50 cursor-pointer whitespace-nowrap"
+            className="hidden xl:block text-sm text-gray-500 hover:text-gray-900 disabled:opacity-50 cursor-pointer whitespace-nowrap"
           >
             Sign out
           </button>
           <button
             onClick={() => setMenuOpen((o) => !o)}
             aria-label="Toggle navigation"
-            className="sm:hidden text-gray-500 hover:text-gray-900 cursor-pointer"
+            className="xl:hidden text-gray-500 hover:text-gray-900 cursor-pointer"
           >
             {menuOpen ? <MdClose className="text-xl" /> : <MdMenu className="text-xl" />}
           </button>
@@ -105,7 +105,7 @@ function RouteComponent() {
       {menuOpen && (
         <div
           ref={menuRef}
-          className="sm:hidden bg-white border-b border-gray-200 px-4 py-3 flex flex-col gap-1"
+          className="xl:hidden bg-white border-b border-gray-200 px-4 py-3 flex flex-col gap-1"
         >
           <MobileNavLink to="/client" exact onClick={closeMenu}>Files</MobileNavLink>
           <MobileNavLink to="/client/favorites" onClick={closeMenu}>Favorites</MobileNavLink>

@@ -1,0 +1,25 @@
+# Test-runner sidecar image.
+# Runs the Go test suite (POST /run-tests) via cmd/testserver.
+# This image is NOT the production API and is never deployed to production.
+
+FROM golang:1.26.2-alpine
+
+WORKDIR /app
+
+# Download dependencies before copying source so this layer is reused on
+# code-only changes.
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+# Pre-compile the test packages so the first /run-tests call doesn't pay
+# a cold-compile penalty.
+RUN go test -run=^$ ./tests/... -count=1
+
+# Build the test-server binary.
+RUN go build -o /test-server ./cmd/testserver
+
+EXPOSE 9228
+
+CMD ["/test-server"]

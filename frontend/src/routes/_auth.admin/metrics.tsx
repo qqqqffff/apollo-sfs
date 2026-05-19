@@ -176,9 +176,7 @@ function RouteComponent() {
   })
 
   useEffect(() => {
-    if (speedTestError && (speedTestError as { status?: number }).status !== 404) {
-      notify('error', 'Failed to load speed test result')
-    }
+    if (speedTestError) notify('error', 'Failed to load speed test result')
   }, [speedTestError, notify])
 
   const speedTestMutation = useMutation({
@@ -481,7 +479,7 @@ function SpeedTestCard({ result, onRun, pending }: {
 }) {
   return (
     <div className="bg-white border border-gray-200 rounded-xl px-4 py-3">
-      <div className="flex items-center justify-between mb-1">
+      <div className="flex items-center justify-between mb-2">
         <div className="text-xs text-gray-400">Network speed</div>
         <button
           onClick={onRun}
@@ -493,10 +491,17 @@ function SpeedTestCard({ result, onRun, pending }: {
       </div>
       {result && !result.error ? (
         <>
-          <div className="text-xl font-semibold text-gray-900">
-            ↑ {result.upload_mbps.toFixed(1)} / ↓ {result.download_mbps.toFixed(1)} <span className="text-sm font-normal text-gray-500">Mb/s</span>
+          <div className="flex flex-col gap-1">
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-xs text-gray-500">↑ Upload</span>
+              <span className="text-sm font-semibold text-gray-900 tabular-nums">{result.upload_mbps.toFixed(1)} Mb/s</span>
+            </div>
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-xs text-gray-500">↓ Download</span>
+              <span className="text-sm font-semibold text-gray-900 tabular-nums">{result.download_mbps.toFixed(1)} Mb/s</span>
+            </div>
           </div>
-          <div className="text-xs text-gray-400 mt-0.5">
+          <div className="text-xs text-gray-400 mt-1">
             {new Date(result.tested_at).toLocaleTimeString()}
           </div>
         </>

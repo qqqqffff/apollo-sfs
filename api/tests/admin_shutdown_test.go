@@ -10,7 +10,7 @@ import (
 
 // newShutdownHandler constructs a Handler wired with the given shutdown channel.
 func newShutdownHandler(ch chan struct{}) *admin.Handler {
-	return admin.NewHandler(&stubAdminQuerier{}, &stubAdminInviteService{}, nil, nil, nil, nil, "", "", "", ch)
+	return admin.NewHandler(&stubAdminQuerier{}, &stubAdminInviteService{}, nil, nil, nil, nil, "", "", "", "", ch)
 }
 
 // isClosed returns true if ch is already closed (non-blocking).

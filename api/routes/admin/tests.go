@@ -75,12 +75,16 @@ func (h *Handler) RunTests(c *gin.Context) {
 	c.JSON(status, resp)
 }
 
-// runBackend executes the Go test suite and returns its entry.
+// runBackend runs the Go test suite and returns its entry.
+// Prefers the api-tests sidecar (backendTestURL) over direct exec (apiDir).
 func (h *Handler) runBackend(parent context.Context) suiteEntry {
+	if h.backendTestURL != "" {
+		return h.callSidecar(parent, h.backendTestURL, "")
+	}
 	if h.apiDir == "" {
 		return suiteEntry{
 			Enabled: false,
-			Message: "backend tests disabled — APP_DIR is not set",
+			Message: "backend tests disabled — BACKEND_TEST_URL and APP_DIR are not set",
 		}
 	}
 

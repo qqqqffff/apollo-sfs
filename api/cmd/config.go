@@ -46,9 +46,12 @@ type Config struct {
 	TurnstileSecretKey string
 	TurnstileSiteKey   string
 
+	// BackendTestURL is the internal URL of the api-tests sidecar container.
+	// e.g. "http://api-tests:9228/run-tests". Preferred over AppDir in Docker.
+	BackendTestURL string
+
 	// AppDir is the absolute path to the api/ source directory on the host.
-	// Required for the backend test-runner endpoint (needs Go toolchain + source).
-	// Not meaningful inside the compiled Docker image — leave unset in production.
+	// Used for local dev when BackendTestURL is unset (needs Go toolchain + source).
 	AppDir string
 
 	// FrontendTestURL is the internal URL of the frontend-tests sidecar container.
@@ -106,6 +109,7 @@ func loadConfig() Config {
 		TurnstileSecretKey: requireEnv("CLOUDFLARE_TURNSTILE_SECRET_KEY"),
 		TurnstileSiteKey:   requireEnv("CLOUDFLARE_TURNSTILE_SITE_KEY"),
 
+		BackendTestURL:  getEnv("BACKEND_TEST_URL", ""),
 		AppDir:          getEnv("APP_DIR", ""),
 		FrontendTestURL: getEnv("FRONTEND_TEST_URL", ""),
 		FrontendE2EURL:  getEnv("FRONTEND_E2E_URL", ""),

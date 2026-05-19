@@ -82,7 +82,7 @@ function RouteComponent() {
   if (isLoading) return <p className="text-sm text-gray-500">Loading…</p>
   if (error)    return <p className="text-sm text-red-500">Failed to load submissions.</p>
 
-  const submissions = data?.pages.flatMap(p => p.items) ?? []
+  const submissions = data?.pages.flatMap(p => p.items ?? []) ?? []
 
   return (
     <div>

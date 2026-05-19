@@ -109,7 +109,7 @@ func (q *Queries) ListInterestSubmissions(ctx context.Context, in PageInput) (*P
 	}
 	defer rows.Close()
 
-	var items []models.InterestSubmission
+	items := []models.InterestSubmission{}
 	for rows.Next() {
 		s, err := scanInterestSubmission(rows)
 		if err != nil {

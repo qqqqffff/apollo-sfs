@@ -42,14 +42,14 @@ func (h *Handler) LatestSpeedTestMbps() float64 {
 }
 
 // GetSpeedTest handles GET /admin/system/speed-test.
-// Returns the most recently cached result, or 404 if no test has run yet.
+// Returns the most recently cached result, or 204 No Content if no test has run yet.
 func (h *Handler) GetSpeedTest(c *gin.Context) {
 	h.speedTestMu.RLock()
 	result := h.latestSpeedTest
 	h.speedTestMu.RUnlock()
 
 	if result == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "no speed test has been run yet"})
+		c.Status(http.StatusNoContent)
 		return
 	}
 	c.JSON(http.StatusOK, result)

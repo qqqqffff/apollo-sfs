@@ -12,6 +12,9 @@ export default defineConfig({
     tailwindcss(),
     react(),
   ],
+  define: {
+    global: 'globalThis',
+  },
   server: {
     port: 5173,
     proxy: {

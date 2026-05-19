@@ -36,6 +36,26 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # ── Backend (Go) test runner sidecar ──────────────────────────────────────
+  # Runs `go test ./tests/... -count=1` via cmd/testserver on the internal bridge.
+  #   POST /run-tests  — Go unit tests
+  # The API calls this endpoint to trigger the suite.
+  # This service is NOT present in production — remove or comment it out there.
+  api-tests:
+    build:
+      context: ./api
+      dockerfile: Dockerfile.test
+    platform: linux/arm64
+    container_name: apollo-sfs-api-tests
+    restart: unless-stopped
+    networks:
+      - app-network
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
   # ── Frontend test runner sidecar ──────────────────────────────────────────
   # Runs Jest and Playwright via test-server.js on the internal Docker bridge.
   #   POST /run-tests  — Jest unit tests
@@ -120,9 +140,8 @@ services:
       # Cloudflare Turnstile — bot protection for the interest form
       CLOUDFLARE_TURNSTILE_SECRET_KEY: ${CLOUDFLARE_TURNSTILE_SECRET_KEY}
       CLOUDFLARE_TURNSTILE_SITE_KEY: ${CLOUDFLARE_TURNSTILE_SITE_KEY}
-      # Test runner — points at the frontend-tests sidecar on the Docker bridge.
-      # APP_DIR is intentionally unset here; go test requires the source tree and
-      # Go toolchain which are not present in the compiled API container image.
+      # Test runners — point at the sidecar containers on the Docker bridge.
+      BACKEND_TEST_URL: http://api-tests:9228/run-tests
       FRONTEND_TEST_URL: http://frontend-tests:9229/run-tests
       FRONTEND_E2E_URL: http://frontend-tests:9229/run-e2e
     volumes:
@@ -137,6 +156,8 @@ services:
       minio:
         condition: service_healthy
       postfix:
+        condition: service_started
+      api-tests:
         condition: service_started
       frontend-tests:
         condition: service_started

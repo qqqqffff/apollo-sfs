@@ -14,7 +14,7 @@ docker exec -i apollo-sfs-postgresql-app psql -U $POSTGRES_APP_USER -d apollo-sf
 migration example
 ```bash
 docker exec -i apollo-sfs-postgresql-app psql \
-  -U <POSTGRES_APP_USER> \
-  -d <POSTGRES_APP_DB> \
+  -U $POSTGRES_APP_USER \
+  -d $POSTGRES_APP_DB \
   -f /docker-entrypoint-initdb.d/migrations/006_alarm_subscriptions.sql
 ```

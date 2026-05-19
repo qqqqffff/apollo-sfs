@@ -93,7 +93,24 @@ func (h *Handler) TriggerSpeedTest(c *gin.Context) {
 	c.JSON(status, result)
 }
 
-// SpeedTestLoop runs a probe every 15 minutes until ctx is cancelled.
+// LatestSpeedTestResult returns the most recent speed test result for inclusion
+// in WS stream broadcasts. Implements services.SpeedTestStreamProvider.
+func (h *Handler) LatestSpeedTestResult() *services.SpeedTestResultSnapshot {
+	h.speedTestMu.RLock()
+	result := h.latestSpeedTest
+	h.speedTestMu.RUnlock()
+	if result == nil {
+		return nil
+	}
+	return &services.SpeedTestResultSnapshot{
+		UploadMbps:   result.UploadMbps,
+		DownloadMbps: result.DownloadMbps,
+		TestedAt:     result.TestedAt,
+		Error:        result.Error,
+	}
+}
+
+// SpeedTestLoop runs a probe every 30 minutes until ctx is cancelled.
 // Intended to be called in a goroutine from main after the handler is wired up.
 // The probe is skipped when current network traffic exceeds 50 % of the last
 // measured capacity — the loop retries on the next tick rather than waiting.
@@ -101,7 +118,7 @@ func (h *Handler) SpeedTestLoop(ctx context.Context) {
 	if h.registry == nil {
 		return
 	}
-	tick := time.NewTicker(15 * time.Minute)
+	tick := time.NewTicker(30 * time.Minute)
 	defer tick.Stop()
 	for {
 		select {

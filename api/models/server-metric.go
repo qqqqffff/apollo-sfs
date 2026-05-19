@@ -30,4 +30,9 @@ type ServerMetricSnapshot struct {
 	// Nullable — set to nil when ICMP ping is unavailable (e.g. missing capability).
 	ServerISPPingMs            *float64 `json:"server_isp_ping_ms" db:"server_isp_ping_ms"`
 	ServerISPPacketLossPercent *float64 `json:"server_isp_packet_loss_percent" db:"server_isp_packet_loss_percent"`
+	// Speed test — populated only in WS stream broadcasts, not persisted to DB.
+	SpeedTestUploadMbps   *float64   `json:"speed_test_upload_mbps,omitempty" db:"-"`
+	SpeedTestDownloadMbps *float64   `json:"speed_test_download_mbps,omitempty" db:"-"`
+	SpeedTestTestedAt     *time.Time `json:"speed_test_tested_at,omitempty" db:"-"`
+	SpeedTestError        string     `json:"speed_test_error,omitempty" db:"-"`
 }

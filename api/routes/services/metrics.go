@@ -164,10 +164,12 @@ func (h *Hub) ClientCount() int {
 // snapshot to the DB, and broadcasts it to all active WebSocket clients. A
 // separate daily goroutine prunes rows older than 7 days.
 type MetricsService struct {
-	queries       *db.Queries
-	hub           *Hub
-	diskStatsPath string
-	ping          *pingCollector
+	queries          *db.Queries
+	hub              *Hub
+	diskStatsPath    string
+	ping             *pingCollector
+	speedTestMu      sync.RWMutex
+	speedTestStream  SpeedTestStreamProvider
 }
 
 // NewMetricsService constructs a MetricsService.
@@ -185,6 +187,14 @@ func NewMetricsService(q *db.Queries, diskStatsPath string) *MetricsService {
 // Hub returns the WebSocket hub so the route handler can register clients.
 func (s *MetricsService) Hub() *Hub {
 	return s.hub
+}
+
+// SetSpeedTestProvider wires in the speed test source so each WS broadcast
+// includes the latest result.
+func (s *MetricsService) SetSpeedTestProvider(p SpeedTestStreamProvider) {
+	s.speedTestMu.Lock()
+	s.speedTestStream = p
+	s.speedTestMu.Unlock()
 }
 
 // Start launches the sampling and pruning goroutines. Returns when ctx is cancelled.
@@ -241,6 +251,17 @@ func (s *MetricsService) runSampler(ctx context.Context) {
 				continue
 			}
 			if s.hub.ClientCount() > 0 {
+				s.speedTestMu.RLock()
+				st := s.speedTestStream
+				s.speedTestMu.RUnlock()
+				if st != nil {
+					if result := st.LatestSpeedTestResult(); result != nil {
+						snap.SpeedTestUploadMbps = &result.UploadMbps
+						snap.SpeedTestDownloadMbps = &result.DownloadMbps
+						snap.SpeedTestTestedAt = &result.TestedAt
+						snap.SpeedTestError = result.Error
+					}
+				}
 				if msg, err := json.Marshal(snap); err == nil {
 					s.hub.Broadcast(msg)
 				}

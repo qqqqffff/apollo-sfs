@@ -37,6 +37,20 @@ type SpeedTestProvider interface {
 	LatestSpeedTestMbps() float64
 }
 
+// SpeedTestResultSnapshot carries the outcome of the most recent speed test.
+type SpeedTestResultSnapshot struct {
+	UploadMbps   float64
+	DownloadMbps float64
+	TestedAt     time.Time
+	Error        string
+}
+
+// SpeedTestStreamProvider supplies the full latest speed test result for
+// inclusion in WS stream broadcasts.
+type SpeedTestStreamProvider interface {
+	LatestSpeedTestResult() *SpeedTestResultSnapshot
+}
+
 // ── API error counter ─────────────────────────────────────────────────────────
 
 type apiMinuteBucket struct {

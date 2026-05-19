@@ -64,6 +64,11 @@ export interface MetricsSnapshot {
   drive_temp_celsius: number | null
   server_isp_ping_ms: number | null
   server_isp_packet_loss_percent: number | null
+  // Speed test — populated only in WS stream broadcasts, not persisted.
+  speed_test_upload_mbps?: number | null
+  speed_test_download_mbps?: number | null
+  speed_test_tested_at?: string | null
+  speed_test_error?: string | null
 }
 
 export function getMetrics() {

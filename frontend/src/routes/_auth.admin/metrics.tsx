@@ -40,6 +40,7 @@ function RouteComponent() {
   const queryClient = useQueryClient()
   const { snapshots, connected } = useMetricsStream()
   const [hours, setHours] = useState<HourWindow>(12)
+  const [selectedNetMetric, setSelectedNetMetric] = useState<'traffic' | 'ping' | 'loss'>('traffic')
 
   const { data: infraData } = useQuery(infrastructureQueryOptions)
   const drives = infraData?.drives ?? []
@@ -168,6 +169,55 @@ function RouteComponent() {
   const cpuTempPoints = hours === 1 ? wsCpuTempPoints : historyCpuTempPoints
   const driveTempPoints = hours === 1 ? wsDriveTempPoints : historyDriveTempPoints
 
+  // Network rate line points (live — derived from consecutive snapshot diffs)
+  const wsNetUploadPoints: LinePoint[] = []
+  const wsNetDownloadPoints: LinePoint[] = []
+  const recentSnapsForNet = snapshots.filter(s => new Date(s.sampled_at).getTime() >= nowMs - 60 * 60 * 1000)
+  for (let i = 1; i < recentSnapsForNet.length; i++) {
+    const prev = recentSnapsForNet[i - 1]
+    const curr = recentSnapsForNet[i]
+    const dtMs = new Date(curr.sampled_at).getTime() - new Date(prev.sampled_at).getTime()
+    if (dtMs <= 0) continue
+    const sentBps = ((curr.network_bytes_sent - prev.network_bytes_sent) / dtMs) * 1000
+    const recvBps = ((curr.network_bytes_recv - prev.network_bytes_recv) / dtMs) * 1000
+    if (sentBps < 0 || recvBps < 0) continue
+    wsNetUploadPoints.push({ x: new Date(curr.sampled_at).getTime(), y: sentBps })
+    wsNetDownloadPoints.push({ x: new Date(curr.sampled_at).getTime(), y: recvBps })
+  }
+  const wsPingPoints: LinePoint[] = recentSnapsForNet
+    .filter(s => s.server_isp_ping_ms != null)
+    .map(s => ({ x: new Date(s.sampled_at).getTime(), y: s.server_isp_ping_ms! }))
+  const wsLossPoints: LinePoint[] = recentSnapsForNet
+    .filter(s => s.server_isp_packet_loss_percent != null)
+    .map(s => ({ x: new Date(s.sampled_at).getTime(), y: s.server_isp_packet_loss_percent! }))
+
+  // Network rate line points (history)
+  const histNetUploadPoints: LinePoint[] = []
+  const histNetDownloadPoints: LinePoint[] = []
+  const histSnaps = historySnaps ?? []
+  for (let i = 1; i < histSnaps.length; i++) {
+    const prev = histSnaps[i - 1]
+    const curr = histSnaps[i]
+    const dtMs = new Date(curr.sampled_at).getTime() - new Date(prev.sampled_at).getTime()
+    if (dtMs <= 0) continue
+    const sentBps = ((curr.network_bytes_sent - prev.network_bytes_sent) / dtMs) * 1000
+    const recvBps = ((curr.network_bytes_recv - prev.network_bytes_recv) / dtMs) * 1000
+    if (sentBps < 0 || recvBps < 0) continue
+    histNetUploadPoints.push({ x: new Date(curr.sampled_at).getTime(), y: sentBps })
+    histNetDownloadPoints.push({ x: new Date(curr.sampled_at).getTime(), y: recvBps })
+  }
+  const histPingPoints: LinePoint[] = histSnaps
+    .filter(s => s.server_isp_ping_ms != null)
+    .map(s => ({ x: new Date(s.sampled_at).getTime(), y: s.server_isp_ping_ms! }))
+  const histLossPoints: LinePoint[] = histSnaps
+    .filter(s => s.server_isp_packet_loss_percent != null)
+    .map(s => ({ x: new Date(s.sampled_at).getTime(), y: s.server_isp_packet_loss_percent! }))
+
+  const netUploadPoints = hours === 1 ? wsNetUploadPoints : histNetUploadPoints
+  const netDownloadPoints = hours === 1 ? wsNetDownloadPoints : histNetDownloadPoints
+  const netPingPoints = hours === 1 ? wsPingPoints : histPingPoints
+  const netLossPoints = hours === 1 ? wsLossPoints : histLossPoints
+
   const hasCpuTemp = latest?.cpu_temp_celsius != null
   const hasDriveTemp = latest?.drive_temp_celsius != null
   const hasTemps = hasCpuTemp || hasDriveTemp
@@ -192,6 +242,18 @@ function RouteComponent() {
     },
     onError: () => notify('error', 'Speed test failed'),
   })
+
+  // Prefer live speed test data from the WS stream; fall back to REST query result.
+  const liveSpeedTest: SpeedTestResult | undefined =
+    latest?.speed_test_upload_mbps != null
+      ? {
+          upload_mbps: latest.speed_test_upload_mbps!,
+          download_mbps: latest.speed_test_download_mbps!,
+          size_bytes: 0,
+          tested_at: latest.speed_test_tested_at!,
+          error: latest.speed_test_error ?? undefined,
+        }
+      : speedTest
 
   const [testResult, setTestResult] = useState<TestRunResponse | null>(null)
   const [testOutputOpen, setTestOutputOpen] = useState(false)
@@ -270,7 +332,7 @@ function RouteComponent() {
       </div>
 
       {latest && (
-        <div className="grid grid-cols-[repeat(auto-fill,minmax(160px,1fr))] gap-3 mb-8">
+        <div className="grid grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-3 mb-8">
           <StatCard label="Total users"    value={String(latest.total_user_count)} />
           <StatCard label="Active (5 min)" value={String(latest.active_user_count)} />
           <StatCard
@@ -284,9 +346,14 @@ function RouteComponent() {
             sub={`${memPct.toFixed(1)}% of ${(latest.memory_total_bytes / GB).toFixed(1)} GB`}
           />
           {netSentRate !== null && (
-            <NetworkTrafficCard sent={netSentRate!} recv={netRecvRate!} />
+            <NetworkTrafficCard
+              sent={netSentRate!}
+              recv={netRecvRate!}
+              selected={selectedNetMetric === 'traffic'}
+              onClick={() => setSelectedNetMetric('traffic')}
+            />
           )}
-          <SpeedTestCard result={speedTest} onRun={() => speedTestMutation.mutate()} pending={speedTestMutation.isPending} />
+          <SpeedTestCard result={liveSpeedTest} onRun={() => speedTestMutation.mutate()} pending={speedTestMutation.isPending} />
           {hasCpuTemp && (
             <StatCard label="CPU temp" value={`${latest.cpu_temp_celsius!.toFixed(1)}°C`} />
           )}
@@ -299,13 +366,58 @@ function RouteComponent() {
           <PingCard
             serverMs={latest?.server_isp_ping_ms ?? null}
             clientMs={clientPingMs}
+            selected={selectedNetMetric === 'ping'}
+            onClick={() => setSelectedNetMetric('ping')}
           />
           <PacketLossCard
             serverLoss={latest?.server_isp_packet_loss_percent ?? null}
             clientLoss={clientPacketLoss}
+            selected={selectedNetMetric === 'loss'}
+            onClick={() => setSelectedNetMetric('loss')}
           />
         </div>
       )}
+
+      <section className="mb-10">
+        <div className="flex items-center gap-3 mb-3">
+          <h3 className="text-sm font-semibold text-gray-600 m-0">Network over time</h3>
+          <div className="flex gap-1">
+            {HOUR_OPTIONS.map(h => (
+              <button
+                key={h}
+                onClick={() => setHours(h)}
+                className={`px-2.5 py-1 text-xs rounded-md border cursor-pointer transition-colors ${
+                  hours === h
+                    ? 'bg-blue-600 text-white border-blue-600'
+                    : 'bg-white text-gray-600 border-gray-200 hover:border-gray-400'
+                }`}
+              >
+                {h}hr
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="bg-white border border-gray-200 rounded-xl px-6 py-4">
+          {selectedNetMetric === 'traffic' && (
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <div className="text-xs text-gray-400 mb-2">↑ Upload</div>
+                <LineGraph points={netUploadPoints} width={halfGraphW} height={160} color="#3b82f6" formatY={formatBytesPerSec} />
+              </div>
+              <div>
+                <div className="text-xs text-gray-400 mb-2">↓ Download</div>
+                <LineGraph points={netDownloadPoints} width={halfGraphW} height={160} color="#10b981" formatY={formatBytesPerSec} />
+              </div>
+            </div>
+          )}
+          {selectedNetMetric === 'ping' && (
+            <LineGraph points={netPingPoints} width={graphW} height={160} color="#f59e0b" formatY={(v) => `${v.toFixed(1)} ms`} />
+          )}
+          {selectedNetMetric === 'loss' && (
+            <LineGraph points={netLossPoints} width={graphW} height={160} color="#ef4444" formatY={(v) => `${v.toFixed(1)}%`} />
+          )}
+        </div>
+      </section>
 
       <section className="mb-10">
         <h3 className="text-sm font-semibold text-gray-600 mb-3 mt-0">Live utilisation</h3>
@@ -654,20 +766,23 @@ function lossColor(pct: number | null): string {
   return 'text-emerald-600'
 }
 
-function PingCard({ serverMs, clientMs }: { serverMs: number | null; clientMs: number | null }) {
+function PingCard({ serverMs, clientMs, selected, onClick }: { serverMs: number | null; clientMs: number | null; selected?: boolean; onClick?: () => void }) {
   return (
-    <div className="bg-white border border-gray-200 rounded-xl px-4 py-3">
+    <div
+      className={`bg-white border rounded-xl px-4 py-3 cursor-pointer transition-colors ${selected ? 'border-blue-500 ring-1 ring-blue-500' : 'border-gray-200 hover:border-gray-300'}`}
+      onClick={onClick}
+    >
       <div className="text-xs text-gray-400 mb-2">Ping</div>
       <div className="flex flex-col gap-1">
         <div className="flex items-center justify-between gap-3">
           <span className="text-xs text-gray-500">Server → ISP</span>
-          <span className={`text-sm font-semibold tabular-nums ${pingColor(serverMs)}`}>
+          <span className={`text-sm font-semibold tabular-nums shrink-0 ${pingColor(serverMs)}`}>
             {serverMs != null ? `${serverMs.toFixed(1)} ms` : '—'}
           </span>
         </div>
         <div className="flex items-center justify-between gap-3">
           <span className="text-xs text-gray-500">Client → Server</span>
-          <span className={`text-sm font-semibold tabular-nums ${pingColor(clientMs)}`}>
+          <span className={`text-sm font-semibold tabular-nums shrink-0 ${pingColor(clientMs)}`}>
             {clientMs != null ? `${clientMs.toFixed(1)} ms` : '—'}
           </span>
         </div>
@@ -676,20 +791,23 @@ function PingCard({ serverMs, clientMs }: { serverMs: number | null; clientMs: n
   )
 }
 
-function PacketLossCard({ serverLoss, clientLoss }: { serverLoss: number | null; clientLoss: number }) {
+function PacketLossCard({ serverLoss, clientLoss, selected, onClick }: { serverLoss: number | null; clientLoss: number; selected?: boolean; onClick?: () => void }) {
   return (
-    <div className="bg-white border border-gray-200 rounded-xl px-4 py-3">
+    <div
+      className={`bg-white border rounded-xl px-4 py-3 cursor-pointer transition-colors ${selected ? 'border-blue-500 ring-1 ring-blue-500' : 'border-gray-200 hover:border-gray-300'}`}
+      onClick={onClick}
+    >
       <div className="text-xs text-gray-400 mb-2">Packet loss</div>
       <div className="flex flex-col gap-1">
         <div className="flex items-center justify-between gap-3">
           <span className="text-xs text-gray-500">Server → ISP</span>
-          <span className={`text-sm font-semibold tabular-nums ${lossColor(serverLoss)}`}>
+          <span className={`text-sm font-semibold tabular-nums shrink-0 ${lossColor(serverLoss)}`}>
             {serverLoss != null ? `${serverLoss.toFixed(1)}%` : '—'}
           </span>
         </div>
         <div className="flex items-center justify-between gap-3">
           <span className="text-xs text-gray-500">Client → Server</span>
-          <span className={`text-sm font-semibold tabular-nums ${lossColor(clientLoss)}`}>
+          <span className={`text-sm font-semibold tabular-nums shrink-0 ${lossColor(clientLoss)}`}>
             {clientLoss.toFixed(1)}%
           </span>
         </div>
@@ -698,18 +816,21 @@ function PacketLossCard({ serverLoss, clientLoss }: { serverLoss: number | null;
   )
 }
 
-function NetworkTrafficCard({ sent, recv }: { sent: string; recv: string }) {
+function NetworkTrafficCard({ sent, recv, selected, onClick }: { sent: string; recv: string; selected?: boolean; onClick?: () => void }) {
   return (
-    <div className="bg-white border border-gray-200 rounded-xl px-4 py-3">
+    <div
+      className={`bg-white border rounded-xl px-4 py-3 cursor-pointer transition-colors ${selected ? 'border-blue-500 ring-1 ring-blue-500' : 'border-gray-200 hover:border-gray-300'}`}
+      onClick={onClick}
+    >
       <div className="text-xs text-gray-400 mb-2">Network traffic</div>
       <div className="flex flex-col gap-1">
         <div className="flex items-center justify-between gap-3">
           <span className="text-xs text-gray-500">↑ Upload</span>
-          <span className="text-sm font-semibold text-gray-900 tabular-nums">{sent}</span>
+          <span className="text-sm font-semibold text-gray-900 tabular-nums shrink-0">{sent}</span>
         </div>
         <div className="flex items-center justify-between gap-3">
           <span className="text-xs text-gray-500">↓ Download</span>
-          <span className="text-sm font-semibold text-gray-900 tabular-nums">{recv}</span>
+          <span className="text-sm font-semibold text-gray-900 tabular-nums shrink-0">{recv}</span>
         </div>
       </div>
     </div>

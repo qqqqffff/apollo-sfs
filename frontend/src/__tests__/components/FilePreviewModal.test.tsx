@@ -1,12 +1,15 @@
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import '@testing-library/jest-dom'
 import { FilePreviewModal, canPreview } from '../../components/FilePreviewModal'
 import type { File as ApiFile } from '../../types/api'
 
 jest.mock('../../api/files', () => ({
-  previewUrl:  (id: string) => `/preview/${id}`,
-  streamUrl:   (id: string, q?: string) => `/stream/${id}${q ? `?q=${q}` : ''}`,
-  downloadUrl: (id: string) => `/download/${id}`,
+  presignFile: jest.fn().mockResolvedValue({
+    download_url: '/api/v1/files/f1/download/p?token=test-tok',
+    preview_url:  '/api/v1/files/f1/preview/p?token=test-tok',
+    expires_at:   '2099-01-01T00:00:00Z',
+  }),
+  streamUrl: (id: string, q?: string) => `/stream/${id}${q ? `?q=${q}` : ''}`,
 }))
 
 // mammoth and dompurify are only imported inside DocxViewer; mock them lazily.
@@ -76,41 +79,58 @@ describe('FilePreviewModal', () => {
     expect(onClose).toHaveBeenCalledTimes(1)
   })
 
-  test('download link points to the correct URL', () => {
+  test('download link uses presigned URL after mount', async () => {
     render(<FilePreviewModal file={makeFile({ id: 'abc' })} onClose={onClose} />)
-    expect(screen.getByRole('link', { name: /download/i })).toHaveAttribute('href', '/download/abc')
+    const link = await waitFor(() => {
+      const a = screen.getByRole('link', { name: /download/i })
+      expect(a).toHaveAttribute('href')
+      return a
+    })
+    expect(link.getAttribute('href')).toContain('/download/p?token=')
   })
 
   // ── per-type rendering ───────────────────────────────────────────────────────
 
-  test('renders <img> for image files', () => {
+  test('renders <img> for image files with presigned src', async () => {
     const { container } = render(
       <FilePreviewModal file={makeFile({ id: 'img1', mime_type: 'image/jpeg' })} onClose={onClose} />,
     )
-    const img = container.querySelector('img')!
-    expect(img).toBeInTheDocument()
-    expect(img.src).toContain('/preview/img1')
+    const img = await waitFor(() => {
+      const el = container.querySelector('img')
+      expect(el).toBeInTheDocument()
+      expect(el?.src).toContain('/preview/p?token=')
+      return el
+    })
+    expect(img).toBeTruthy()
   })
 
-  test('renders <iframe> for PDF files', () => {
+  test('renders <iframe> for PDF files with presigned src', async () => {
     const { container } = render(
       <FilePreviewModal file={makeFile({ id: 'pdf1', mime_type: 'application/pdf' })} onClose={onClose} />,
     )
-    expect(container.querySelector('iframe')).toBeInTheDocument()
+    await waitFor(() => {
+      const iframe = container.querySelector('iframe')
+      expect(iframe).toBeInTheDocument()
+      expect(iframe?.src).toContain('/preview/p?token=')
+    })
   })
 
-  test('renders <video> for video files', () => {
+  test('renders <video> for video files using streamUrl (not presigned)', () => {
     const { container } = render(
       <FilePreviewModal file={makeFile({ id: 'vid1', mime_type: 'video/mp4' })} onClose={onClose} />,
     )
-    expect(container.querySelector('video')).toBeInTheDocument()
+    const video = container.querySelector('video')
+    expect(video).toBeInTheDocument()
+    expect(video?.src).toContain('/stream/vid1')
   })
 
-  test('renders <iframe> for text files', () => {
+  test('renders <iframe> for text files with presigned src', async () => {
     const { container } = render(
       <FilePreviewModal file={makeFile({ mime_type: 'text/plain' })} onClose={onClose} />,
     )
-    expect(container.querySelector('iframe')).toBeInTheDocument()
+    await waitFor(() => {
+      expect(container.querySelector('iframe')).toBeInTheDocument()
+    })
   })
 
   test('renders unsupported message for unknown types', () => {
@@ -120,12 +140,14 @@ describe('FilePreviewModal', () => {
     expect(screen.getByText(/preview not available/i)).toBeInTheDocument()
   })
 
-  test('unsupported type shows a download link', () => {
+  test('unsupported type shows a download link once presign resolves', async () => {
     render(
       <FilePreviewModal file={makeFile({ id: 'zip1', mime_type: 'application/zip' })} onClose={onClose} />,
     )
-    const links = screen.getAllByRole('link', { name: /download/i })
-    expect(links.length).toBeGreaterThanOrEqual(1)
+    await waitFor(() => {
+      const links = screen.getAllByRole('link', { name: /download/i })
+      expect(links.length).toBeGreaterThanOrEqual(1)
+    })
   })
 
   // ── video quality toggle ───────────────────────────────────────────────────

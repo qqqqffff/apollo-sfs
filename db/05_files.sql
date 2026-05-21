@@ -15,12 +15,20 @@ CREATE TABLE files (
     size_bytes       BIGINT      NOT NULL DEFAULT 0,
     minio_object_key TEXT        NOT NULL UNIQUE,
     nonce            BYTEA       NOT NULL,
+    -- taken_at is the capture date extracted from media metadata (EXIF for
+    -- images, container metadata for videos). NULL when unavailable; callers
+    -- fall back to created_at for sorting.
+    taken_at         TIMESTAMPTZ,
+    -- hidden files are excluded from collection listings unless explicitly
+    -- requested via a "show hidden" toggle or the dedicated hidden view.
+    hidden           BOOLEAN     NOT NULL DEFAULT FALSE,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX files_user_id_idx   ON files (user_id);
 CREATE INDEX files_folder_id_idx ON files (folder_id);
+CREATE INDEX files_taken_at_idx  ON files (folder_id, taken_at);
 
 -- Unique filename per folder for non-root files.
 CREATE UNIQUE INDEX files_unique_name_per_folder

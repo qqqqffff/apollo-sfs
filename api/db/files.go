@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -12,15 +13,16 @@ import (
 
 const fileColumns = `
 	id, user_id, folder_id, drive_id, name, mime_type,
-	size_bytes, minio_object_key, nonce, created_at, updated_at`
+	size_bytes, minio_object_key, nonce, taken_at, hidden, created_at, updated_at`
 
 func scanFile(row *sql.Row) (*models.File, error) {
 	var f models.File
 	var folderID uuid.NullUUID
 	var driveID uuid.NullUUID
+	var takenAt sql.NullTime
 	err := row.Scan(
 		&f.ID, &f.UserID, &folderID, &driveID, &f.Name, &f.MimeType,
-		&f.SizeBytes, &f.MinIOObjectKey, &f.Nonce, &f.CreatedAt, &f.UpdatedAt,
+		&f.SizeBytes, &f.MinIOObjectKey, &f.Nonce, &takenAt, &f.Hidden, &f.CreatedAt, &f.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -30,6 +32,9 @@ func scanFile(row *sql.Row) (*models.File, error) {
 	}
 	if driveID.Valid {
 		f.DriveID = &driveID.UUID
+	}
+	if takenAt.Valid {
+		f.TakenAt = &takenAt.Time
 	}
 	return &f, nil
 }
@@ -38,9 +43,10 @@ func scanFileRow(rows *sql.Rows) (*models.File, error) {
 	var f models.File
 	var folderID uuid.NullUUID
 	var driveID uuid.NullUUID
+	var takenAt sql.NullTime
 	err := rows.Scan(
 		&f.ID, &f.UserID, &folderID, &driveID, &f.Name, &f.MimeType,
-		&f.SizeBytes, &f.MinIOObjectKey, &f.Nonce, &f.CreatedAt, &f.UpdatedAt,
+		&f.SizeBytes, &f.MinIOObjectKey, &f.Nonce, &takenAt, &f.Hidden, &f.CreatedAt, &f.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -50,6 +56,9 @@ func scanFileRow(rows *sql.Rows) (*models.File, error) {
 	}
 	if driveID.Valid {
 		f.DriveID = &driveID.UUID
+	}
+	if takenAt.Valid {
+		f.TakenAt = &takenAt.Time
 	}
 	return &f, nil
 }
@@ -66,14 +75,18 @@ func (q *Queries) CreateFile(ctx context.Context, f *models.File) (*models.File,
 	if f.DriveID != nil {
 		driveID = uuid.NullUUID{UUID: *f.DriveID, Valid: true}
 	}
+	var takenAt sql.NullTime
+	if f.TakenAt != nil {
+		takenAt = sql.NullTime{Time: *f.TakenAt, Valid: true}
+	}
 	row := q.db.QueryRowContext(ctx, `
 		INSERT INTO files (
 			id, user_id, folder_id, drive_id, name, mime_type,
-			size_bytes, minio_object_key, nonce, created_at, updated_at
-		) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
+			size_bytes, minio_object_key, nonce, taken_at, created_at, updated_at
+		) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
 		RETURNING`+fileColumns,
 		f.UserID, folderID, driveID, f.Name, f.MimeType,
-		f.SizeBytes, f.MinIOObjectKey, f.Nonce,
+		f.SizeBytes, f.MinIOObjectKey, f.Nonce, takenAt,
 	)
 	out, err := scanFile(row)
 	if err != nil {
@@ -311,6 +324,130 @@ func (q *Queries) DeleteAllUserFileRows(ctx context.Context, username string) er
 		`DELETE FROM files WHERE user_id = $1::uuid`, username)
 	if err != nil {
 		return fmt.Errorf("DeleteAllUserFileRows: %w", err)
+	}
+	return nil
+}
+
+// ── Media collection listing ───────────────────────────────────────────────
+
+// MediaSort selects the ordering for a media collection listing.
+type MediaSort string
+
+const (
+	// MediaSortTakenAt orders by capture date (newest first), falling back to
+	// upload date when taken_at is null.
+	MediaSortTakenAt MediaSort = "taken_at"
+	// MediaSortCreated orders by upload date (newest first).
+	MediaSortCreated MediaSort = "created_at"
+	// MediaSortName orders alphabetically by name.
+	MediaSortName MediaSort = "name"
+)
+
+// HiddenFilter controls whether hidden files appear in a media listing.
+type HiddenFilter int
+
+const (
+	// HiddenExclude omits hidden files (default collection view).
+	HiddenExclude HiddenFilter = iota
+	// HiddenInclude returns hidden and visible files together ("show hidden").
+	HiddenInclude
+	// HiddenOnly returns only hidden files (the dedicated hidden view).
+	HiddenOnly
+)
+
+// orderClause maps a MediaSort to a fixed ORDER BY fragment. The mapping is a
+// closed set (never user-interpolated) so this is injection-safe.
+func (s MediaSort) orderClause() string {
+	switch s {
+	case MediaSortCreated:
+		return "f.created_at DESC, f.name ASC"
+	case MediaSortName:
+		return "f.name ASC"
+	default: // MediaSortTakenAt
+		return "COALESCE(f.taken_at, f.created_at) DESC, f.name ASC"
+	}
+}
+
+// hiddenClause maps a HiddenFilter to a fixed WHERE fragment (or empty string).
+func (h HiddenFilter) hiddenClause() string {
+	switch h {
+	case HiddenInclude:
+		return ""
+	case HiddenOnly:
+		return "AND f.hidden = TRUE"
+	default: // HiddenExclude
+		return "AND f.hidden = FALSE"
+	}
+}
+
+// ListMediaFiles returns a page of files belonging to a media collection. This
+// is the union of files physically in the collection (folder_id = collectionID)
+// and files pointed into it via collection_items, filtered by hidden state and
+// ordered per sort. Must run inside a ForUser transaction (RLS scopes rows).
+func (q *Queries) ListMediaFiles(ctx context.Context, collectionID uuid.UUID, sort MediaSort, hidden HiddenFilter, in PageInput) (*PageResult[models.File], error) {
+	limit := clampLimit(in.Limit)
+	offset, err := decodeOffsetCursor(in.Cursor)
+	if err != nil {
+		return nil, fmt.Errorf("ListMediaFiles: %w", err)
+	}
+
+	query := `
+		SELECT` + fileColumns + `
+		FROM files f
+		WHERE (
+			f.folder_id = $1
+			OR f.id IN (SELECT file_id FROM collection_items WHERE collection_id = $1)
+		)
+		` + hidden.hiddenClause() + `
+		ORDER BY ` + sort.orderClause() + `
+		LIMIT $2 OFFSET $3`
+
+	rows, err := q.db.QueryContext(ctx, query, collectionID, limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("ListMediaFiles: %w", err)
+	}
+	defer rows.Close()
+
+	files := make([]models.File, 0)
+	for rows.Next() {
+		f, err := scanFileRow(rows)
+		if err != nil {
+			return nil, fmt.Errorf("ListMediaFiles scan: %w", err)
+		}
+		files = append(files, *f)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("ListMediaFiles: %w", err)
+	}
+	return &PageResult[models.File]{
+		Items:     files,
+		NextToken: offsetNextToken(len(files), limit, offset),
+	}, nil
+}
+
+// SetFileHidden toggles a file's hidden flag and returns the updated record.
+func (q *Queries) SetFileHidden(ctx context.Context, id uuid.UUID, hidden bool) (*models.File, error) {
+	row := q.db.QueryRowContext(ctx, `
+		UPDATE files SET hidden = $2, updated_at = NOW()
+		WHERE id = $1
+		RETURNING`+fileColumns,
+		id, hidden)
+	f, err := scanFile(row)
+	if err != nil {
+		return nil, fmt.Errorf("SetFileHidden %s: %w", id, err)
+	}
+	return f, nil
+}
+
+// SetFileTakenAt records the capture date extracted from media metadata.
+// Runs outside the user-scoped transaction (called from background extraction),
+// so it is intentionally not gated by RLS — file ids are unguessable UUIDs.
+func (q *Queries) SetFileTakenAt(ctx context.Context, id uuid.UUID, takenAt time.Time) error {
+	_, err := q.db.ExecContext(ctx, `
+		UPDATE files SET taken_at = $2 WHERE id = $1
+	`, id, takenAt)
+	if err != nil {
+		return fmt.Errorf("SetFileTakenAt %s: %w", id, err)
 	}
 	return nil
 }

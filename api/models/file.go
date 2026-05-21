@@ -19,6 +19,11 @@ type File struct {
 	SizeBytes      int64      `json:"size_bytes" db:"size_bytes"`
 	MinIOObjectKey string     `json:"-" db:"minio_object_key"`
 	Nonce          []byte     `json:"-" db:"nonce"`
-	CreatedAt      time.Time  `json:"created_at" db:"created_at"`
-	UpdatedAt      time.Time  `json:"updated_at" db:"updated_at"`
+	// TakenAt is the capture date from media metadata (EXIF/container). Nil when
+	// unavailable; clients sort media by TakenAt, falling back to CreatedAt.
+	TakenAt   *time.Time `json:"taken_at" db:"taken_at"`
+	// Hidden excludes the file from collection listings unless explicitly shown.
+	Hidden    bool      `json:"hidden" db:"hidden"`
+	CreatedAt time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt time.Time `json:"updated_at" db:"updated_at"`
 }

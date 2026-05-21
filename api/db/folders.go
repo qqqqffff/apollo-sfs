@@ -10,10 +10,12 @@ import (
 	"apollo-sfs.com/api/models"
 )
 
+const folderColumns = `id, user_id, parent_id, name, kind, created_at, updated_at`
+
 func scanFolder(row *sql.Row) (*models.Folder, error) {
 	var f models.Folder
 	var parentID uuid.NullUUID
-	err := row.Scan(&f.ID, &f.UserID, &parentID, &f.Name, &f.CreatedAt, &f.UpdatedAt)
+	err := row.Scan(&f.ID, &f.UserID, &parentID, &f.Name, &f.Kind, &f.CreatedAt, &f.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -26,7 +28,7 @@ func scanFolder(row *sql.Row) (*models.Folder, error) {
 func scanFolderRow(rows *sql.Rows) (*models.Folder, error) {
 	var f models.Folder
 	var parentID uuid.NullUUID
-	err := rows.Scan(&f.ID, &f.UserID, &parentID, &f.Name, &f.CreatedAt, &f.UpdatedAt)
+	err := rows.Scan(&f.ID, &f.UserID, &parentID, &f.Name, &f.Kind, &f.CreatedAt, &f.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -39,11 +41,15 @@ func scanFolderRow(rows *sql.Rows) (*models.Folder, error) {
 // CreateFolder inserts a new folder and returns the persisted row with
 // server-generated id and timestamps.
 func (q *Queries) CreateFolder(ctx context.Context, f *models.Folder) (*models.Folder, error) {
+	kind := f.Kind
+	if kind == "" {
+		kind = models.FolderKindRegular
+	}
 	row := q.db.QueryRowContext(ctx, `
-		INSERT INTO folders (id, user_id, parent_id, name, created_at, updated_at)
-		VALUES (gen_random_uuid(), $1, $2, $3, NOW(), NOW())
-		RETURNING id, user_id, parent_id, name, created_at, updated_at
-	`, f.UserID, f.ParentID, f.Name)
+		INSERT INTO folders (id, user_id, parent_id, name, kind, created_at, updated_at)
+		VALUES (gen_random_uuid(), $1, $2, $3, $4, NOW(), NOW())
+		RETURNING `+folderColumns+`
+	`, f.UserID, f.ParentID, f.Name, kind)
 	out, err := scanFolder(row)
 	if err != nil {
 		return nil, fmt.Errorf("CreateFolder: %w", err)
@@ -54,7 +60,7 @@ func (q *Queries) CreateFolder(ctx context.Context, f *models.Folder) (*models.F
 // GetFolderByID returns a single folder. Returns sql.ErrNoRows if not found.
 func (q *Queries) GetFolderByID(ctx context.Context, id uuid.UUID) (*models.Folder, error) {
 	row := q.db.QueryRowContext(ctx, `
-		SELECT id, user_id, parent_id, name, created_at, updated_at
+		SELECT `+folderColumns+`
 		FROM folders WHERE id = $1
 	`, id)
 	f, err := scanFolder(row)
@@ -74,7 +80,7 @@ func (q *Queries) ListFoldersByUser(ctx context.Context, userID uuid.UUID, in Pa
 	}
 
 	rows, err := q.db.QueryContext(ctx, `
-		SELECT id, user_id, parent_id, name, created_at, updated_at
+		SELECT `+folderColumns+`
 		FROM folders WHERE user_id = $1
 		ORDER BY name ASC
 		LIMIT $2 OFFSET $3
@@ -107,7 +113,7 @@ func (q *Queries) UpdateFolderName(ctx context.Context, id uuid.UUID, name strin
 	row := q.db.QueryRowContext(ctx, `
 		UPDATE folders SET name = $2, updated_at = NOW()
 		WHERE id = $1
-		RETURNING id, user_id, parent_id, name, created_at, updated_at
+		RETURNING `+folderColumns+`
 	`, id, name)
 	f, err := scanFolder(row)
 	if err != nil {
@@ -126,7 +132,7 @@ func (q *Queries) ListRootFolders(ctx context.Context, userID uuid.UUID, in Page
 	}
 
 	rows, err := q.db.QueryContext(ctx, `
-		SELECT id, user_id, parent_id, name, created_at, updated_at
+		SELECT `+folderColumns+`
 		FROM folders
 		WHERE user_id = $1 AND parent_id IS NULL
 		ORDER BY name ASC
@@ -165,7 +171,7 @@ func (q *Queries) SearchFoldersByUser(ctx context.Context, userID uuid.UUID, ter
 	}
 
 	rows, err := q.db.QueryContext(ctx, `
-		SELECT id, user_id, parent_id, name, created_at, updated_at
+		SELECT `+folderColumns+`
 		FROM folders
 		WHERE user_id = $1 AND name ILIKE '%' || $2 || '%'
 		ORDER BY name ASC
@@ -203,7 +209,7 @@ func (q *Queries) ListFoldersByParent(ctx context.Context, userID, parentID uuid
 	}
 
 	rows, err := q.db.QueryContext(ctx, `
-		SELECT id, user_id, parent_id, name, created_at, updated_at
+		SELECT `+folderColumns+`
 		FROM folders
 		WHERE user_id = $1 AND parent_id = $2
 		ORDER BY name ASC
@@ -261,7 +267,7 @@ func (q *Queries) UpdateFolderParent(ctx context.Context, id uuid.UUID, parentID
 	row := q.db.QueryRowContext(ctx, `
 		UPDATE folders SET parent_id = $2, updated_at = NOW()
 		WHERE id = $1
-		RETURNING id, user_id, parent_id, name, created_at, updated_at
+		RETURNING `+folderColumns+`
 	`, id, parentID)
 	f, err := scanFolder(row)
 	if err != nil {

@@ -107,6 +107,7 @@ type FileService struct {
 	enc          *EncryptionService
 	email        *EmailService
 	transcode    *TranscodeService
+	meta         *MetadataService
 	quotaWarnPct int
 
 	userCacheMu sync.RWMutex
@@ -121,13 +122,14 @@ type FileService struct {
 }
 
 // NewFileService constructs a FileService.
-func NewFileService(q *db.Queries, registry *MinIORegistry, enc *EncryptionService, email *EmailService, transcode *TranscodeService, cfg FileServiceConfig) *FileService {
+func NewFileService(q *db.Queries, registry *MinIORegistry, enc *EncryptionService, email *EmailService, transcode *TranscodeService, meta *MetadataService, cfg FileServiceConfig) *FileService {
 	return &FileService{
 		queries:      q,
 		registry:     registry,
 		enc:          enc,
 		email:        email,
 		transcode:    transcode,
+		meta:         meta,
 		quotaWarnPct: cfg.QuotaWarnPct,
 		userCache:    make(map[string]cachedUser),
 		allocCache:   make(map[string]cachedAlloc),
@@ -188,6 +190,16 @@ func (s *FileService) Upload(ctx context.Context, in UploadInput) (*models.File,
 	mimeType := in.MimeType
 	if detected := mimetype.Detect(plaintext); detected != nil {
 		mimeType = detected.String()
+	}
+
+	// 2b. Auto-route image/video uploads to the user's media folder if configured.
+	in.FolderID = s.resolveUploadFolder(ctx, in.Username, in.FolderID, mimeType)
+
+	// 2c. For images, extract the capture date now (plaintext is already in
+	// memory). Videos are probed asynchronously after the blob is stored.
+	var takenAt *time.Time
+	if strings.HasPrefix(mimeType, "image/") {
+		takenAt = ExtractImageTakenAt(plaintext)
 	}
 
 	// 3. Quota check.
@@ -261,6 +273,7 @@ func (s *FileService) Upload(ctx context.Context, in UploadInput) (*models.File,
 		SizeBytes:      fileSize,
 		MinIOObjectKey: objectKey,
 		Nonce:          nonce,
+		TakenAt:        takenAt,
 	})
 	if err != nil {
 		// Best-effort cleanup: delete the orphaned MinIO object.
@@ -306,7 +319,102 @@ func (s *FileService) Upload(ctx context.Context, in UploadInput) (*models.File,
 		go s.createVariant(file, in.Username)
 	}
 
+	// 11. Probe video capture date in the background (images were done in step 2c).
+	if strings.HasPrefix(mimeType, "video/") {
+		go s.extractTakenAtAsync(file, in.Username)
+	}
+
 	return file, nil
+}
+
+// resolveUploadFolder returns the destination folder for an upload. When the
+// user has configured a media auto-upload folder and the upload is an image or
+// video, every such upload is routed there (overriding the requested folder).
+func (s *FileService) resolveUploadFolder(ctx context.Context, username string, requested *uuid.UUID, mimeType string) *uuid.UUID {
+	if !isMediaMime(mimeType) {
+		return requested
+	}
+	prefs, err := s.queries.GetUserPreferences(ctx, username)
+	if err != nil || prefs.MediaAutouploadFolderID == nil {
+		return requested
+	}
+	return prefs.MediaAutouploadFolderID
+}
+
+// isMediaMime reports whether a MIME type is an image or video.
+func isMediaMime(mimeType string) bool {
+	return strings.HasPrefix(mimeType, "image/") || strings.HasPrefix(mimeType, "video/")
+}
+
+// extractTakenAtAsync downloads a stored file, extracts its capture date
+// (EXIF for images, ffprobe for videos), and persists it. Best-effort: any
+// failure is logged and leaves taken_at null so listings fall back to upload date.
+func (s *FileService) extractTakenAtAsync(file *models.File, username string) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("metadata: recovered panic for %s: %v", file.ID, r)
+		}
+	}()
+	ctx := context.Background()
+
+	var (
+		plaintext []byte
+		err       error
+	)
+	if IsChunked(file) {
+		plaintext, err = s.DownloadChunked(ctx, file, username)
+	} else {
+		_, plaintext, err = s.Download(ctx, file.ID, file.UserID, username)
+	}
+	if err != nil {
+		log.Printf("metadata: download %s: %v", file.ID, err)
+		return
+	}
+
+	var takenAt *time.Time
+	switch {
+	case strings.HasPrefix(file.MimeType, "image/"):
+		takenAt = ExtractImageTakenAt(plaintext)
+	case strings.HasPrefix(file.MimeType, "video/"):
+		if s.meta == nil {
+			return
+		}
+		path, cleanup, terr := extractToTempFile(plaintext, mimeToExt(file.MimeType))
+		if terr != nil {
+			log.Printf("metadata: temp file %s: %v", file.ID, terr)
+			return
+		}
+		defer cleanup()
+		takenAt = s.meta.ExtractVideoTakenAt(ctx, path)
+	}
+
+	if takenAt == nil {
+		return
+	}
+	if err := s.queries.SetFileTakenAt(ctx, file.ID, *takenAt); err != nil {
+		log.Printf("metadata: persist taken_at %s: %v", file.ID, err)
+	}
+}
+
+// SetHidden toggles a file's hidden flag. Returns ErrNotFound if the file does
+// not belong to userID.
+func (s *FileService) SetHidden(ctx context.Context, fileID, userID uuid.UUID, hidden bool) (*models.File, error) {
+	q, tx, err := s.queries.ForUser(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("set hidden: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := q.GetFileByID(ctx, fileID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("set hidden: get file: %w", err)
+	}
+	updated, err := q.SetFileHidden(ctx, fileID, hidden)
+	if err != nil {
+		return nil, fmt.Errorf("set hidden: %w", err)
+	}
+	return updated, tx.Commit()
 }
 
 // CheckQuota returns ErrQuotaExceeded when adding additionalBytes would push the
@@ -1028,6 +1136,9 @@ func (s *FileService) FinalizeChunkedUpload(ctx context.Context, sess *UploadSes
 		mimeType = "application/octet-stream"
 	}
 
+	// Auto-route image/video uploads to the user's media folder if configured.
+	sess.FolderID = s.resolveUploadFolder(ctx, sess.Username, sess.FolderID, mimeType)
+
 	// Read current usage before updating so we can compute threshold crossings below.
 	user, userErr := s.queries.GetUserByUsername(ctx, sess.Username)
 
@@ -1086,6 +1197,11 @@ func (s *FileService) FinalizeChunkedUpload(ctx context.Context, sess *UploadSes
 	// Kick off background 480p transcoding for video files.
 	if strings.HasPrefix(mimeType, "video/") && s.transcode != nil && s.transcode.Available() {
 		go s.createVariant(file, sess.Username)
+	}
+
+	// Probe capture date in the background for media files.
+	if isMediaMime(mimeType) {
+		go s.extractTakenAtAsync(file, sess.Username)
 	}
 
 	return file, nil

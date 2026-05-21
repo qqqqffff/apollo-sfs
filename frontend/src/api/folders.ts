@@ -1,5 +1,5 @@
 import { del, get, patch, post } from './client'
-import type { Folder, FolderContents } from '../types/api'
+import type { Folder, FolderContents, FolderKind, HiddenMode, MediaSort } from '../types/api'
 
 export interface FolderPageParams {
   folderCursor?: string
@@ -25,8 +25,23 @@ export function getFolder(folderId: string, p: FolderPageParams = {}) {
   return get<FolderContents>(`/folders/${folderId}${buildQS(p)}`)
 }
 
-export function createFolder(name: string, parent_id?: string) {
-  return post<Folder>('/folders', { name, parent_id: parent_id ?? null })
+export interface MediaPageParams extends FolderPageParams {
+  sort?: MediaSort
+  hidden?: HiddenMode
+}
+
+// getMediaFolder fetches a media collection's subcollections and media files
+// (physical residents plus pointers), ordered by sort and filtered by hidden.
+export function getMediaFolder(folderId: string, p: MediaPageParams = {}) {
+  const params = new URLSearchParams(buildQS(p).replace(/^\?/, ''))
+  if (p.sort) params.set('sort', p.sort)
+  if (p.hidden && p.hidden !== 'hide') params.set('hidden', p.hidden === 'only' ? 'only' : 'show')
+  const qs = params.size ? `?${params}` : ''
+  return get<FolderContents>(`/folders/${folderId}/media${qs}`)
+}
+
+export function createFolder(name: string, parent_id?: string, kind: FolderKind = 'regular') {
+  return post<Folder>('/folders', { name, parent_id: parent_id ?? null, kind })
 }
 
 export function renameFolder(folderId: string, name: string) {

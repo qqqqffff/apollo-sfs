@@ -131,6 +131,9 @@ func (s *FolderService) GetContents(
 
 // Create inserts a new folder owned by userID. If parentID is non-nil the
 // parent folder must exist and be owned by the same user.
+// kind is "regular" or "media"; an empty or unknown value defaults to regular.
+// A folder created beneath a media folder inherits the media kind so the whole
+// subtree behaves as a collection (its descendants are subcollections).
 // Returns ErrFolderNotFound if the parent does not belong to userID.
 // Returns ErrDuplicateFolderName if a sibling with the same name already exists
 // (enforced by the DB unique constraint on user_id, parent_id, name).
@@ -139,6 +142,7 @@ func (s *FolderService) Create(
 	userID uuid.UUID,
 	parentID *uuid.UUID,
 	name string,
+	kind string,
 ) (*models.Folder, error) {
 	q, tx, err := s.queries.ForUser(ctx, userID)
 	if err != nil {
@@ -146,10 +150,19 @@ func (s *FolderService) Create(
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// Verify the parent folder exists and belongs to this user.
+	if kind != models.FolderKindMedia {
+		kind = models.FolderKindRegular
+	}
+
+	// Verify the parent folder exists and belongs to this user. A child of a
+	// media folder is itself a media subcollection.
 	if parentID != nil {
-		if _, err := s.getOwned(ctx, q, *parentID, userID); err != nil {
+		parent, err := s.getOwned(ctx, q, *parentID, userID)
+		if err != nil {
 			return nil, err
+		}
+		if parent.Kind == models.FolderKindMedia {
+			kind = models.FolderKindMedia
 		}
 	}
 
@@ -157,6 +170,7 @@ func (s *FolderService) Create(
 		UserID:   userID,
 		ParentID: parentID,
 		Name:     name,
+		Kind:     kind,
 	})
 	if err != nil {
 		if isDuplicateKeyError(err) {
@@ -165,6 +179,136 @@ func (s *FolderService) Create(
 		return nil, fmt.Errorf("create folder: %w", err)
 	}
 	return folder, tx.Commit()
+}
+
+// GetMediaContents returns a media folder's metadata, its direct subcollections,
+// and its media files (physical residents plus pointers), ordered per sort and
+// filtered by hidden state. Returns ErrFolderNotFound if the folder does not
+// belong to userID, ErrNotMediaCollection if it is not a media folder.
+func (s *FolderService) GetMediaContents(
+	ctx context.Context,
+	folderID, userID uuid.UUID,
+	sort db.MediaSort,
+	hidden db.HiddenFilter,
+	folderPage, filePage db.PageInput,
+) (*FolderContents, error) {
+	q, tx, err := s.queries.ForUser(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("get media contents: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	folder, err := s.getOwned(ctx, q, folderID, userID)
+	if err != nil {
+		return nil, err
+	}
+	if folder.Kind != models.FolderKindMedia {
+		return nil, ErrNotMediaCollection
+	}
+
+	var subfolders *db.PageResult[models.Folder]
+	if folderPage.Skip {
+		subfolders = emptyFolders()
+	} else {
+		subfolders, err = q.ListFoldersByParent(ctx, userID, folderID, folderPage)
+		if err != nil {
+			return nil, fmt.Errorf("get media contents: subfolders: %w", err)
+		}
+	}
+
+	var files *db.PageResult[models.File]
+	if filePage.Skip {
+		files = emptyFiles()
+	} else {
+		files, err = q.ListMediaFiles(ctx, folderID, sort, hidden, filePage)
+		if err != nil {
+			return nil, fmt.Errorf("get media contents: files: %w", err)
+		}
+	}
+
+	return &FolderContents{
+		Folder:     folder,
+		Subfolders: subfolders,
+		Files:      files,
+	}, nil
+}
+
+// CopyToSubcollection adds a pointer placing fileID into the subcollection
+// collectionID without moving the file's physical home. Both must belong to
+// userID and collectionID must be a media folder. A duplicate pointer is a no-op.
+func (s *FolderService) CopyToSubcollection(ctx context.Context, userID, collectionID, fileID uuid.UUID) error {
+	q, tx, err := s.queries.ForUser(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("copy to subcollection: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	coll, err := s.getOwned(ctx, q, collectionID, userID)
+	if err != nil {
+		return err
+	}
+	if coll.Kind != models.FolderKindMedia {
+		return ErrNotMediaCollection
+	}
+	if _, err := q.GetFileByID(ctx, fileID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		return fmt.Errorf("copy to subcollection: get file: %w", err)
+	}
+	if err := q.AddCollectionItem(ctx, userID, collectionID, fileID); err != nil {
+		if isDuplicateKeyError(err) {
+			return tx.Commit() // already present — treat as success
+		}
+		return fmt.Errorf("copy to subcollection: %w", err)
+	}
+	return tx.Commit()
+}
+
+// MoveSubcollectionItem repoints fileID from one subcollection to another.
+// All ids must belong to userID and the target must be a media folder.
+func (s *FolderService) MoveSubcollectionItem(ctx context.Context, userID, fileID, fromCollectionID, toCollectionID uuid.UUID) error {
+	q, tx, err := s.queries.ForUser(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("move subcollection item: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := s.getOwned(ctx, q, fromCollectionID, userID); err != nil {
+		return err
+	}
+	target, err := s.getOwned(ctx, q, toCollectionID, userID)
+	if err != nil {
+		return err
+	}
+	if target.Kind != models.FolderKindMedia {
+		return ErrNotMediaCollection
+	}
+	if err := q.MoveCollectionItem(ctx, fileID, fromCollectionID, toCollectionID); err != nil {
+		if isDuplicateKeyError(err) {
+			return ErrDuplicateFolderName
+		}
+		return fmt.Errorf("move subcollection item: %w", err)
+	}
+	return tx.Commit()
+}
+
+// RemoveFromSubcollection deletes the pointer linking fileID to collectionID.
+// The file's physical home is unaffected. A missing pointer is a no-op.
+func (s *FolderService) RemoveFromSubcollection(ctx context.Context, userID, collectionID, fileID uuid.UUID) error {
+	q, tx, err := s.queries.ForUser(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("remove from subcollection: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := s.getOwned(ctx, q, collectionID, userID); err != nil {
+		return err
+	}
+	if err := q.RemoveCollectionItem(ctx, collectionID, fileID); err != nil {
+		return fmt.Errorf("remove from subcollection: %w", err)
+	}
+	return tx.Commit()
 }
 
 // Rename changes a folder's display name. Returns ErrFolderNotFound if the
@@ -322,3 +466,7 @@ var ErrDuplicateFolderName = errors.New("a folder with that name already exists 
 
 // ErrFolderCycle is returned when a move would make a folder its own descendant.
 var ErrFolderCycle = errors.New("cannot move a folder into itself or one of its subfolders")
+
+// ErrNotMediaCollection is returned when an operation requires a media folder
+// but the target folder is a regular folder.
+var ErrNotMediaCollection = errors.New("folder is not a media collection")

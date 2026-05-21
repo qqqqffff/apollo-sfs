@@ -13,11 +13,18 @@ jest.mock('@tanstack/react-query', () => ({
   ...jest.requireActual('@tanstack/react-query'),
   useQuery:    (...args: any[]) => mockQuery(...args),
   useMutation: (...args: any[]) => mockMutation(...args),
+  useQueryClient: () => ({ invalidateQueries: jest.fn() }),
 }))
 
 jest.mock('../../../api/me', () => ({
   meQueryOptions: { queryKey: ['me'], queryFn: jest.fn() },
   changePassword: jest.fn(),
+  preferencesQueryOptions: { queryKey: ['preferences'], queryFn: jest.fn() },
+  updatePreferences: jest.fn(),
+}))
+
+jest.mock('../../../api/folders', () => ({
+  listRoot: jest.fn(),
 }))
 
 jest.mock('../../../api/client', () => ({

@@ -10,10 +10,19 @@ import (
 // exists only in PostgreSQL; MinIO has no knowledge of it.
 // Unique constraint: (user_id, parent_id, name).
 type Folder struct {
-	ID        uuid.UUID  `json:"id" db:"id"`
-	UserID    uuid.UUID  `json:"user_id" db:"user_id"`
-	ParentID  *uuid.UUID `json:"parent_id" db:"parent_id"` // NULL means root folder
-	Name      string     `json:"name" db:"name"`
-	CreatedAt time.Time  `json:"created_at" db:"created_at"`
-	UpdatedAt time.Time  `json:"updated_at" db:"updated_at"`
+	ID       uuid.UUID  `json:"id" db:"id"`
+	UserID   uuid.UUID  `json:"user_id" db:"user_id"`
+	ParentID *uuid.UUID `json:"parent_id" db:"parent_id"` // NULL means root folder
+	Name     string     `json:"name" db:"name"`
+	// Kind is "regular" or "media". A media folder is a top-level picture/video
+	// collection; folders nested beneath it act as subcollections.
+	Kind      string    `json:"kind" db:"kind"`
+	CreatedAt time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt time.Time `json:"updated_at" db:"updated_at"`
 }
+
+// Folder kind values.
+const (
+	FolderKindRegular = "regular"
+	FolderKindMedia   = "media"
+)

@@ -114,7 +114,9 @@ func main() {
 		log.Printf("transcode: ffmpeg not found — video variants disabled")
 	}
 
-	fileSvc := services.NewFileService(queries, registry, encSvc, emailSvc, transcodeSvc, services.FileServiceConfig{
+	metadataSvc := services.NewMetadataService()
+
+	fileSvc := services.NewFileService(queries, registry, encSvc, emailSvc, transcodeSvc, metadataSvc, services.FileServiceConfig{
 		QuotaWarnPct: cfg.QuotaWarningThresholdPct,
 	})
 	folderSvc := services.NewFolderService(queries)
@@ -211,8 +213,9 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	)
 
 	uploadStore := services.NewUploadSessionStore()
+	presignSvc := services.NewPresignService(cfg.PresignSecret)
 
-	h := routes.NewHandler(queries, fileSvc, folderSvc, inviteSvc, favSvc, authSvc, uploadStore, emailSvc, cfg.TurnstileSecretKey)
+	h := routes.NewHandler(queries, fileSvc, folderSvc, inviteSvc, favSvc, authSvc, uploadStore, emailSvc, presignSvc, cfg.TurnstileSecretKey)
 	authHandler := auth.NewHandler(authSvc)
 	adminHandler := admin.NewHandler(queries, inviteSvc, metricsSvc, authSvc, fileSvc, registry, geoReader, cfg.BackendTestURL, cfg.AppDir, cfg.FrontendTestURL, cfg.FrontendE2EURL, shutdownCh)
 	metricsSvc.SetSpeedTestProvider(adminHandler)
@@ -230,6 +233,13 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	})
 	v1.GET("/invitations/:token", h.ValidateInvitationToken)
 	v1.POST("/interest", h.SubmitInterestForm)
+
+	// ── Presigned file endpoints (token auth, no session cookie required) ────
+	v1.GET("/files/:file_id/download/p", h.DownloadFilePresigned)
+	v1.GET("/files/:file_id/preview/p", h.PreviewFilePresigned)
+	v1.POST("/files/upload/p", h.UploadFilePresigned)
+	v1.POST("/files/upload/:upload_id/chunk/p", h.UploadChunkPresigned)
+	v1.POST("/files/upload/:upload_id/complete/p", h.CompleteUploadPresigned)
 
 	// ── Auth — rate-limited, no JWT required ─────────────────────────────────
 	// Logout is the exception: it requires a valid session to invalidate.
@@ -255,19 +265,29 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	{
 		protected.GET("/me", h.Me)
 		protected.POST("/me/password", h.ChangePassword)
+		protected.GET("/me/preferences", h.GetPreferences)
+		protected.PUT("/me/preferences", h.UpdatePreferences)
 
 		// Files — single upload (small files ≤ 5 MB)
 		protected.POST("/files/upload", h.UploadFile)
+		// Presigned single upload — issues a token the client uses to upload without cookie auth
+		protected.POST("/files/upload/presign", h.PresignUpload)
 		// Chunked upload (large files > 5 MB)
 		protected.POST("/files/upload/init", h.InitUpload)
 		protected.POST("/files/upload/:upload_id/chunk", h.UploadChunk)
 		protected.POST("/files/upload/:upload_id/complete", h.CompleteUpload)
+		// Presigned chunked upload — issues a session token for token-authenticated chunk uploads
+		protected.POST("/files/upload/presign/init", h.PresignChunkedUpload)
 		protected.GET("/files/:file_id", h.GetFile)
 		protected.GET("/files/:file_id/download", h.DownloadFile)
 		protected.GET("/files/:file_id/preview", h.PreviewFile)
 		protected.GET("/files/:file_id/stream", h.StreamFile)
+		// Presign — issue time-limited download/preview URLs for a file
+		protected.POST("/files/:file_id/presign", h.PresignFile)
 		protected.PATCH("/files/:file_id", h.UpdateFile)
 		protected.PATCH("/files/:file_id/move", h.MoveFile)
+		protected.PATCH("/files/:file_id/hide", h.HideFile)
+		protected.PATCH("/files/:file_id/unhide", h.UnhideFile)
 		protected.DELETE("/files/:file_id", h.DeleteFile)
 
 		// Search
@@ -283,10 +303,16 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		// Folders
 		protected.GET("/folders", h.ListFolders)
 		protected.GET("/folders/:folder_id", h.GetFolder)
+		protected.GET("/folders/:folder_id/media", h.GetMediaFolder)
 		protected.POST("/folders", h.CreateFolder)
 		protected.PATCH("/folders/:folder_id", h.UpdateFolder)
 		protected.PATCH("/folders/:folder_id/move", h.MoveFolder)
 		protected.DELETE("/folders/:folder_id", h.DeleteFolder)
+
+		// Media subcollection pointers
+		protected.POST("/collections/:collection_id/items/:file_id", h.CopyFileToCollection)
+		protected.PATCH("/collections/:collection_id/items/:file_id/move", h.MoveCollectionItem)
+		protected.DELETE("/collections/:collection_id/items/:file_id", h.RemoveFileFromCollection)
 
 		// ── Admin — JWT + admin realm role ───────────────────────────────────
 		adminGroup := protected.Group("/admin")

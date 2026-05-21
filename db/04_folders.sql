@@ -5,11 +5,15 @@
 -- Cascade delete removes all descendant folders when a parent is deleted;
 -- files are removed by their own ON DELETE CASCADE from folders.
 
+-- kind distinguishes a normal folder ('regular') from a media collection
+-- ('media'). A media folder is a top-level picture/video collection; any folder
+-- nested beneath it acts as a subcollection.
 CREATE TABLE folders (
     id         UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id    UUID        NOT NULL,
     parent_id  UUID        REFERENCES folders (id) ON DELETE CASCADE,
     name       TEXT        NOT NULL,
+    kind       TEXT        NOT NULL DEFAULT 'regular',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 

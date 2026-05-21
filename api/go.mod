@@ -17,6 +17,8 @@ require (
 	golang.org/x/time v0.15.0
 )
 
+require github.com/rwcarlsen/goexif v0.0.0-20190401172101-9e8deecbddbd
+
 require (
 	github.com/bmatcuk/doublestar/v4 v4.9.1 // indirect
 	github.com/bytedance/gopkg v0.1.3 // indirect

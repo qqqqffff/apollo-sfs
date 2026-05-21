@@ -16,20 +16,37 @@ export interface File {
   name: string
   mime_type: string
   size_bytes: number
+  // Capture date from media metadata (EXIF/container); null when unavailable.
+  taken_at: string | null
+  // Hidden files are excluded from collection views unless explicitly shown.
+  hidden: boolean
   created_at: string
   updated_at: string
   // Only present on the single-file GET endpoint; undefined in list responses.
   has_low_variant?: boolean
 }
 
+export type FolderKind = 'regular' | 'media'
+
 export interface Folder {
   id: string
   user_id: string
   parent_id: string | null
   name: string
+  kind: FolderKind
   created_at: string
   updated_at: string
 }
+
+export interface UserPreferences {
+  user_id: string
+  media_autoupload_folder_id: string | null
+  created_at: string
+  updated_at: string
+}
+
+export type MediaSort = 'taken_at' | 'created_at' | 'name'
+export type HiddenMode = 'hide' | 'show' | 'only'
 
 export interface FolderContents {
   folder: Folder | null

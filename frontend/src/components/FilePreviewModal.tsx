@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { MdClose, MdDownload } from 'react-icons/md'
 import type { File } from '../types/api'
-import { previewUrl, streamUrl, downloadUrl } from '../api/files'
+import { presignFile, streamUrl } from '../api/files'
 
 interface Props {
   file: File
@@ -35,14 +35,15 @@ type DocxState =
   | { status: 'ready'; html: string }
   | { status: 'error' }
 
-function DocxViewer({ file }: { file: File }) {
+function DocxViewer({ previewUrl, downloadUrl }: { previewUrl: string; downloadUrl: string }) {
   const [state, setState] = useState<DocxState>({ status: 'loading' })
 
   useEffect(() => {
+    if (!previewUrl) return
     let cancelled = false
     async function load() {
       try {
-        const res = await fetch(previewUrl(file.id), { credentials: 'include' })
+        const res = await fetch(previewUrl)
         if (!res.ok) throw new Error('fetch failed')
         const buf = await res.arrayBuffer()
         const mammoth = await import('mammoth')
@@ -55,7 +56,7 @@ function DocxViewer({ file }: { file: File }) {
     }
     load()
     return () => { cancelled = true }
-  }, [file.id])
+  }, [previewUrl])
 
   if (state.status === 'loading') {
     return <div className="p-10 text-sm text-gray-400">Converting document…</div>
@@ -65,7 +66,9 @@ function DocxViewer({ file }: { file: File }) {
     return (
       <div className="p-10 text-center text-gray-500 text-sm">
         <p className="mb-3">Could not render this document.</p>
-        <a href={downloadUrl(file.id)} className="text-blue-600 hover:underline">Download instead</a>
+        {downloadUrl && (
+          <a href={downloadUrl} className="text-blue-600 hover:underline">Download instead</a>
+        )}
       </div>
     )
   }
@@ -82,6 +85,23 @@ function DocxViewer({ file }: { file: File }) {
 
 export function FilePreviewModal({ file, onClose }: Props) {
   const kind = previewKind(file.mime_type)
+
+  // Presigned URLs fetched on mount for non-video previews and downloads.
+  const [downloadLink, setDownloadLink] = useState('')
+  const [previewLink, setPreviewLink] = useState('')
+
+  useEffect(() => {
+    let cancelled = false
+    presignFile(file.id).then(({ download_url, preview_url }) => {
+      if (!cancelled) {
+        setDownloadLink(download_url)
+        setPreviewLink(preview_url)
+      }
+    }).catch(() => {
+      // Presign failed — links stay empty; UI shows disabled state gracefully.
+    })
+    return () => { cancelled = true }
+  }, [file.id])
 
   // Auto-select 480p on slow connections when a low-quality variant is ready.
   const [quality, setQuality] = useState<'original' | 'low'>(() => {
@@ -113,7 +133,6 @@ export function FilePreviewModal({ file, onClose }: Props) {
     return () => { document.body.style.overflow = '' }
   }, [])
 
-  const url = previewUrl(file.id)
   const bodyIsScrollable = kind === 'text' || kind === 'docx' || kind === 'pdf'
 
   return (
@@ -139,7 +158,8 @@ export function FilePreviewModal({ file, onClose }: Props) {
               </button>
             )}
             <a
-              href={downloadUrl(file.id)}
+              href={downloadLink || undefined}
+              aria-disabled={!downloadLink}
               className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-900 transition-colors"
             >
               <MdDownload className="text-base" /> Download
@@ -158,17 +178,17 @@ export function FilePreviewModal({ file, onClose }: Props) {
         <div
           className={`flex-1 min-h-0 flex ${bodyIsScrollable ? 'items-stretch' : 'items-center justify-center overflow-auto'}`}
         >
-          {kind === 'image' && (
+          {kind === 'image' && previewLink && (
             <img
-              src={url}
+              src={previewLink}
               alt={file.name}
               className="max-w-full max-h-full object-contain block"
             />
           )}
 
-          {kind === 'pdf' && (
+          {kind === 'pdf' && previewLink && (
             <iframe
-              src={url}
+              src={previewLink}
               title={file.name}
               className="w-full h-full border-0 block"
             />
@@ -185,21 +205,25 @@ export function FilePreviewModal({ file, onClose }: Props) {
             />
           )}
 
-          {kind === 'text' && (
+          {kind === 'text' && previewLink && (
             <iframe
-              src={url}
+              src={previewLink}
               title={file.name}
               sandbox="allow-same-origin"
               className="w-full h-full border-0 block"
             />
           )}
 
-          {kind === 'docx' && <DocxViewer file={file} />}
+          {kind === 'docx' && (
+            <DocxViewer previewUrl={previewLink} downloadUrl={downloadLink} />
+          )}
 
           {kind === 'unsupported' && (
             <div className="p-16 text-center text-gray-500 text-sm">
               <p className="mb-3">Preview not available for this file type.</p>
-              <a href={downloadUrl(file.id)} className="text-blue-600 hover:underline">Download instead</a>
+              {downloadLink && (
+                <a href={downloadLink} className="text-blue-600 hover:underline">Download instead</a>
+              )}
             </div>
           )}
         </div>

@@ -44,6 +44,11 @@ type Config struct {
 	TurnstileSecretKey string
 	TurnstileSiteKey   string
 
+	// PresignSecret is the HMAC key used to sign presigned download/upload tokens.
+	// Falls back to SESSION_KEY when not explicitly set so existing deployments
+	// work without a new env var.
+	PresignSecret string
+
 	// BackendTestURL is the internal URL of the api-tests sidecar container.
 	// e.g. "http://api-tests:9228/run-tests". Preferred over AppDir in Docker.
 	BackendTestURL string
@@ -105,6 +110,8 @@ func loadConfig() Config {
 		TurnstileSecretKey: requireEnv("CLOUDFLARE_TURNSTILE_SECRET_KEY"),
 		TurnstileSiteKey:   requireEnv("CLOUDFLARE_TURNSTILE_SITE_KEY"),
 
+		PresignSecret: getEnvOrKey("PRESIGN_SECRET", "SESSION_KEY"),
+
 		BackendTestURL:  getEnv("BACKEND_TEST_URL", ""),
 		AppDir:          getEnv("APP_DIR", ""),
 		FrontendTestURL: getEnv("FRONTEND_TEST_URL", ""),
@@ -125,4 +132,13 @@ func getEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// getEnvOrKey returns the value of primary, falling back to the value of
+// fallbackKey (not a literal string). Both must be non-empty env var names.
+func getEnvOrKey(primary, fallbackKey string) string {
+	if v := os.Getenv(primary); v != "" {
+		return v
+	}
+	return requireEnv(fallbackKey)
 }

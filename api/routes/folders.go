@@ -82,6 +82,7 @@ func (h *Handler) GetFolder(c *gin.Context) {
 type createFolderRequest struct {
 	Name     string  `json:"name"      binding:"required,max=255"`
 	ParentID *string `json:"parent_id"` // omit or null → root
+	Kind     string  `json:"kind"`      // "regular" (default) or "media"
 }
 
 // CreateFolder handles POST /api/v1/folders.
@@ -112,7 +113,7 @@ func (h *Handler) CreateFolder(c *gin.Context) {
 		parentID = &pid
 	}
 
-	folder, err := h.folders.Create(c.Request.Context(), userID, parentID, req.Name)
+	folder, err := h.folders.Create(c.Request.Context(), userID, parentID, req.Name, req.Kind)
 	if err != nil {
 		switch {
 		case errors.Is(err, services.ErrFolderNotFound):

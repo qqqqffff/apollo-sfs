@@ -26,7 +26,7 @@ func makeInterestRequest() *http.Request {
 
 // buildInterestHandler creates a handler wired with a captcha stub that always passes.
 func buildInterestHandler(q routes.Querier) *routes.Handler {
-	h := routes.NewHandler(q, nil, nil, nil, nil, nil, nil, nil, "secret")
+	h := routes.NewHandler(q, nil, nil, nil, nil, nil, nil, nil, nil, "secret")
 	routes.SetVerifyCaptcha(h, func(_, _, _ string) (bool, error) { return true, nil })
 	return h
 }
@@ -58,7 +58,7 @@ func TestInterestForm_HappyPath(t *testing.T) {
 
 func TestInterestForm_CaptchaFails(t *testing.T) {
 	q := &stubQuerier{}
-	h := routes.NewHandler(q, nil, nil, nil, nil, nil, nil, nil, "secret")
+	h := routes.NewHandler(q, nil, nil, nil, nil, nil, nil, nil, nil, "secret")
 	routes.SetVerifyCaptcha(h, func(_, _, _ string) (bool, error) { return false, nil })
 
 	r := newEngine()

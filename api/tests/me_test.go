@@ -132,7 +132,7 @@ func TestMe_MissingUsernameContext(t *testing.T) {
 }
 
 func TestMe_RegistersRoute(t *testing.T) {
-	h := routes.NewHandler(&stubQuerier{user: sampleUser()}, nil, nil, nil, nil, nil, nil, nil, "")
+	h := routes.NewHandler(&stubQuerier{user: sampleUser()}, nil, nil, nil, nil, nil, nil, nil, nil, "")
 	_ = h // ensure the handler is constructible; handler registration tested in other tests
 }
 

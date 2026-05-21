@@ -30,8 +30,8 @@ const mockFavoriteFolder  = favoriteFolder  as jest.Mock
 const mockUnfavoriteFolder = unfavoriteFolder as jest.Mock
 
 const LIST: FavoriteList = {
-  files:   [{ id: 'f1', user_id: 'u1', name: 'photo.jpg', mime_type: 'image/jpeg', size_bytes: 100, created_at: '', updated_at: '', folder_id: null }],
-  folders: [{ id: 'fold-1', user_id: 'u1', name: 'Docs', created_at: '', updated_at: '', parent_id: null }],
+  files:   [{ id: 'f1', user_id: 'u1', name: 'photo.jpg', mime_type: 'image/jpeg', size_bytes: 100, taken_at: null, hidden: false, created_at: '', updated_at: '', folder_id: null }],
+  folders: [{ id: 'fold-1', user_id: 'u1', name: 'Docs', kind: 'regular', created_at: '', updated_at: '', parent_id: null }],
 }
 
 function makeWrapper(client: QueryClient) {

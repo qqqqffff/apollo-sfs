@@ -80,7 +80,7 @@ describe('createFolder', () => {
     const [url, init] = lastCall()
     expect(url).toBe('/api/v1/folders')
     expect(init.method).toBe('POST')
-    expect(JSON.parse(init.body as string)).toEqual({ name: 'Photos', parent_id: null })
+    expect(JSON.parse(init.body as string)).toEqual({ name: 'Photos', parent_id: null, kind: 'regular' })
   })
 
   it('includes parent_id when provided', async () => {

@@ -84,8 +84,10 @@ func (q *Queries) ListUsers(ctx context.Context, in PageInput) (*PageResult[mode
 	}
 
 	// Include each user's active ban (if any) via a lateral join.
+	// Columns are fully qualified with u. to avoid ambiguity with user_bans.username.
 	rows, err := q.db.QueryContext(ctx, `
-		SELECT`+userColumns+`,
+		SELECT u.username, u.email, u.encrypted_key, u.key_nonce, u.master_key_version,
+		       u.storage_used_bytes, u.storage_quota_bytes, u.last_seen_at, u.created_at, u.is_admin,
 		       b.id, b.ban_type, b.violation_code, b.comments, b.banned_by,
 		       b.banned_at, b.expires_at, b.pardoned_at, b.pardoned_by
 		FROM   users u

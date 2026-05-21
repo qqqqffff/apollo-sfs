@@ -23,6 +23,8 @@ import (
 	"apollo-sfs.com/api/routes/services"
 )
 
+const testPresignSecret = "test-presign-secret"
+
 func init() {
 	gin.SetMode(gin.TestMode)
 }
@@ -89,6 +91,12 @@ func (s *stubQuerier) GetUserByUsername(_ context.Context, _ string) (*models.Us
 }
 func (s *stubQuerier) GetActiveBan(_ context.Context, _ string) (*models.UserBan, error) {
 	return s.activeBan, s.activeBanErr
+}
+func (s *stubQuerier) GetUserPreferences(_ context.Context, userID string) (*models.UserPreferences, error) {
+	return &models.UserPreferences{UserID: userID}, nil
+}
+func (s *stubQuerier) SetMediaAutouploadFolder(_ context.Context, userID string, folderID *uuid.UUID) (*models.UserPreferences, error) {
+	return &models.UserPreferences{UserID: userID, MediaAutouploadFolderID: folderID}, nil
 }
 func (s *stubQuerier) AutoPardonExpiredSuspension(_ context.Context, _ string) error { return nil }
 func (s *stubQuerier) AddBannedIP(_ context.Context, _, _ string) error              { return nil }
@@ -355,6 +363,9 @@ func (s *stubFileService) Move(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ uu
 func (s *stubFileService) Rename(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ string) (*models.File, error) {
 	return s.file, s.fileErr
 }
+func (s *stubFileService) SetHidden(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ bool) (*models.File, error) {
+	return s.file, s.fileErr
+}
 func (s *stubFileService) Delete(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ string) error {
 	s.deleted = true
 	return s.fileErr
@@ -399,7 +410,20 @@ func (s *stubFolderService) GetContents(_ context.Context, _, _ uuid.UUID, _, _ 
 		Files:      &db.PageResult[models.File]{Items: []models.File{}},
 	}, nil
 }
-func (s *stubFolderService) Create(_ context.Context, _ uuid.UUID, _ *uuid.UUID, _ string) (*models.Folder, error) {
+func (s *stubFolderService) GetMediaContents(_ context.Context, _, _ uuid.UUID, _ db.MediaSort, _ db.HiddenFilter, _, _ db.PageInput) (*services.FolderContents, error) {
+	if s.folderErr != nil {
+		return nil, s.folderErr
+	}
+	if s.contents != nil {
+		return s.contents, nil
+	}
+	return &services.FolderContents{
+		Folder:     s.folder,
+		Subfolders: &db.PageResult[models.Folder]{Items: []models.Folder{}},
+		Files:      &db.PageResult[models.File]{Items: []models.File{}},
+	}, nil
+}
+func (s *stubFolderService) Create(_ context.Context, _ uuid.UUID, _ *uuid.UUID, _ string, _ string) (*models.Folder, error) {
 	return s.folder, s.folderErr
 }
 func (s *stubFolderService) Rename(_ context.Context, _, _ uuid.UUID, _ string) (*models.Folder, error) {
@@ -411,13 +435,22 @@ func (s *stubFolderService) Move(_ context.Context, _, _, _ uuid.UUID) (*models.
 func (s *stubFolderService) Delete(_ context.Context, _, _ uuid.UUID) error {
 	return s.folderErr
 }
+func (s *stubFolderService) CopyToSubcollection(_ context.Context, _, _, _ uuid.UUID) error {
+	return s.folderErr
+}
+func (s *stubFolderService) MoveSubcollectionItem(_ context.Context, _, _, _, _ uuid.UUID) error {
+	return s.folderErr
+}
+func (s *stubFolderService) RemoveFromSubcollection(_ context.Context, _, _, _ uuid.UUID) error {
+	return s.folderErr
+}
 
 // ── Builder helpers ───────────────────────────────────────────────────────────
 
 // newRoutesHandler builds a routes.Handler with nil services for the ones not
 // under test. The captcha verifier always passes.
 func newRoutesHandler(q routes.Querier, inv routes.InviteService) *routes.Handler {
-	h := routes.NewHandler(q, nil, nil, nil, nil, nil, nil, nil, "test-secret")
+	h := routes.NewHandler(q, nil, nil, nil, nil, nil, nil, nil, nil, "test-secret")
 	routes.SetInviteService(h, inv)
 	routes.SetVerifyCaptcha(h, func(_, _, _ string) (bool, error) { return true, nil })
 	return h
@@ -425,12 +458,18 @@ func newRoutesHandler(q routes.Querier, inv routes.InviteService) *routes.Handle
 
 // newFileHandler builds a routes.Handler wired with the given file service stub.
 func newFileHandler(fileSvc routes.FileServicer) *routes.Handler {
-	return routes.NewHandler(&stubQuerier{}, fileSvc, nil, nil, nil, nil, nil, nil, "test-secret")
+	return routes.NewHandler(&stubQuerier{}, fileSvc, nil, nil, nil, nil, nil, nil, nil, "test-secret")
+}
+
+// newFileHandlerWithPresign builds a routes.Handler wired with the given file
+// service stub and a real PresignService keyed with testPresignSecret.
+func newFileHandlerWithPresign(fileSvc routes.FileServicer) *routes.Handler {
+	return routes.NewHandler(&stubQuerier{}, fileSvc, nil, nil, nil, nil, nil, nil, services.NewPresignService(testPresignSecret), "test-secret")
 }
 
 // newFolderHandler builds a routes.Handler wired with the given folder service stub.
 func newFolderHandler(folderSvc routes.FolderServicer) *routes.Handler {
-	return routes.NewHandler(&stubQuerier{}, nil, folderSvc, nil, nil, nil, nil, nil, "test-secret")
+	return routes.NewHandler(&stubQuerier{}, nil, folderSvc, nil, nil, nil, nil, nil, nil, "test-secret")
 }
 
 // newAdminHandler builds an admin.Handler with only querier and invite service set.
@@ -508,7 +547,7 @@ func newAdminBrowseHandler(
 	favSvc routes.FavServicer,
 	kcResolver func(ctx context.Context, username string) (uuid.UUID, error),
 ) *routes.Handler {
-	h := routes.NewHandler(q, nil, folderSvc, nil, favSvc, nil, nil, nil, "")
+	h := routes.NewHandler(q, nil, folderSvc, nil, favSvc, nil, nil, nil, nil, "")
 	routes.SetKcIDResolver(h, kcResolver)
 	return h
 }

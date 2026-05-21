@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -703,6 +704,561 @@ func (h *Handler) CompleteUpload(c *gin.Context) {
 			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 		} else {
 			log.Printf("complete upload %s: %v", uploadID, err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "upload failed"})
+		}
+		return
+	}
+
+	go h.uploads.Delete(uploadID)
+
+	h.logAudit(db.AuditInput{
+		TargetUsername: sess.Username,
+		ActorUsername:  sess.Username,
+		Action:         "file_uploaded",
+		ResourceType:   strPtr("file"),
+		ResourceID:     &file.ID,
+		ResourceName:   &file.Name,
+	})
+
+	var folderIDStr *string
+	if file.FolderID != nil {
+		s := file.FolderID.String()
+		folderIDStr = &s
+	}
+	c.JSON(http.StatusCreated, uploadResponse{
+		ID:        file.ID.String(),
+		Name:      file.Name,
+		MimeType:  file.MimeType,
+		SizeBytes: file.SizeBytes,
+		FolderID:  folderIDStr,
+	})
+}
+
+// ── Presigned URLs ────────────────────────────────────────────────────────────
+
+const (
+	presignedDownloadTTL      = time.Hour
+	presignedUploadTTL        = 6 * time.Hour
+	presignedChunkedUploadTTL = 24 * time.Hour
+)
+
+// presignResponse is returned by all presign endpoints.
+type presignResponse struct {
+	DownloadURL string `json:"download_url,omitempty"`
+	PreviewURL  string `json:"preview_url,omitempty"`
+	URL         string `json:"url,omitempty"`
+	UploadID    string `json:"upload_id,omitempty"`
+	SessionToken string `json:"session_token,omitempty"`
+	ExpiresAt   string `json:"expires_at"`
+}
+
+// PresignFile handles POST /api/v1/files/:file_id/presign.
+// Issues time-limited download and preview URLs for a file the caller owns.
+func (h *Handler) PresignFile(c *gin.Context) {
+	fileID, err := uuid.Parse(c.Param("file_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid file id"})
+		return
+	}
+
+	userID, _ := uuid.Parse(c.GetString("userID"))
+	username := c.GetString("username")
+
+	if _, err := h.files.GetMetadata(c.Request.Context(), fileID, userID); err != nil {
+		if errors.Is(err, services.ErrNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "file not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not presign file"})
+		return
+	}
+
+	dlToken, expiresAt, err := h.presign.IssueForFile(fileID.String(), userID.String(), username, services.PresignActionDownload, presignedDownloadTTL)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not generate token"})
+		return
+	}
+	pvToken, _, err := h.presign.IssueForFile(fileID.String(), userID.String(), username, services.PresignActionPreview, presignedDownloadTTL)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not generate token"})
+		return
+	}
+
+	c.JSON(http.StatusOK, presignResponse{
+		DownloadURL: fmt.Sprintf("/api/v1/files/%s/download/p?token=%s", fileID, dlToken),
+		PreviewURL:  fmt.Sprintf("/api/v1/files/%s/preview/p?token=%s", fileID, pvToken),
+		ExpiresAt:   expiresAt.UTC().Format(time.RFC3339),
+	})
+}
+
+// DownloadFilePresigned handles GET /api/v1/files/:file_id/download/p.
+// Validates the presign token and serves the file as an attachment.
+func (h *Handler) DownloadFilePresigned(c *gin.Context) {
+	h.servePresigned(c, false)
+}
+
+// PreviewFilePresigned handles GET /api/v1/files/:file_id/preview/p.
+// Validates the presign token and serves the file inline.
+func (h *Handler) PreviewFilePresigned(c *gin.Context) {
+	h.servePresigned(c, true)
+}
+
+// servePresigned validates a file presign token and streams the decrypted content.
+func (h *Handler) servePresigned(c *gin.Context, inline bool) {
+	fileIDStr := c.Param("file_id")
+	fileID, err := uuid.Parse(fileIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid file id"})
+		return
+	}
+
+	action := services.PresignActionDownload
+	if inline {
+		action = services.PresignActionPreview
+	}
+
+	token := c.Query("token")
+	if token == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "token is required"})
+		return
+	}
+
+	claim, err := h.presign.ValidateForFile(token, action)
+	if err != nil {
+		if errors.Is(err, services.ErrPresignExpired) {
+			c.JSON(http.StatusGone, gin.H{"error": "presigned URL has expired"})
+			return
+		}
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid presigned token"})
+		return
+	}
+
+	if claim.FileID != fileIDStr {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid presigned token"})
+		return
+	}
+
+	userID, err := uuid.Parse(claim.UserID)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid presigned token"})
+		return
+	}
+
+	file, plaintext, err := h.files.Download(c.Request.Context(), fileID, userID, claim.Username)
+	if err != nil {
+		if errors.Is(err, services.ErrNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "file not found"})
+			return
+		}
+		log.Printf("servePresigned: file=%s user=%s err=%v", fileID, claim.Username, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not retrieve file"})
+		return
+	}
+
+	mimeType := file.MimeType
+	if inline {
+		switch {
+		case strings.HasPrefix(mimeType, "image/"),
+			strings.HasPrefix(mimeType, "video/"),
+			strings.HasPrefix(mimeType, "audio/"),
+			mimeType == "application/pdf":
+		case strings.HasPrefix(mimeType, "text/"):
+			mimeType = "text/plain; charset=utf-8"
+		default:
+			inline = false
+		}
+	}
+
+	if inline {
+		c.Header("Content-Disposition", "inline")
+	} else {
+		c.Header("Content-Disposition",
+			fmt.Sprintf(`attachment; filename="%s"`, sanitize.ContentDispositionFilename(file.Name)))
+	}
+
+	c.Data(http.StatusOK, mimeType, plaintext)
+}
+
+// PresignUpload handles POST /api/v1/files/upload/presign.
+// Issues a time-limited presigned URL for a single-file upload.
+// Body: { "name", "size", "folder_id" (optional) }
+func (h *Handler) PresignUpload(c *gin.Context) {
+	var req struct {
+		Name     string  `json:"name"     binding:"required"`
+		Size     int64   `json:"size"     binding:"required,min=1,max=107374182400"`
+		FolderID *string `json:"folder_id"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	name := sanitize.Name(req.Name, 255)
+	if name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid file name"})
+		return
+	}
+
+	username := c.GetString("username")
+	if err := h.files.CheckQuota(c.Request.Context(), username, req.Size); err != nil {
+		if errors.Is(err, services.ErrQuotaExceeded) {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "quota check failed"})
+		return
+	}
+
+	userID := c.GetString("userID")
+
+	var folderIDStr *string
+	if req.FolderID != nil && *req.FolderID != "" {
+		if _, err := uuid.Parse(*req.FolderID); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "folder_id must be a valid UUID"})
+			return
+		}
+		folderIDStr = req.FolderID
+	}
+
+	token, expiresAt, err := h.presign.IssueForUpload(userID, username, folderIDStr, req.Size, presignedUploadTTL)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not generate upload token"})
+		return
+	}
+
+	c.JSON(http.StatusOK, presignResponse{
+		URL:       fmt.Sprintf("/api/v1/files/upload/p?token=%s", token),
+		ExpiresAt: expiresAt.UTC().Format(time.RFC3339),
+	})
+}
+
+// UploadFilePresigned handles POST /api/v1/files/upload/p.
+// Validates the presign token and performs the file upload without cookie auth.
+func (h *Handler) UploadFilePresigned(c *gin.Context) {
+	token := c.Query("token")
+	if token == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "token is required"})
+		return
+	}
+
+	claim, err := h.presign.ValidateForUpload(token)
+	if err != nil {
+		if errors.Is(err, services.ErrPresignExpired) {
+			c.JSON(http.StatusGone, gin.H{"error": "presigned URL has expired"})
+			return
+		}
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid presigned token"})
+		return
+	}
+
+	fileHeader, err := c.FormFile("file")
+	if err != nil {
+		if errors.Is(err, http.ErrMissingFile) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "file field is required"})
+		} else {
+			log.Printf("presigned upload: read multipart body: %v", err)
+			c.JSON(http.StatusBadRequest, gin.H{"error": "upload interrupted — please retry"})
+		}
+		return
+	}
+
+	if fileHeader.Size > claim.MaxBytes {
+		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "file exceeds permitted size"})
+		return
+	}
+
+	name := sanitize.Name(c.PostForm("name"), 255)
+	if name == "" {
+		name = sanitize.Name(fileHeader.Filename, 255)
+	}
+	if name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "could not determine a valid file name"})
+		return
+	}
+
+	var folderID *uuid.UUID
+	if claim.FolderID != nil {
+		parsed, err := uuid.Parse(*claim.FolderID)
+		if err == nil {
+			folderID = &parsed
+		}
+	}
+
+	userID, err := uuid.Parse(claim.UserID)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid presigned token"})
+		return
+	}
+
+	src, err := fileHeader.Open()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not read uploaded file"})
+		return
+	}
+	defer src.Close()
+
+	file, err := h.files.Upload(c.Request.Context(), services.UploadInput{
+		Username: claim.Username,
+		UserID:   userID,
+		FolderID: folderID,
+		Name:     name,
+		MimeType: fileHeader.Header.Get("Content-Type"),
+		Reader:   src,
+	})
+	if err != nil {
+		if errors.Is(err, services.ErrQuotaExceeded) {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, services.ErrDuplicateName) {
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+			return
+		}
+		log.Printf("presigned upload: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "upload failed"})
+		return
+	}
+
+	var folderIDStr *string
+	if file.FolderID != nil {
+		s := file.FolderID.String()
+		folderIDStr = &s
+	}
+
+	h.logAudit(db.AuditInput{
+		TargetUsername: claim.Username,
+		ActorUsername:  claim.Username,
+		Action:         "file_uploaded",
+		ResourceType:   strPtr("file"),
+		ResourceID:     &file.ID,
+		ResourceName:   &file.Name,
+	})
+
+	c.JSON(http.StatusCreated, uploadResponse{
+		ID:        file.ID.String(),
+		Name:      file.Name,
+		MimeType:  file.MimeType,
+		SizeBytes: file.SizeBytes,
+		FolderID:  folderIDStr,
+	})
+}
+
+// PresignChunkedUpload handles POST /api/v1/files/upload/presign/init.
+// Issues a session token for a presigned chunked upload, reusing the existing
+// session infrastructure for chunk tracking.
+// Body: same as InitUpload.
+func (h *Handler) PresignChunkedUpload(c *gin.Context) {
+	var req struct {
+		Name        string  `json:"name"         binding:"required"`
+		TotalChunks int     `json:"total_chunks" binding:"required,min=1"`
+		TotalSize   int64   `json:"total_size"   binding:"required,min=1,max=107374182400"`
+		FolderID    *string `json:"folder_id"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	name := sanitize.Name(req.Name, 255)
+	if name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid file name"})
+		return
+	}
+
+	var folderID *uuid.UUID
+	if req.FolderID != nil && *req.FolderID != "" {
+		parsed, err := uuid.Parse(*req.FolderID)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "folder_id must be a valid UUID"})
+			return
+		}
+		folderID = &parsed
+	}
+
+	username := c.GetString("username")
+	if err := h.files.CheckQuota(c.Request.Context(), username, req.TotalSize); err != nil {
+		if errors.Is(err, services.ErrQuotaExceeded) {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "quota check failed"})
+		return
+	}
+
+	userID, _ := uuid.Parse(c.GetString("userID"))
+	sess, err := h.uploads.Create(userID, username, name, folderID, req.TotalChunks, req.TotalSize)
+	if err != nil {
+		log.Printf("presign chunked upload: create session: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not create upload session"})
+		return
+	}
+
+	if err := h.files.BeginChunkedUpload(c.Request.Context(), sess); err != nil {
+		h.uploads.Delete(sess.ID)
+		log.Printf("presign chunked upload: begin: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not initialise upload"})
+		return
+	}
+
+	sessionToken, expiresAt, err := h.presign.IssueForChunkedUpload(sess.ID.String(), userID.String(), presignedChunkedUploadTTL)
+	if err != nil {
+		h.uploads.Delete(sess.ID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not generate session token"})
+		return
+	}
+
+	h.logAudit(db.AuditInput{
+		TargetUsername: username,
+		ActorUsername:  username,
+		Action:         "file_upload_started",
+		ResourceType:   strPtr("file"),
+		ResourceName:   &name,
+	})
+
+	c.JSON(http.StatusCreated, presignResponse{
+		UploadID:     sess.ID.String(),
+		SessionToken: sessionToken,
+		ExpiresAt:    expiresAt.UTC().Format(time.RFC3339),
+	})
+}
+
+// UploadChunkPresigned handles POST /api/v1/files/upload/:upload_id/chunk/p.
+// Validates the session token and uploads a single chunk without cookie auth.
+func (h *Handler) UploadChunkPresigned(c *gin.Context) {
+	uploadID, err := uuid.Parse(c.Param("upload_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid upload_id"})
+		return
+	}
+
+	token := c.Query("token")
+	if token == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "token is required"})
+		return
+	}
+
+	claim, err := h.presign.ValidateForChunkedUpload(token)
+	if err != nil {
+		if errors.Is(err, services.ErrPresignExpired) {
+			c.JSON(http.StatusGone, gin.H{"error": "presigned URL has expired"})
+			return
+		}
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid presigned token"})
+		return
+	}
+
+	if claim.SessionID != uploadID.String() {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid presigned token"})
+		return
+	}
+
+	sess, ok := h.uploads.Get(uploadID)
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": "upload session not found or expired"})
+		return
+	}
+
+	claimUserID, err := uuid.Parse(claim.UserID)
+	if err != nil || sess.UserID != claimUserID {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid presigned token"})
+		return
+	}
+
+	index, err := strconv.Atoi(c.PostForm("chunk_index"))
+	if err != nil || index < 0 || index >= sess.TotalChunks {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid chunk_index"})
+		return
+	}
+
+	fileHeader, err := c.FormFile("chunk")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "chunk field is required"})
+		return
+	}
+
+	src, err := fileHeader.Open()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not open chunk"})
+		return
+	}
+	defer src.Close()
+
+	data, err := io.ReadAll(src)
+	if err != nil {
+		log.Printf("presigned upload chunk %d for %s: read: %v", index, uploadID, err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "upload interrupted — please retry"})
+		return
+	}
+
+	sess.DispatchChunk(index)
+	go h.files.EncryptAndUploadPart(context.Background(), sess, index, data)
+
+	c.JSON(http.StatusOK, gin.H{
+		"chunk_index": index,
+		"dispatched":  sess.DispatchedCount(),
+		"total":       sess.TotalChunks,
+	})
+}
+
+// CompleteUploadPresigned handles POST /api/v1/files/upload/:upload_id/complete/p.
+// Validates the session token and finalises the chunked upload without cookie auth.
+func (h *Handler) CompleteUploadPresigned(c *gin.Context) {
+	uploadID, err := uuid.Parse(c.Param("upload_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid upload_id"})
+		return
+	}
+
+	token := c.Query("token")
+	if token == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "token is required"})
+		return
+	}
+
+	claim, err := h.presign.ValidateForChunkedUpload(token)
+	if err != nil {
+		if errors.Is(err, services.ErrPresignExpired) {
+			c.JSON(http.StatusGone, gin.H{"error": "presigned URL has expired"})
+			return
+		}
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid presigned token"})
+		return
+	}
+
+	if claim.SessionID != uploadID.String() {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid presigned token"})
+		return
+	}
+
+	sess, ok := h.uploads.Get(uploadID)
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": "upload session not found or expired"})
+		return
+	}
+
+	claimUserID, err := uuid.Parse(claim.UserID)
+	if err != nil || sess.UserID != claimUserID {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid presigned token"})
+		return
+	}
+
+	if !sess.AllDispatched() {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":      "not all chunks dispatched",
+			"dispatched": sess.DispatchedCount(),
+			"total":      sess.TotalChunks,
+		})
+		return
+	}
+
+	file, err := h.files.FinalizeChunkedUpload(c.Request.Context(), sess)
+	if err != nil {
+		if errors.Is(err, services.ErrQuotaExceeded) {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": err.Error()})
+		} else if errors.Is(err, services.ErrDuplicateName) {
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		} else {
+			log.Printf("complete presigned upload %s: %v", uploadID, err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "upload failed"})
 		}
 		return

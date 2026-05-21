@@ -4,19 +4,27 @@ import { useFileUpload } from '../../hooks/useFileUpload'
 // ── Module mocks ──────────────────────────────────────────────────────────────
 
 jest.mock('../../api/files', () => ({
-  CHUNK_SIZE: 5 * 1024 * 1024,
-  uploadFile:            jest.fn(),
-  initChunkedUpload:     jest.fn(),
-  uploadChunk:           jest.fn(),
-  completeChunkedUpload: jest.fn(),
+  CHUNK_SIZE:                     5 * 1024 * 1024,
+  presignUpload:                  jest.fn(),
+  uploadFilePresigned:            jest.fn(),
+  presignChunkedUpload:           jest.fn(),
+  uploadChunkPresigned:           jest.fn(),
+  completeChunkedUploadPresigned: jest.fn(),
 }))
 
-import { uploadFile, initChunkedUpload, uploadChunk, completeChunkedUpload } from '../../api/files'
+import {
+  presignUpload,
+  uploadFilePresigned,
+  presignChunkedUpload,
+  uploadChunkPresigned,
+  completeChunkedUploadPresigned,
+} from '../../api/files'
 
-const mockUploadFile            = uploadFile            as jest.Mock
-const mockInitChunkedUpload     = initChunkedUpload     as jest.Mock
-const mockUploadChunk           = uploadChunk           as jest.Mock
-const mockCompleteChunkedUpload = completeChunkedUpload as jest.Mock
+const mockPresignUpload                 = presignUpload                 as jest.Mock
+const mockUploadFilePresigned           = uploadFilePresigned           as jest.Mock
+const mockPresignChunkedUpload          = presignChunkedUpload          as jest.Mock
+const mockUploadChunkPresigned          = uploadChunkPresigned          as jest.Mock
+const mockCompleteChunkedUploadPresigned = completeChunkedUploadPresigned as jest.Mock
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -30,11 +38,14 @@ const SMALL_FILE = makeFile('small.txt', 100)
 const CHUNK_SIZE = 5 * 1024 * 1024
 const LARGE_FILE = makeFile('large.bin', CHUNK_SIZE + 1)
 
+const PRESIGN_UPLOAD_OK = { url: '/api/v1/files/upload/p?token=tok', expires_at: '2099-01-01T00:00:00Z' }
+
 beforeEach(() => {
-  mockUploadFile.mockReset()
-  mockInitChunkedUpload.mockReset()
-  mockUploadChunk.mockReset()
-  mockCompleteChunkedUpload.mockReset()
+  mockPresignUpload.mockReset()
+  mockUploadFilePresigned.mockReset()
+  mockPresignChunkedUpload.mockReset()
+  mockUploadChunkPresigned.mockReset()
+  mockCompleteChunkedUploadPresigned.mockReset()
 })
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -55,14 +66,14 @@ describe('useFileUpload — startUpload (success path)', () => {
   // the 150 ms flush interval ever fires.
 
   it('transitions to uploading immediately', () => {
-    mockUploadFile.mockImplementation(() => new Promise(() => {})) // never resolves
+    mockPresignUpload.mockImplementation(() => new Promise(() => {})) // never resolves
     const { result } = renderHook(() => useFileUpload())
     act(() => { result.current.startUpload([SMALL_FILE], null, jest.fn()) })
     expect(result.current.progress.status).toBe('uploading')
   })
 
   it('initialises one item per file', () => {
-    mockUploadFile.mockImplementation(() => new Promise(() => {}))
+    mockPresignUpload.mockImplementation(() => new Promise(() => {}))
     const { result } = renderHook(() => useFileUpload())
     act(() => { result.current.startUpload([SMALL_FILE], null, jest.fn()) })
     expect(result.current.progress.items).toHaveLength(1)
@@ -70,7 +81,8 @@ describe('useFileUpload — startUpload (success path)', () => {
   })
 
   it('sets status=complete after all files succeed', async () => {
-    mockUploadFile.mockResolvedValue({ file: { id: 'f1' } })
+    mockPresignUpload.mockResolvedValue(PRESIGN_UPLOAD_OK)
+    mockUploadFilePresigned.mockResolvedValue({ file: { id: 'f1' } })
     const { result } = renderHook(() => useFileUpload())
     await act(async () => {
       await result.current.startUpload([SMALL_FILE], null, jest.fn())
@@ -81,7 +93,8 @@ describe('useFileUpload — startUpload (success path)', () => {
   })
 
   it('calls onAnySuccess when at least one file succeeds', async () => {
-    mockUploadFile.mockResolvedValue({ file: { id: 'f1' } })
+    mockPresignUpload.mockResolvedValue(PRESIGN_UPLOAD_OK)
+    mockUploadFilePresigned.mockResolvedValue({ file: { id: 'f1' } })
     const onAnySuccess = jest.fn()
     const { result } = renderHook(() => useFileUpload())
     await act(async () => {
@@ -91,7 +104,7 @@ describe('useFileUpload — startUpload (success path)', () => {
   })
 
   it('sets totalBytes to the sum of all file sizes', () => {
-    mockUploadFile.mockImplementation(() => new Promise(() => {}))
+    mockPresignUpload.mockImplementation(() => new Promise(() => {}))
     const a = makeFile('a.txt', 200)
     const b = makeFile('b.txt', 300)
     const { result } = renderHook(() => useFileUpload())
@@ -99,13 +112,14 @@ describe('useFileUpload — startUpload (success path)', () => {
     expect(result.current.progress.totalBytes).toBe(500)
   })
 
-  it('passes folderId to uploadFile', async () => {
-    mockUploadFile.mockResolvedValue({ file: { id: 'f1' } })
+  it('passes folderId to presignUpload', async () => {
+    mockPresignUpload.mockResolvedValue(PRESIGN_UPLOAD_OK)
+    mockUploadFilePresigned.mockResolvedValue({ file: { id: 'f1' } })
     const { result } = renderHook(() => useFileUpload())
     await act(async () => {
       await result.current.startUpload([SMALL_FILE], 'folder-xyz', jest.fn())
     })
-    expect(mockUploadFile).toHaveBeenCalledWith('folder-xyz', SMALL_FILE, expect.any(Function))
+    expect(mockPresignUpload).toHaveBeenCalledWith(SMALL_FILE.name, SMALL_FILE.size, 'folder-xyz')
   })
 })
 
@@ -120,7 +134,7 @@ describe('useFileUpload — startUpload (retry / failure path)', () => {
   afterEach(() => jest.useRealTimers())
 
   it('sets status=allFailed when all files fail (after retries)', async () => {
-    mockUploadFile.mockRejectedValue(new Error('network error'))
+    mockPresignUpload.mockRejectedValue(new Error('network error'))
     const { result } = renderHook(() => useFileUpload())
     await act(async () => {
       const p = result.current.startUpload([SMALL_FILE], null, jest.fn())
@@ -136,9 +150,10 @@ describe('useFileUpload — startUpload (retry / failure path)', () => {
   it('sets status=partial when some files succeed and some fail', async () => {
     const goodFile = makeFile('good.txt', 100)
     const badFile  = makeFile('bad.txt',  100)
-    mockUploadFile
-      .mockResolvedValueOnce({ file: { id: 'f1' } }) // good — resolves immediately
-      .mockRejectedValue(new Error('fail'))            // bad — all retries fail
+    mockPresignUpload
+      .mockResolvedValueOnce(PRESIGN_UPLOAD_OK) // good — presign resolves
+      .mockRejectedValue(new Error('fail'))      // bad — all retries fail
+    mockUploadFilePresigned.mockResolvedValue({ file: { id: 'f1' } })
     const { result } = renderHook(() => useFileUpload())
     await act(async () => {
       const p = result.current.startUpload([goodFile, badFile], null, jest.fn())
@@ -151,7 +166,7 @@ describe('useFileUpload — startUpload (retry / failure path)', () => {
   })
 
   it('does not call onAnySuccess when all files fail', async () => {
-    mockUploadFile.mockRejectedValue(new Error('fail'))
+    mockPresignUpload.mockRejectedValue(new Error('fail'))
     const onAnySuccess = jest.fn()
     const { result } = renderHook(() => useFileUpload())
     await act(async () => {
@@ -164,28 +179,33 @@ describe('useFileUpload — startUpload (retry / failure path)', () => {
 })
 
 describe('useFileUpload — chunked upload', () => {
-  it('uses initChunkedUpload for files larger than CHUNK_SIZE', async () => {
-    mockInitChunkedUpload.mockResolvedValue({ upload_id: 'up-1' })
-    mockUploadChunk.mockResolvedValue({ chunk_index: 0, dispatched: 1, total: 1 })
-    mockCompleteChunkedUpload.mockResolvedValue({ file: { id: 'f1' } })
+  it('uses presignChunkedUpload for files larger than CHUNK_SIZE', async () => {
+    mockPresignChunkedUpload.mockResolvedValue({
+      upload_id: 'up-1',
+      session_token: 'sess.tok',
+      expires_at: '2099-01-01T00:00:00Z',
+    })
+    mockUploadChunkPresigned.mockResolvedValue({ chunk_index: 0, dispatched: 1, total: 2 })
+    mockCompleteChunkedUploadPresigned.mockResolvedValue({ file: { id: 'f1' } })
     const { result } = renderHook(() => useFileUpload())
     await act(async () => {
       await result.current.startUpload([LARGE_FILE], null, jest.fn())
     })
-    expect(mockInitChunkedUpload).toHaveBeenCalledWith(
+    expect(mockPresignChunkedUpload).toHaveBeenCalledWith(
       LARGE_FILE.name,
       2, // ceil((CHUNK_SIZE+1) / CHUNK_SIZE) = 2
       LARGE_FILE.size,
       null,
     )
-    expect(mockUploadChunk).toHaveBeenCalled()
-    expect(mockCompleteChunkedUpload).toHaveBeenCalledWith('up-1')
+    expect(mockUploadChunkPresigned).toHaveBeenCalled()
+    expect(mockCompleteChunkedUploadPresigned).toHaveBeenCalledWith('up-1', 'sess.tok')
   })
 })
 
 describe('useFileUpload — dismiss', () => {
   it('resets progress back to idle', async () => {
-    mockUploadFile.mockResolvedValue({ file: { id: 'f1' } })
+    mockPresignUpload.mockResolvedValue(PRESIGN_UPLOAD_OK)
+    mockUploadFilePresigned.mockResolvedValue({ file: { id: 'f1' } })
     const { result } = renderHook(() => useFileUpload())
     await act(async () => {
       await result.current.startUpload([SMALL_FILE], null, jest.fn())

@@ -41,11 +41,11 @@ function page(
   return {
     folder: null,
     subfolders: {
-      items: folders.map(f => ({ ...f, user_id: 'u1', created_at: '', updated_at: '', parent_id: null })),
+      items: folders.map(f => ({ ...f, user_id: 'u1', kind: 'regular' as const, created_at: '', updated_at: '', parent_id: null })),
       next_token: nextFolderToken,
     },
     files: {
-      items: files.map(f => ({ ...f, user_id: 'u1', mime_type: 'text/plain', size_bytes: 100, created_at: '', updated_at: '', folder_id: null })),
+      items: files.map(f => ({ ...f, user_id: 'u1', mime_type: 'text/plain', size_bytes: 100, taken_at: null, hidden: false, created_at: '', updated_at: '', folder_id: null })),
       next_token: nextFileToken,
     },
   }

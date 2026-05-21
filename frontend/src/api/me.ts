@@ -1,5 +1,5 @@
-import { get, post } from './client'
-import type { User } from '../types/api'
+import { get, post, put } from './client'
+import type { User, UserPreferences } from '../types/api'
 
 export function getMe() {
   return get<User>('/me')
@@ -10,6 +10,22 @@ export function changePassword(currentPassword: string, newPassword: string) {
     current_password: currentPassword,
     new_password: newPassword,
   })
+}
+
+export function getPreferences() {
+  return get<UserPreferences>('/me/preferences')
+}
+
+// updatePreferences sets the media auto-upload target folder. Pass null to disable.
+export function updatePreferences(mediaAutouploadFolderId: string | null) {
+  return put<UserPreferences>('/me/preferences', {
+    media_autoupload_folder_id: mediaAutouploadFolderId,
+  })
+}
+
+export const preferencesQueryOptions = {
+  queryKey: ['preferences'] as const,
+  queryFn: getPreferences,
 }
 
 export const meQueryOptions = {

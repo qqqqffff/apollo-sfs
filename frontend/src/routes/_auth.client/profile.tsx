@@ -1,8 +1,9 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useState } from 'react'
-import { useQuery, useMutation } from '@tanstack/react-query'
-import { MdCheck, MdClose } from 'react-icons/md'
-import { meQueryOptions, changePassword } from '../../api/me'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { MdCheck, MdClose, MdPhotoLibrary } from 'react-icons/md'
+import { meQueryOptions, changePassword, preferencesQueryOptions, updatePreferences } from '../../api/me'
+import { listRoot } from '../../api/folders'
 import { ApiError } from '../../api/client'
 
 export const Route = createFileRoute('/_auth/client/profile')({
@@ -120,6 +121,8 @@ function RouteComponent() {
         </div>
       </div>
 
+      <MediaAutoUpload />
+
       <div className="bg-white border border-gray-200 rounded-xl px-5 py-4">
         <h3 className="text-sm font-semibold text-gray-800 mb-4">Change password</h3>
         <form
@@ -188,6 +191,75 @@ function RouteComponent() {
           </button>
         </form>
       </div>
+    </div>
+  )
+}
+
+function MediaAutoUpload() {
+  const queryClient = useQueryClient()
+  const { data: prefs } = useQuery(preferencesQueryOptions)
+  const { data: root } = useQuery({ queryKey: ['folders', 'root'], queryFn: () => listRoot() })
+  const [error, setError] = useState<string | null>(null)
+  const [saved, setSaved] = useState(false)
+
+  const mediaFolders = (root?.subfolders?.items ?? []).filter((f) => f.kind === 'media')
+  const enabled = !!prefs?.media_autoupload_folder_id
+
+  const mutation = useMutation({
+    mutationFn: (folderId: string | null) => updatePreferences(folderId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['preferences'] })
+      setError(null)
+      setSaved(true)
+      setTimeout(() => setSaved(false), 3000)
+    },
+    onError: (err) => setError(err instanceof ApiError ? err.message : 'Failed to save preference'),
+  })
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-xl px-5 py-4">
+      <h3 className="text-sm font-semibold text-gray-800 mb-1 flex items-center gap-1.5">
+        <MdPhotoLibrary className="text-gray-500" /> Media auto-upload
+      </h3>
+      <p className="text-xs text-gray-400 mb-4">
+        Automatically send every photo and video you upload to a chosen media collection.
+      </p>
+
+      {mediaFolders.length === 0 ? (
+        <p className="text-xs text-gray-500">
+          Create a media collection first to enable auto-upload.
+        </p>
+      ) : (
+        <div className="flex flex-col gap-3">
+          <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={enabled}
+              onChange={(e) => mutation.mutate(e.target.checked ? mediaFolders[0].id : null)}
+              className="cursor-pointer"
+            />
+            Auto-upload photos &amp; videos to a collection
+          </label>
+
+          {enabled && (
+            <div className="flex flex-col gap-1">
+              <label className="text-xs text-gray-500">Destination collection</label>
+              <select
+                value={prefs?.media_autoupload_folder_id ?? ''}
+                onChange={(e) => mutation.mutate(e.target.value || null)}
+                className="border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent cursor-pointer"
+              >
+                {mediaFolders.map((f) => (
+                  <option key={f.id} value={f.id}>{f.name}</option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {error && <p className="text-xs text-red-500">{error}</p>}
+          {saved && <p className="text-xs text-green-600">Preference saved.</p>}
+        </div>
+      )}
     </div>
   )
 }

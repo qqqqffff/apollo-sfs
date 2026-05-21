@@ -9,6 +9,7 @@ import {
   MdFolder,
   MdFolderOpen,
   MdInsertDriveFile,
+  MdPhotoLibrary,
   MdStar,
   MdStarOutline,
   MdUploadFile,
@@ -18,6 +19,8 @@ import { deleteFile, downloadUrl, fileQueryOptions, moveFile } from '../../api/f
 import { meQueryOptions } from '../../api/me'
 import { useNotification } from '../../context/NotificationContext'
 import { FilePreviewModal, canPreview } from '../../components/FilePreviewModal'
+import { MediaCollectionView } from '../../components/MediaCollectionView'
+import type { FolderKind } from '../../types/api'
 import { UploadModal } from '../../components/UploadModal'
 import { DeleteConfirmModal, readSkipDeleteCookie } from '../../components/DeleteConfirmModal'
 import { UploadToast } from '../../components/UploadToast'
@@ -107,6 +110,7 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
   const [search, setSearch] = useState('')
   const [creatingFolder, setCreatingFolder] = useState(false)
   const [newFolderName, setNewFolderName] = useState('')
+  const [newFolderKind, setNewFolderKind] = useState<FolderKind>('regular')
   const { progress, startUpload, dismiss } = useFileUpload()
   const { isDragging } = useDragDrop((dropped) => { if (!readOnly) setPendingFiles(dropped) })
   const { sort, onSort } = useSort()
@@ -148,23 +152,32 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
     )
 
   const createFolderMutation = useMutation({
-    mutationFn: (name: string) => createFolder(name, folderId === 'root' ? undefined : folderId),
+    mutationFn: ({ name, kind }: { name: string; kind: FolderKind }) =>
+      createFolder(name, folderId === 'root' ? undefined : folderId, kind),
     onSuccess: () => {
       setCreatingFolder(false)
       setNewFolderName('')
+      setNewFolderKind('regular')
       queryClient.invalidateQueries({ queryKey: ['folders', folderId] })
     },
     onError: () => notify('error', 'Failed to create folder'),
   })
 
+  function startCreate(kind: FolderKind) {
+    setNewFolderKind(kind)
+    setNewFolderName('')
+    setCreatingFolder(true)
+  }
+
   function confirmNewFolder() {
     const name = newFolderName.trim()
-    if (name) createFolderMutation.mutate(name)
+    if (name) createFolderMutation.mutate({ name, kind: newFolderKind })
   }
 
   function cancelNewFolder() {
     setCreatingFolder(false)
     setNewFolderName('')
+    setNewFolderKind('regular')
   }
 
   const deleteFolderMutation = useMutation({
@@ -210,6 +223,21 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
   if (isLoading) return <p className="text-sm text-gray-500">Loading…</p>
   if (error) return <p className="text-sm text-red-500">Failed to load files.</p>
 
+  // Media collections render as a date-sorted gallery with hidden/subcollection
+  // controls instead of the standard file/folder listing.
+  if (folder && folder.kind === 'media') {
+    return (
+      <MediaCollectionView
+        folderId={folder.id}
+        folder={folder}
+        readOnly={readOnly}
+        onBack={goBack}
+        onOpenFolder={openFolder}
+        onOpenFile={openFile}
+      />
+    )
+  }
+
   const subfolders = sortedFolders(rawSubfolders, sort)
   const files = sortedFiles(rawFiles, sort)
   // null = root upload (no folder); backend accepts absent folder_id for root.
@@ -234,11 +262,18 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
       {!readOnly && (
         <div className="flex gap-2 mb-4">
           <button
-            onClick={() => { setCreatingFolder(true); setNewFolderName('') }}
+            onClick={() => startCreate('regular')}
             disabled={creatingFolder}
             className="inline-flex items-center gap-1.5 px-3 py-2 text-sm border border-gray-200 rounded-lg text-gray-700 hover:bg-gray-50 cursor-pointer transition-colors disabled:opacity-40"
           >
             <MdCreateNewFolder className="text-base text-gray-500" /> New folder
+          </button>
+          <button
+            onClick={() => startCreate('media')}
+            disabled={creatingFolder}
+            className="inline-flex items-center gap-1.5 px-3 py-2 text-sm border border-gray-200 rounded-lg text-gray-700 hover:bg-gray-50 cursor-pointer transition-colors disabled:opacity-40"
+          >
+            <MdPhotoLibrary className="text-base text-purple-400" /> New collection
           </button>
           <input
             ref={fileRef}
@@ -281,7 +316,9 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
           <ul className="list-none m-0 p-0">
             {creatingFolder && (
               <li className="flex items-center gap-2 px-2 py-1.5 rounded-lg bg-blue-50 ring-1 ring-blue-200 ring-inset mb-1">
-                <MdFolder className="text-blue-400 text-lg shrink-0" />
+                {newFolderKind === 'media'
+                  ? <MdPhotoLibrary className="text-purple-400 text-lg shrink-0" />
+                  : <MdFolder className="text-blue-400 text-lg shrink-0" />}
                 <input
                   autoFocus
                   type="text"
@@ -291,7 +328,7 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
                     if (e.key === 'Enter') confirmNewFolder()
                     if (e.key === 'Escape') cancelNewFolder()
                   }}
-                  placeholder="Folder name"
+                  placeholder={newFolderKind === 'media' ? 'Collection name' : 'Folder name'}
                   className="flex-1 bg-transparent border-0 outline-none text-sm text-gray-800 placeholder-gray-400"
                 />
                 <button
@@ -328,7 +365,9 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
                   onClick={() => openFolder(f.id)}
                   className="flex-1 flex items-center gap-2 bg-transparent border-0 cursor-pointer text-left text-sm text-gray-800 hover:text-gray-900 p-0"
                 >
-                  <MdFolder className="text-blue-400 text-lg shrink-0" />
+                  {f.kind === 'media'
+                    ? <MdPhotoLibrary className="text-purple-400 text-lg shrink-0" />
+                    : <MdFolder className="text-blue-400 text-lg shrink-0" />}
                   {f.name}
                 </button>
                 {!readOnly && (

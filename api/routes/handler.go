@@ -38,6 +38,7 @@ type FileServicer interface {
 	DownloadChunked(ctx context.Context, file *models.File, username string) ([]byte, error)
 	Move(ctx context.Context, fileID, userID, newFolderID uuid.UUID) (*models.File, error)
 	Rename(ctx context.Context, fileID, userID uuid.UUID, name string) (*models.File, error)
+	SetHidden(ctx context.Context, fileID, userID uuid.UUID, hidden bool) (*models.File, error)
 	Delete(ctx context.Context, fileID, userID uuid.UUID, username string) error
 	AdminDeleteAllFiles(ctx context.Context, username string) error
 	BeginChunkedUpload(ctx context.Context, sess *services.UploadSession) error
@@ -49,10 +50,14 @@ type FileServicer interface {
 type FolderServicer interface {
 	ListRoot(ctx context.Context, userID uuid.UUID, folderPage, filePage db.PageInput) (*services.FolderContents, error)
 	GetContents(ctx context.Context, folderID, userID uuid.UUID, folderPage, filePage db.PageInput) (*services.FolderContents, error)
-	Create(ctx context.Context, userID uuid.UUID, parentID *uuid.UUID, name string) (*models.Folder, error)
+	GetMediaContents(ctx context.Context, folderID, userID uuid.UUID, sort db.MediaSort, hidden db.HiddenFilter, folderPage, filePage db.PageInput) (*services.FolderContents, error)
+	Create(ctx context.Context, userID uuid.UUID, parentID *uuid.UUID, name string, kind string) (*models.Folder, error)
 	Rename(ctx context.Context, folderID, userID uuid.UUID, name string) (*models.Folder, error)
 	Move(ctx context.Context, folderID, targetID, userID uuid.UUID) (*models.Folder, error)
 	Delete(ctx context.Context, folderID, userID uuid.UUID) error
+	CopyToSubcollection(ctx context.Context, userID, collectionID, fileID uuid.UUID) error
+	MoveSubcollectionItem(ctx context.Context, userID, fileID, fromCollectionID, toCollectionID uuid.UUID) error
+	RemoveFromSubcollection(ctx context.Context, userID, collectionID, fileID uuid.UUID) error
 }
 
 // Compile-time checks that the concrete service types satisfy these interfaces.
@@ -71,6 +76,7 @@ type Handler struct {
 	auth            *services.AuthService
 	uploads         *services.UploadSessionStore
 	email           *services.EmailService
+	presign         *services.PresignService
 	turnstileSecret string
 	// verifyCaptcha overrides the real Turnstile HTTP call. When nil the
 	// production verifyTurnstile function is used.
@@ -80,7 +86,7 @@ type Handler struct {
 }
 
 // NewHandler constructs a Handler with the given dependencies.
-func NewHandler(q Querier, fileSvc FileServicer, folderSvc FolderServicer, inviteSvc InviteService, favSvc FavServicer, authSvc *services.AuthService, uploadStore *services.UploadSessionStore, emailSvc *services.EmailService, turnstileSecret string) *Handler {
+func NewHandler(q Querier, fileSvc FileServicer, folderSvc FolderServicer, inviteSvc InviteService, favSvc FavServicer, authSvc *services.AuthService, uploadStore *services.UploadSessionStore, emailSvc *services.EmailService, presignSvc *services.PresignService, turnstileSecret string) *Handler {
 	return &Handler{
 		queries:         q,
 		files:           fileSvc,
@@ -90,6 +96,7 @@ func NewHandler(q Querier, fileSvc FileServicer, folderSvc FolderServicer, invit
 		auth:            authSvc,
 		uploads:         uploadStore,
 		email:           emailSvc,
+		presign:         presignSvc,
 		turnstileSecret: turnstileSecret,
 	}
 }

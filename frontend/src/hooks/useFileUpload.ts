@@ -1,5 +1,12 @@
 import { useState, useCallback, useRef } from 'react'
-import { uploadFile, initChunkedUpload, uploadChunk, completeChunkedUpload, CHUNK_SIZE } from '../api/files'
+import {
+  uploadFilePresigned,
+  presignUpload,
+  presignChunkedUpload,
+  uploadChunkPresigned,
+  completeChunkedUploadPresigned,
+  CHUNK_SIZE,
+} from '../api/files'
 
 export type UploadStatus = 'idle' | 'uploading' | 'complete' | 'partial' | 'allFailed'
 export type FileItemStatus = 'queued' | 'uploading' | 'done' | 'failed'
@@ -86,17 +93,16 @@ export function useFileUpload() {
     liveRef.current = { ...liveRef.current, items, loadedBytes }
   }
 
-  // Upload a single file using the appropriate path (chunked vs single).
-  // bytesOffset is the number of already-loaded bytes for this file item
-  // before this call (used to compute absolute loaded position).
+  // Upload a single file using the presigned URL flow.
   async function uploadSingleFile(
     file: globalThis.File,
     folderId: string | null,
     itemIndex: number,
   ): Promise<void> {
     if (file.size <= CHUNK_SIZE) {
-      // ── Single-request upload ──────────────────────────────────────────────
-      await uploadFile(folderId, file, (xhrLoaded, xhrTotal) => {
+      // ── Presigned single-file upload ───────────────────────────────────────
+      const { url } = await presignUpload(file.name, file.size, folderId)
+      await uploadFilePresigned(url, file, (xhrLoaded, xhrTotal) => {
         const scaled = xhrTotal > 0
           ? Math.min(Math.round((xhrLoaded / xhrTotal) * file.size), file.size)
           : xhrLoaded
@@ -105,18 +111,22 @@ export function useFileUpload() {
       return
     }
 
-    // ── Chunked upload ─────────────────────────────────────────────────────
+    // ── Presigned chunked upload ───────────────────────────────────────────
     const totalChunks = Math.ceil(file.size / CHUNK_SIZE)
-    const { upload_id } = await initChunkedUpload(file.name, totalChunks, file.size, folderId)
+    const { upload_id, session_token } = await presignChunkedUpload(
+      file.name,
+      totalChunks,
+      file.size,
+      folderId,
+    )
 
     for (let ci = 0; ci < totalChunks; ci++) {
       const start = ci * CHUNK_SIZE
       const chunk = file.slice(start, start + CHUNK_SIZE)
       const chunkSize = chunk.size
-      // Bytes from completed chunks so far
       const completedBytes = ci * CHUNK_SIZE
 
-      await uploadChunk(upload_id, ci, chunk, (xhrLoaded, xhrTotal) => {
+      await uploadChunkPresigned(upload_id, session_token, ci, chunk, (xhrLoaded, xhrTotal) => {
         const chunkLoaded = xhrTotal > 0
           ? Math.min(Math.round((xhrLoaded / xhrTotal) * chunkSize), chunkSize)
           : xhrLoaded
@@ -124,7 +134,7 @@ export function useFileUpload() {
       })
     }
 
-    await completeChunkedUpload(upload_id)
+    await completeChunkedUploadPresigned(upload_id, session_token)
   }
 
   const startUpload = useCallback(async (

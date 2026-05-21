@@ -1,7 +1,7 @@
 import { createFileRoute, Link, Outlet, redirect, useNavigate } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState, useEffect, useRef } from 'react'
-import { MdMenu, MdClose, MdBlock, MdLockClock, MdLockOpen } from 'react-icons/md'
+import { MdMenu, MdClose, MdBlock, MdLockClock, MdLockOpen, MdPerson } from 'react-icons/md'
 import { AppIcon } from '../components/AppIcon'
 import { meQueryOptions } from '../api/me'
 import { logout } from '../api/auth'
@@ -192,9 +192,10 @@ function RouteComponent() {
           )}
           <Link
             to="/client/profile"
-            className="text-sm text-gray-500 hover:text-gray-900 transition-colors truncate max-w-24 xl:max-w-36 2xl:max-w-56"
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-700 hover:bg-gray-200 transition-colors truncate max-w-28 xl:max-w-40 2xl:max-w-56"
           >
-            {user?.username}
+            <MdPerson className="text-sm shrink-0" />
+            <span className="truncate">{user?.username}</span>
           </Link>
           <button
             onClick={() => logoutMutation.mutate()}

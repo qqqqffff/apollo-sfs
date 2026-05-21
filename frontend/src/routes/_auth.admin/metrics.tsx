@@ -30,7 +30,7 @@ const GB = 1024 ** 3
 type HourWindow = 1 | 12 | 24 | 48 | 72
 const HOUR_OPTIONS: HourWindow[] = [1, 12, 24, 48, 72]
 
-type MetricKey = 'total_users' | 'active_users' | 'disk' | 'memory' | 'traffic' | 'ping' | 'loss' | 'cpu_temp' | 'drive_temp'
+type MetricKey = 'total_users' | 'active_users' | 'disk' | 'memory' | 'traffic' | 'speed' | 'ping' | 'loss' | 'cpu_temp' | 'drive_temp'
 
 const METRIC_LABELS: Record<MetricKey, string> = {
   total_users:  'Total users',
@@ -38,6 +38,7 @@ const METRIC_LABELS: Record<MetricKey, string> = {
   disk:         'Disk committed',
   memory:       'Memory',
   traffic:      'Network traffic',
+  speed:        'Network speed',
   ping:         'Ping',
   loss:         'Packet loss',
   cpu_temp:     'CPU temperature',
@@ -211,9 +212,31 @@ function RouteComponent() {
   const netUploadPoints = hours === 1 ? wsNetUploadPoints : histNetUploadPoints
   const netDownloadPoints = hours === 1 ? wsNetDownloadPoints : histNetDownloadPoints
   const serverPingPoints = hours === 1 ? wsPingPoints : histPingPoints
-  // Fall back to client HTTP ping history when server ICMP data is unavailable
-  const netPingPoints = serverPingPoints.length >= 2 ? serverPingPoints : clientPingHistory
+  // For 1hr live view, fall back to HTTP pings if server ICMP unavailable.
+  // For historical views, HTTP pings only cover the last hour so don't substitute.
+  const netPingPoints = hours === 1
+    ? (serverPingPoints.length >= 2 ? serverPingPoints : clientPingHistory)
+    : serverPingPoints
   const netLossPoints = hours === 1 ? wsLossPoints : histLossPoints
+
+  // Speed test line points (live — only snapshots with a speed test result)
+  const wsSpeedUploadPoints: LinePoint[] = recentSnapsForNet
+    .filter(s => s.speed_test_upload_mbps != null)
+    .map(s => ({ x: new Date(s.sampled_at).getTime(), y: s.speed_test_upload_mbps! }))
+  const wsSpeedDownloadPoints: LinePoint[] = recentSnapsForNet
+    .filter(s => s.speed_test_download_mbps != null)
+    .map(s => ({ x: new Date(s.sampled_at).getTime(), y: s.speed_test_download_mbps! }))
+
+  // Speed test line points (history)
+  const histSpeedUploadPoints: LinePoint[] = histSnaps
+    .filter(s => s.speed_test_upload_mbps != null)
+    .map(s => ({ x: new Date(s.sampled_at).getTime(), y: s.speed_test_upload_mbps! }))
+  const histSpeedDownloadPoints: LinePoint[] = histSnaps
+    .filter(s => s.speed_test_download_mbps != null)
+    .map(s => ({ x: new Date(s.sampled_at).getTime(), y: s.speed_test_download_mbps! }))
+
+  const speedUploadPoints = hours === 1 ? wsSpeedUploadPoints : histSpeedUploadPoints
+  const speedDownloadPoints = hours === 1 ? wsSpeedDownloadPoints : histSpeedDownloadPoints
 
   // Additional metric line points (live)
   const wsUsersPoints: LinePoint[] = recentSnapsForNet.map(s => ({ x: new Date(s.sampled_at).getTime(), y: s.total_user_count }))
@@ -306,7 +329,6 @@ function RouteComponent() {
   }
 
   const graphW = Math.min(820, window.innerWidth - 80)
-  const halfGraphW = Math.floor((graphW - 16) / 2)
 
   return (
     <div className="max-w-4xl">
@@ -384,7 +406,7 @@ function RouteComponent() {
               onClick={() => setSelectedMetric('traffic')}
             />
           )}
-          <SpeedTestCard result={liveSpeedTest} onRun={() => speedTestMutation.mutate()} pending={speedTestMutation.isPending} />
+          <SpeedTestCard result={liveSpeedTest} onRun={() => speedTestMutation.mutate()} pending={speedTestMutation.isPending} selected={selectedMetric === 'speed'} onClick={() => setSelectedMetric('speed')} />
           {hasCpuTemp && (
             <StatCard
               label="CPU temp"
@@ -440,14 +462,26 @@ function RouteComponent() {
         </div>
         <div className="bg-white border border-gray-200 rounded-xl px-6 py-4">
           {selectedMetric === 'traffic' && (
-            <div className="grid grid-cols-2 gap-4">
+            <div className="flex flex-col gap-4">
               <div>
                 <div className="text-xs text-gray-400 mb-2">↑ Upload</div>
-                <LineGraph points={netUploadPoints} width={halfGraphW} height={180} color="#3b82f6" formatY={formatBytesPerSec} />
+                <LineGraph points={netUploadPoints} width={graphW} height={160} color="#3b82f6" formatY={formatBytesPerSec} />
               </div>
               <div>
                 <div className="text-xs text-gray-400 mb-2">↓ Download</div>
-                <LineGraph points={netDownloadPoints} width={halfGraphW} height={180} color="#10b981" formatY={formatBytesPerSec} />
+                <LineGraph points={netDownloadPoints} width={graphW} height={160} color="#10b981" formatY={formatBytesPerSec} />
+              </div>
+            </div>
+          )}
+          {selectedMetric === 'speed' && (
+            <div className="flex flex-col gap-4">
+              <div>
+                <div className="text-xs text-gray-400 mb-2">↑ Upload (Mbps)</div>
+                <LineGraph points={speedUploadPoints} width={graphW} height={160} color="#3b82f6" formatY={(v) => `${v.toFixed(1)} Mb/s`} />
+              </div>
+              <div>
+                <div className="text-xs text-gray-400 mb-2">↓ Download (Mbps)</div>
+                <LineGraph points={speedDownloadPoints} width={graphW} height={160} color="#10b981" formatY={(v) => `${v.toFixed(1)} Mb/s`} />
               </div>
             </div>
           )}
@@ -592,13 +626,18 @@ function StatCard({ label, value, sub, selected, onClick }: { label: string; val
 
 import type { SpeedTestResult, TestSuiteEntry } from '../../api/admin'
 
-function SpeedTestCard({ result, onRun, pending }: {
+function SpeedTestCard({ result, onRun, pending, selected, onClick }: {
   result: SpeedTestResult | undefined
   onRun: () => void
   pending: boolean
+  selected?: boolean
+  onClick?: () => void
 }) {
   return (
-    <div className="bg-white border border-gray-200 rounded-xl px-4 py-3">
+    <div
+      className={`bg-white border rounded-xl px-4 py-3 transition-colors ${onClick ? 'cursor-pointer' : ''} ${selected ? 'border-blue-500 ring-1 ring-blue-500' : 'border-gray-200 hover:border-gray-300'}`}
+      onClick={onClick}
+    >
       <div className="flex items-center justify-between mb-2">
         <div className="text-xs text-gray-400">Network speed</div>
         <button

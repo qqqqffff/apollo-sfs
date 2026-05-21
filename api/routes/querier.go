@@ -16,6 +16,10 @@ type Querier interface {
 	// Me
 	GetUserByUsername(ctx context.Context, username string) (*models.User, error)
 
+	// User preferences
+	GetUserPreferences(ctx context.Context, userID string) (*models.UserPreferences, error)
+	SetMediaAutouploadFolder(ctx context.Context, userID string, folderID *uuid.UUID) (*models.UserPreferences, error)
+
 	// Ban / suspension enforcement (checked on every /me call)
 	GetActiveBan(ctx context.Context, username string) (*models.UserBan, error)
 	AutoPardonExpiredSuspension(ctx context.Context, username string) error

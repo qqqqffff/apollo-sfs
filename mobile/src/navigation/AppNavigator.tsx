@@ -1,8 +1,8 @@
 import React, { useEffect } from 'react';
+import { Linking } from 'react-native';
 import { NavigationContainer, LinkingOptions } from '@react-navigation/native';
 import { createStackNavigator } from '@react-navigation/stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
-import * as Linking from 'expo-linking';
 import { Text } from 'react-native';
 import { useAuth } from '../context/AuthContext';
 import LoginScreen from '../screens/LoginScreen';
@@ -55,7 +55,7 @@ function MainTabs() {
 }
 
 const linking: LinkingOptions<ReactNavigation.RootParamList> = {
-  prefixes: [Linking.createURL('/'), 'https://apollo-sfs.com'],
+  prefixes: ['apollosfs://', 'https://apollo-sfs.com'],
   config: {
     screens: {
       Auth: {
@@ -74,9 +74,12 @@ export default function AppNavigator() {
   useEffect(() => {
     Linking.getInitialURL().then((url) => {
       if (url) {
-        const parsed = Linking.parse(url);
-        if (parsed.queryParams?.token) {
-          setInitialToken(String(parsed.queryParams.token));
+        try {
+          const parsed = new URL(url);
+          const token = parsed.searchParams.get('token');
+          if (token) setInitialToken(token);
+        } catch {
+          // malformed URL
         }
       }
     });

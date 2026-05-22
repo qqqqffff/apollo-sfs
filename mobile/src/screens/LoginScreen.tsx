@@ -7,18 +7,11 @@ import {
   Text,
   TextInput,
   TouchableOpacity,
-  View,
 } from 'react-native';
-import * as AppleAuthentication from 'expo-apple-authentication';
-import * as WebBrowser from 'expo-web-browser';
-import * as AuthSession from 'expo-auth-session';
+import appleAuth, { AppleButton } from '@invertase/react-native-apple-authentication';
+import { GoogleSignin, statusCodes } from '@react-native-google-signin/google-signin';
 import { login, loginWithApple, loginWithGoogle } from '../api/auth';
 import { useAuth } from '../context/AuthContext';
-import { BASE_URL } from '../api/client';
-
-WebBrowser.maybeCompleteAuthSession();
-
-const GOOGLE_CLIENT_ID = 'REPLACE_WITH_GOOGLE_CLIENT_ID';
 
 export default function LoginScreen({ navigation }: { navigation: any }) {
   const [username, setUsername] = useState('');
@@ -41,42 +34,34 @@ export default function LoginScreen({ navigation }: { navigation: any }) {
 
   const handleApple = async () => {
     try {
-      const credential = await AppleAuthentication.signInAsync({
-        requestedScopes: [
-          AppleAuthentication.AppleAuthenticationScope.FULL_NAME,
-          AppleAuthentication.AppleAuthenticationScope.EMAIL,
-        ],
+      const credential = await appleAuth.performRequest({
+        requestedOperation: appleAuth.Operation.LOGIN,
+        requestedScopes: [appleAuth.Scope.FULL_NAME, appleAuth.Scope.EMAIL],
       });
       if (!credential.identityToken) throw new Error('No identity token');
       await loginWithApple(credential.identityToken);
       await refreshProfile();
     } catch (e: any) {
-      if (e.code !== 'ERR_CANCELED') {
+      if (e.code !== appleAuth.Error.CANCELED) {
         Alert.alert('Apple sign-in failed', e.message);
       }
     }
   };
 
-  const discovery = AuthSession.useAutoDiscovery('https://accounts.google.com');
-  const [request, response, promptAsync] = AuthSession.useAuthRequest(
-    {
-      clientId: GOOGLE_CLIENT_ID,
-      scopes: ['openid', 'email', 'profile'],
-      responseType: AuthSession.ResponseType.IdToken,
-    },
-    discovery,
-  );
-
-  React.useEffect(() => {
-    if (response?.type === 'success') {
-      const idToken = response.params.id_token;
-      if (idToken) {
-        loginWithGoogle(idToken)
-          .then(() => refreshProfile())
-          .catch((e) => Alert.alert('Google sign-in failed', e.message));
+  const handleGoogle = async () => {
+    try {
+      await GoogleSignin.hasPlayServices();
+      const response = await GoogleSignin.signIn();
+      const idToken = (response as any).data?.idToken ?? (response as any).idToken;
+      if (!idToken) throw new Error('No ID token');
+      await loginWithGoogle(idToken);
+      await refreshProfile();
+    } catch (e: any) {
+      if (e.code !== statusCodes.SIGN_IN_CANCELLED) {
+        Alert.alert('Google sign-in failed', e.message);
       }
     }
-  }, [response]);
+  };
 
   return (
     <KeyboardAvoidingView
@@ -108,20 +93,15 @@ export default function LoginScreen({ navigation }: { navigation: any }) {
       <Text style={styles.orDivider}>— or —</Text>
 
       {Platform.OS === 'ios' && (
-        <AppleAuthentication.AppleAuthenticationButton
-          buttonType={AppleAuthentication.AppleAuthenticationButtonType.SIGN_IN}
-          buttonStyle={AppleAuthentication.AppleAuthenticationButtonStyle.BLACK}
-          cornerRadius={8}
+        <AppleButton
+          buttonStyle={AppleButton.Style.BLACK}
+          buttonType={AppleButton.Type.SIGN_IN}
           style={styles.appleButton}
           onPress={handleApple}
         />
       )}
 
-      <TouchableOpacity
-        style={[styles.button, styles.googleButton]}
-        onPress={() => promptAsync()}
-        disabled={!request}
-      >
+      <TouchableOpacity style={[styles.button, styles.googleButton]} onPress={handleGoogle}>
         <Text style={styles.buttonText}>Sign in with Google</Text>
       </TouchableOpacity>
 

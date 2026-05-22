@@ -1,37 +1,36 @@
 import axios, { AxiosError, InternalAxiosRequestConfig } from 'axios';
-import * as SecureStore from 'expo-secure-store';
-import Constants from 'expo-constants';
+import { secureStorage } from '../utils/storage';
+import { API_BASE_URL } from '../config';
 
-export const BASE_URL = Constants.expoConfig?.extra?.apiBaseUrl ?? 'https://apollo-sfs.com';
+export const BASE_URL = API_BASE_URL;
 
 const STORE_KEY_ACCESS = 'apollo_access_token';
 const STORE_KEY_REFRESH = 'apollo_refresh_token';
 
 export async function getStoredTokens() {
   const [access, refresh] = await Promise.all([
-    SecureStore.getItemAsync(STORE_KEY_ACCESS),
-    SecureStore.getItemAsync(STORE_KEY_REFRESH),
+    secureStorage.getItem(STORE_KEY_ACCESS),
+    secureStorage.getItem(STORE_KEY_REFRESH),
   ]);
   return { access, refresh };
 }
 
 export async function storeTokens(access: string, refresh: string) {
   await Promise.all([
-    SecureStore.setItemAsync(STORE_KEY_ACCESS, access),
-    SecureStore.setItemAsync(STORE_KEY_REFRESH, refresh),
+    secureStorage.setItem(STORE_KEY_ACCESS, access),
+    secureStorage.setItem(STORE_KEY_REFRESH, refresh),
   ]);
 }
 
 export async function clearTokens() {
   await Promise.all([
-    SecureStore.deleteItemAsync(STORE_KEY_ACCESS),
-    SecureStore.deleteItemAsync(STORE_KEY_REFRESH),
+    secureStorage.removeItem(STORE_KEY_ACCESS),
+    secureStorage.removeItem(STORE_KEY_REFRESH),
   ]);
 }
 
 const api = axios.create({ baseURL: BASE_URL });
 
-// Attach Bearer token to every request.
 api.interceptors.request.use(async (config: InternalAxiosRequestConfig) => {
   const { access, refresh } = await getStoredTokens();
   if (access) {
@@ -54,7 +53,6 @@ function drainQueue(token: string | null, error?: unknown) {
   pendingQueue = [];
 }
 
-// Silently handle new tokens returned by the server via response headers.
 api.interceptors.response.use(
   async (response) => {
     const newAccess = response.headers['x-new-access-token'];

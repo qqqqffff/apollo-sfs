@@ -1,6 +1,6 @@
 # Mobile App Setup, Testing & Deployment
 
-This guide walks through everything you need to go from the `mobile/` source code to a working app on a physical device and, finally, to production releases on the App Store and Google Play.
+This guide covers everything from the `mobile/` source code to a working app on a physical device and, finally, to production releases on the App Store and Google Play. The app uses React Native CLI (bare workflow) — no Expo runtime is involved.
 
 ---
 
@@ -8,135 +8,228 @@ This guide walks through everything you need to go from the `mobile/` source cod
 
 | Tool | Where to get it | Notes |
 |------|----------------|-------|
-| Node.js 20+ | [nodejs.org](https://nodejs.org) | Required for the Expo toolchain |
-| Expo CLI | `npm install -g expo-cli eas-cli` | EAS CLI is needed for cloud builds and submissions |
+| Node.js 20+ | [nodejs.org](https://nodejs.org) | Required for Metro bundler |
+| Watchman | `brew install watchman` | File watcher used by Metro on macOS |
+| Ruby 3+ | System or `rbenv` | Required for CocoaPods |
+| CocoaPods | `gem install cocoapods` | iOS dependency manager |
 | Xcode 15+ | Mac App Store | iOS builds and Simulator; Mac required |
-| Android Studio | [developer.android.com](https://developer.android.com/studio) | Android Emulator and SDK |
+| Android Studio | [developer.android.com](https://developer.android.com/studio) | Android Emulator and SDK tools |
+| JDK 17 | `brew install openjdk@17` | Android build toolchain |
 | Apple Developer account | [developer.apple.com](https://developer.apple.com) | $99/yr; required to sign iOS builds |
 | Google Play Console account | [play.google.com/console](https://play.google.com/console) | One-time $25 fee; required to publish Android |
 
+Follow the [React Native environment setup guide](https://reactnative.dev/docs/set-up-your-environment) for your OS before proceeding.
+
 ---
 
-## 1. Initial project setup
+## 1. Create the native project
+
+The `mobile/` directory contains the JavaScript/TypeScript source but not the generated native projects. You need to initialise them once using the React Native CLI:
+
+```bash
+npx @react-native-community/cli init ApolloSFS --directory mobile --skip-install
+```
+
+> If `mobile/` already exists (which it does after cloning this repo), run the command outside the repo and then copy the generated `android/` and `ios/` directories into `mobile/`. Alternatively, create them with:
+
+```bash
+cd mobile
+npx react-native build-android  # generates android/ skeleton
+npx react-native build-ios      # generates ios/ skeleton (runs pod install)
+```
+
+### 1a. Install JS dependencies
 
 ```bash
 cd mobile
 npm install
 ```
 
-### 1a. Fill in the two placeholder values
+### 1b. Install iOS native dependencies
 
-Open each of the three screen files below and replace `REPLACE_WITH_GOOGLE_CLIENT_ID` with the OAuth 2.0 Client ID you created in the [Google Cloud Console](https://console.cloud.google.com) (Application type: **Web application**):
-
-```
-src/screens/LoginScreen.tsx
-src/screens/RegisterScreen.tsx
-src/screens/ProfileScreen.tsx
+```bash
+cd mobile/ios
+pod install
+cd ..
 ```
 
-### 1b. Update your production domain
+---
+
+## 2. Native project configuration
+
+These changes must be made in the generated `ios/` and `android/` directories.
+
+### 2a. Fill in the Google OAuth Client ID
+
+Open `mobile/src/config.ts` and replace `REPLACE_WITH_GOOGLE_CLIENT_ID` with the OAuth 2.0 Client ID you created in the [Google Cloud Console](https://console.cloud.google.com) (Application type: **iOS** for the iOS app, **Android** for the Android app):
+
+```ts
+export const GOOGLE_CLIENT_ID = 'YOUR_CLIENT_ID.apps.googleusercontent.com';
+```
+
+### 2b. iOS — Info.plist
+
+Open `ios/ApolloSFS/Info.plist` and add:
+
+```xml
+<!-- Photo library access -->
+<key>NSPhotoLibraryUsageDescription</key>
+<string>Back up your photos and videos to Apollo SFS.</string>
+<key>NSPhotoLibraryAddUsageDescription</key>
+<string>Save downloaded files to your photo library.</string>
+
+<!-- Background fetch -->
+<key>UIBackgroundModes</key>
+<array>
+  <string>fetch</string>
+  <string>processing</string>
+</array>
+```
+
+### 2c. iOS — Bundle identifier and Associated Domains
+
+1. Open `ios/ApolloSFS.xcworkspace` in Xcode.
+2. Select the **ApolloSFS** target → **Signing & Capabilities**.
+3. Set **Bundle Identifier** to `com.apollosfs.app`.
+4. Add capability: **Associated Domains** → add `applinks:apollo-sfs.com`.
+5. Add capability: **Sign In with Apple**.
+
+### 2d. iOS — URL scheme for deep links
+
+In Xcode, select the **ApolloSFS** target → **Info** → **URL Types** → click **+**:
+
+| Field | Value |
+|-------|-------|
+| Identifier | `com.apollosfs.app` |
+| URL Schemes | `apollosfs` |
+
+This registers `apollosfs://` so navigation deep links work in development.
+
+### 2e. Android — AndroidManifest.xml
+
+Open `android/app/src/main/AndroidManifest.xml` and add the following inside `<manifest>`:
+
+```xml
+<!-- Permissions -->
+<uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+<uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+    android:maxSdkVersion="32" />
+<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+<uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+<uses-permission android:name="android.permission.INTERNET" />
+```
+
+Inside the `<activity>` element for `MainActivity`, add an intent filter for App Links and the custom scheme:
+
+```xml
+<!-- Custom scheme -->
+<intent-filter>
+  <action android:name="android.intent.action.VIEW" />
+  <category android:name="android.intent.category.DEFAULT" />
+  <category android:name="android.intent.category.BROWSABLE" />
+  <data android:scheme="apollosfs" />
+</intent-filter>
+
+<!-- Universal App Links (https://apollo-sfs.com/register) -->
+<intent-filter android:autoVerify="true">
+  <action android:name="android.intent.action.VIEW" />
+  <category android:name="android.intent.category.DEFAULT" />
+  <category android:name="android.intent.category.BROWSABLE" />
+  <data
+    android:scheme="https"
+    android:host="apollo-sfs.com"
+    android:pathPrefix="/register" />
+</intent-filter>
+```
+
+### 2f. Android — google-services.json
+
+Download `google-services.json` from the [Firebase Console](https://console.firebase.google.com) (or from the [Google Cloud Console](https://console.cloud.google.com) → your project → Android app credentials) and place it at:
+
+```
+android/app/google-services.json
+```
+
+Add the Google Services plugin to `android/build.gradle`:
+
+```groovy
+buildscript {
+  dependencies {
+    classpath 'com.google.gms:google-services:4.4.2'
+  }
+}
+```
+
+And to `android/app/build.gradle`:
+
+```groovy
+apply plugin: 'com.google.gms.google-services'
+```
+
+### 2g. Update production domain
 
 If your production domain is not `apollo-sfs.com`, replace every occurrence in:
 
-- `app.json` — `associatedDomains`, `intentFilters.data.host`
+- `mobile/src/config.ts` — `API_BASE_URL`
+- `ios/ApolloSFS/ApolloSFS.entitlements` — `applinks:` entry
+- `android/app/src/main/AndroidManifest.xml` — the App Links `android:host`
 - `nginx/well-known/.well-known/apple-app-site-association` — `appID` field
-- `nginx/well-known/.well-known/assetlinks.json` — update as described in section 6
+- `nginx/well-known/.well-known/assetlinks.json` — as described in section 6
 
 ---
 
-## 2. Running in the Expo Go app (fastest way to iterate)
+## 3. Running on a device or simulator
 
-Expo Go lets you preview the app on a real device over your local network without installing Xcode or Android Studio.
-
-```bash
-cd mobile
-npx expo start
-```
-
-Scan the QR code shown in the terminal with:
-- **iOS** — the Camera app (opens Expo Go automatically)
-- **Android** — the Expo Go app from the Play Store
-
-> **Limitation:** `expo-apple-authentication` and background fetch do **not** run inside Expo Go because they require native capabilities. Use a development build (section 3) to test those features.
-
----
-
-## 3. Development builds (full native capabilities)
-
-A development build is a custom version of the app that includes all native modules and connects to the Expo dev server. It behaves exactly like the final production app except that the JS bundle is served over the network for fast hot-reload.
-
-### 3a. Log in to Expo / EAS
-
-```bash
-eas login
-```
-
-Create an Expo account at [expo.dev](https://expo.dev) if you don't have one.
-
-### 3b. Configure EAS
+### 3a. iOS Simulator
 
 ```bash
 cd mobile
-eas build:configure
+npx react-native run-ios
 ```
 
-This creates `eas.json`. Accept the defaults; EAS will manage provisioning profiles and signing automatically.
-
-### 3c. Build for iOS (runs on EAS cloud)
+This compiles the app with Xcode and launches it in the default Simulator. To target a specific device:
 
 ```bash
-eas build --platform ios --profile development
+npx react-native run-ios --simulator "iPhone 16 Pro"
 ```
 
-EAS will:
-1. Ask you to log in to your Apple Developer account (done once).
-2. Create or reuse an App ID for `com.apollosfs.app`.
-3. Generate a Development provisioning profile and signing certificate.
-4. Build the `.ipa` and give you a QR code to install it on your device via AirDrop or a direct URL.
+### 3b. iOS physical device
 
-Install the `.ipa` on your iPhone, then start the Expo dev server:
+1. Connect your iPhone via USB.
+2. In Xcode (**Signing & Capabilities**), select your Apple Developer team so Xcode can sign the build automatically.
+3. Run:
 
 ```bash
-npx expo start --dev-client
+npx react-native run-ios --device "Your iPhone Name"
 ```
 
-Open the app — it will connect to your local Expo server automatically.
+Or build and install directly from Xcode: **Product → Run** with your device selected.
 
-### 3d. Build for Android (runs on EAS cloud)
+### 3c. Android Emulator
+
+Start an AVD from Android Studio (**Device Manager** → play button), then:
 
 ```bash
-eas build --platform android --profile development
+cd mobile
+npx react-native run-android
 ```
 
-Install the resulting `.apk` on your Android device (enable "Install from unknown sources" in Settings → Security).
+### 3d. Android physical device
 
-### 3e. Run on iOS Simulator (no Apple account needed)
-
-```bash
-npx expo run:ios
-```
-
-This compiles the app locally using Xcode and launches it in the Simulator. Requires Xcode 15+ installed and `xcode-select --install` run at least once.
-
-### 3f. Run on Android Emulator
-
-Start an AVD from Android Studio (Device Manager → play button), then:
-
-```bash
-npx expo run:android
-```
+Enable **Developer options** and **USB debugging** on your device, connect via USB, then run the same command as above. The CLI auto-detects the connected device.
 
 ---
 
 ## 4. Testing Sign in with Apple
 
-Sign in with Apple only works on a real iOS device (not the Simulator) and only when the app is signed with an App ID that has the **Sign In with Apple** capability enabled.
+Sign in with Apple only works on a real iOS device and only when the app is signed with an App ID that has the **Sign In with Apple** capability enabled (already set in step 2c).
 
 ### 4a. Enable the capability in your Apple Developer account
 
-1. Go to [developer.apple.com/account](https://developer.apple.com/account) → **Certificates, Identifiers & Profiles** → **Identifiers**.
-2. Find `com.apollosfs.app` (or create it).
-3. Under **Capabilities**, check **Sign In with Apple** → Save.
+1. Go to [developer.apple.com](https://developer.apple.com) → **Certificates, Identifiers & Profiles** → **Identifiers**.
+2. Find `com.apollosfs.app` (create it if it doesn't exist).
+3. Under **Capabilities**, enable **Sign In with Apple** → Save.
 
 ### 4b. Enable Keycloak Apple IdP
 
@@ -144,14 +237,12 @@ Follow the steps in `keycloak/KC_setup.md` under **Apple Identity Provider**. Yo
 - A **Services ID** (e.g. `com.apollosfs.app.signin`) registered in your Apple Developer account with a redirect URI pointing to your Keycloak instance.
 - A **Key** with Sign In with Apple enabled; download the `.p8` file.
 
-Once configured, Keycloak's `/api/v1/mobile/auth/apple` endpoint accepts the `identityToken` the device generates.
-
 ### 4c. Test flow
 
-1. Install a development build on a physical iPhone.
+1. Build and install on a physical iPhone (`npx react-native run-ios --device`).
 2. Tap **Sign in with Apple** on the Login or Register screen.
 3. Authenticate with Face ID / Touch ID.
-4. The app calls `POST /api/v1/mobile/auth/apple` → your Keycloak instance exchanges the token → app stores the resulting tokens and navigates to the Home screen.
+4. The app calls `POST /api/v1/mobile/auth/apple` → Keycloak exchanges the token → app stores tokens and navigates to Home.
 
 ---
 
@@ -159,90 +250,82 @@ Once configured, Keycloak's `/api/v1/mobile/auth/apple` endpoint accepts the `id
 
 Invitation emails contain a URL like `https://apollo-sfs.com/register?token=abc123`. When the app is installed, iOS/Android should intercept this URL and open the Register screen with the token pre-filled.
 
-### 5a. Local development test
+### 5a. Custom scheme test (development)
 
 ```bash
-npx uri-scheme open "https://apollo-sfs.com/register?token=testtoken" --ios
-# or
-npx uri-scheme open "https://apollo-sfs.com/register?token=testtoken" --android
+# iOS Simulator
+xcrun simctl openurl booted "apollosfs://register?token=testtoken"
+
+# Android Emulator
+adb shell am start -W -a android.intent.action.VIEW \
+  -d "apollosfs://register?token=testtoken" com.apollosfs.app
 ```
 
 ### 5b. Enabling Universal Links on iOS (production)
 
-Universal Links require the `apple-app-site-association` file to be served from your domain **before** iOS will intercept the URL. The file is already at `nginx/well-known/.well-known/apple-app-site-association`; you need to update it with your real Team ID and bundle ID:
+Universal Links require the `apple-app-site-association` file to be served from your domain **before** iOS will intercept the URL. The file is at `nginx/well-known/.well-known/apple-app-site-association`. Update it with your real Team ID and bundle ID:
 
-1. Find your **Team ID** at [developer.apple.com/account](https://developer.apple.com/account) → Membership → Team ID (10-character alphanumeric string).
+```json
+{
+  "applinks": {
+    "apps": [],
+    "details": [
+      {
+        "appID": "YOURTEAMID.com.apollosfs.app",
+        "paths": ["/register", "/register/*"]
+      }
+    ]
+  }
+}
+```
 
-2. Edit `nginx/well-known/.well-known/apple-app-site-association`:
+Find your Team ID at [developer.apple.com](https://developer.apple.com) → Membership → Team ID.
 
-   ```json
-   {
-     "applinks": {
-       "apps": [],
-       "details": [
-         {
-           "appID": "YOURTEAMID.com.apollosfs.app",
-           "paths": ["/register", "/register/*"]
-         }
-       ]
-     }
-   }
-   ```
+Verify it is served correctly (no redirect, `Content-Type: application/json`):
 
-3. Verify it is served correctly (no redirect, correct Content-Type):
-
-   ```bash
-   curl -I https://apollo-sfs.com/.well-known/apple-app-site-association
-   # Must return: Content-Type: application/json
-   # Must NOT redirect (no 301/302)
-   ```
-
-4. On a physical device, opening a `https://apollo-sfs.com/register?token=…` link in Safari or Messages should now open the Apollo SFS app directly instead of the browser.
+```bash
+curl -I https://apollo-sfs.com/.well-known/apple-app-site-association
+```
 
 ### 5c. Enabling App Links on Android (production)
 
-1. Get the SHA-256 fingerprint of your app signing key:
+1. Get the SHA-256 fingerprint of your release signing keystore:
 
-   ```bash
-   # If you let EAS manage signing (recommended):
-   eas credentials --platform android
-   # Copy the SHA-256 fingerprint shown under "Keystore"
-
-   # If using your own keystore:
-   keytool -list -v -keystore your-keystore.jks -alias your-alias | grep SHA256
-   ```
+```bash
+keytool -list -v -keystore android/app/release.keystore -alias your-alias | grep SHA256
+```
 
 2. Edit `nginx/well-known/.well-known/assetlinks.json`:
 
-   ```json
-   [
-     {
-       "relation": ["delegate_permission/common.handle_all_urls"],
-       "target": {
-         "namespace": "android_app",
-         "package_name": "com.apollosfs.app",
-         "sha256_cert_fingerprints": [
-           "AB:CD:EF:..."
-         ]
-       }
-     }
-   ]
-   ```
+```json
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.apollosfs.app",
+      "sha256_cert_fingerprints": [
+        "AB:CD:EF:..."
+      ]
+    }
+  }
+]
+```
 
 3. Verify with Google's tool:
 
-   ```
-   https://digitalassetlinks.googleapis.com/v1/statements:list?source.web.site=https://apollo-sfs.com&relation=delegate_permission/common.handle_all_urls
-   ```
+```
+https://digitalassetlinks.googleapis.com/v1/statements:list?source.web.site=https://apollo-sfs.com&relation=delegate_permission/common.handle_all_urls
+```
 
 ---
 
 ## 6. Camera roll backup — end-to-end test
 
-1. Install the development build on a device and sign in.
+1. Install the app on a device and sign in.
 2. Open the **Home** screen — tap **Sync Now**.
 3. Grant photo library access when prompted.
-4. Watch the terminal (`npx expo start` logs) — you should see upload requests to `/api/v1/files/upload`.
+4. Watch the Metro bundler terminal — you should see upload requests to `/api/v1/files/upload`.
 5. Open the **Files** screen — photos should appear.
 6. Take a new photo on the device, wait ~30 seconds, tap **Sync Now** again — the new photo should appear.
 
@@ -254,30 +337,33 @@ Universal Links require the `apple-app-site-association` file to be served from 
 
 ## 7. Production build — App Store (iOS)
 
-### 7a. Create the production build
+### 7a. Set the version and build number
 
-```bash
-cd mobile
-eas build --platform ios --profile production
-```
+In Xcode, select the **ApolloSFS** target → **General** → increment **Version** and **Build** as needed.
 
-EAS will create a Distribution provisioning profile and sign the `.ipa` automatically. The build runs in the EAS cloud (~15–20 minutes).
+### 7b. Create an Archive
 
-### 7b. Submit to App Store Connect
+In Xcode, select **Any iOS Device (arm64)** as the build target, then:
 
-```bash
-eas submit --platform ios
-```
+**Product → Archive**
 
-EAS uploads the `.ipa` to App Store Connect. You will be prompted for your Apple ID credentials once.
+This builds a release `.xcarchive` in Xcode's Organizer.
 
-### 7c. Complete the App Store listing
+### 7c. Upload to App Store Connect
+
+In the Xcode Organizer:
+
+1. Select the archive → **Distribute App**.
+2. Choose **App Store Connect** → **Upload**.
+3. Follow the prompts; Xcode signs the `.ipa` with your Distribution certificate automatically.
+
+### 7d. Complete the App Store listing
 
 1. Log in to [appstoreconnect.apple.com](https://appstoreconnect.apple.com).
 2. Select **My Apps** → **Apollo SFS**.
 3. Fill in the required fields:
    - **App name, subtitle, description, keywords**
-   - **Screenshots** — at minimum 6.5" iPhone (you can use the Simulator: `⌘S` captures a screenshot)
+   - **Screenshots** — at minimum 6.5" iPhone (Simulator: `⌘S` captures a screenshot)
    - **Privacy policy URL** — required for all apps
    - **Age rating** — complete the questionnaire
    - **App Review information** — provide a demo account the Apple reviewer can use
@@ -285,108 +371,152 @@ EAS uploads the `.ipa` to App Store Connect. You will be prompted for your Apple
 
 First reviews typically take 1–3 days.
 
-### 7d. App Store capability checklist
+### 7e. App Store capability checklist
 
-Before submitting, confirm the following are configured in App Store Connect and your Developer account:
+Before submitting, confirm the following:
 
 - [ ] **Sign In with Apple** enabled on the App ID
-- [ ] **Associated Domains** entitlement enabled on the App ID (`applinks:apollo-sfs.com`)
-- [ ] Background Modes: **Background fetch** and **Background processing** checked in Xcode capabilities (handled by `app.json` `backgroundModes`)
-- [ ] Photo Library usage description present in `app.json` `infoPlist`
+- [ ] **Associated Domains** entitlement enabled (`applinks:apollo-sfs.com`)
+- [ ] `UIBackgroundModes` includes `fetch` and `processing` in Info.plist
+- [ ] `NSPhotoLibraryUsageDescription` present in Info.plist
+- [ ] Distribution certificate and provisioning profile valid in Xcode
 
 ---
 
 ## 8. Production build — Google Play (Android)
 
-### 8a. Create the production build
+### 8a. Generate a release keystore (first time only)
+
+```bash
+keytool -genkey -v -keystore android/app/release.keystore \
+  -alias apollosfs -keyalg RSA -keysize 2048 -validity 10000
+```
+
+Store this file and its passwords securely — you cannot change it after publishing.
+
+### 8b. Configure signing in Gradle
+
+In `android/app/build.gradle`:
+
+```groovy
+android {
+  signingConfigs {
+    release {
+      storeFile file('release.keystore')
+      storePassword System.getenv('KEYSTORE_PASS')
+      keyAlias 'apollosfs'
+      keyPassword System.getenv('KEY_PASS')
+    }
+  }
+  buildTypes {
+    release {
+      signingConfig signingConfigs.release
+      minifyEnabled true
+      proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+    }
+  }
+}
+```
+
+### 8c. Build the release AAB
 
 ```bash
 cd mobile
-eas build --platform android --profile production
+npx react-native build-android --mode=release
+# or
+cd android && ./gradlew bundleRelease
 ```
 
-This produces a signed `.aab` (Android App Bundle). EAS generates and stores the keystore automatically; you can export it later from `eas credentials`.
+The signed `.aab` is at `android/app/build/outputs/bundle/release/app-release.aab`.
 
-### 8b. First upload (manual — required for the initial release)
+### 8d. First upload (manual — required for the initial release)
 
 Google requires the first build to be uploaded manually:
 
-1. Go to [play.google.com/console](https://play.google.com/console) → Create app.
+1. Go to [play.google.com/console](https://play.google.com/console) → **Create app**.
 2. Fill in the app details (name, category, contact email, privacy policy).
 3. Navigate to **Testing** → **Internal testing** → **Create new release**.
-4. Upload the `.aab` file downloaded from EAS.
+4. Upload the `.aab` file.
 5. Promote to **Closed testing** (alpha) → **Open testing** (beta) → **Production** when ready.
 
-### 8c. Subsequent releases
+### 8e. Subsequent releases
 
-```bash
-eas submit --platform android
-```
+Build a new AAB, then upload it in the Play Console to the appropriate track.
 
-EAS uploads the `.aab` directly to the Play Console track you specify.
+### 8f. Google Play checklist
 
-### 8d. Google Play checklist
-
-- [ ] Target SDK 34+ (Expo 52 handles this automatically)
-- [ ] `READ_MEDIA_IMAGES` and `READ_MEDIA_VIDEO` permissions declared (already in `app.json`)
+- [ ] Target SDK 34+ (set in `android/app/build.gradle`)
+- [ ] `READ_MEDIA_IMAGES` and `READ_MEDIA_VIDEO` permissions declared in AndroidManifest.xml
 - [ ] Privacy policy URL provided in the Play Console
 - [ ] Data safety form completed (the app collects: photos/videos, account info; data is encrypted in transit and at rest)
-- [ ] SHA-256 fingerprint from the EAS-managed keystore added to `assetlinks.json` (see section 5c)
+- [ ] SHA-256 fingerprint from `release.keystore` added to `assetlinks.json` (see section 5c)
 
 ---
 
-## 9. Over-the-air updates (JS-only changes)
+## 9. Troubleshooting
 
-For changes that don't touch native modules (most UI and logic changes), you can push updates directly to users without going through App Store/Play Store review:
+### Metro bundler: "Unable to resolve module"
 
 ```bash
 cd mobile
-eas update --branch production --message "Fix sync cursor bug"
+npm install
+cd ios && pod install && cd ..
+npx react-native start --reset-cache
 ```
 
-Users will receive the update silently the next time they open the app. This is handled by Expo Updates (included in Expo 52 by default).
-
-> OTA updates cannot change native code, permissions, or add new native modules. Those always require a new store build.
-
----
-
-## 10. Troubleshooting
-
-### "Unable to resolve module" on `npx expo start`
+### CocoaPods install fails
 
 ```bash
-cd mobile
-npx expo install --fix   # repairs version mismatches
-npm install              # installs any missing packages
+sudo gem install cocoapods
+cd mobile/ios
+pod repo update
+pod install
 ```
 
 ### Sign In with Apple button not appearing
 
-The `expo-apple-authentication` button only renders on iOS. On Android it is conditionally hidden (`Platform.OS === 'ios'`). On the iOS Simulator the button renders but the authentication sheet will fail — test on a real device.
+`@invertase/react-native-apple-authentication` only renders the button on iOS. On Android the button is conditionally hidden (`Platform.OS === 'ios'`). On the iOS Simulator the button renders but the authentication sheet fails — test on a real device.
 
 ### Universal Links not intercepting (iOS)
 
 - The AASA file must be served without a redirect and with `Content-Type: application/json`. Check the nginx `alias` block in `nginx/conf.d/apollo-sfs.conf`.
 - iOS caches the AASA aggressively. After updating the file, test on a fresh device or use the **Associated Domains Development** environment in Xcode (Signing & Capabilities → Associated Domains → tick "Alternate Mode").
-- The app must be installed via TestFlight or the App Store for Universal Links to activate in production. Development builds with the correct entitlement also work.
+- Universal Links require the app to be installed via TestFlight or the App Store (or a development build with the correct entitlement signed by your team).
 
 ### Background sync not firing (iOS)
 
-iOS decides when to run background fetch tasks based on battery, network, and usage patterns. During development, trigger it manually:
+iOS decides when to run background fetch based on battery, network, and usage patterns. During development, trigger it manually from Xcode:
 
 ```
 Xcode → Debug menu → Simulate Background Fetch
 ```
 
-Or from the terminal while the device is connected:
+Or from the terminal while the Simulator is running:
 
 ```bash
 xcrun simctl spawn booted backgroundfetch com.apollosfs.app
 ```
 
-### EAS build fails with provisioning error
+### Android: "react-native-sqlite-storage" build error
+
+Ensure `android/app/build.gradle` targets `minSdkVersion 24` and `compileSdkVersion 34`:
+
+```groovy
+android {
+  compileSdk 34
+  defaultConfig {
+    minSdkVersion 24
+    targetSdkVersion 34
+  }
+}
+```
+
+### Google Sign-In: "DEVELOPER_ERROR" on Android
+
+This means the SHA-1 fingerprint in your Firebase/Google Cloud project does not match your build's signing certificate. Add the debug fingerprint:
 
 ```bash
-eas credentials --platform ios
-# Select "Remove" for stale profiles, then re-run eas build
+cd android && ./gradlew signingReport
+# Copy the SHA-1 under "Variant: debug" and add it in the Google Cloud Console
+# under your Android OAuth 2.0 client → SHA-1 certificate fingerprints
 ```

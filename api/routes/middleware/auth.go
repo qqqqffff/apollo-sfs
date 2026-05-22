@@ -112,23 +112,38 @@ type keycloakClaims struct {
 	} `json:"realm_access"`
 }
 
-// RequireAuth reads the access_token from the session, verifies its signature
-// and expiry using the Keycloak JWKS, then injects the following keys into the
-// Gin context for use by downstream middleware and handlers:
+// RequireAuth accepts an access token from either an HttpOnly session cookie
+// (web clients) or an Authorization: Bearer header (mobile clients).
+//
+// For Bearer requests an expired token is silently refreshed if the client
+// sends a valid X-Refresh-Token header; the new pair is returned in
+// X-New-Access-Token / X-New-Refresh-Token response headers (no cookie is written).
+//
+// On success the following Gin context keys are set for downstream handlers:
 //
 //   - "username" string   — preferred_username claim
 //   - "userID"   string   — Keycloak subject claim (sub)
 //   - "exp"      int64    — token expiry Unix timestamp (consumed by ProactiveRefresh)
 //   - "roles"    []string — realm_access.roles claim (consumed by RequireAdmin)
 //
-// Returns 401 when the session carries no token or the token is invalid/expired.
+// Returns 401 when no valid credentials are present.
 // Also updates last_seen_at on every successful request (best-effort, non-blocking).
 func (m *AuthMiddleware) RequireAuth() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		session := sessions.DefaultMany(c, SessionName)
+		var accessToken, refreshToken string
+		useBearerPath := false
 
-		accessToken, ok := session.Get("access_token").(string)
-		if !ok || accessToken == "" {
+		if h := c.GetHeader("Authorization"); strings.HasPrefix(h, "Bearer ") {
+			accessToken = strings.TrimPrefix(h, "Bearer ")
+			refreshToken = c.GetHeader("X-Refresh-Token")
+			useBearerPath = true
+		} else {
+			session := sessions.DefaultMany(c, SessionName)
+			accessToken, _ = session.Get("access_token").(string)
+			refreshToken, _ = session.Get("refresh_token").(string)
+		}
+
+		if accessToken == "" {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 			return
 		}
@@ -136,15 +151,18 @@ func (m *AuthMiddleware) RequireAuth() gin.HandlerFunc {
 		idToken, err := m.verifier.Verify(c.Request.Context(), accessToken)
 		if err != nil {
 			// Access token expired — attempt a silent refresh before giving up.
-			// This handles the case where the user was idle longer than the access
-			// token TTL; ProactiveRefresh only runs after this middleware succeeds.
-			if refreshToken, ok := session.Get("refresh_token").(string); ok && refreshToken != "" {
+			if refreshToken != "" {
 				if tokens, refreshErr := m.callRefreshGrant(c.Request.Context(), refreshToken); refreshErr == nil {
-					session.Set("access_token", tokens.AccessToken)
-					session.Set("refresh_token", tokens.RefreshToken)
-					if saveErr := session.Save(); saveErr == nil {
-						idToken, err = m.verifier.Verify(c.Request.Context(), tokens.AccessToken)
+					if useBearerPath {
+						c.Header("X-New-Access-Token", tokens.AccessToken)
+						c.Header("X-New-Refresh-Token", tokens.RefreshToken)
+					} else {
+						session := sessions.DefaultMany(c, SessionName)
+						session.Set("access_token", tokens.AccessToken)
+						session.Set("refresh_token", tokens.RefreshToken)
+						_ = session.Save()
 					}
+					idToken, err = m.verifier.Verify(c.Request.Context(), tokens.AccessToken)
 				}
 			}
 			if err != nil {

@@ -132,6 +132,25 @@ func (s *stubQuerier) ListAuditLogsForUser(_ context.Context, _ string, _ db.Pag
 	return &db.PageResult[models.AuditLog]{Items: []models.AuditLog{}}, nil
 }
 
+// Device / sync stubs (mobile)
+func (s *stubQuerier) CreateDevice(_ context.Context, userID uuid.UUID, name, platform string, pushToken *string) (*db.Device, error) {
+	return &db.Device{ID: uuid.New(), UserID: userID, Name: name, Platform: platform}, nil
+}
+func (s *stubQuerier) GetDevice(_ context.Context, id uuid.UUID) (*db.Device, error) {
+	return &db.Device{ID: id}, nil
+}
+func (s *stubQuerier) UpdateDeviceLastSeen(_ context.Context, _ uuid.UUID, _ *string) error { return nil }
+func (s *stubQuerier) DeleteDevice(_ context.Context, _ uuid.UUID) error                    { return nil }
+func (s *stubQuerier) DeltaSyncFiles(_ context.Context, _ uuid.UUID, _ time.Time) ([]models.File, error) {
+	return []models.File{}, nil
+}
+func (s *stubQuerier) DeltaSyncDeleted(_ context.Context, _ uuid.UUID, _ time.Time) ([]uuid.UUID, error) {
+	return []uuid.UUID{}, nil
+}
+func (s *stubQuerier) FindFileByHash(_ context.Context, _ uuid.UUID, _ string) (*models.File, error) {
+	return nil, nil
+}
+
 // ── Stub InviteService (routes package) ───────────────────────────────────────
 
 type stubInviteValidator struct {

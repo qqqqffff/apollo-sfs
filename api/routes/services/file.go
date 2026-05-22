@@ -3,7 +3,9 @@ package services
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -186,7 +188,11 @@ func (s *FileService) Upload(ctx context.Context, in UploadInput) (*models.File,
 		return nil, fmt.Errorf("upload: read body: %w", err)
 	}
 
-	// 2. Detect MIME type from actual content; fall back to client-provided hint.
+	// 2. Compute SHA-256 for client-side dedup before any transformation.
+	rawHash := sha256.Sum256(plaintext)
+	hashHex := hex.EncodeToString(rawHash[:])
+
+	// 3. Detect MIME type from actual content; fall back to client-provided hint.
 	mimeType := in.MimeType
 	if detected := mimetype.Detect(plaintext); detected != nil {
 		mimeType = detected.String()
@@ -274,6 +280,7 @@ func (s *FileService) Upload(ctx context.Context, in UploadInput) (*models.File,
 		MinIOObjectKey: objectKey,
 		Nonce:          nonce,
 		TakenAt:        takenAt,
+		SHA256Hash:     &hashHex,
 	})
 	if err != nil {
 		// Best-effort cleanup: delete the orphaned MinIO object.
@@ -551,7 +558,7 @@ func (s *FileService) Delete(ctx context.Context, fileID, userID uuid.UUID, user
 	if err := storage.RemoveObject(ctx, file.MinIOObjectKey); err != nil {
 		return fmt.Errorf("delete: remove blob: %w", err)
 	}
-	if err := q.DeleteFile(ctx, fileID); err != nil {
+	if err := q.DeleteFile(ctx, fileID, userID); err != nil {
 		return fmt.Errorf("delete: remove metadata: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -1148,6 +1155,11 @@ func (s *FileService) FinalizeChunkedUpload(ctx context.Context, sess *UploadSes
 		return nil, fmt.Errorf("finalize: begin tx: %w", err)
 	}
 	defer func() { _ = utx.Rollback() }()
+	var sha256Hash *string
+	if sess.SHA256Hash != "" {
+		h := sess.SHA256Hash
+		sha256Hash = &h
+	}
 	file, err := uq.CreateFile(ctx, &models.File{
 		ID:             sess.FileID,
 		UserID:         sess.UserID,
@@ -1158,6 +1170,7 @@ func (s *FileService) FinalizeChunkedUpload(ctx context.Context, sess *UploadSes
 		SizeBytes:      sess.TotalSize,
 		MinIOObjectKey: sess.ObjectKey,
 		Nonce:          []byte{}, // empty nonce signals chunked encryption mode
+		SHA256Hash:     sha256Hash,
 	})
 	if err != nil {
 		_ = sess.MinIOStorage.RemoveObject(ctx, sess.ObjectKey)

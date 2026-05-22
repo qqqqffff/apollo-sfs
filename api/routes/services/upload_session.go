@@ -30,6 +30,7 @@ type UploadSession struct {
 	MinioUploadID string
 	UserKey       []byte // zeroed by Zero() when the session is finalised or deleted
 	MimeType      string // detected from the first chunk; set by EncryptAndUploadPart
+	SHA256Hash    string // hex SHA-256 of plaintext, supplied by mobile clients for dedup
 	DriveID       uuid.UUID
 	MinIOStorage  *MinIOService
 

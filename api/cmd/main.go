@@ -254,6 +254,16 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		authGroup.POST("/reset_password", authHandler.ResetPassword)
 	}
 
+	// ── Mobile auth — token-based (no session cookie) ─────────────────────
+	mobileAuthGroup := v1.Group("/mobile/auth")
+	mobileAuthGroup.Use(mw.RateLimit())
+	{
+		mobileAuthGroup.POST("/login", authHandler.MobileLogin)
+		mobileAuthGroup.POST("/refresh", authHandler.MobileRefresh)
+		mobileAuthGroup.POST("/apple", authHandler.MobileAppleLogin)
+		mobileAuthGroup.POST("/google", authHandler.MobileGoogleLogin)
+	}
+
 	// ── Protected — valid JWT cookie required on every request ───────────────
 	// RequireAuth validates the token; if the access token is expired it
 	// transparently refreshes it via the refresh token before continuing.
@@ -267,6 +277,16 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		protected.POST("/me/password", h.ChangePassword)
 		protected.GET("/me/preferences", h.GetPreferences)
 		protected.PUT("/me/preferences", h.UpdatePreferences)
+		protected.POST("/me/social/link", h.LinkSocial)
+		protected.DELETE("/me/social/unlink", h.UnlinkSocial)
+
+		// Devices (mobile sync)
+		protected.POST("/devices", h.RegisterDevice)
+		protected.DELETE("/devices/:device_id", h.DeleteDevice)
+
+		// Sync delta (mobile)
+		protected.GET("/sync/delta", h.DeltaSync)
+		protected.POST("/sync/check-hash", h.CheckHash)
 
 		// Files — single upload (small files ≤ 5 MB)
 		protected.POST("/files/upload", h.UploadFile)

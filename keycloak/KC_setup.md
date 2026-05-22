@@ -173,3 +173,56 @@ echo "   KEYCLOAK_CLIENT_SECRET=$API_SECRET"
 echo "   KEYCLOAK_ADMIN_CLIENT_ID=$ADMIN_CLIENT_ID"
 echo "   KEYCLOAK_ADMIN_CLIENT_SECRET=$ADMIN_SECRET"
 echo "============================================================"
+# ── Social Identity Providers (Apple & Google) ─────────────────────────────────
+#
+# The mobile app supports Sign in with Apple and Sign in with Google via
+# Keycloak Token Exchange. You must configure each as an Identity Provider
+# in the Keycloak admin console before the mobile auth endpoints will work.
+#
+# ── Enabling Token Exchange in Keycloak ────────────────────────────────────────
+#
+# Keycloak 26+ requires enabling token exchange per-realm:
+#   Admin Console → Realm Settings → General tab
+#   → Enable "Token Exchange" (preview feature)
+#
+# ── Apple Identity Provider ────────────────────────────────────────────────────
+#
+# Prerequisites (Apple Developer Account):
+#   1. Create an App ID with "Sign In with Apple" capability (bundle ID: com.apollosfs.app)
+#   2. Create a Services ID (e.g. com.apollosfs.app.signin) — this is the OAuth2 client ID
+#   3. Register your Keycloak redirect URI in the Services ID:
+#      https://<your-domain>/realms/apollo-sfs/broker/apple/endpoint
+#   4. Create a Key with "Sign In with Apple" enabled → download the .p8 file
+#
+# In Keycloak Admin Console:
+#   Identity Providers → Add provider → Apple
+#   - Alias:            apple
+#   - Client ID:        <Services ID from step 2>
+#   - Team ID:          <10-char Apple Team ID>
+#   - Key ID:           <Key ID from step 4>
+#   - Private Key:      <contents of the .p8 file>
+#   - Default Scopes:   name email
+#   - Sync mode:        FORCE
+#
+# ── Google Identity Provider ───────────────────────────────────────────────────
+#
+# Prerequisites (Google Cloud Console):
+#   1. Create an OAuth 2.0 Client ID (Application type: Web application)
+#   2. Add authorised redirect URI:
+#      https://<your-domain>/realms/apollo-sfs/broker/google/endpoint
+#   3. Note the Client ID and Client Secret
+#
+# In Keycloak Admin Console:
+#   Identity Providers → Add provider → Google
+#   - Alias:            google
+#   - Client ID:        <OAuth2 Client ID from step 1>
+#   - Client Secret:    <OAuth2 Client Secret from step 1>
+#   - Default Scopes:   openid email profile
+#   - Sync mode:        FORCE
+#
+# ── Updating nginx/well-known/.well-known/assetlinks.json ─────────────────────
+#
+# Replace REPLACE_WITH_YOUR_APP_SIGNING_CERT_SHA256_FINGERPRINT with the actual
+# SHA-256 fingerprint of your Android app signing certificate. To get it:
+#   keytool -list -v -keystore your-keystore.jks -alias your-alias
+# Or from the Play Console: Setup → App signing → App signing key certificate

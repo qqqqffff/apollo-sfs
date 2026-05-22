@@ -719,6 +719,126 @@ func (s *AuthService) kcFindUserByUsername(ctx context.Context, adminToken, user
 	return users[0].ID, nil
 }
 
+// SocialLogin exchanges a provider identity token (Apple or Google) for Apollo
+// SFS tokens using Keycloak's Token Exchange grant. Keycloak must have the
+// corresponding Identity Provider configured (apple / google).
+//
+// providerToken is the raw JWT issued by the provider (Apple identityToken or
+// Google id_token). provider must be "apple" or "google".
+func (s *AuthService) SocialLogin(ctx context.Context, provider, providerToken string) (*TokenPair, error) {
+	body := url.Values{
+		"grant_type":           {"urn:ietf:params:oauth:grant-type:token-exchange"},
+		"client_id":            {s.kcClientID},
+		"client_secret":        {s.kcSecret},
+		"subject_token":        {providerToken},
+		"subject_token_type":   {"urn:ietf:params:oauth:token-type:id_token"},
+		"subject_issuer":       {provider},
+		"requested_token_type": {"urn:ietf:params:oauth:token-type:refresh_token"},
+	}
+	tokens, err := s.tokenRequest(ctx, body)
+	if err != nil {
+		return nil, fmt.Errorf("social login (%s): %w", provider, err)
+	}
+	if s.ProvisionUserKey != nil {
+		if err := s.ensureUserProvisioned(ctx, tokens.AccessToken); err != nil {
+			return nil, fmt.Errorf("social login (%s): provision user: %w", provider, err)
+		}
+	}
+	return tokens, nil
+}
+
+// LinkSocialIdentity links a provider identity to the Keycloak account identified
+// by kcUserID. provider must be the Keycloak IdP alias ("apple" or "google").
+// providerToken is the raw JWT from the provider.
+func (s *AuthService) LinkSocialIdentity(ctx context.Context, kcUserID, provider, providerToken string) error {
+	adminToken, err := s.adminToken(ctx)
+	if err != nil {
+		return fmt.Errorf("link social: admin token: %w", err)
+	}
+
+	// Decode the provider token claims to get the subject (provider user ID).
+	parts := strings.SplitN(providerToken, ".", 3)
+	if len(parts) != 3 {
+		return fmt.Errorf("link social: malformed provider token")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return fmt.Errorf("link social: decode payload: %w", err)
+	}
+	var claims struct {
+		Sub   string `json:"sub"`
+		Email string `json:"email"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return fmt.Errorf("link social: parse claims: %w", err)
+	}
+
+	type idpLink struct {
+		IdentityProvider string `json:"identityProvider"`
+		UserID           string `json:"userId"`
+		UserName         string `json:"userName"`
+	}
+	link := idpLink{
+		IdentityProvider: provider,
+		UserID:           claims.Sub,
+		UserName:         claims.Email,
+	}
+	body, err := json.Marshal(link)
+	if err != nil {
+		return err
+	}
+
+	endpoint := fmt.Sprintf("%s/admin/realms/%s/users/%s/federated-identity/%s",
+		s.kcURL, s.kcRealm, kcUserID, provider)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(string(body)))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+
+	resp, err := s.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("keycloak link identity: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusConflict {
+		return fmt.Errorf("provider identity already linked")
+	}
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusNoContent {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("keycloak link identity returned %s: %s", resp.Status, string(b))
+	}
+	return nil
+}
+
+// UnlinkSocialIdentity removes a provider link from the given Keycloak account.
+func (s *AuthService) UnlinkSocialIdentity(ctx context.Context, kcUserID, provider string) error {
+	adminToken, err := s.adminToken(ctx)
+	if err != nil {
+		return fmt.Errorf("unlink social: admin token: %w", err)
+	}
+
+	endpoint := fmt.Sprintf("%s/admin/realms/%s/users/%s/federated-identity/%s",
+		s.kcURL, s.kcRealm, kcUserID, provider)
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, endpoint, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+
+	resp, err := s.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("keycloak unlink identity: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("keycloak unlink identity returned %s: %s", resp.Status, string(b))
+	}
+	return nil
+}
+
 // kcUpdateUsername fetches the current Keycloak UserRepresentation, sets the new
 // username in-place, and PUTs the full object back. PUT /users/{id} is a full
 // replacement — sending only {"username":"x"} would wipe other fields.

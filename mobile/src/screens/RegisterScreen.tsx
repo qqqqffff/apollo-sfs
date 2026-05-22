@@ -2,24 +2,18 @@ import React, { useEffect, useState } from 'react';
 import {
   Alert,
   KeyboardAvoidingView,
+  Linking,
   Platform,
   StyleSheet,
   Text,
   TextInput,
   TouchableOpacity,
-  View,
 } from 'react-native';
-import * as AppleAuthentication from 'expo-apple-authentication';
-import * as AuthSession from 'expo-auth-session';
-import * as WebBrowser from 'expo-web-browser';
-import * as Linking from 'expo-linking';
+import appleAuth, { AppleButton } from '@invertase/react-native-apple-authentication';
+import { GoogleSignin, statusCodes } from '@react-native-google-signin/google-signin';
 import api from '../api/client';
 import { loginWithApple, loginWithGoogle, storeTokens } from '../api/auth';
 import { useAuth } from '../context/AuthContext';
-
-WebBrowser.maybeCompleteAuthSession();
-
-const GOOGLE_CLIENT_ID = 'REPLACE_WITH_GOOGLE_CLIENT_ID';
 
 export default function RegisterScreen({
   navigation,
@@ -35,12 +29,15 @@ export default function RegisterScreen({
   const [loading, setLoading] = useState(false);
   const { refreshProfile } = useAuth();
 
-  // Pre-fill invite token from deep link.
+  // Pre-fill invite token from deep link arriving while screen is mounted.
   useEffect(() => {
     const handleURL = ({ url }: { url: string }) => {
-      const parsed = Linking.parse(url);
-      if (parsed.queryParams?.token) {
-        setInviteToken(String(parsed.queryParams.token));
+      try {
+        const parsed = new URL(url);
+        const token = parsed.searchParams.get('token');
+        if (token) setInviteToken(token);
+      } catch {
+        // malformed URL — ignore
       }
     };
     const sub = Linking.addEventListener('url', handleURL);
@@ -60,7 +57,6 @@ export default function RegisterScreen({
         password,
         invite_token: inviteToken.trim(),
       });
-      // After registration, log in to obtain mobile tokens.
       const res = await api.post('/api/v1/mobile/auth/login', {
         username: username.trim(),
         password,
@@ -76,40 +72,34 @@ export default function RegisterScreen({
 
   const handleApple = async () => {
     try {
-      const credential = await AppleAuthentication.signInAsync({
-        requestedScopes: [
-          AppleAuthentication.AppleAuthenticationScope.FULL_NAME,
-          AppleAuthentication.AppleAuthenticationScope.EMAIL,
-        ],
+      const credential = await appleAuth.performRequest({
+        requestedOperation: appleAuth.Operation.LOGIN,
+        requestedScopes: [appleAuth.Scope.FULL_NAME, appleAuth.Scope.EMAIL],
       });
       if (!credential.identityToken) throw new Error('No identity token');
       await loginWithApple(credential.identityToken);
       await refreshProfile();
     } catch (e: any) {
-      if (e.code !== 'ERR_CANCELED') Alert.alert('Apple sign-in failed', e.message);
+      if (e.code !== appleAuth.Error.CANCELED) {
+        Alert.alert('Apple sign-in failed', e.message);
+      }
     }
   };
 
-  const discovery = AuthSession.useAutoDiscovery('https://accounts.google.com');
-  const [request, response, promptAsync] = AuthSession.useAuthRequest(
-    {
-      clientId: GOOGLE_CLIENT_ID,
-      scopes: ['openid', 'email', 'profile'],
-      responseType: AuthSession.ResponseType.IdToken,
-    },
-    discovery,
-  );
-
-  useEffect(() => {
-    if (response?.type === 'success') {
-      const idToken = response.params.id_token;
-      if (idToken) {
-        loginWithGoogle(idToken)
-          .then(() => refreshProfile())
-          .catch((e) => Alert.alert('Google sign-in failed', e.message));
+  const handleGoogle = async () => {
+    try {
+      await GoogleSignin.hasPlayServices();
+      const response = await GoogleSignin.signIn();
+      const idToken = (response as any).data?.idToken ?? (response as any).idToken;
+      if (!idToken) throw new Error('No ID token');
+      await loginWithGoogle(idToken);
+      await refreshProfile();
+    } catch (e: any) {
+      if (e.code !== statusCodes.SIGN_IN_CANCELLED) {
+        Alert.alert('Google sign-in failed', e.message);
       }
     }
-  }, [response]);
+  };
 
   return (
     <KeyboardAvoidingView
@@ -131,16 +121,15 @@ export default function RegisterScreen({
       <Text style={styles.orDivider}>— or register with —</Text>
 
       {Platform.OS === 'ios' && (
-        <AppleAuthentication.AppleAuthenticationButton
-          buttonType={AppleAuthentication.AppleAuthenticationButtonType.SIGN_UP}
-          buttonStyle={AppleAuthentication.AppleAuthenticationButtonStyle.BLACK}
-          cornerRadius={8}
+        <AppleButton
+          buttonStyle={AppleButton.Style.BLACK}
+          buttonType={AppleButton.Type.SIGN_UP}
           style={styles.appleButton}
           onPress={handleApple}
         />
       )}
 
-      <TouchableOpacity style={[styles.button, styles.googleButton]} onPress={() => promptAsync()} disabled={!request}>
+      <TouchableOpacity style={[styles.button, styles.googleButton]} onPress={handleGoogle}>
         <Text style={styles.buttonText}>Sign up with Google</Text>
       </TouchableOpacity>
 

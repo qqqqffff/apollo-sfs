@@ -1,34 +1,39 @@
-import * as BackgroundFetch from 'expo-background-fetch';
-import * as TaskManager from 'expo-task-manager';
+import BackgroundFetch from 'react-native-background-fetch';
 import { SyncService } from '../services/SyncService';
 
-export const BACKGROUND_SYNC_TASK = 'apollo-background-sync';
-
-TaskManager.defineTask(BACKGROUND_SYNC_TASK, async () => {
+export const headlessTask = async (event: { taskId: string; timeout: boolean }) => {
+  if (event.timeout) {
+    BackgroundFetch.finish(event.taskId);
+    return;
+  }
   try {
     const svc = new SyncService();
     await svc.run();
-    return BackgroundFetch.BackgroundFetchResult.NewData;
-  } catch {
-    return BackgroundFetch.BackgroundFetchResult.Failed;
+  } finally {
+    BackgroundFetch.finish(event.taskId);
   }
-});
+};
 
-export async function registerBackgroundSync() {
-  const status = await BackgroundFetch.getStatusAsync();
-  if (
-    status === BackgroundFetch.BackgroundFetchStatus.Restricted ||
-    status === BackgroundFetch.BackgroundFetchStatus.Denied
-  ) {
-    return;
-  }
-
-  const isRegistered = await TaskManager.isTaskRegisteredAsync(BACKGROUND_SYNC_TASK);
-  if (!isRegistered) {
-    await BackgroundFetch.registerTaskAsync(BACKGROUND_SYNC_TASK, {
-      minimumInterval: 15 * 60, // 15 minutes — iOS enforced minimum
+export async function registerBackgroundSync(): Promise<void> {
+  await BackgroundFetch.configure(
+    {
+      minimumFetchInterval: 15, // minutes; iOS enforces its own minimum
       stopOnTerminate: false,
       startOnBoot: true,
-    });
-  }
+      enableHeadless: true,
+      requiredNetworkType: BackgroundFetch.NETWORK_TYPE_ANY,
+    },
+    async (taskId) => {
+      try {
+        const svc = new SyncService();
+        await svc.run();
+      } finally {
+        BackgroundFetch.finish(taskId);
+      }
+    },
+    (taskId) => {
+      // Timeout handler
+      BackgroundFetch.finish(taskId);
+    },
+  );
 }

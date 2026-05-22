@@ -8,13 +8,10 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import * as AppleAuthentication from 'expo-apple-authentication';
-import * as AuthSession from 'expo-auth-session';
-import * as WebBrowser from 'expo-web-browser';
+import appleAuth from '@invertase/react-native-apple-authentication';
+import { GoogleSignin, statusCodes } from '@react-native-google-signin/google-signin';
 import { linkSocial, unlinkSocial } from '../api/auth';
 import { useAuth } from '../context/AuthContext';
-
-WebBrowser.maybeCompleteAuthSession();
 
 const GOOGLE_CLIENT_ID = 'REPLACE_WITH_GOOGLE_CLIENT_ID';
 
@@ -23,17 +20,18 @@ export default function ProfileScreen() {
   const [linking, setLinking] = useState(false);
 
   const handleLinkApple = async () => {
-    if (!Platform.OS === 'ios') return;
+    if (Platform.OS !== 'ios') return;
     setLinking(true);
     try {
-      const credential = await AppleAuthentication.signInAsync({
-        requestedScopes: [AppleAuthentication.AppleAuthenticationScope.EMAIL],
+      const credential = await appleAuth.performRequest({
+        requestedOperation: appleAuth.Operation.LOGIN,
+        requestedScopes: [appleAuth.Scope.EMAIL],
       });
       if (!credential.identityToken) throw new Error('No token');
       await linkSocial('apple', credential.identityToken);
       Alert.alert('Apple ID linked');
     } catch (e: any) {
-      if (e.code !== 'ERR_CANCELED') Alert.alert('Failed to link Apple ID', e.message);
+      if (e.code !== appleAuth.Error.CANCELED) Alert.alert('Failed to link Apple ID', e.message);
     } finally {
       setLinking(false);
     }
@@ -48,26 +46,29 @@ export default function ProfileScreen() {
     }
   };
 
-  const discovery = AuthSession.useAutoDiscovery('https://accounts.google.com');
-  const [request, response, promptAsync] = AuthSession.useAuthRequest(
-    {
-      clientId: GOOGLE_CLIENT_ID,
-      scopes: ['openid', 'email'],
-      responseType: AuthSession.ResponseType.IdToken,
-    },
-    discovery,
-  );
-
-  React.useEffect(() => {
-    if (response?.type === 'success') {
-      const idToken = response.params.id_token;
-      if (idToken) {
-        linkSocial('google', idToken)
-          .then(() => Alert.alert('Google account linked'))
-          .catch((e) => Alert.alert('Failed to link Google', e.message));
+  const handleLinkGoogle = async () => {
+    try {
+      await GoogleSignin.hasPlayServices();
+      const response = await GoogleSignin.signIn();
+      const idToken = (response as any).data?.idToken ?? (response as any).idToken;
+      if (!idToken) throw new Error('No ID token');
+      await linkSocial('google', idToken);
+      Alert.alert('Google account linked');
+    } catch (e: any) {
+      if (e.code !== statusCodes.SIGN_IN_CANCELLED) {
+        Alert.alert('Failed to link Google', e.message);
       }
     }
-  }, [response]);
+  };
+
+  const handleUnlinkGoogle = async () => {
+    try {
+      await unlinkSocial('google');
+      Alert.alert('Google account unlinked');
+    } catch (e: any) {
+      Alert.alert('Failed', e.message);
+    }
+  };
 
   const usedPct =
     profile && profile.storage_quota_bytes > 0
@@ -108,11 +109,11 @@ export default function ProfileScreen() {
         <View style={styles.row}>
           <Text style={styles.rowLabel}>Google</Text>
           <View style={styles.rowActions}>
-            <TouchableOpacity onPress={() => promptAsync()} disabled={!request}>
+            <TouchableOpacity onPress={handleLinkGoogle}>
               <Text style={styles.link}>Link</Text>
             </TouchableOpacity>
             <Text style={styles.sep}> · </Text>
-            <TouchableOpacity onPress={() => unlinkSocial('google').catch(() => {})}>
+            <TouchableOpacity onPress={handleUnlinkGoogle}>
               <Text style={styles.unlink}>Unlink</Text>
             </TouchableOpacity>
           </View>

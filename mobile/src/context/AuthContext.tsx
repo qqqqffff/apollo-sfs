@@ -1,6 +1,5 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
-import * as SecureStore from 'expo-secure-store';
-import { getStoredTokens } from '../api/client';
+import { clearTokens, getStoredTokens } from '../api/client';
 import { getMe } from '../api/auth';
 
 interface UserProfile {
@@ -52,8 +51,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [loadSession]);
 
   const signOut = useCallback(async () => {
-    await SecureStore.deleteItemAsync('apollo_access_token');
-    await SecureStore.deleteItemAsync('apollo_refresh_token');
+    await clearTokens();
     setProfile(null);
   }, []);
 

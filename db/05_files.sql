@@ -22,6 +22,9 @@ CREATE TABLE files (
     -- hidden files are excluded from collection listings unless explicitly
     -- requested via a "show hidden" toggle or the dedicated hidden view.
     hidden           BOOLEAN     NOT NULL DEFAULT FALSE,
+    -- sha256_hash is the hex-encoded SHA-256 of the plaintext bytes, used for
+    -- client-side dedup: mobile clients check before uploading identical content.
+    sha256_hash      TEXT,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -29,6 +32,7 @@ CREATE TABLE files (
 CREATE INDEX files_user_id_idx   ON files (user_id);
 CREATE INDEX files_folder_id_idx ON files (folder_id);
 CREATE INDEX files_taken_at_idx  ON files (folder_id, taken_at);
+CREATE INDEX files_sha256_idx    ON files (user_id, sha256_hash) WHERE sha256_hash IS NOT NULL;
 
 -- Unique filename per folder for non-root files.
 CREATE UNIQUE INDEX files_unique_name_per_folder

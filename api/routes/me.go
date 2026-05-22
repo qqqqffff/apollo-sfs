@@ -140,6 +140,67 @@ func (h *Handler) Me(c *gin.Context) {
 	})
 }
 
+type socialLinkRequest struct {
+	Provider string `json:"provider" binding:"required"`
+	Token    string `json:"token"    binding:"required"`
+}
+
+type socialUnlinkRequest struct {
+	Provider string `json:"provider" binding:"required"`
+}
+
+// LinkSocial handles POST /api/v1/me/social/link.
+// Links an Apple or Google identity to the authenticated user's account.
+func (h *Handler) LinkSocial(c *gin.Context) {
+	userID := c.GetString("userID")
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	var req socialLinkRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "provider and token are required"})
+		return
+	}
+	if req.Provider != "apple" && req.Provider != "google" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "provider must be apple or google"})
+		return
+	}
+
+	if err := h.auth.LinkSocialIdentity(c.Request.Context(), userID, req.Provider, req.Token); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "identity linked"})
+}
+
+// UnlinkSocial handles DELETE /api/v1/me/social/unlink.
+// Removes an Apple or Google identity link from the authenticated user's account.
+func (h *Handler) UnlinkSocial(c *gin.Context) {
+	userID := c.GetString("userID")
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	var req socialUnlinkRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "provider is required"})
+		return
+	}
+	if req.Provider != "apple" && req.Provider != "google" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "provider must be apple or google"})
+		return
+	}
+
+	if err := h.auth.UnlinkSocialIdentity(c.Request.Context(), userID, req.Provider); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "identity unlinked"})
+}
+
 // clientIP extracts the real client IP from the request, preferring
 // X-Real-IP (set by nginx) over the remote address.
 func clientIP(c *gin.Context) string {

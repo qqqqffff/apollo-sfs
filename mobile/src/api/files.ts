@@ -14,9 +14,18 @@ export interface ApiFile {
   updated_at: string;
 }
 
+export interface ApiFolder {
+  id: string;
+  user_id: string;
+  parent_id: string | null;
+  name: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface FolderContents {
-  folder: unknown;
-  subfolders: { items: unknown[]; next_token?: string };
+  folder: ApiFolder | null;
+  subfolders: { items: ApiFolder[]; next_token?: string };
   files: { items: ApiFile[]; next_token?: string };
 }
 

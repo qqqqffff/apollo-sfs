@@ -53,6 +53,12 @@ pod install
 cd ..
 ```
 
+### 1c. SVG support for icons
+
+The app uses `lucide-react-native` with `react-native-svg` for vector icons. Both libraries are installed by `npm install`. On iOS, CocoaPods picks up the native SVG renderer automatically during `pod install`. On Android, autolinking handles it during `./gradlew assembleDebug`.
+
+No additional font-file setup is required — icons are rendered as SVG paths.
+
 ---
 
 ## 2. Native project configuration

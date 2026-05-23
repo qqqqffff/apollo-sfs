@@ -1,13 +1,19 @@
 import React, { useEffect } from 'react';
-import { ActivityIndicator, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Platform, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { CloudUpload, RefreshCw } from 'lucide-react-native';
 import { registerDevice } from '../api/sync';
 import { registerBackgroundSync } from '../tasks/backgroundSync';
 import { useSync } from '../context/SyncContext';
 import { useAuth } from '../context/AuthContext';
-import { Platform } from 'react-native';
+import { colors, radius, shadow, spacing } from '../theme';
 
 const DEVICE_ID_KEY = 'apollo_device_id';
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024 ** 3) return `${(bytes / 1024 / 1024).toFixed(0)} MB`;
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GB`;
+}
 
 export default function HomeScreen() {
   const { profile } = useAuth();
@@ -31,38 +37,68 @@ export default function HomeScreen() {
     })();
   }, []);
 
-  const usedPct =
-    profile && profile.storage_quota_bytes > 0
-      ? ((profile.storage_used_bytes / profile.storage_quota_bytes) * 100).toFixed(1)
-      : '0';
+  const usedBytes = profile?.storage_used_bytes ?? 0;
+  const quotaBytes = profile?.storage_quota_bytes ?? 0;
+  const usedPct = quotaBytes > 0 ? (usedBytes / quotaBytes) * 100 : 0;
+  const barColor = usedPct > 90 ? colors.error : usedPct > 70 ? colors.warning : colors.primary;
 
   return (
     <View style={styles.container}>
-      <Text style={styles.greeting}>Welcome, {profile?.username ?? '…'}</Text>
-
+      {/* Storage card */}
       <View style={styles.card}>
-        <Text style={styles.cardTitle}>Storage</Text>
-        <Text style={styles.cardValue}>{usedPct}% used</Text>
-        <View style={styles.bar}>
-          <View style={[styles.barFill, { width: `${Math.min(parseFloat(usedPct), 100)}%` as any }]} />
+        <Text style={styles.cardLabel}>Storage</Text>
+        <View style={styles.storageRow}>
+          <Text style={styles.storageValue}>
+            {formatBytes(usedBytes)}
+          </Text>
+          <Text style={styles.storageQuota}>
+            {' '}/ {formatBytes(quotaBytes)}
+          </Text>
         </View>
+        <View style={styles.barTrack}>
+          <View style={[styles.barFill, { width: `${Math.min(usedPct, 100)}%` as any, backgroundColor: barColor }]} />
+        </View>
+        <Text style={styles.barLabel}>{usedPct.toFixed(1)}% used</Text>
       </View>
 
+      {/* Backup card */}
       <View style={styles.card}>
-        <Text style={styles.cardTitle}>Camera Roll Backup</Text>
-        {pendingCount > 0 && (
-          <Text style={styles.pending}>{pendingCount} photos waiting to upload</Text>
-        )}
-        {lastSyncedAt && (
-          <Text style={styles.lastSync}>Last synced: {lastSyncedAt.toLocaleTimeString()}</Text>
-        )}
-        {lastError && <Text style={styles.error}>{lastError}</Text>}
+        <Text style={styles.cardLabel}>Camera Roll Backup</Text>
 
-        <TouchableOpacity style={styles.syncButton} onPress={triggerSync} disabled={isSyncing}>
+        {pendingCount > 0 && (
+          <View style={styles.statusRow}>
+            <View style={[styles.statusDot, { backgroundColor: colors.warning }]} />
+            <Text style={styles.statusText}>{pendingCount} photo{pendingCount !== 1 ? 's' : ''} waiting to upload</Text>
+          </View>
+        )}
+
+        {lastSyncedAt && (
+          <View style={styles.statusRow}>
+            <View style={[styles.statusDot, { backgroundColor: colors.success }]} />
+            <Text style={styles.statusText}>
+              Last synced {lastSyncedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+            </Text>
+          </View>
+        )}
+
+        {lastError && (
+          <View style={[styles.errorBox]}>
+            <Text style={styles.errorBoxText}>{lastError}</Text>
+          </View>
+        )}
+
+        <TouchableOpacity
+          style={[styles.syncButton, isSyncing && styles.syncButtonDisabled]}
+          onPress={triggerSync}
+          disabled={isSyncing}
+        >
           {isSyncing ? (
-            <ActivityIndicator color="#fff" />
+            <ActivityIndicator color={colors.surface} size="small" />
           ) : (
-            <Text style={styles.syncButtonText}>Sync Now</Text>
+            <>
+              <CloudUpload size={18} color={colors.surface} strokeWidth={2} style={styles.syncIcon} />
+              <Text style={styles.syncButtonText}>Sync Now</Text>
+            </>
           )}
         </TouchableOpacity>
       </View>
@@ -71,31 +107,60 @@ export default function HomeScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, padding: 20, backgroundColor: '#f5f5f5' },
-  greeting: { fontSize: 22, fontWeight: '700', marginBottom: 20 },
+  container: { flex: 1, backgroundColor: colors.background, padding: spacing.md },
+
   card: {
-    backgroundColor: '#fff',
-    borderRadius: 12,
-    padding: 16,
-    marginBottom: 16,
-    shadowColor: '#000',
-    shadowOpacity: 0.06,
-    shadowRadius: 8,
-    elevation: 2,
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    padding: spacing.md,
+    marginBottom: spacing.md,
+    ...shadow.md,
   },
-  cardTitle: { fontSize: 14, color: '#666', marginBottom: 4 },
-  cardValue: { fontSize: 24, fontWeight: '700', marginBottom: 8 },
-  bar: { height: 8, backgroundColor: '#e5e7eb', borderRadius: 4, overflow: 'hidden' },
-  barFill: { height: '100%', backgroundColor: '#1a56db', borderRadius: 4 },
-  pending: { color: '#f59e0b', fontWeight: '600', marginBottom: 4 },
-  lastSync: { color: '#6b7280', fontSize: 13, marginBottom: 8 },
-  error: { color: '#ef4444', fontSize: 13, marginBottom: 8 },
+  cardLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: colors.textMuted,
+    textTransform: 'uppercase',
+    letterSpacing: 0.8,
+    marginBottom: spacing.sm,
+  },
+
+  storageRow: { flexDirection: 'row', alignItems: 'baseline', marginBottom: spacing.sm },
+  storageValue: { fontSize: 28, fontWeight: '700', color: colors.textPrimary },
+  storageQuota: { fontSize: 16, color: colors.textSecondary },
+
+  barTrack: {
+    height: 8,
+    backgroundColor: colors.border,
+    borderRadius: radius.xl,
+    overflow: 'hidden',
+    marginBottom: spacing.xs,
+  },
+  barFill: { height: '100%', borderRadius: radius.xl },
+  barLabel: { fontSize: 12, color: colors.textSecondary },
+
+  statusRow: { flexDirection: 'row', alignItems: 'center', marginBottom: spacing.xs },
+  statusDot: { width: 7, height: 7, borderRadius: 4, marginRight: spacing.sm },
+  statusText: { fontSize: 14, color: colors.textSecondary },
+
+  errorBox: {
+    backgroundColor: colors.errorBg,
+    borderRadius: radius.sm,
+    padding: spacing.sm,
+    marginBottom: spacing.sm,
+  },
+  errorBoxText: { fontSize: 13, color: colors.error },
+
   syncButton: {
-    backgroundColor: '#1a56db',
-    borderRadius: 8,
+    flexDirection: 'row',
+    backgroundColor: colors.primary,
+    borderRadius: radius.md,
     padding: 12,
     alignItems: 'center',
-    marginTop: 8,
+    justifyContent: 'center',
+    marginTop: spacing.sm,
   },
-  syncButtonText: { color: '#fff', fontWeight: '600' },
+  syncButtonDisabled: { opacity: 0.6 },
+  syncIcon: { marginRight: spacing.sm },
+  syncButtonText: { color: colors.surface, fontWeight: '600', fontSize: 15 },
 });

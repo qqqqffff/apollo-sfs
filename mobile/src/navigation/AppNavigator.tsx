@@ -3,8 +3,9 @@ import { Linking } from 'react-native';
 import { NavigationContainer, LinkingOptions } from '@react-navigation/native';
 import { createStackNavigator } from '@react-navigation/stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
-import { Text } from 'react-native';
+import { Home, Folder, Star, User, Settings } from 'lucide-react-native';
 import { useAuth } from '../context/AuthContext';
+import { colors } from '../theme';
 import LoginScreen from '../screens/LoginScreen';
 import RegisterScreen from '../screens/RegisterScreen';
 import HomeScreen from '../screens/HomeScreen';
@@ -15,6 +16,14 @@ import SettingsScreen from '../screens/SettingsScreen';
 
 const Stack = createStackNavigator();
 const Tab = createBottomTabNavigator();
+
+const TAB_ICONS: Record<string, React.ComponentType<{ size: number; color: string; strokeWidth?: number }>> = {
+  Home: Home,
+  Files: Folder,
+  Favorites: Star,
+  Profile: User,
+  Settings: Settings,
+};
 
 function AuthStack({ initialToken }: { initialToken?: string }) {
   return (
@@ -33,23 +42,36 @@ function MainTabs() {
   return (
     <Tab.Navigator
       screenOptions={({ route }) => ({
-        tabBarIcon: () => {
-          const icons: Record<string, string> = {
-            Home: '🏠',
-            Files: '📁',
-            Favorites: '★',
-            Profile: '👤',
-            Settings: '⚙️',
-          };
-          return <Text>{icons[route.name] ?? '?'}</Text>;
+        tabBarIcon: ({ focused, color, size }) => {
+          const Icon = TAB_ICONS[route.name];
+          if (!Icon) return null;
+          return <Icon size={size} color={color} strokeWidth={focused ? 2.5 : 1.5} />;
+        },
+        tabBarActiveTintColor: colors.primary,
+        tabBarInactiveTintColor: colors.textMuted,
+        tabBarStyle: {
+          backgroundColor: colors.surface,
+          borderTopColor: colors.border,
+        },
+        headerStyle: {
+          backgroundColor: colors.surface,
+          borderBottomColor: colors.border,
+          borderBottomWidth: 1,
+          elevation: 0,
+          shadowOpacity: 0,
+        },
+        headerTitleStyle: {
+          color: colors.textPrimary,
+          fontWeight: '600',
+          fontSize: 17,
         },
       })}
     >
-      <Tab.Screen name="Home" component={HomeScreen} />
-      <Tab.Screen name="Files" component={FilesScreen} />
-      <Tab.Screen name="Favorites" component={FavoritesScreen} />
-      <Tab.Screen name="Profile" component={ProfileScreen} />
-      <Tab.Screen name="Settings" component={SettingsScreen} />
+      <Tab.Screen name="Home" component={HomeScreen} options={{ title: 'Home' }} />
+      <Tab.Screen name="Files" component={FilesScreen} options={{ title: 'Files' }} />
+      <Tab.Screen name="Favorites" component={FavoritesScreen} options={{ title: 'Favorites' }} />
+      <Tab.Screen name="Profile" component={ProfileScreen} options={{ title: 'Profile' }} />
+      <Tab.Screen name="Settings" component={SettingsScreen} options={{ title: 'Settings' }} />
     </Tab.Navigator>
   );
 }

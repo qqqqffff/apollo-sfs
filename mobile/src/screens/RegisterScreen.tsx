@@ -4,16 +4,19 @@ import {
   KeyboardAvoidingView,
   Linking,
   Platform,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
   TouchableOpacity,
+  View,
 } from 'react-native';
 import appleAuth, { AppleButton } from '@invertase/react-native-apple-authentication';
 import { GoogleSignin, statusCodes } from '@react-native-google-signin/google-signin';
 import api from '../api/client';
 import { loginWithApple, loginWithGoogle, storeTokens } from '../api/auth';
 import { useAuth } from '../context/AuthContext';
+import { colors, radius, spacing } from '../theme';
 
 export default function RegisterScreen({
   navigation,
@@ -80,9 +83,7 @@ export default function RegisterScreen({
       await loginWithApple(credential.identityToken);
       await refreshProfile();
     } catch (e: any) {
-      if (e.code !== appleAuth.Error.CANCELED) {
-        Alert.alert('Apple sign-in failed', e.message);
-      }
+      if (e.code !== appleAuth.Error.CANCELED) Alert.alert('Apple sign-in failed', e.message);
     }
   };
 
@@ -103,52 +104,147 @@ export default function RegisterScreen({
 
   return (
     <KeyboardAvoidingView
-      style={styles.container}
+      style={styles.outer}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
     >
-      <Text style={styles.title}>Create Account</Text>
-      <Text style={styles.subtitle}>You'll need an invitation link from an admin.</Text>
+      <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
+        <View style={styles.header}>
+          <Text style={styles.title}>Create Account</Text>
+          <Text style={styles.subtitle}>You'll need an invitation link from an admin.</Text>
+        </View>
 
-      <TextInput style={styles.input} placeholder="Username" autoCapitalize="none" value={username} onChangeText={setUsername} />
-      <TextInput style={styles.input} placeholder="Email" keyboardType="email-address" autoCapitalize="none" value={email} onChangeText={setEmail} />
-      <TextInput style={styles.input} placeholder="Password" secureTextEntry value={password} onChangeText={setPassword} />
-      <TextInput style={styles.input} placeholder="Invite token" autoCapitalize="none" value={inviteToken} onChangeText={setInviteToken} />
+        <View style={styles.form}>
+          <Text style={styles.inputLabel}>Invite Token</Text>
+          <TextInput
+            style={[styles.input, inviteToken && styles.inputFilled]}
+            placeholder="Paste your invite token"
+            placeholderTextColor={colors.textMuted}
+            autoCapitalize="none"
+            autoCorrect={false}
+            value={inviteToken}
+            onChangeText={setInviteToken}
+          />
 
-      <TouchableOpacity style={styles.button} onPress={handleRegister} disabled={loading}>
-        <Text style={styles.buttonText}>{loading ? 'Creating account…' : 'Register'}</Text>
-      </TouchableOpacity>
+          <Text style={styles.inputLabel}>Username</Text>
+          <TextInput
+            style={styles.input}
+            placeholder="choose-a-username"
+            placeholderTextColor={colors.textMuted}
+            autoCapitalize="none"
+            value={username}
+            onChangeText={setUsername}
+          />
 
-      <Text style={styles.orDivider}>— or register with —</Text>
+          <Text style={styles.inputLabel}>Email</Text>
+          <TextInput
+            style={styles.input}
+            placeholder="you@example.com"
+            placeholderTextColor={colors.textMuted}
+            keyboardType="email-address"
+            autoCapitalize="none"
+            value={email}
+            onChangeText={setEmail}
+          />
 
-      {Platform.OS === 'ios' && (
-        <AppleButton
-          buttonStyle={AppleButton.Style.BLACK}
-          buttonType={AppleButton.Type.SIGN_UP}
-          style={styles.appleButton}
-          onPress={handleApple}
-        />
-      )}
+          <Text style={styles.inputLabel}>Password</Text>
+          <TextInput
+            style={styles.input}
+            placeholder="••••••••"
+            placeholderTextColor={colors.textMuted}
+            secureTextEntry
+            value={password}
+            onChangeText={setPassword}
+          />
 
-      <TouchableOpacity style={[styles.button, styles.googleButton]} onPress={handleGoogle}>
-        <Text style={styles.buttonText}>Sign up with Google</Text>
-      </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.primaryButton, loading && styles.buttonDisabled]}
+            onPress={handleRegister}
+            disabled={loading}
+          >
+            <Text style={styles.primaryButtonText}>{loading ? 'Creating account…' : 'Register'}</Text>
+          </TouchableOpacity>
+        </View>
 
-      <TouchableOpacity onPress={() => navigation.navigate('Login')}>
-        <Text style={styles.link}>Already have an account? Sign in</Text>
-      </TouchableOpacity>
+        <View style={styles.dividerRow}>
+          <View style={styles.dividerLine} />
+          <Text style={styles.dividerText}>or register with</Text>
+          <View style={styles.dividerLine} />
+        </View>
+
+        <View style={styles.socialGroup}>
+          {Platform.OS === 'ios' && (
+            <AppleButton
+              buttonStyle={AppleButton.Style.BLACK}
+              buttonType={AppleButton.Type.SIGN_UP}
+              style={styles.appleButton}
+              onPress={handleApple}
+            />
+          )}
+
+          <TouchableOpacity style={styles.googleButton} onPress={handleGoogle}>
+            <Text style={styles.googleButtonText}>Sign up with Google</Text>
+          </TouchableOpacity>
+        </View>
+
+        <TouchableOpacity style={styles.footer} onPress={() => navigation.navigate('Login')}>
+          <Text style={styles.footerText}>
+            Already have an account?{' '}
+            <Text style={styles.footerLink}>Sign in</Text>
+          </Text>
+        </TouchableOpacity>
+      </ScrollView>
     </KeyboardAvoidingView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, justifyContent: 'center', padding: 24, backgroundColor: '#fff' },
-  title: { fontSize: 28, fontWeight: '700', textAlign: 'center', marginBottom: 8 },
-  subtitle: { textAlign: 'center', color: '#666', marginBottom: 24 },
-  input: { borderWidth: 1, borderColor: '#ccc', borderRadius: 8, padding: 12, marginBottom: 12, fontSize: 16 },
-  button: { backgroundColor: '#1a56db', borderRadius: 8, padding: 14, alignItems: 'center', marginBottom: 12 },
-  buttonText: { color: '#fff', fontWeight: '600', fontSize: 16 },
-  googleButton: { backgroundColor: '#db4437' },
-  appleButton: { width: '100%', height: 48, marginBottom: 12 },
-  orDivider: { textAlign: 'center', color: '#888', marginVertical: 8 },
-  link: { textAlign: 'center', color: '#1a56db', marginTop: 16 },
+  outer: { flex: 1, backgroundColor: colors.surface },
+  container: { flexGrow: 1, padding: spacing.lg },
+
+  header: { marginTop: spacing.xl, marginBottom: spacing.lg },
+  title: { fontSize: 28, fontWeight: '700', color: colors.textPrimary, marginBottom: spacing.xs },
+  subtitle: { fontSize: 15, color: colors.textSecondary },
+
+  form: { marginBottom: spacing.lg },
+  inputLabel: { fontSize: 13, fontWeight: '600', color: colors.textSecondary, marginBottom: spacing.xs },
+  input: {
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    paddingHorizontal: spacing.md,
+    paddingVertical: 11,
+    fontSize: 16,
+    color: colors.textPrimary,
+    marginBottom: spacing.md,
+  },
+  inputFilled: { borderColor: colors.primary, backgroundColor: colors.primaryLighter },
+
+  primaryButton: {
+    backgroundColor: colors.primary,
+    borderRadius: radius.md,
+    paddingVertical: 13,
+    alignItems: 'center',
+    marginTop: spacing.xs,
+  },
+  buttonDisabled: { opacity: 0.6 },
+  primaryButtonText: { color: colors.surface, fontWeight: '600', fontSize: 16 },
+
+  dividerRow: { flexDirection: 'row', alignItems: 'center', marginVertical: spacing.lg },
+  dividerLine: { flex: 1, height: 1, backgroundColor: colors.border },
+  dividerText: { fontSize: 13, color: colors.textMuted, marginHorizontal: spacing.sm },
+
+  socialGroup: { gap: spacing.sm },
+  appleButton: { width: '100%', height: 48 },
+  googleButton: {
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  googleButtonText: { fontSize: 16, fontWeight: '500', color: colors.textPrimary },
+
+  footer: { marginTop: spacing.xl, alignItems: 'center', paddingBottom: spacing.md },
+  footerText: { fontSize: 14, color: colors.textSecondary },
+  footerLink: { color: colors.primary, fontWeight: '600' },
 });

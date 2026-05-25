@@ -16,7 +16,11 @@ type Folder struct {
 	Name     string     `json:"name" db:"name"`
 	// Kind is "regular" or "media". A media folder is a top-level picture/video
 	// collection; folders nested beneath it act as subcollections.
-	Kind      string    `json:"kind" db:"kind"`
+	Kind string `json:"kind" db:"kind"`
+	// SizeBytes is the recursive sum of all file sizes under the folder
+	// (including descendants). Computed by the listing queries; 0 on bare
+	// inserts/updates that don't compute it.
+	SizeBytes int64     `json:"size_bytes" db:"size_bytes"`
 	CreatedAt time.Time `json:"created_at" db:"created_at"`
 	UpdatedAt time.Time `json:"updated_at" db:"updated_at"`
 }

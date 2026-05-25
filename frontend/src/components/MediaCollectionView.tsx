@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   MdAdd,
@@ -9,6 +9,7 @@ import {
   MdMovie,
   MdInsertDriveFile,
   MdPhotoLibrary,
+  MdUploadFile,
   MdVisibility,
   MdVisibilityOff,
 } from 'react-icons/md'
@@ -17,6 +18,9 @@ import { hideFile, unhideFile, previewUrl } from '../api/files'
 import { copyToCollection, removeFromCollection } from '../api/collections'
 import { meQueryOptions } from '../api/me'
 import { useNotification } from '../context/NotificationContext'
+import { useFileUpload } from '../hooks/useFileUpload'
+import { UploadModal } from './UploadModal'
+import { UploadToast } from './UploadToast'
 import type { File, Folder, HiddenMode, MediaSort } from '../types/api'
 
 interface Props {
@@ -57,6 +61,9 @@ export function MediaCollectionView({ folderId, folder, readOnly, onBack, onOpen
   const [hidden, setHidden] = useState<HiddenMode>('hide')
   const [creating, setCreating] = useState(false)
   const [newName, setNewName] = useState('')
+  const fileRef = useRef<HTMLInputElement>(null)
+  const [pendingFiles, setPendingFiles] = useState<globalThis.File[]>([])
+  const { progress, startUpload, dismiss } = useFileUpload()
 
   const { subfolders, files, isLoading, error, hasNextPage, isFetchingNextPage, fetchNextPage } =
     useInfiniteMedia(folderId, sort, hidden)
@@ -129,13 +136,33 @@ export function MediaCollectionView({ folderId, folder, readOnly, onBack, onOpen
         </div>
 
         {!readOnly && (
-          <button
-            onClick={() => { setCreating(true); setNewName('') }}
-            disabled={creating}
-            className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs border border-gray-200 rounded-lg text-gray-700 hover:bg-gray-50 cursor-pointer transition-colors disabled:opacity-40"
-          >
-            <MdCreateNewFolder className="text-sm text-gray-500" /> New subcollection
-          </button>
+          <>
+            <button
+              onClick={() => { setCreating(true); setNewName('') }}
+              disabled={creating}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs border border-gray-200 rounded-lg text-gray-700 hover:bg-gray-50 cursor-pointer transition-colors disabled:opacity-40"
+            >
+              <MdCreateNewFolder className="text-sm text-gray-500" /> New subcollection
+            </button>
+            <input
+              ref={fileRef}
+              type="file"
+              multiple
+              accept="image/*,video/*"
+              className="hidden"
+              onChange={(e) => {
+                const selected = Array.from(e.target.files ?? [])
+                if (selected.length > 0) setPendingFiles(selected)
+                e.target.value = ''
+              }}
+            />
+            <button
+              onClick={() => fileRef.current?.click()}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium cursor-pointer transition-colors"
+            >
+              <MdUploadFile className="text-sm" /> Upload
+            </button>
+          </>
         )}
       </div>
 
@@ -223,6 +250,25 @@ export function MediaCollectionView({ folderId, folder, readOnly, onBack, onOpen
       {user && (
         <p className="text-xs text-gray-400 mt-6">Tip: enable auto-upload in your profile to send all photos and videos here.</p>
       )}
+
+      {pendingFiles.length > 0 && user && !readOnly && (
+        <UploadModal
+          files={pendingFiles}
+          folderName={folder.name}
+          user={user}
+          onConfirm={() => {
+            const filesToUpload = pendingFiles
+            setPendingFiles([])
+            startUpload(filesToUpload, folderId, () => {
+              invalidate()
+              queryClient.invalidateQueries({ queryKey: ['me'] })
+            })
+          }}
+          onCancel={() => setPendingFiles([])}
+        />
+      )}
+
+      <UploadToast progress={progress} onDismiss={dismiss} />
     </div>
   )
 }

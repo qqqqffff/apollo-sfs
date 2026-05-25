@@ -329,10 +329,18 @@ func (s *FileService) Upload(ctx context.Context, in UploadInput) (*models.File,
 
 // resolveUploadFolder returns the destination folder for an upload. When the
 // user has configured a media auto-upload folder and the upload is an image or
-// video, every such upload is routed there (overriding the requested folder).
+// video, every such upload is routed there — UNLESS the user is explicitly
+// uploading into a media folder already, in which case that destination wins
+// (so per-collection uploads land where the user dropped them).
 func (s *FileService) resolveUploadFolder(ctx context.Context, username string, requested *uuid.UUID, mimeType string) *uuid.UUID {
 	if !isMediaMime(mimeType) {
 		return requested
+	}
+	// Explicit upload into a media folder: respect it, skip redirect.
+	if requested != nil {
+		if folder, err := s.queries.GetFolderByID(ctx, *requested); err == nil && folder.Kind == models.FolderKindMedia {
+			return requested
+		}
 	}
 	prefs, err := s.queries.GetUserPreferences(ctx, username)
 	if err != nil || prefs.MediaAutouploadFolderID == nil {

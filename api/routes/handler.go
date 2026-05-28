@@ -58,6 +58,7 @@ type FolderServicer interface {
 	CopyToSubcollection(ctx context.Context, userID, collectionID, fileID uuid.UUID) error
 	MoveSubcollectionItem(ctx context.Context, userID, fileID, fromCollectionID, toCollectionID uuid.UUID) error
 	RemoveFromSubcollection(ctx context.Context, userID, collectionID, fileID uuid.UUID) error
+	GetAncestors(ctx context.Context, folderID, userID uuid.UUID) ([]models.Folder, error)
 }
 
 // Compile-time checks that the concrete service types satisfy these interfaces.
@@ -77,6 +78,7 @@ type Handler struct {
 	uploads         *services.UploadSessionStore
 	email           *services.EmailService
 	presign         *services.PresignService
+	apiKeys         *services.APIKeyService
 	turnstileSecret string
 	// verifyCaptcha overrides the real Turnstile HTTP call. When nil the
 	// production verifyTurnstile function is used.
@@ -105,6 +107,13 @@ func NewHandler(q Querier, fileSvc FileServicer, folderSvc FolderServicer, invit
 // tests that need to bypass real HTTP calls to Cloudflare.
 func SetVerifyCaptcha(h *Handler, fn func(secret, token, ip string) (bool, error)) {
 	h.verifyCaptcha = fn
+}
+
+// SetAPIKeyService installs the API key service on an existing Handler.
+// Wired from main once the service is constructed; nil is tolerated and
+// causes the management endpoints to return 503 (configured, not crash).
+func SetAPIKeyService(h *Handler, svc *services.APIKeyService) {
+	h.apiKeys = svc
 }
 
 // SetInviteService replaces the invite service on an existing Handler.

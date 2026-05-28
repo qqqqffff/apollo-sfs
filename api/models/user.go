@@ -16,6 +16,8 @@ type User struct {
 	LastSeenAt        *time.Time `json:"last_seen_at" db:"last_seen_at"`
 	CreatedAt         time.Time  `json:"created_at" db:"created_at"`
 	IsAdmin           bool       `json:"is_admin" db:"is_admin"`
+	IsPremium         bool       `json:"is_premium" db:"is_premium"`
+	PremiumGrantedAt  *time.Time `json:"premium_granted_at" db:"premium_granted_at"`
 	// ActiveBan is populated by the admin ListUsers query via a lateral join.
 	// It is nil when the user has no active ban or suspension.
 	ActiveBan *UserBan `json:"active_ban,omitempty"`

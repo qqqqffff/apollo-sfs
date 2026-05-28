@@ -39,6 +39,20 @@ func NewFolderService(q *db.Queries) *FolderService {
 
 // ── Public operations ─────────────────────────────────────────────────────────
 
+// GetAncestors returns the breadcrumb chain from root → leaf ending at
+// folderID. Wrapped in ForUser so RLS confirms ownership in a single round
+// trip. Returns an empty slice (not nil, not an error) when folderID does
+// not belong to userID, matching the "treat-as-not-found" pattern used in
+// the rest of the package.
+func (s *FolderService) GetAncestors(ctx context.Context, folderID, userID uuid.UUID) ([]models.Folder, error) {
+	q, tx, err := s.queries.ForUser(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("ancestors: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	return q.GetFolderAncestors(ctx, userID, folderID)
+}
+
 // ListRoot returns the top-level folders (parent_id IS NULL) and root-level
 // files for the given userID, with independent pagination for each list.
 // When folderPage.Skip or filePage.Skip is true the corresponding list is

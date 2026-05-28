@@ -20,7 +20,9 @@ import (
 	"apollo-sfs.com/api/routes/admin"
 	"apollo-sfs.com/api/routes/auth"
 	"apollo-sfs.com/api/routes/middleware"
+	"apollo-sfs.com/api/routes/payments"
 	"apollo-sfs.com/api/routes/services"
+	"apollo-sfs.com/api/routes/sfs"
 )
 
 func main() {
@@ -214,10 +216,27 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 
 	uploadStore := services.NewUploadSessionStore()
 	presignSvc := services.NewPresignService(cfg.PresignSecret)
+	apiKeySvc := services.NewAPIKeyService(queries, []byte(cfg.SFSAPIKeyPepper))
+	apiKeyMW := middleware.NewAPIKeyMiddleware(apiKeySvc)
 
 	h := routes.NewHandler(queries, fileSvc, folderSvc, inviteSvc, favSvc, authSvc, uploadStore, emailSvc, presignSvc, cfg.TurnstileSecretKey)
+	routes.SetAPIKeyService(h, apiKeySvc)
 	authHandler := auth.NewHandler(authSvc)
 	adminHandler := admin.NewHandler(queries, inviteSvc, metricsSvc, authSvc, fileSvc, registry, geoReader, cfg.BackendTestURL, cfg.AppDir, cfg.FrontendTestURL, cfg.FrontendE2EURL, shutdownCh)
+	sfsHandler := sfs.NewHandler(queries, fileSvc, presignSvc, apiKeySvc)
+
+	paypalClient := services.NewPayPalClient(services.PayPalConfig{
+		Environment:  cfg.PayPalEnvironment,
+		ClientID:     cfg.PayPalClientID,
+		ClientSecret: cfg.PayPalClientSecret,
+		WebhookID:    cfg.PayPalWebhookID,
+	})
+	paymentSvc := services.NewPaymentService(queries, authSvc)
+	paymentsHandler := payments.NewHandler(paypalClient, paymentSvc, queries, payments.Config{
+		AmountCents: cfg.PremiumTierPriceCents,
+		Currency:    cfg.PremiumTierCurrency,
+		AppBaseURL:  cfg.AppBaseURL,
+	})
 	metricsSvc.SetSpeedTestProvider(adminHandler)
 	go adminHandler.SpeedTestLoop(context.Background())
 
@@ -234,12 +253,30 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	v1.GET("/invitations/:token", h.ValidateInvitationToken)
 	v1.POST("/interest", h.SubmitInterestForm)
 
+	// ── PayPal webhook (no auth — verified via signature) ────────────────────
+	v1.POST("/payments/webhook", paymentsHandler.Webhook)
+
 	// ── Presigned file endpoints (token auth, no session cookie required) ────
 	v1.GET("/files/:file_id/download/p", h.DownloadFilePresigned)
 	v1.GET("/files/:file_id/preview/p", h.PreviewFilePresigned)
 	v1.POST("/files/upload/p", h.UploadFilePresigned)
 	v1.POST("/files/upload/:upload_id/chunk/p", h.UploadChunkPresigned)
 	v1.POST("/files/upload/:upload_id/complete/p", h.CompleteUploadPresigned)
+
+	// ── SFS S3-like API (API-key auth, premium only) ─────────────────────────
+	// Authenticated via Authorization: Bearer <sfs_..._...> (NOT cookie).
+	// IPRateLimit runs first (anti-stuffing); per-key limit could be added
+	// after RequireAPIKey but a single shared limit is sufficient for v1.
+	sfsGroup := v1.Group("/sfs")
+	sfsGroup.Use(mw.RateLimit(), apiKeyMW.RequireAPIKey(), apiKeyMW.RequirePremiumAPI())
+	{
+		sfsGroup.POST("/buckets/:bucket_id/put", sfsHandler.Put)
+		sfsGroup.POST("/buckets/:bucket_id/get", sfsHandler.Get)
+		sfsGroup.POST("/buckets/:bucket_id/head", sfsHandler.Head)
+		sfsGroup.POST("/buckets/:bucket_id/delete", sfsHandler.Delete)
+		sfsGroup.POST("/buckets/:bucket_id/list", sfsHandler.List)
+		sfsGroup.POST("/buckets/:bucket_id/move", sfsHandler.Move)
+	}
 
 	// ── Auth — rate-limited, no JWT required ─────────────────────────────────
 	// Logout is the exception: it requires a valid session to invalidate.
@@ -303,11 +340,22 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		// Folders
 		protected.GET("/folders", h.ListFolders)
 		protected.GET("/folders/:folder_id", h.GetFolder)
+		protected.GET("/folders/:folder_id/ancestors", h.GetFolderAncestors)
 		protected.GET("/folders/:folder_id/media", h.GetMediaFolder)
 		protected.POST("/folders", h.CreateFolder)
 		protected.PATCH("/folders/:folder_id", h.UpdateFolder)
 		protected.PATCH("/folders/:folder_id/move", h.MoveFolder)
 		protected.DELETE("/folders/:folder_id", h.DeleteFolder)
+
+		// API key management for the SFS S3-like API. Premium users only;
+		// non-premium callers receive 402 from the handler.
+		protected.GET("/me/api-keys", h.ListAPIKeys)
+		protected.POST("/me/api-keys", h.CreateAPIKey)
+		protected.DELETE("/me/api-keys/:id", h.RevokeAPIKey)
+
+		// Premium upgrade — create + capture a one-time PayPal order.
+		protected.POST("/payments/orders", paymentsHandler.CreateOrder)
+		protected.POST("/payments/orders/:order_id/capture", paymentsHandler.CaptureOrder)
 
 		// Media subcollection pointers
 		protected.POST("/collections/:collection_id/items/:file_id", h.CopyFileToCollection)

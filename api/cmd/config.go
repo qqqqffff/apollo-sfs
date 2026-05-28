@@ -66,10 +66,28 @@ type Config struct {
 	// e.g. "http://frontend-tests:9229/run-e2e"
 	// Leave empty to disable the E2E test runner.
 	FrontendE2EURL string
+
+	// ── Premium tier + SFS API key + PayPal ─────────────────────────────────
+	// SFSAPIKeyPepper is mixed into the argon2id hash of API key secrets so
+	// a database leak alone cannot brute-force keys offline. Minimum 32 bytes.
+	SFSAPIKeyPepper string
+
+	// PayPalClientID / Secret / WebhookID are the credentials of the PayPal
+	// application that processes one-time premium purchases. Configured via
+	// docs/paypal_setup.md.
+	PayPalClientID     string
+	PayPalClientSecret string
+	PayPalWebhookID    string
+	PayPalEnvironment  string // "sandbox" | "live"
+
+	// PremiumTierPriceCents is the one-time charge for the premium tier.
+	PremiumTierPriceCents int
+	PremiumTierCurrency   string // ISO 4217, e.g. "USD"
 }
 
 func loadConfig() Config {
 	quotaPct, _ := strconv.Atoi(getEnv("QUOTA_WARNING_THRESHOLD_PERCENT", "80"))
+	premiumPrice, _ := strconv.Atoi(getEnv("PREMIUM_TIER_PRICE_CENTS", "999"))
 
 	return Config{
 		Port: getEnv("PORT", "8080"),
@@ -116,6 +134,14 @@ func loadConfig() Config {
 		AppDir:          getEnv("APP_DIR", ""),
 		FrontendTestURL: getEnv("FRONTEND_TEST_URL", ""),
 		FrontendE2EURL:  getEnv("FRONTEND_E2E_URL", ""),
+
+		SFSAPIKeyPepper:       requireEnv("SFS_API_KEY_PEPPER"),
+		PayPalClientID:        getEnv("PAYPAL_CLIENT_ID", ""),
+		PayPalClientSecret:    getEnv("PAYPAL_CLIENT_SECRET", ""),
+		PayPalWebhookID:       getEnv("PAYPAL_WEBHOOK_ID", ""),
+		PayPalEnvironment:     getEnv("PAYPAL_ENV", "sandbox"),
+		PremiumTierPriceCents: premiumPrice,
+		PremiumTierCurrency:   getEnv("PREMIUM_TIER_CURRENCY", "USD"),
 	}
 }
 

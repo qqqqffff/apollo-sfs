@@ -50,9 +50,22 @@
         "description": "Application administrator \u2014 can manage users, send invitations, and view server metrics",
         "composite": false,
         "clientRole": false
+      },
+      {
+        "name": "premium",
+        "description": "Premium subscriber \u2014 unlocks the SFS S3-like programmatic API. Granted by adding the user to the \"premium\" realm group after a successful PayPal capture.",
+        "composite": false,
+        "clientRole": false
       }
     ]
   },
+  "groups": [
+    {
+      "name": "premium",
+      "path": "/premium",
+      "realmRoles": ["premium"]
+    }
+  ],
   "clients": [
     {
       "clientId": "apollo-sfs-api",

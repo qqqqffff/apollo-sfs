@@ -102,6 +102,17 @@ func New(
 	}
 }
 
+// roleSetHas reports whether the slice contains the target role.
+// Used by RequireAuth to populate the isPremium gin context value.
+func roleSetHas(roles []string, target string) bool {
+	for _, r := range roles {
+		if r == target {
+			return true
+		}
+	}
+	return false
+}
+
 // keycloakClaims represents the JWT claims issued by Keycloak.
 type keycloakClaims struct {
 	Sub               string `json:"sub"`
@@ -163,16 +174,26 @@ func (m *AuthMiddleware) RequireAuth() gin.HandlerFunc {
 		c.Set("username", claims.PreferredUsername)
 		c.Set("exp", claims.Exp)
 		c.Set("roles", claims.RealmAccess.Roles)
+		c.Set("isPremium", roleSetHas(claims.RealmAccess.Roles, "premium") ||
+			roleSetHas(claims.RealmAccess.Roles, "admin"))
 
-		// Update last_seen_at and sync is_admin from JWT — best-effort, non-blocking.
-		isAdmin := false
+		// Update last_seen_at and sync is_admin / is_premium from JWT realm
+		// roles — best-effort, non-blocking. Premium is granted via Keycloak
+		// group membership (the "premium" realm group carries the "premium"
+		// role); admins also implicitly receive premium downstream.
+		isAdmin, isPremium := false, false
 		for _, r := range claims.RealmAccess.Roles {
-			if r == "admin" {
+			switch r {
+			case "admin":
 				isAdmin = true
-				break
+			case "premium":
+				isPremium = true
 			}
 		}
-		if err := m.queries.UpdateLastSeenAt(c.Request.Context(), claims.PreferredUsername, isAdmin); err != nil {
+		if isAdmin {
+			isPremium = true
+		}
+		if err := m.queries.UpdateLastSeenAt(c.Request.Context(), claims.PreferredUsername, isAdmin, isPremium); err != nil {
 			log.Printf("RequireAuth: update last_seen_at for %q: %v", claims.PreferredUsername, err)
 		}
 

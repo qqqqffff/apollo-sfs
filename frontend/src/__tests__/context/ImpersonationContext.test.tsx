@@ -7,7 +7,7 @@ const wrapper = ({ children }: { children: React.ReactNode }) => (
   <ImpersonationProvider>{children}</ImpersonationProvider>
 )
 
-const ALICE = { username: 'alice', email: 'alice@example.com', is_admin: false, storage_used_bytes: 0, storage_quota_bytes: 0, created_at: '', last_seen_at: null }
+const ALICE = { username: 'alice', email: 'alice@example.com', is_admin: false, is_premium: false, premium_granted_at: null, storage_used_bytes: 0, storage_quota_bytes: 0, created_at: '', last_seen_at: null }
 
 describe('useImpersonation', () => {
   beforeEach(() => sessionStorage.clear())

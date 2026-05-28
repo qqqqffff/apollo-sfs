@@ -6,7 +6,35 @@ export interface User {
   last_seen_at: string | null
   created_at: string
   is_admin: boolean
+  is_premium: boolean
+  premium_granted_at: string | null
   active_ban?: UserBan | null
+}
+
+export type APIKeyOperation = 'read' | 'write' | 'delete' | 'list'
+
+export interface APIKeyScope {
+  id?: string
+  operation: APIKeyOperation
+  path_prefix: string
+}
+
+export interface APIKey {
+  id: string
+  username: string
+  name: string
+  key_prefix: string
+  created_at: string
+  last_used_at: string | null
+  expires_at: string | null
+  revoked_at: string | null
+  scopes?: APIKeyScope[]
+  matching_operations?: APIKeyOperation[]
+}
+
+export interface IssuedAPIKey {
+  raw_key: string
+  key: APIKey
 }
 
 export interface File {

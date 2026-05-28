@@ -16,7 +16,9 @@ import { Route as InterestRouteImport } from './routes/interest'
 import { Route as AboutRouteImport } from './routes/about'
 import { Route as AuthRouteImport } from './routes/_auth'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as AuthPremiumRouteImport } from './routes/_auth.premium'
 import { Route as AuthClientIndexRouteImport } from './routes/_auth.client/index'
+import { Route as AuthSettingsApiKeysRouteImport } from './routes/_auth.settings/api-keys'
 import { Route as AuthClientProfileRouteImport } from './routes/_auth.client/profile'
 import { Route as AuthClientFavoritesRouteImport } from './routes/_auth.client/favorites'
 import { Route as AuthAdminUsersRouteImport } from './routes/_auth.admin/users'
@@ -61,9 +63,19 @@ const IndexRoute = IndexRouteImport.update({
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const AuthPremiumRoute = AuthPremiumRouteImport.update({
+  id: '/premium',
+  path: '/premium',
+  getParentRoute: () => AuthRoute,
+} as any)
 const AuthClientIndexRoute = AuthClientIndexRouteImport.update({
   id: '/client/',
   path: '/client/',
+  getParentRoute: () => AuthRoute,
+} as any)
+const AuthSettingsApiKeysRoute = AuthSettingsApiKeysRouteImport.update({
+  id: '/settings/api-keys',
+  path: '/settings/api-keys',
   getParentRoute: () => AuthRoute,
 } as any)
 const AuthClientProfileRoute = AuthClientProfileRouteImport.update({
@@ -119,6 +131,7 @@ export interface FileRoutesByFullPath {
   '/login': typeof LoginRoute
   '/register': typeof RegisterRoute
   '/suspended': typeof SuspendedRoute
+  '/premium': typeof AuthPremiumRoute
   '/admin/alarm': typeof AuthAdminAlarmRoute
   '/admin/banned-ips': typeof AuthAdminBannedIpsRoute
   '/admin/bans': typeof AuthAdminBansRoute
@@ -128,6 +141,7 @@ export interface FileRoutesByFullPath {
   '/admin/users': typeof AuthAdminUsersRoute
   '/client/favorites': typeof AuthClientFavoritesRoute
   '/client/profile': typeof AuthClientProfileRoute
+  '/settings/api-keys': typeof AuthSettingsApiKeysRoute
   '/client/': typeof AuthClientIndexRoute
 }
 export interface FileRoutesByTo {
@@ -137,6 +151,7 @@ export interface FileRoutesByTo {
   '/login': typeof LoginRoute
   '/register': typeof RegisterRoute
   '/suspended': typeof SuspendedRoute
+  '/premium': typeof AuthPremiumRoute
   '/admin/alarm': typeof AuthAdminAlarmRoute
   '/admin/banned-ips': typeof AuthAdminBannedIpsRoute
   '/admin/bans': typeof AuthAdminBansRoute
@@ -146,6 +161,7 @@ export interface FileRoutesByTo {
   '/admin/users': typeof AuthAdminUsersRoute
   '/client/favorites': typeof AuthClientFavoritesRoute
   '/client/profile': typeof AuthClientProfileRoute
+  '/settings/api-keys': typeof AuthSettingsApiKeysRoute
   '/client': typeof AuthClientIndexRoute
 }
 export interface FileRoutesById {
@@ -157,6 +173,7 @@ export interface FileRoutesById {
   '/login': typeof LoginRoute
   '/register': typeof RegisterRoute
   '/suspended': typeof SuspendedRoute
+  '/_auth/premium': typeof AuthPremiumRoute
   '/_auth/admin/alarm': typeof AuthAdminAlarmRoute
   '/_auth/admin/banned-ips': typeof AuthAdminBannedIpsRoute
   '/_auth/admin/bans': typeof AuthAdminBansRoute
@@ -166,6 +183,7 @@ export interface FileRoutesById {
   '/_auth/admin/users': typeof AuthAdminUsersRoute
   '/_auth/client/favorites': typeof AuthClientFavoritesRoute
   '/_auth/client/profile': typeof AuthClientProfileRoute
+  '/_auth/settings/api-keys': typeof AuthSettingsApiKeysRoute
   '/_auth/client/': typeof AuthClientIndexRoute
 }
 export interface FileRouteTypes {
@@ -177,6 +195,7 @@ export interface FileRouteTypes {
     | '/login'
     | '/register'
     | '/suspended'
+    | '/premium'
     | '/admin/alarm'
     | '/admin/banned-ips'
     | '/admin/bans'
@@ -186,6 +205,7 @@ export interface FileRouteTypes {
     | '/admin/users'
     | '/client/favorites'
     | '/client/profile'
+    | '/settings/api-keys'
     | '/client/'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -195,6 +215,7 @@ export interface FileRouteTypes {
     | '/login'
     | '/register'
     | '/suspended'
+    | '/premium'
     | '/admin/alarm'
     | '/admin/banned-ips'
     | '/admin/bans'
@@ -204,6 +225,7 @@ export interface FileRouteTypes {
     | '/admin/users'
     | '/client/favorites'
     | '/client/profile'
+    | '/settings/api-keys'
     | '/client'
   id:
     | '__root__'
@@ -214,6 +236,7 @@ export interface FileRouteTypes {
     | '/login'
     | '/register'
     | '/suspended'
+    | '/_auth/premium'
     | '/_auth/admin/alarm'
     | '/_auth/admin/banned-ips'
     | '/_auth/admin/bans'
@@ -223,6 +246,7 @@ export interface FileRouteTypes {
     | '/_auth/admin/users'
     | '/_auth/client/favorites'
     | '/_auth/client/profile'
+    | '/_auth/settings/api-keys'
     | '/_auth/client/'
   fileRoutesById: FileRoutesById
 }
@@ -287,11 +311,25 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/_auth/premium': {
+      id: '/_auth/premium'
+      path: '/premium'
+      fullPath: '/premium'
+      preLoaderRoute: typeof AuthPremiumRouteImport
+      parentRoute: typeof AuthRoute
+    }
     '/_auth/client/': {
       id: '/_auth/client/'
       path: '/client'
       fullPath: '/client/'
       preLoaderRoute: typeof AuthClientIndexRouteImport
+      parentRoute: typeof AuthRoute
+    }
+    '/_auth/settings/api-keys': {
+      id: '/_auth/settings/api-keys'
+      path: '/settings/api-keys'
+      fullPath: '/settings/api-keys'
+      preLoaderRoute: typeof AuthSettingsApiKeysRouteImport
       parentRoute: typeof AuthRoute
     }
     '/_auth/client/profile': {
@@ -361,6 +399,7 @@ declare module '@tanstack/react-router' {
 }
 
 interface AuthRouteChildren {
+  AuthPremiumRoute: typeof AuthPremiumRoute
   AuthAdminAlarmRoute: typeof AuthAdminAlarmRoute
   AuthAdminBannedIpsRoute: typeof AuthAdminBannedIpsRoute
   AuthAdminBansRoute: typeof AuthAdminBansRoute
@@ -370,10 +409,12 @@ interface AuthRouteChildren {
   AuthAdminUsersRoute: typeof AuthAdminUsersRoute
   AuthClientFavoritesRoute: typeof AuthClientFavoritesRoute
   AuthClientProfileRoute: typeof AuthClientProfileRoute
+  AuthSettingsApiKeysRoute: typeof AuthSettingsApiKeysRoute
   AuthClientIndexRoute: typeof AuthClientIndexRoute
 }
 
 const AuthRouteChildren: AuthRouteChildren = {
+  AuthPremiumRoute: AuthPremiumRoute,
   AuthAdminAlarmRoute: AuthAdminAlarmRoute,
   AuthAdminBannedIpsRoute: AuthAdminBannedIpsRoute,
   AuthAdminBansRoute: AuthAdminBansRoute,
@@ -383,6 +424,7 @@ const AuthRouteChildren: AuthRouteChildren = {
   AuthAdminUsersRoute: AuthAdminUsersRoute,
   AuthClientFavoritesRoute: AuthClientFavoritesRoute,
   AuthClientProfileRoute: AuthClientProfileRoute,
+  AuthSettingsApiKeysRoute: AuthSettingsApiKeysRoute,
   AuthClientIndexRoute: AuthClientIndexRoute,
 }
 

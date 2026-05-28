@@ -1,6 +1,6 @@
 import { createFileRoute, useNavigate, useSearch } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   MdArrowBack,
   MdCheck,
@@ -9,12 +9,13 @@ import {
   MdFolder,
   MdFolderOpen,
   MdInsertDriveFile,
+  MdLink,
   MdPhotoLibrary,
   MdStar,
   MdStarOutline,
   MdUploadFile,
 } from 'react-icons/md'
-import { createFolder, deleteFolder, moveFolder } from '../../api/folders'
+import { createFolder, deleteFolder, moveFolder, getAncestors } from '../../api/folders'
 import { deleteFile, downloadUrl, fileQueryOptions, moveFile } from '../../api/files'
 import { meQueryOptions } from '../../api/me'
 import { useNotification } from '../../context/NotificationContext'
@@ -23,6 +24,8 @@ import { MediaCollectionView } from '../../components/MediaCollectionView'
 import type { FolderKind } from '../../types/api'
 import { UploadModal } from '../../components/UploadModal'
 import { DeleteConfirmModal, readSkipDeleteCookie } from '../../components/DeleteConfirmModal'
+import { FolderBreadcrumb } from '../../components/FolderBreadcrumb'
+import { ShareDirectoryModal } from '../../components/ShareDirectoryModal'
 import { UploadToast } from '../../components/UploadToast'
 import { SortControls } from '../../components/SortControls'
 import { SearchBar } from '../../components/SearchBar'
@@ -107,6 +110,7 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
   const fileRef = useRef<HTMLInputElement>(null)
   const [pendingFiles, setPendingFiles] = useState<globalThis.File[]>([])
   const [pendingDelete, setPendingDelete] = useState<{ type: 'file' | 'folder'; id: string; name: string } | null>(null)
+  const [sharingFolder, setSharingFolder] = useState<{ id: string; name: string } | null>(null)
   const [search, setSearch] = useState('')
   const [creatingFolder, setCreatingFolder] = useState(false)
   const [newFolderName, setNewFolderName] = useState('')
@@ -249,14 +253,29 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
   return (
     <div>
       {folderId !== 'root' ? (
-        <div className="flex items-center gap-2 mb-5">
-          <BackButton onClick={goBack} />
+        <div className="mb-2">
+          <FolderBreadcrumb
+            folderId={folderId}
+            onNavigate={(id) => navigate({ to: '/client', search: { file: undefined, folder: id } })}
+            trailing={
+              !readOnly && (user?.is_premium || user?.is_admin) && folder ? (
+                <ShareButton onOpen={() => setSharingFolder({ id: folder.id, name: folder.name })} />
+              ) : undefined
+            }
+          />
           {folder && <h2 className="text-lg font-semibold text-gray-900 m-0">{folder.name}</h2>}
         </div>
       ) : (
-        <h2 className="text-lg font-semibold text-gray-900 mb-5 mt-0">
-          {readOnly ? `${impersonatedUser!.username}'s Files` : 'My Files'}
-        </h2>
+        <div className="flex items-center gap-3 mb-5">
+          <h2 className="text-lg font-semibold text-gray-900 mt-0 mb-0">
+            {readOnly ? `${impersonatedUser!.username}'s Files` : 'My Files'}
+          </h2>
+          {user?.is_premium && !user?.is_admin && (
+            <span className="px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider bg-amber-100 text-amber-700 rounded">
+              Premium
+            </span>
+          )}
+        </div>
       )}
 
       {!readOnly && (
@@ -373,6 +392,15 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
                 {!readOnly && (
                   <>
                     <StarButton active={favoriteFolderIds.has(f.id)} onClick={() => toggleFolder(f.id)} title={favoriteFolderIds.has(f.id) ? 'Remove from favorites' : 'Add to favorites'} />
+                    {(user?.is_premium || user?.is_admin) && (
+                      <button
+                        onClick={() => setSharingFolder({ id: f.id, name: f.name })}
+                        title="Share via SFS API"
+                        className="text-amber-400 hover:text-amber-600 cursor-pointer bg-transparent border-0 p-0.5 transition-colors"
+                      >
+                        <MdLink className="text-base" />
+                      </button>
+                    )}
                     <button
                       onClick={() => handleDeleteClick('folder', f.id, f.name)}
                       className="text-xs text-gray-400 hover:text-red-500 cursor-pointer bg-transparent border-0 px-1 transition-colors"
@@ -464,6 +492,14 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
         />
       )}
 
+      {sharingFolder && (
+        <SharedDirectoryGate
+          folderId={sharingFolder.id}
+          folderName={sharingFolder.name}
+          onClose={() => setSharingFolder(null)}
+        />
+      )}
+
       {isDragging && !readOnly && (
         <div className="fixed inset-0 bg-blue-500/10 border-4 border-dashed border-blue-400 flex items-center justify-center z-999 pointer-events-none">
           <div className="bg-white/95 rounded-2xl px-12 py-6 text-center shadow-xl">
@@ -521,6 +557,40 @@ function StarButton({ active, onClick, title }: { active: boolean; onClick: () =
       {active ? <MdStar className="text-lg" /> : <MdStarOutline className="text-lg" />}
     </button>
   )
+}
+
+function ShareButton({ onOpen }: { onOpen: () => void }) {
+  return (
+    <button
+      onClick={onOpen}
+      title="Share via SFS API"
+      className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded border border-amber-200 text-amber-700 bg-amber-50 hover:bg-amber-100 cursor-pointer transition-colors"
+    >
+      <MdLink className="text-sm" /> Share
+    </button>
+  )
+}
+
+// SharedDirectoryGate looks up the ancestor chain for the folder being
+// shared so the modal can render the SFS path string before opening.
+// Without the ancestors we can't build the slash-joined key.
+function SharedDirectoryGate({
+  folderId, folderName, onClose,
+}: { folderId: string; folderName: string; onClose: () => void }) {
+  const [path, setPath] = useState<string | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    getAncestors(folderId)
+      .then((res) => {
+        if (cancelled) return
+        const joined = res.ancestors.map((a) => a.name).join('/')
+        setPath(joined)
+      })
+      .catch(() => { if (!cancelled) setPath('') })
+    return () => { cancelled = true }
+  }, [folderId])
+  if (path === null) return null
+  return <ShareDirectoryModal path={path} folderName={folderName} onClose={onClose} />
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

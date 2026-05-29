@@ -4,6 +4,8 @@ import { useEffect, useRef, useState } from 'react'
 import {
   MdArrowBack,
   MdCheck,
+  MdCloudQueue,
+  MdCloudUpload,
   MdClose,
   MdCreateNewFolder,
   MdFolder,
@@ -11,7 +13,6 @@ import {
   MdInsertDriveFile,
   MdLink,
   MdPhotoLibrary,
-  MdAutoMode,
   MdStar,
   MdStarOutline,
   MdUploadFile,
@@ -588,6 +589,21 @@ function StarButton({ active, onClick, title }: { active: boolean; onClick: () =
       className={`cursor-pointer bg-transparent border-0 p-0.5 transition-colors ${active ? 'text-amber-400 hover:text-amber-500' : 'text-gray-300 hover:text-amber-400'}`}
     >
       {active ? <MdStar className="text-lg" /> : <MdStarOutline className="text-lg" />}
+    </button>
+  )
+}
+
+// AutoUploadButton marks a media collection as the destination that incoming
+// photos and videos are routed to. Only one collection can be the target at a
+// time, so clicking the active button clears it (handled by the parent toggle).
+function AutoUploadButton({ active, onClick }: { active: boolean; onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      title={active ? 'Auto-upload destination — click to disable' : 'Set as auto-upload destination'}
+      className={`cursor-pointer bg-transparent border-0 p-0.5 transition-colors ${active ? 'text-sky-500 hover:text-sky-600' : 'text-gray-300 hover:text-sky-400'}`}
+    >
+      {active ? <MdCloudUpload className="text-lg" /> : <MdCloudQueue className="text-lg" />}
     </button>
   )
 }

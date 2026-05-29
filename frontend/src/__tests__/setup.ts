@@ -17,6 +17,16 @@ if (!AbortSignal.timeout) {
   }
 }
 
+// Polyfill ResizeObserver — used by FolderBreadcrumb to react to width changes
+// but not implemented by jsdom. A no-op stub is enough; tests don't resize.
+if (!globalThis.ResizeObserver) {
+  globalThis.ResizeObserver = class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  }
+}
+
 // Polyfill URLSearchParams.size — added to the WHATWG spec in 2023 and not yet
 // implemented in the jsdom version bundled with jest-environment-jsdom.
 if (!('size' in URLSearchParams.prototype)) {

@@ -4,6 +4,7 @@ import '@testing-library/jest-dom'
 
 jest.mock('@tanstack/react-router', () => ({
   createFileRoute: () => (opts: any) => ({ options: opts }),
+  useNavigate: () => jest.fn(),
 }))
 
 const mockQuery = jest.fn()

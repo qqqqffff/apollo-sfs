@@ -134,6 +134,11 @@ services:
       POSTFIX_INTERNAL_HOST: postfix:587
       MAIL_FROM: ${MAIL_FROM}
       MAIL_DOMAIN: ${MAIL_DOMAIN}
+      # Inbound email — SendGrid Inbound Parse stores parsed messages on disk
+      # under this path (mounted from the host's ~/service-worker-email below).
+      # SENDGRID_WEBHOOK_SECRET guards the public webhook via a ?token= param.
+      EMAIL_STORAGE_PATH: /home/app/service-worker-email
+      SENDGRID_WEBHOOK_SECRET: ${SENDGRID_WEBHOOK_SECRET:-}
       QUOTA_WARNING_THRESHOLD_PERCENT: ${QUOTA_WARNING_THRESHOLD_PERCENT:-80}
       DISK_STATS_PATH: /data
       # Cloudflare Turnstile — bot protection for the interest form
@@ -160,6 +165,8 @@ services:
       - /home/apollo/apollo-sfs/minio/nvme-01:/data:ro
       - /var/lib/GeoIP:/var/lib/GeoIP:ro
       - /var/run/docker.sock:/var/run/docker.sock
+      # Inbound email store — host dir persists messages across container rebuilds.
+      - ${HOME}/service-worker-email:/home/app/service-worker-email
     depends_on:
       db-app:
         condition: service_healthy

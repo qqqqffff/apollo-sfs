@@ -134,6 +134,7 @@ function RouteComponent() {
                 <NavLink to="/admin/users" onClick={closeMenu}>Users</NavLink>
                 <NavLink to="/admin/invitations" onClick={closeMenu}>Invitations</NavLink>
                 <NavLink to="/admin/interest" onClick={closeMenu}>Interest</NavLink>
+                <NavLink to="/admin/emails" onClick={closeMenu}>Emails</NavLink>
                 <NavLink to="/admin/bans" onClick={closeMenu}>Bans & Suspensions</NavLink>
                 <NavLink to="/admin/metrics" onClick={closeMenu}>Metrics</NavLink>
                 <NavLink to="/admin/alarm" onClick={closeMenu}>Alarms</NavLink>
@@ -241,6 +242,7 @@ function RouteComponent() {
               <MobileNavLink to="/admin/users" onClick={closeMenu}>Users</MobileNavLink>
               <MobileNavLink to="/admin/invitations" onClick={closeMenu}>Invitations</MobileNavLink>
               <MobileNavLink to="/admin/interest" onClick={closeMenu}>Interest</MobileNavLink>
+              <MobileNavLink to="/admin/emails" onClick={closeMenu}>Emails</MobileNavLink>
               <MobileNavLink to="/admin/bans" onClick={closeMenu}>Bans & Suspensions</MobileNavLink>
               <MobileNavLink to="/admin/metrics" onClick={closeMenu}>Metrics</MobileNavLink>
               <MobileNavLink to="/admin/alarm" onClick={closeMenu}>Alarms</MobileNavLink>

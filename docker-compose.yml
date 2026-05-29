@@ -323,6 +323,7 @@ services:
       CF_API_TOKEN: ${CLOUDFLARE_API_TOKEN}
       DOMAINS: ${CLOUDFLARE_RECORD_NAME}
       PROXIED: "true"
+      IP6_PROVIDER: "none"
     networks:
       - app-network
     logging:

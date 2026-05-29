@@ -10,36 +10,45 @@ import (
 
 const userColumns = `
 	username, email, encrypted_key, key_nonce, master_key_version,
-	storage_used_bytes, storage_quota_bytes, last_seen_at, created_at, is_admin`
+	storage_used_bytes, storage_quota_bytes, last_seen_at, created_at, is_admin,
+	is_premium, premium_granted_at`
 
 func scanUser(row *sql.Row) (*models.User, error) {
 	var u models.User
-	var lastSeenAt sql.NullTime
+	var lastSeenAt, premiumGrantedAt sql.NullTime
 	err := row.Scan(
 		&u.Username, &u.Email, &u.EncryptedKey, &u.KeyNonce, &u.MasterKeyVersion,
 		&u.StorageUsedBytes, &u.StorageQuotaBytes, &lastSeenAt, &u.CreatedAt, &u.IsAdmin,
+		&u.IsPremium, &premiumGrantedAt,
 	)
 	if err != nil {
 		return nil, err
 	}
 	if lastSeenAt.Valid {
 		u.LastSeenAt = &lastSeenAt.Time
+	}
+	if premiumGrantedAt.Valid {
+		u.PremiumGrantedAt = &premiumGrantedAt.Time
 	}
 	return &u, nil
 }
 
 func scanUserRow(rows *sql.Rows) (*models.User, error) {
 	var u models.User
-	var lastSeenAt sql.NullTime
+	var lastSeenAt, premiumGrantedAt sql.NullTime
 	err := rows.Scan(
 		&u.Username, &u.Email, &u.EncryptedKey, &u.KeyNonce, &u.MasterKeyVersion,
 		&u.StorageUsedBytes, &u.StorageQuotaBytes, &lastSeenAt, &u.CreatedAt, &u.IsAdmin,
+		&u.IsPremium, &premiumGrantedAt,
 	)
 	if err != nil {
 		return nil, err
 	}
 	if lastSeenAt.Valid {
 		u.LastSeenAt = &lastSeenAt.Time
+	}
+	if premiumGrantedAt.Valid {
+		u.PremiumGrantedAt = &premiumGrantedAt.Time
 	}
 	return &u, nil
 }
@@ -88,6 +97,7 @@ func (q *Queries) ListUsers(ctx context.Context, in PageInput) (*PageResult[mode
 	rows, err := q.db.QueryContext(ctx, `
 		SELECT u.username, u.email, u.encrypted_key, u.key_nonce, u.master_key_version,
 		       u.storage_used_bytes, u.storage_quota_bytes, u.last_seen_at, u.created_at, u.is_admin,
+		       u.is_premium, u.premium_granted_at,
 		       b.id, b.ban_type, b.violation_code, b.comments, b.banned_by,
 		       b.banned_at, b.expires_at, b.pardoned_at, b.pardoned_by
 		FROM   users u
@@ -125,7 +135,7 @@ func (q *Queries) ListUsers(ctx context.Context, in PageInput) (*PageResult[mode
 
 func scanUserWithBanRow(rows *sql.Rows) (*models.User, error) {
 	var u models.User
-	var lastSeenAt sql.NullTime
+	var lastSeenAt, premiumGrantedAt sql.NullTime
 	// Ban columns — all nullable because of the LEFT JOIN.
 	var (
 		banID            sql.NullInt64
@@ -141,6 +151,7 @@ func scanUserWithBanRow(rows *sql.Rows) (*models.User, error) {
 	err := rows.Scan(
 		&u.Username, &u.Email, &u.EncryptedKey, &u.KeyNonce, &u.MasterKeyVersion,
 		&u.StorageUsedBytes, &u.StorageQuotaBytes, &lastSeenAt, &u.CreatedAt, &u.IsAdmin,
+		&u.IsPremium, &premiumGrantedAt,
 		&banID, &banType, &violationCode, &comments, &bannedBy,
 		&bannedAt, &expiresAt, &pardonedAt, &pardonedBy,
 	)
@@ -149,6 +160,9 @@ func scanUserWithBanRow(rows *sql.Rows) (*models.User, error) {
 	}
 	if lastSeenAt.Valid {
 		u.LastSeenAt = &lastSeenAt.Time
+	}
+	if premiumGrantedAt.Valid {
+		u.PremiumGrantedAt = &premiumGrantedAt.Time
 	}
 	if banID.Valid {
 		b := &models.UserBan{
@@ -174,15 +188,43 @@ func scanUserWithBanRow(rows *sql.Rows) (*models.User, error) {
 	return &u, nil
 }
 
-// UpdateLastSeenAt stamps the current time and syncs is_admin from the JWT.
-// Called by the auth middleware on every authenticated request.
-func (q *Queries) UpdateLastSeenAt(ctx context.Context, username string, isAdmin bool) error {
-	_, err := q.db.ExecContext(ctx,
-		`UPDATE users SET last_seen_at = NOW(), is_admin = $2 WHERE username = $1`,
-		username, isAdmin,
-	)
+// UpdateLastSeenAt stamps the current time and syncs is_admin and is_premium
+// from the JWT realm roles. Called by the auth middleware on every
+// authenticated request. premium_granted_at is set the first time the flag
+// flips true and never cleared here (the payment refund path clears it).
+func (q *Queries) UpdateLastSeenAt(ctx context.Context, username string, isAdmin, isPremium bool) error {
+	_, err := q.db.ExecContext(ctx, `
+		UPDATE users
+		SET last_seen_at       = NOW(),
+		    is_admin           = $2,
+		    is_premium         = $3,
+		    premium_granted_at = CASE
+		                            WHEN $3 AND premium_granted_at IS NULL THEN NOW()
+		                            ELSE premium_granted_at
+		                         END
+		WHERE username = $1
+	`, username, isAdmin, isPremium)
 	if err != nil {
 		return fmt.Errorf("UpdateLastSeenAt %q: %w", username, err)
+	}
+	return nil
+}
+
+// SetUserPremium toggles the is_premium flag. Used by payments/ApplyCapture
+// and the refund/dispute handler. Sets premium_granted_at when granting,
+// leaves the historical timestamp alone when revoking.
+func (q *Queries) SetUserPremium(ctx context.Context, username string, isPremium bool) error {
+	_, err := q.db.ExecContext(ctx, `
+		UPDATE users
+		SET is_premium         = $2,
+		    premium_granted_at = CASE
+		                            WHEN $2 AND premium_granted_at IS NULL THEN NOW()
+		                            ELSE premium_granted_at
+		                         END
+		WHERE username = $1
+	`, username, isPremium)
+	if err != nil {
+		return fmt.Errorf("SetUserPremium %q: %w", username, err)
 	}
 	return nil
 }

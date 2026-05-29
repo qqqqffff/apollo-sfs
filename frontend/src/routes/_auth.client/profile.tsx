@@ -1,7 +1,7 @@
-import { createFileRoute } from '@tanstack/react-router'
+import { createFileRoute, useNavigate } from '@tanstack/react-router'
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { MdCheck, MdClose, MdPhotoLibrary } from 'react-icons/md'
+import { MdCheck, MdClose, MdPhotoLibrary, MdRocketLaunch, MdKey } from 'react-icons/md'
 import { meQueryOptions, changePassword, preferencesQueryOptions, updatePreferences } from '../../api/me'
 import { listRoot } from '../../api/folders'
 import { ApiError } from '../../api/client'
@@ -120,6 +120,8 @@ function RouteComponent() {
           <p className="text-xs text-gray-400 mt-1.5">{pct.toFixed(1)}% used</p>
         </div>
       </div>
+
+      <PremiumCard isPremium={user.is_premium} isAdmin={user.is_admin} grantedAt={user.premium_granted_at} />
 
       <MediaAutoUpload />
 
@@ -269,6 +271,56 @@ function Row({ label, value }: { label: string; value: string }) {
     <div className="flex items-center justify-between px-5 py-3.5">
       <span className="text-sm text-gray-500">{label}</span>
       <span className="text-sm text-gray-900 font-medium">{value}</span>
+    </div>
+  )
+}
+
+// PremiumCard either invites the user to upgrade (free + non-admin) or shows
+// a "you're on Premium" confirmation with a deep link to API key management.
+function PremiumCard({
+  isPremium, isAdmin, grantedAt,
+}: { isPremium: boolean; isAdmin: boolean; grantedAt: string | null }) {
+  const navigate = useNavigate()
+  if (isPremium || isAdmin) {
+    return (
+      <div className="bg-white border border-gray-200 rounded-xl px-5 py-4">
+        <div className="flex items-start gap-3">
+          <MdCheck className="text-green-500 text-xl shrink-0 mt-0.5" />
+          <div className="flex-1">
+            <h3 className="text-sm font-semibold text-gray-800 m-0">Premium</h3>
+            <p className="text-xs text-gray-500 m-0 mt-1">
+              {isAdmin
+                ? 'Included with your admin account.'
+                : grantedAt ? `Activated on ${new Date(grantedAt).toLocaleDateString()}.` : 'Active.'}
+            </p>
+          </div>
+          <button
+            onClick={() => navigate({ to: '/settings/api-keys' as never })}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs border border-gray-200 rounded-lg text-gray-700 hover:bg-gray-50 cursor-pointer transition-colors"
+          >
+            <MdKey /> Manage API keys
+          </button>
+        </div>
+      </div>
+    )
+  }
+  return (
+    <div className="bg-amber-50 border-2 border-amber-200 rounded-xl px-5 py-4">
+      <div className="flex items-start gap-3">
+        <MdRocketLaunch className="text-amber-500 text-2xl shrink-0 mt-0.5" />
+        <div className="flex-1">
+          <h3 className="text-sm font-semibold text-gray-900 m-0">Upgrade to Premium</h3>
+          <p className="text-xs text-gray-600 m-0 mt-1">
+            Unlocks the SFS S3-like API and per-directory API keys. One-time payment.
+          </p>
+        </div>
+        <button
+          onClick={() => navigate({ to: '/premium' as never })}
+          className="px-3 py-2 text-xs bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium cursor-pointer transition-colors"
+        >
+          Upgrade
+        </button>
+      </div>
     </div>
   )
 }

@@ -126,6 +126,9 @@ function RouteComponent() {
           <div className="hidden xl:flex items-center gap-1">
             <NavLink to="/client" exact onClick={closeMenu}>Files</NavLink>
             <NavLink to="/client/favorites" onClick={closeMenu}>Favorites</NavLink>
+            {(user?.is_premium || user?.is_admin) && (
+              <NavLink to={'/settings/api-keys' as never} onClick={closeMenu}>API Keys</NavLink>
+            )}
             {user?.is_admin && (
               <>
                 <NavLink to="/admin/users" onClick={closeMenu}>Users</NavLink>
@@ -196,6 +199,14 @@ function RouteComponent() {
           >
             <MdPerson className="text-sm shrink-0" />
             <span className="truncate">{user?.username}</span>
+            {(user?.is_premium || user?.is_admin) && (
+              <span
+                title={user.is_admin ? 'Admin (premium included)' : 'Premium subscriber'}
+                className="px-1 py-px text-[9px] font-semibold uppercase tracking-wider bg-amber-200 text-amber-800 rounded-sm"
+              >
+                {user.is_admin ? 'A' : 'P'}
+              </span>
+            )}
           </Link>
           <button
             onClick={() => logoutMutation.mutate()}
@@ -222,6 +233,9 @@ function RouteComponent() {
         >
           <MobileNavLink to="/client" exact onClick={closeMenu}>Files</MobileNavLink>
           <MobileNavLink to="/client/favorites" onClick={closeMenu}>Favorites</MobileNavLink>
+          {(user?.is_premium || user?.is_admin) && (
+            <MobileNavLink to={'/settings/api-keys' as never} onClick={closeMenu}>API Keys</MobileNavLink>
+          )}
           {user?.is_admin && (
             <>
               <MobileNavLink to="/admin/users" onClick={closeMenu}>Users</MobileNavLink>

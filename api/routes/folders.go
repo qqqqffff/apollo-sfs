@@ -77,6 +77,27 @@ func (h *Handler) GetFolder(c *gin.Context) {
 	c.JSON(http.StatusOK, contents)
 }
 
+// ── GetFolderAncestors ────────────────────────────────────────────────────────
+
+// GetFolderAncestors handles GET /api/v1/folders/:folder_id/ancestors.
+// Returns the breadcrumb chain from root → leaf as a flat array. Used by
+// the frontend FolderBreadcrumb component.
+func (h *Handler) GetFolderAncestors(c *gin.Context) {
+	folderID, err := uuid.Parse(c.Param("folder_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid folder_id"})
+		return
+	}
+	userID, _ := uuid.Parse(c.GetString("userID"))
+	chain, err := h.folders.GetAncestors(c.Request.Context(), folderID, userID)
+	if err != nil {
+		log.Printf("GetFolderAncestors: folder=%s user=%s err=%v", folderID, userID, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not retrieve ancestors"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ancestors": chain})
+}
+
 // ── CreateFolder ──────────────────────────────────────────────────────────────
 
 type createFolderRequest struct {

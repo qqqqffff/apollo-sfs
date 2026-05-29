@@ -301,6 +301,67 @@ func (q *Queries) UpdateFolderParent(ctx context.Context, id uuid.UUID, parentID
 	return f, nil
 }
 
+// GetFolderAncestors returns the chain of folders from root → leaf ending at
+// folderID, owned by userID. Used by the breadcrumb UI and by SFS path
+// resolution. A single recursive CTE call replaces N round-trips that walking
+// parent_id would otherwise require. The returned slice is in root→leaf
+// order; the leaf is the requested folder itself.
+func (q *Queries) GetFolderAncestors(ctx context.Context, userID, folderID uuid.UUID) ([]models.Folder, error) {
+	rows, err := q.db.QueryContext(ctx, `
+		WITH RECURSIVE chain AS (
+			SELECT id, user_id, parent_id, name, kind, created_at, updated_at, 0 AS depth
+			FROM folders WHERE id = $2 AND user_id = $1
+			UNION ALL
+			SELECT f.id, f.user_id, f.parent_id, f.name, f.kind, f.created_at, f.updated_at, c.depth + 1
+			FROM folders f JOIN chain c ON f.id = c.parent_id
+			WHERE f.user_id = $1
+		)
+		SELECT id, user_id, parent_id, name, kind, created_at, updated_at
+		FROM chain ORDER BY depth DESC
+	`, userID, folderID)
+	if err != nil {
+		return nil, fmt.Errorf("GetFolderAncestors: %w", err)
+	}
+	defer rows.Close()
+	var out []models.Folder
+	for rows.Next() {
+		f, err := scanFolderRow(rows)
+		if err != nil {
+			return nil, fmt.Errorf("GetFolderAncestors scan: %w", err)
+		}
+		out = append(out, *f)
+	}
+	return out, rows.Err()
+}
+
+// FindFolderByParentAndName looks up a single folder by (user_id, parent_id,
+// name). parentID nil matches the root level (parent_id IS NULL). Returns
+// sql.ErrNoRows if no folder matches.
+func (q *Queries) FindFolderByParentAndName(ctx context.Context, userID uuid.UUID, parentID *uuid.UUID, name string) (*models.Folder, error) {
+	if parentID == nil {
+		row := q.db.QueryRowContext(ctx, `
+			SELECT `+folderColumns+`
+			FROM folders
+			WHERE user_id = $1 AND parent_id IS NULL AND name = $2
+		`, userID, name)
+		f, err := scanFolder(row)
+		if err != nil {
+			return nil, err
+		}
+		return f, nil
+	}
+	row := q.db.QueryRowContext(ctx, `
+		SELECT `+folderColumns+`
+		FROM folders
+		WHERE user_id = $1 AND parent_id = $2 AND name = $3
+	`, userID, *parentID, name)
+	f, err := scanFolder(row)
+	if err != nil {
+		return nil, err
+	}
+	return f, nil
+}
+
 // FolderWouldCreateCycle returns true if moving folderID into targetID would
 // create a cycle, i.e. targetID is folderID itself or a descendant of it.
 // Uses a recursive CTE to walk the ancestor chain of targetID upward to root.

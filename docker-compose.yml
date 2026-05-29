@@ -139,6 +139,19 @@ services:
       # Cloudflare Turnstile — bot protection for the interest form
       CLOUDFLARE_TURNSTILE_SECRET_KEY: ${CLOUDFLARE_TURNSTILE_SECRET_KEY}
       CLOUDFLARE_TURNSTILE_SITE_KEY: ${CLOUDFLARE_TURNSTILE_SITE_KEY}
+      # Premium tier + SFS S3-like API + PayPal
+      # SFS_API_KEY_PEPPER: ≥ 32 random bytes mixed into the argon2id hash
+      # of every API key so a DB leak cannot be brute-forced offline.
+      SFS_API_KEY_PEPPER: ${SFS_API_KEY_PEPPER}
+      # PayPal Orders v2 credentials. PAYPAL_ENV: "sandbox" or "live".
+      # PAYPAL_WEBHOOK_ID is required for signature verification on the
+      # /api/v1/payments/webhook endpoint — see docs/paypal_setup.md.
+      PAYPAL_CLIENT_ID: ${PAYPAL_CLIENT_ID:-}
+      PAYPAL_CLIENT_SECRET: ${PAYPAL_CLIENT_SECRET:-}
+      PAYPAL_WEBHOOK_ID: ${PAYPAL_WEBHOOK_ID:-}
+      PAYPAL_ENV: ${PAYPAL_ENV:-sandbox}
+      PREMIUM_TIER_PRICE_CENTS: ${PREMIUM_TIER_PRICE_CENTS:-999}
+      PREMIUM_TIER_CURRENCY: ${PREMIUM_TIER_CURRENCY:-USD}
       # Test runners — point at the sidecar containers on the Docker bridge.
       BACKEND_TEST_URL: http://api-tests:9228/run-tests
       FRONTEND_TEST_URL: http://frontend-tests:9229/run-tests

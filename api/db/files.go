@@ -269,6 +269,51 @@ func (q *Queries) UpdateFileName(ctx context.Context, id uuid.UUID, name string)
 	return f, nil
 }
 
+// MoveFileToRoot moves a file to the root level (folder_id IS NULL) and
+// bumps updated_at. Used by SFS /move when the destination key has no
+// directory components.
+func (q *Queries) MoveFileToRoot(ctx context.Context, fileID uuid.UUID) (*models.File, error) {
+	row := q.db.QueryRowContext(ctx, `
+		UPDATE files SET folder_id = NULL, updated_at = NOW()
+		WHERE id = $1
+		RETURNING`+fileColumns,
+		fileID,
+	)
+	f, err := scanFile(row)
+	if err != nil {
+		return nil, fmt.Errorf("MoveFileToRoot %s: %w", fileID, err)
+	}
+	return f, nil
+}
+
+// FindFileByFolderAndName resolves a file by its (user_id, folder_id, name).
+// folderID nil matches the root level. Returns sql.ErrNoRows when no
+// matching file exists.
+func (q *Queries) FindFileByFolderAndName(ctx context.Context, userID uuid.UUID, folderID *uuid.UUID, name string) (*models.File, error) {
+	if folderID == nil {
+		row := q.db.QueryRowContext(ctx, `
+			SELECT`+fileColumns+`
+			FROM files
+			WHERE user_id = $1 AND folder_id IS NULL AND name = $2
+		`, userID, name)
+		f, err := scanFile(row)
+		if err != nil {
+			return nil, err
+		}
+		return f, nil
+	}
+	row := q.db.QueryRowContext(ctx, `
+		SELECT`+fileColumns+`
+		FROM files
+		WHERE user_id = $1 AND folder_id = $2 AND name = $3
+	`, userID, *folderID, name)
+	f, err := scanFile(row)
+	if err != nil {
+		return nil, err
+	}
+	return f, nil
+}
+
 // MoveFile updates a file's folder_id. Ownership is enforced at the service
 // layer before this is called.
 func (q *Queries) MoveFile(ctx context.Context, fileID, newFolderID uuid.UUID) (*models.File, error) {

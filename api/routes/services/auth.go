@@ -779,3 +779,108 @@ func (s *AuthService) kcUpdateUsername(ctx context.Context, adminToken, userID, 
 	return nil
 }
 
+// ── Group membership ──────────────────────────────────────────────────────────
+
+// AddUserToGroupByName adds the user (looked up by preferred_username) to
+// the named realm group. Used by the payments flow to flip a user to the
+// "premium" group after a successful PayPal capture so subsequent JWTs
+// carry the premium realm role.
+func (s *AuthService) AddUserToGroupByName(ctx context.Context, username, groupName string) error {
+	adminToken, err := s.adminToken(ctx)
+	if err != nil {
+		return fmt.Errorf("group add: admin token: %w", err)
+	}
+	userID, err := s.kcFindUserByUsername(ctx, adminToken, username)
+	if err != nil || userID == "" {
+		return fmt.Errorf("group add: find user %q: %w", username, err)
+	}
+	groupID, err := s.kcFindGroupByName(ctx, adminToken, groupName)
+	if err != nil || groupID == "" {
+		return fmt.Errorf("group add: find group %q: %w", groupName, err)
+	}
+	endpoint := fmt.Sprintf("%s/admin/realms/%s/users/%s/groups/%s", s.kcURL, s.kcRealm, userID, groupID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, endpoint, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	resp, err := s.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("keycloak group put: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusCreated {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("keycloak group put returned %s: %s", resp.Status, string(b))
+	}
+	return nil
+}
+
+// RemoveUserFromGroupByName removes the user from the named realm group.
+// Counterpart to AddUserToGroupByName used by the payment refund / dispute
+// handler. Idempotent: removing a user that isn't in the group is a no-op.
+func (s *AuthService) RemoveUserFromGroupByName(ctx context.Context, username, groupName string) error {
+	adminToken, err := s.adminToken(ctx)
+	if err != nil {
+		return fmt.Errorf("group remove: admin token: %w", err)
+	}
+	userID, err := s.kcFindUserByUsername(ctx, adminToken, username)
+	if err != nil || userID == "" {
+		return fmt.Errorf("group remove: find user %q: %w", username, err)
+	}
+	groupID, err := s.kcFindGroupByName(ctx, adminToken, groupName)
+	if err != nil || groupID == "" {
+		return fmt.Errorf("group remove: find group %q: %w", groupName, err)
+	}
+	endpoint := fmt.Sprintf("%s/admin/realms/%s/users/%s/groups/%s", s.kcURL, s.kcRealm, userID, groupID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, endpoint, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	resp, err := s.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("keycloak group delete: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("keycloak group delete returned %s: %s", resp.Status, string(b))
+	}
+	return nil
+}
+
+// kcFindGroupByName resolves a realm group's ID by exact name. Returns an
+// empty string (no error) when not found so the caller can distinguish
+// missing-group from transport errors.
+func (s *AuthService) kcFindGroupByName(ctx context.Context, adminToken, name string) (string, error) {
+	endpoint := fmt.Sprintf("%s/admin/realms/%s/groups?search=%s&exact=true",
+		s.kcURL, s.kcRealm, url.QueryEscape(name))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	resp, err := s.http.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("keycloak group search: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("keycloak group search returned %s", resp.Status)
+	}
+	var groups []struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&groups); err != nil {
+		return "", err
+	}
+	for _, g := range groups {
+		if g.Name == name {
+			return g.ID, nil
+		}
+	}
+	return "", nil
+}
+

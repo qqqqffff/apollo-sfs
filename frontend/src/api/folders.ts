@@ -65,3 +65,14 @@ export const folderQueryOptions = (folderId: string) => ({
   queryKey: ['folders', folderId] as const,
   queryFn: () => getFolder(folderId),
 })
+
+// getAncestors returns the breadcrumb chain from root → leaf for folderId.
+// Backed by a single recursive-CTE query on the server.
+export function getAncestors(folderId: string) {
+  return get<{ ancestors: Folder[] }>(`/folders/${folderId}/ancestors`)
+}
+
+export const ancestorsQueryOptions = (folderId: string) => ({
+  queryKey: ['folders', folderId, 'ancestors'] as const,
+  queryFn: () => getAncestors(folderId),
+})

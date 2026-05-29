@@ -444,6 +444,9 @@ func (s *stubFolderService) MoveSubcollectionItem(_ context.Context, _, _, _, _ 
 func (s *stubFolderService) RemoveFromSubcollection(_ context.Context, _, _, _ uuid.UUID) error {
 	return s.folderErr
 }
+func (s *stubFolderService) GetAncestors(_ context.Context, _, _ uuid.UUID) ([]models.Folder, error) {
+	return nil, s.folderErr
+}
 
 // ── Builder helpers ───────────────────────────────────────────────────────────
 

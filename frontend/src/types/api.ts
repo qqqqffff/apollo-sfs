@@ -62,6 +62,9 @@ export interface Folder {
   parent_id: string | null
   name: string
   kind: FolderKind
+  // Recursive sum of all file sizes under this folder. Populated by listing
+  // endpoints; 0 on bare single-folder responses (create/rename/move).
+  size_bytes: number
   created_at: string
   updated_at: string
 }

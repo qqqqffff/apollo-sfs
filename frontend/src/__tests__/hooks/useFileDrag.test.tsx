@@ -5,8 +5,8 @@ import type { File as ApiFile, Folder } from '../../types/api'
 // ── Test data ─────────────────────────────────────────────────────────────────
 
 const FILE: ApiFile = { id: 'f1', user_id: 'u1', name: 'doc.pdf', mime_type: 'application/pdf', size_bytes: 1024, taken_at: null, hidden: false, created_at: '', updated_at: '', folder_id: null }
-const FOLDER: Folder = { id: 'fold-1', user_id: 'u1', name: 'Docs', kind: 'regular', created_at: '', updated_at: '', parent_id: null }
-const TARGET_FOLDER: Folder = { id: 'fold-target', user_id: 'u1', name: 'Target', kind: 'regular', created_at: '', updated_at: '', parent_id: null }
+const FOLDER: Folder = { id: 'fold-1', user_id: 'u1', name: 'Docs', kind: 'regular', size_bytes: 0, created_at: '', updated_at: '', parent_id: null }
+const TARGET_FOLDER: Folder = { id: 'fold-target', user_id: 'u1', name: 'Target', kind: 'regular', size_bytes: 0, created_at: '', updated_at: '', parent_id: null }
 
 const FILE_DRAG_TYPE = 'application/x-apollo-file'
 const FOLDER_DRAG_TYPE = 'application/x-apollo-folder'

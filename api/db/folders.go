@@ -12,6 +12,23 @@ import (
 
 const folderColumns = `id, user_id, parent_id, name, kind, created_at, updated_at`
 
+// folderListSelect projects every column needed by the folder listing endpoints,
+// including a recursive descendant-size aggregate. LATERAL lets the inner CTE
+// reference each row's id while RLS on files keeps the sum scoped to the user.
+const folderListSelect = `
+SELECT f.id, f.user_id, f.parent_id, f.name, f.kind, f.created_at, f.updated_at,
+       COALESCE(s.total, 0) AS size_bytes
+FROM folders f
+LEFT JOIN LATERAL (
+    WITH RECURSIVE d(id) AS (
+        SELECT f.id
+        UNION ALL
+        SELECT cf.id FROM folders cf JOIN d ON cf.parent_id = d.id
+    )
+    SELECT SUM(files.size_bytes) AS total
+    FROM files WHERE folder_id IN (SELECT id FROM d)
+) s ON TRUE`
+
 func scanFolder(row *sql.Row) (*models.Folder, error) {
 	var f models.Folder
 	var parentID uuid.NullUUID
@@ -29,6 +46,21 @@ func scanFolderRow(rows *sql.Rows) (*models.Folder, error) {
 	var f models.Folder
 	var parentID uuid.NullUUID
 	err := rows.Scan(&f.ID, &f.UserID, &parentID, &f.Name, &f.Kind, &f.CreatedAt, &f.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	if parentID.Valid {
+		f.ParentID = &parentID.UUID
+	}
+	return &f, nil
+}
+
+// scanFolderListRow scans a folder row from a listing query that also projects
+// size_bytes (the recursive descendant-content size).
+func scanFolderListRow(rows *sql.Rows) (*models.Folder, error) {
+	var f models.Folder
+	var parentID uuid.NullUUID
+	err := rows.Scan(&f.ID, &f.UserID, &parentID, &f.Name, &f.Kind, &f.CreatedAt, &f.UpdatedAt, &f.SizeBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -79,10 +111,9 @@ func (q *Queries) ListFoldersByUser(ctx context.Context, userID uuid.UUID, in Pa
 		return nil, fmt.Errorf("ListFoldersByUser: %w", err)
 	}
 
-	rows, err := q.db.QueryContext(ctx, `
-		SELECT `+folderColumns+`
-		FROM folders WHERE user_id = $1
-		ORDER BY name ASC
+	rows, err := q.db.QueryContext(ctx, folderListSelect+`
+		WHERE f.user_id = $1
+		ORDER BY f.name ASC
 		LIMIT $2 OFFSET $3
 	`, userID, limit, offset)
 	if err != nil {
@@ -92,7 +123,7 @@ func (q *Queries) ListFoldersByUser(ctx context.Context, userID uuid.UUID, in Pa
 
 	folders := make([]models.Folder, 0)
 	for rows.Next() {
-		f, err := scanFolderRow(rows)
+		f, err := scanFolderListRow(rows)
 		if err != nil {
 			return nil, fmt.Errorf("ListFoldersByUser scan: %w", err)
 		}
@@ -131,11 +162,9 @@ func (q *Queries) ListRootFolders(ctx context.Context, userID uuid.UUID, in Page
 		return nil, fmt.Errorf("ListRootFolders: %w", err)
 	}
 
-	rows, err := q.db.QueryContext(ctx, `
-		SELECT `+folderColumns+`
-		FROM folders
-		WHERE user_id = $1 AND parent_id IS NULL
-		ORDER BY name ASC
+	rows, err := q.db.QueryContext(ctx, folderListSelect+`
+		WHERE f.user_id = $1 AND f.parent_id IS NULL
+		ORDER BY f.name ASC
 		LIMIT $2 OFFSET $3
 	`, userID, limit, offset)
 	if err != nil {
@@ -145,7 +174,7 @@ func (q *Queries) ListRootFolders(ctx context.Context, userID uuid.UUID, in Page
 
 	folders := make([]models.Folder, 0)
 	for rows.Next() {
-		f, err := scanFolderRow(rows)
+		f, err := scanFolderListRow(rows)
 		if err != nil {
 			return nil, fmt.Errorf("ListRootFolders scan: %w", err)
 		}
@@ -170,11 +199,9 @@ func (q *Queries) SearchFoldersByUser(ctx context.Context, userID uuid.UUID, ter
 		return nil, fmt.Errorf("SearchFoldersByUser: %w", err)
 	}
 
-	rows, err := q.db.QueryContext(ctx, `
-		SELECT `+folderColumns+`
-		FROM folders
-		WHERE user_id = $1 AND name ILIKE '%' || $2 || '%'
-		ORDER BY name ASC
+	rows, err := q.db.QueryContext(ctx, folderListSelect+`
+		WHERE f.user_id = $1 AND f.name ILIKE '%' || $2 || '%'
+		ORDER BY f.name ASC
 		LIMIT $3 OFFSET $4
 	`, userID, term, limit, offset)
 	if err != nil {
@@ -184,7 +211,7 @@ func (q *Queries) SearchFoldersByUser(ctx context.Context, userID uuid.UUID, ter
 
 	folders := make([]models.Folder, 0)
 	for rows.Next() {
-		f, err := scanFolderRow(rows)
+		f, err := scanFolderListRow(rows)
 		if err != nil {
 			return nil, fmt.Errorf("SearchFoldersByUser scan: %w", err)
 		}
@@ -208,11 +235,9 @@ func (q *Queries) ListFoldersByParent(ctx context.Context, userID, parentID uuid
 		return nil, fmt.Errorf("ListFoldersByParent: %w", err)
 	}
 
-	rows, err := q.db.QueryContext(ctx, `
-		SELECT `+folderColumns+`
-		FROM folders
-		WHERE user_id = $1 AND parent_id = $2
-		ORDER BY name ASC
+	rows, err := q.db.QueryContext(ctx, folderListSelect+`
+		WHERE f.user_id = $1 AND f.parent_id = $2
+		ORDER BY f.name ASC
 		LIMIT $3 OFFSET $4
 	`, userID, parentID, limit, offset)
 	if err != nil {
@@ -222,7 +247,7 @@ func (q *Queries) ListFoldersByParent(ctx context.Context, userID, parentID uuid
 
 	folders := make([]models.Folder, 0)
 	for rows.Next() {
-		f, err := scanFolderRow(rows)
+		f, err := scanFolderListRow(rows)
 		if err != nil {
 			return nil, fmt.Errorf("ListFoldersByParent scan: %w", err)
 		}

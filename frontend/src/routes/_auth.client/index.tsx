@@ -11,13 +11,14 @@ import {
   MdInsertDriveFile,
   MdLink,
   MdPhotoLibrary,
+  MdAutoMode,
   MdStar,
   MdStarOutline,
   MdUploadFile,
 } from 'react-icons/md'
 import { createFolder, deleteFolder, moveFolder, getAncestors } from '../../api/folders'
 import { deleteFile, downloadUrl, fileQueryOptions, moveFile } from '../../api/files'
-import { meQueryOptions } from '../../api/me'
+import { meQueryOptions, preferencesQueryOptions, updatePreferences } from '../../api/me'
 import { useNotification } from '../../context/NotificationContext'
 import { FilePreviewModal, canPreview } from '../../components/FilePreviewModal'
 import { MediaCollectionView } from '../../components/MediaCollectionView'
@@ -119,6 +120,8 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
   const { isDragging } = useDragDrop((dropped) => { if (!readOnly) setPendingFiles(dropped) })
   const { sort, onSort } = useSort()
   const { favoriteFileIds, favoriteFolderIds, toggleFile, toggleFolder } = useFavorites()
+  const { data: prefs } = useQuery(preferencesQueryOptions)
+  const autoUploadTargetId = prefs?.media_autoupload_folder_id ?? null
 
   const {
     folder,
@@ -155,14 +158,31 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
       (folderId, targetFolderId) => moveFolderMutation.mutate({ folderId, targetFolderId }),
     )
 
+  const setAutoUploadMutation = useMutation({
+    mutationFn: (folderId: string | null) => updatePreferences(folderId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['preferences'] })
+    },
+    onError: () => notify('error', 'Failed to update auto-upload target'),
+  })
+
+  function toggleAutoUploadTarget(folderId: string) {
+    setAutoUploadMutation.mutate(autoUploadTargetId === folderId ? null : folderId)
+  }
+
   const createFolderMutation = useMutation({
     mutationFn: ({ name, kind }: { name: string; kind: FolderKind }) =>
       createFolder(name, folderId === 'root' ? undefined : folderId, kind),
-    onSuccess: () => {
+    onSuccess: (folder) => {
       setCreatingFolder(false)
       setNewFolderName('')
       setNewFolderKind('regular')
       queryClient.invalidateQueries({ queryKey: ['folders', folderId] })
+      // A newly created media collection becomes the user's auto-upload target.
+      if (folder.kind === 'media') {
+        setAutoUploadMutation.mutate(folder.id)
+        notify('success', `"${folder.name}" is now your auto-upload destination`)
+      }
     },
     onError: () => notify('error', 'Failed to create folder'),
   })
@@ -382,15 +402,25 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
               >
                 <button
                   onClick={() => openFolder(f.id)}
-                  className="flex-1 flex items-center gap-2 bg-transparent border-0 cursor-pointer text-left text-sm text-gray-800 hover:text-gray-900 p-0"
+                  className="flex-1 flex items-center gap-2 bg-transparent border-0 cursor-pointer text-left text-sm text-gray-800 hover:text-gray-900 p-0 min-w-0"
                 >
                   {f.kind === 'media'
                     ? <MdPhotoLibrary className="text-purple-400 text-lg shrink-0" />
                     : <MdFolder className="text-blue-400 text-lg shrink-0" />}
-                  {f.name}
+                  <span className="truncate">{f.name}</span>
                 </button>
+                <span className="text-xs text-gray-400 shrink-0 hidden sm:inline">
+                  {new Date(f.created_at).toLocaleDateString()}
+                </span>
+                <span className="text-xs text-gray-400 shrink-0">{formatSize(f.size_bytes)}</span>
                 {!readOnly && (
                   <>
+                    {f.kind === 'media' && (
+                      <AutoUploadButton
+                        active={autoUploadTargetId === f.id}
+                        onClick={() => toggleAutoUploadTarget(f.id)}
+                      />
+                    )}
                     <StarButton active={favoriteFolderIds.has(f.id)} onClick={() => toggleFolder(f.id)} title={favoriteFolderIds.has(f.id) ? 'Remove from favorites' : 'Add to favorites'} />
                     {(user?.is_premium || user?.is_admin) && (
                       <button
@@ -432,6 +462,9 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
                   <MdInsertDriveFile className="text-gray-400 text-lg shrink-0" />
                   <span className="truncate">{f.name}</span>
                 </button>
+                <span className="text-xs text-gray-400 shrink-0 hidden sm:inline">
+                  {new Date(f.created_at).toLocaleDateString()}
+                </span>
                 <span className="text-xs text-gray-400 shrink-0">{formatSize(f.size_bytes)}</span>
                 {!readOnly && (
                   <>

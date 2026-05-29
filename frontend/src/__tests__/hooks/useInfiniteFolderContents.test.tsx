@@ -41,7 +41,7 @@ function page(
   return {
     folder: null,
     subfolders: {
-      items: folders.map(f => ({ ...f, user_id: 'u1', kind: 'regular' as const, created_at: '', updated_at: '', parent_id: null })),
+      items: folders.map(f => ({ ...f, user_id: 'u1', kind: 'regular' as const, size_bytes: 0, created_at: '', updated_at: '', parent_id: null })),
       next_token: nextFolderToken,
     },
     files: {

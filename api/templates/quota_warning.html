@@ -1,0 +1,71 @@
+{{/*
+  Template name : "quota_warning"
+  Trigger       : User's storage crosses the warning threshold (default 80%)
+  Data fields   :
+    AppName        string
+    AppURL         string
+    Email          string
+    Username       string
+    UsedFormatted  string — human-readable used storage e.g. "8.2 GB"
+    QuotaFormatted string — human-readable total quota  e.g. "10 GB"
+    UsedPercent    int    — integer percentage e.g. 83
+*/}}
+{{define "quota_warning"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <title>Storage warning — {{.AppName}}</title>
+</head>
+<body>
+  <div class="email-wrapper">
+    <div class="email-card">
+
+      {{template "header" .}}
+
+      <div class="email-body">
+        <h1>You&#39;re running low on storage</h1>
+        <p>Hi <strong>{{.Username}}</strong>,</p>
+        <p>
+          You have used <strong>{{.UsedFormatted}}</strong> of your
+          <strong>{{.QuotaFormatted}}</strong> storage quota
+          (<strong>{{.UsedPercent}}%</strong>).
+        </p>
+
+        <p class="usage-label">Storage used — {{.UsedPercent}}%</p>
+        <div class="usage-bar-wrapper">
+          <div class="usage-bar-fill" style="width: {{.UsedPercent}}%"></div>
+        </div>
+
+        <div class="alert alert-warning">
+          When your quota is full, new uploads will be blocked until you free up
+          space or contact your administrator to increase your limit.
+        </div>
+
+        <p>
+          To free up space, review and delete files you no longer need from your
+          file manager.
+        </p>
+
+        <div class="btn-wrapper">
+          <a href="{{.AppURL}}" class="btn-primary">Manage your files</a>
+        </div>
+
+        <hr class="email-divider" />
+
+        <p>
+          If you need a larger quota, contact your administrator. This warning is
+          sent once per threshold crossing and will not repeat until your usage
+          drops and rises again.
+        </p>
+      </div>
+
+      {{template "footer" .}}
+
+    </div>
+  </div>
+</body>
+</html>
+{{end}}

@@ -1,0 +1,59 @@
+{{/*
+  Template name : "alarm_notification"
+  Trigger       : AlarmService detects a sustained threshold breach
+  Data fields   :
+    AppName  string — human-readable app name
+    AppURL   string — public base URL
+    Title    string — short alarm label, e.g. "High CPU Usage"
+    Detail   string — full description with current value and threshold
+    AdminURL string — link to the admin alarm settings page
+*/}}
+{{define "alarm_notification"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <title>Server alarm: {{.Title}} — {{.AppName}}</title>
+</head>
+<body>
+  <div class="email-wrapper">
+    <div class="email-card">
+
+      {{template "header" .}}
+
+      <div class="email-body">
+        <h1>&#9888; {{.Title}}</h1>
+        <p>
+          An automated alarm has been triggered on <strong>{{.AppName}}</strong>.
+        </p>
+
+        <table style="width:100%;border-collapse:collapse;margin:20px 0;">
+          <tr>
+            <td style="padding:8px 12px;font-weight:600;color:#374151;width:30%;border-bottom:1px solid #e5e7eb;">Alarm</td>
+            <td style="padding:8px 12px;color:#111827;border-bottom:1px solid #e5e7eb;">{{.Title}}</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 12px;font-weight:600;color:#374151;vertical-align:top;">Details</td>
+            <td style="padding:8px 12px;color:#111827;">{{.Detail}}</td>
+          </tr>
+        </table>
+
+        <p style="color:#6b7280;font-size:14px;">
+          This notification will not repeat for at least one hour while the condition persists.
+          You can adjust or disable alarms from the admin panel.
+        </p>
+
+        <div class="btn-wrapper">
+          <a href="{{.AdminURL}}" class="btn-primary">Manage alarm settings</a>
+        </div>
+      </div>
+
+      {{template "footer" .}}
+
+    </div>
+  </div>
+</body>
+</html>
+{{end}}

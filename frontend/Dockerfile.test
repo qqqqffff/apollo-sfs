@@ -1,0 +1,44 @@
+# Test-runner sidecar image.
+# Runs the Jest unit suite (POST /run-tests) and the Playwright E2E suite
+# (POST /run-e2e) via test-server.js.
+# This image is NOT the production frontend and is never deployed to production.
+
+# Playwright requires glibc — use Debian slim instead of Alpine.
+FROM node:22-bookworm-slim
+
+WORKDIR /app
+
+# Install Playwright's Chromium system dependencies.
+# This is the same set that `npx playwright install-deps chromium` would pull in,
+# pinned here so the image build is fully offline after the layer is cached.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libnss3 \
+    libnspr4 \
+    libatk1.0-0 \
+    libatk-bridge2.0-0 \
+    libcups2 \
+    libdrm2 \
+    libxkbcommon0 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxfixes3 \
+    libxrandr2 \
+    libgbm1 \
+    libasound2 \
+    libpango-1.0-0 \
+    libcairo2 \
+    libatspi2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install all deps (including devDependencies for Jest and Playwright).
+COPY package.json package-lock.json ./
+RUN npm ci
+
+# Download the Playwright Chromium browser binary.
+RUN npx playwright install chromium
+
+COPY . .
+
+EXPOSE 9229
+
+CMD ["node", "test-server.js"]

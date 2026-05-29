@@ -9,15 +9,47 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
+import { Route as SuspendedRouteImport } from './routes/suspended'
+import { Route as RegisterRouteImport } from './routes/register'
 import { Route as LoginRouteImport } from './routes/login'
+import { Route as InterestRouteImport } from './routes/interest'
+import { Route as AboutRouteImport } from './routes/about'
 import { Route as AuthRouteImport } from './routes/_auth'
 import { Route as IndexRouteImport } from './routes/index'
-import { Route as AuthAdminRouteImport } from './routes/_auth.admin'
-import { Route as AuthFilesIndexRouteImport } from './routes/_auth.files/index'
+import { Route as AuthClientIndexRouteImport } from './routes/_auth.client/index'
+import { Route as AuthClientProfileRouteImport } from './routes/_auth.client/profile'
+import { Route as AuthClientFavoritesRouteImport } from './routes/_auth.client/favorites'
+import { Route as AuthAdminUsersRouteImport } from './routes/_auth.admin/users'
+import { Route as AuthAdminMetricsRouteImport } from './routes/_auth.admin/metrics'
+import { Route as AuthAdminInvitationsRouteImport } from './routes/_auth.admin/invitations'
+import { Route as AuthAdminInterestRouteImport } from './routes/_auth.admin/interest'
+import { Route as AuthAdminBansRouteImport } from './routes/_auth.admin/bans'
+import { Route as AuthAdminBannedIpsRouteImport } from './routes/_auth.admin/banned-ips'
+import { Route as AuthAdminAlarmRouteImport } from './routes/_auth.admin/alarm'
 
+const SuspendedRoute = SuspendedRouteImport.update({
+  id: '/suspended',
+  path: '/suspended',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const RegisterRoute = RegisterRouteImport.update({
+  id: '/register',
+  path: '/register',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const LoginRoute = LoginRouteImport.update({
   id: '/login',
   path: '/login',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const InterestRoute = InterestRouteImport.update({
+  id: '/interest',
+  path: '/interest',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AboutRoute = AboutRouteImport.update({
+  id: '/about',
+  path: '/about',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AuthRoute = AuthRouteImport.update({
@@ -29,53 +61,197 @@ const IndexRoute = IndexRouteImport.update({
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
-const AuthAdminRoute = AuthAdminRouteImport.update({
-  id: '/admin',
-  path: '/admin',
+const AuthClientIndexRoute = AuthClientIndexRouteImport.update({
+  id: '/client/',
+  path: '/client/',
   getParentRoute: () => AuthRoute,
 } as any)
-const AuthFilesIndexRoute = AuthFilesIndexRouteImport.update({
-  id: '/files/',
-  path: '/files/',
+const AuthClientProfileRoute = AuthClientProfileRouteImport.update({
+  id: '/client/profile',
+  path: '/client/profile',
+  getParentRoute: () => AuthRoute,
+} as any)
+const AuthClientFavoritesRoute = AuthClientFavoritesRouteImport.update({
+  id: '/client/favorites',
+  path: '/client/favorites',
+  getParentRoute: () => AuthRoute,
+} as any)
+const AuthAdminUsersRoute = AuthAdminUsersRouteImport.update({
+  id: '/admin/users',
+  path: '/admin/users',
+  getParentRoute: () => AuthRoute,
+} as any)
+const AuthAdminMetricsRoute = AuthAdminMetricsRouteImport.update({
+  id: '/admin/metrics',
+  path: '/admin/metrics',
+  getParentRoute: () => AuthRoute,
+} as any)
+const AuthAdminInvitationsRoute = AuthAdminInvitationsRouteImport.update({
+  id: '/admin/invitations',
+  path: '/admin/invitations',
+  getParentRoute: () => AuthRoute,
+} as any)
+const AuthAdminInterestRoute = AuthAdminInterestRouteImport.update({
+  id: '/admin/interest',
+  path: '/admin/interest',
+  getParentRoute: () => AuthRoute,
+} as any)
+const AuthAdminBansRoute = AuthAdminBansRouteImport.update({
+  id: '/admin/bans',
+  path: '/admin/bans',
+  getParentRoute: () => AuthRoute,
+} as any)
+const AuthAdminBannedIpsRoute = AuthAdminBannedIpsRouteImport.update({
+  id: '/admin/banned-ips',
+  path: '/admin/banned-ips',
+  getParentRoute: () => AuthRoute,
+} as any)
+const AuthAdminAlarmRoute = AuthAdminAlarmRouteImport.update({
+  id: '/admin/alarm',
+  path: '/admin/alarm',
   getParentRoute: () => AuthRoute,
 } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/about': typeof AboutRoute
+  '/interest': typeof InterestRoute
   '/login': typeof LoginRoute
-  '/admin': typeof AuthAdminRoute
-  '/files': typeof AuthFilesIndexRoute
+  '/register': typeof RegisterRoute
+  '/suspended': typeof SuspendedRoute
+  '/admin/alarm': typeof AuthAdminAlarmRoute
+  '/admin/banned-ips': typeof AuthAdminBannedIpsRoute
+  '/admin/bans': typeof AuthAdminBansRoute
+  '/admin/interest': typeof AuthAdminInterestRoute
+  '/admin/invitations': typeof AuthAdminInvitationsRoute
+  '/admin/metrics': typeof AuthAdminMetricsRoute
+  '/admin/users': typeof AuthAdminUsersRoute
+  '/client/favorites': typeof AuthClientFavoritesRoute
+  '/client/profile': typeof AuthClientProfileRoute
+  '/client/': typeof AuthClientIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/about': typeof AboutRoute
+  '/interest': typeof InterestRoute
   '/login': typeof LoginRoute
-  '/admin': typeof AuthAdminRoute
-  '/files': typeof AuthFilesIndexRoute
+  '/register': typeof RegisterRoute
+  '/suspended': typeof SuspendedRoute
+  '/admin/alarm': typeof AuthAdminAlarmRoute
+  '/admin/banned-ips': typeof AuthAdminBannedIpsRoute
+  '/admin/bans': typeof AuthAdminBansRoute
+  '/admin/interest': typeof AuthAdminInterestRoute
+  '/admin/invitations': typeof AuthAdminInvitationsRoute
+  '/admin/metrics': typeof AuthAdminMetricsRoute
+  '/admin/users': typeof AuthAdminUsersRoute
+  '/client/favorites': typeof AuthClientFavoritesRoute
+  '/client/profile': typeof AuthClientProfileRoute
+  '/client': typeof AuthClientIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/_auth': typeof AuthRouteWithChildren
+  '/about': typeof AboutRoute
+  '/interest': typeof InterestRoute
   '/login': typeof LoginRoute
-  '/_auth/admin': typeof AuthAdminRoute
-  '/_auth/files/': typeof AuthFilesIndexRoute
+  '/register': typeof RegisterRoute
+  '/suspended': typeof SuspendedRoute
+  '/_auth/admin/alarm': typeof AuthAdminAlarmRoute
+  '/_auth/admin/banned-ips': typeof AuthAdminBannedIpsRoute
+  '/_auth/admin/bans': typeof AuthAdminBansRoute
+  '/_auth/admin/interest': typeof AuthAdminInterestRoute
+  '/_auth/admin/invitations': typeof AuthAdminInvitationsRoute
+  '/_auth/admin/metrics': typeof AuthAdminMetricsRoute
+  '/_auth/admin/users': typeof AuthAdminUsersRoute
+  '/_auth/client/favorites': typeof AuthClientFavoritesRoute
+  '/_auth/client/profile': typeof AuthClientProfileRoute
+  '/_auth/client/': typeof AuthClientIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/login' | '/admin' | '/files'
+  fullPaths:
+    | '/'
+    | '/about'
+    | '/interest'
+    | '/login'
+    | '/register'
+    | '/suspended'
+    | '/admin/alarm'
+    | '/admin/banned-ips'
+    | '/admin/bans'
+    | '/admin/interest'
+    | '/admin/invitations'
+    | '/admin/metrics'
+    | '/admin/users'
+    | '/client/favorites'
+    | '/client/profile'
+    | '/client/'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/login' | '/admin' | '/files'
-  id: '__root__' | '/' | '/_auth' | '/login' | '/_auth/admin' | '/_auth/files/'
+  to:
+    | '/'
+    | '/about'
+    | '/interest'
+    | '/login'
+    | '/register'
+    | '/suspended'
+    | '/admin/alarm'
+    | '/admin/banned-ips'
+    | '/admin/bans'
+    | '/admin/interest'
+    | '/admin/invitations'
+    | '/admin/metrics'
+    | '/admin/users'
+    | '/client/favorites'
+    | '/client/profile'
+    | '/client'
+  id:
+    | '__root__'
+    | '/'
+    | '/_auth'
+    | '/about'
+    | '/interest'
+    | '/login'
+    | '/register'
+    | '/suspended'
+    | '/_auth/admin/alarm'
+    | '/_auth/admin/banned-ips'
+    | '/_auth/admin/bans'
+    | '/_auth/admin/interest'
+    | '/_auth/admin/invitations'
+    | '/_auth/admin/metrics'
+    | '/_auth/admin/users'
+    | '/_auth/client/favorites'
+    | '/_auth/client/profile'
+    | '/_auth/client/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AuthRoute: typeof AuthRouteWithChildren
+  AboutRoute: typeof AboutRoute
+  InterestRoute: typeof InterestRoute
   LoginRoute: typeof LoginRoute
+  RegisterRoute: typeof RegisterRoute
+  SuspendedRoute: typeof SuspendedRoute
 }
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
+    '/suspended': {
+      id: '/suspended'
+      path: '/suspended'
+      fullPath: '/suspended'
+      preLoaderRoute: typeof SuspendedRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/register': {
+      id: '/register'
+      path: '/register'
+      fullPath: '/register'
+      preLoaderRoute: typeof RegisterRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/login': {
       id: '/login'
       path: '/login'
@@ -83,10 +259,24 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof LoginRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/interest': {
+      id: '/interest'
+      path: '/interest'
+      fullPath: '/interest'
+      preLoaderRoute: typeof InterestRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/about': {
+      id: '/about'
+      path: '/about'
+      fullPath: '/about'
+      preLoaderRoute: typeof AboutRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/_auth': {
       id: '/_auth'
       path: ''
-      fullPath: ''
+      fullPath: '/'
       preLoaderRoute: typeof AuthRouteImport
       parentRoute: typeof rootRouteImport
     }
@@ -97,31 +287,103 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/_auth/admin': {
-      id: '/_auth/admin'
-      path: '/admin'
-      fullPath: '/admin'
-      preLoaderRoute: typeof AuthAdminRouteImport
+    '/_auth/client/': {
+      id: '/_auth/client/'
+      path: '/client'
+      fullPath: '/client/'
+      preLoaderRoute: typeof AuthClientIndexRouteImport
       parentRoute: typeof AuthRoute
     }
-    '/_auth/files/': {
-      id: '/_auth/files/'
-      path: '/files'
-      fullPath: '/files'
-      preLoaderRoute: typeof AuthFilesIndexRouteImport
+    '/_auth/client/profile': {
+      id: '/_auth/client/profile'
+      path: '/client/profile'
+      fullPath: '/client/profile'
+      preLoaderRoute: typeof AuthClientProfileRouteImport
+      parentRoute: typeof AuthRoute
+    }
+    '/_auth/client/favorites': {
+      id: '/_auth/client/favorites'
+      path: '/client/favorites'
+      fullPath: '/client/favorites'
+      preLoaderRoute: typeof AuthClientFavoritesRouteImport
+      parentRoute: typeof AuthRoute
+    }
+    '/_auth/admin/users': {
+      id: '/_auth/admin/users'
+      path: '/admin/users'
+      fullPath: '/admin/users'
+      preLoaderRoute: typeof AuthAdminUsersRouteImport
+      parentRoute: typeof AuthRoute
+    }
+    '/_auth/admin/metrics': {
+      id: '/_auth/admin/metrics'
+      path: '/admin/metrics'
+      fullPath: '/admin/metrics'
+      preLoaderRoute: typeof AuthAdminMetricsRouteImport
+      parentRoute: typeof AuthRoute
+    }
+    '/_auth/admin/invitations': {
+      id: '/_auth/admin/invitations'
+      path: '/admin/invitations'
+      fullPath: '/admin/invitations'
+      preLoaderRoute: typeof AuthAdminInvitationsRouteImport
+      parentRoute: typeof AuthRoute
+    }
+    '/_auth/admin/interest': {
+      id: '/_auth/admin/interest'
+      path: '/admin/interest'
+      fullPath: '/admin/interest'
+      preLoaderRoute: typeof AuthAdminInterestRouteImport
+      parentRoute: typeof AuthRoute
+    }
+    '/_auth/admin/bans': {
+      id: '/_auth/admin/bans'
+      path: '/admin/bans'
+      fullPath: '/admin/bans'
+      preLoaderRoute: typeof AuthAdminBansRouteImport
+      parentRoute: typeof AuthRoute
+    }
+    '/_auth/admin/banned-ips': {
+      id: '/_auth/admin/banned-ips'
+      path: '/admin/banned-ips'
+      fullPath: '/admin/banned-ips'
+      preLoaderRoute: typeof AuthAdminBannedIpsRouteImport
+      parentRoute: typeof AuthRoute
+    }
+    '/_auth/admin/alarm': {
+      id: '/_auth/admin/alarm'
+      path: '/admin/alarm'
+      fullPath: '/admin/alarm'
+      preLoaderRoute: typeof AuthAdminAlarmRouteImport
       parentRoute: typeof AuthRoute
     }
   }
 }
 
 interface AuthRouteChildren {
-  AuthAdminRoute: typeof AuthAdminRoute
-  AuthFilesIndexRoute: typeof AuthFilesIndexRoute
+  AuthAdminAlarmRoute: typeof AuthAdminAlarmRoute
+  AuthAdminBannedIpsRoute: typeof AuthAdminBannedIpsRoute
+  AuthAdminBansRoute: typeof AuthAdminBansRoute
+  AuthAdminInterestRoute: typeof AuthAdminInterestRoute
+  AuthAdminInvitationsRoute: typeof AuthAdminInvitationsRoute
+  AuthAdminMetricsRoute: typeof AuthAdminMetricsRoute
+  AuthAdminUsersRoute: typeof AuthAdminUsersRoute
+  AuthClientFavoritesRoute: typeof AuthClientFavoritesRoute
+  AuthClientProfileRoute: typeof AuthClientProfileRoute
+  AuthClientIndexRoute: typeof AuthClientIndexRoute
 }
 
 const AuthRouteChildren: AuthRouteChildren = {
-  AuthAdminRoute: AuthAdminRoute,
-  AuthFilesIndexRoute: AuthFilesIndexRoute,
+  AuthAdminAlarmRoute: AuthAdminAlarmRoute,
+  AuthAdminBannedIpsRoute: AuthAdminBannedIpsRoute,
+  AuthAdminBansRoute: AuthAdminBansRoute,
+  AuthAdminInterestRoute: AuthAdminInterestRoute,
+  AuthAdminInvitationsRoute: AuthAdminInvitationsRoute,
+  AuthAdminMetricsRoute: AuthAdminMetricsRoute,
+  AuthAdminUsersRoute: AuthAdminUsersRoute,
+  AuthClientFavoritesRoute: AuthClientFavoritesRoute,
+  AuthClientProfileRoute: AuthClientProfileRoute,
+  AuthClientIndexRoute: AuthClientIndexRoute,
 }
 
 const AuthRouteWithChildren = AuthRoute._addFileChildren(AuthRouteChildren)
@@ -129,7 +391,11 @@ const AuthRouteWithChildren = AuthRoute._addFileChildren(AuthRouteChildren)
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AuthRoute: AuthRouteWithChildren,
+  AboutRoute: AboutRoute,
+  InterestRoute: InterestRoute,
   LoginRoute: LoginRoute,
+  RegisterRoute: RegisterRoute,
+  SuspendedRoute: SuspendedRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

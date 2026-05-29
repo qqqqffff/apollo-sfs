@@ -1,0 +1,13 @@
+[Unit]
+Description=Weekly Cloudflare IP range refresh
+
+[Timer]
+# Run 5 minutes after boot (in case the network isn't up at boot time),
+# then every week thereafter. Persistent=true means if the system was off
+# when the timer would have fired, it runs immediately on next boot.
+OnBootSec=5min
+OnUnitActiveSec=1w
+Persistent=true
+
+[Install]
+WantedBy=timers.target

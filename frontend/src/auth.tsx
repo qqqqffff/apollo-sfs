@@ -1,98 +1,131 @@
-import React, { createContext, useContext, useState, useEffect, type ReactNode } from 'react';
-import { useNavigate } from '@tanstack/react-router';
-import { useLogin, useRefreshToken, useLogout } from './services/userService';
+import { createContext, useCallback, useContext } from 'react'
+import type React from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { login as apiLogin, logout as apiLogout } from './api/auth'
+import { getMe, meQueryOptions } from './api/me'
+import type { User } from './types/api'
+import { ApiError } from './api/client'
 
-interface AuthContextType {
-  isAuthenticated: boolean;
-  isAdmin: boolean;
-  login: (username: string, password: string) => Promise<void>;
-  logout: () => void;
-  token: string | null;
+type LoginReturnType = 'fail' | 'admin' | 'client' | 'nextStep' | 'banned' | 'suspended'
+
+export interface AuthContext {
+  user: User | null
+  isLoading: boolean
+  isAuthenticated: boolean
+  validateAuth: () => Promise<boolean | 'banned' | 'suspended'>
+  login: (username: string, password: string) => Promise<LoginReturnType>
+  confirmLogin: (username: string, password: string) => Promise<LoginReturnType>
+  logout: () => Promise<'success' | 'fail'>
+  admin: boolean
+  updateProfile: (updatedUser: User) => Promise<'success' | 'fail'>
 }
 
-const AuthContext = createContext<AuthContextType | undefined>(undefined);
-
-export const useAuth = () => {
-  const context = useContext(AuthContext);
-  if (!context) {
-    throw new Error('useAuth must be used within an AuthProvider');
-  }
-  return context;
-};
-
-interface AuthProviderProps {
-  children: ReactNode;
+function storeRestriction(body: Record<string, unknown>) {
+  try {
+    sessionStorage.setItem('apollo_restriction', JSON.stringify(body))
+  } catch { /* ignore */ }
 }
 
-export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
-  const [token, setToken] = useState<string | null>(localStorage.getItem('token'));
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [isAdmin, setIsAdmin] = useState(false);
-  const navigate = useNavigate();
+function isRestriction(err: unknown): err is ApiError {
+  return (
+    err instanceof ApiError &&
+    err.status === 403 &&
+    (err.body.error === 'banned' || err.body.error === 'suspended')
+  )
+}
 
-  const loginMutation = useLogin();
-  const refreshMutation = useRefreshToken();
-  const logoutMutation = useLogout();
+const AuthContext = createContext<AuthContext | null>(null)
 
-  useEffect(() => {
-    if (token) {
-      // Validate token and set roles
-      validateToken(token);
-    }
-  }, [token]);
+export function AuthProvider({ children }: { children: React.ReactNode }) {
+  const queryClient = useQueryClient()
+  const { data: user, isLoading } = useQuery(meQueryOptions)
 
-  const validateToken = async (token: string) => {
+  const validateAuth = useCallback(async (): Promise<boolean | 'banned' | 'suspended'> => {
     try {
-      const response = await fetch('/api/v1/auth/verify', {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      });
-      if (response.ok) {
-        const data = await response.json();
-        setIsAuthenticated(true);
-        // Check if admin (assuming realm_access.roles includes 'admin')
-        const roles = data.realm_access?.roles || [];
-        setIsAdmin(roles.includes('admin'));
-      } else {
-        logout();
+      const me = await queryClient.fetchQuery(meQueryOptions)
+      return !!me
+    } catch (err) {
+      if (isRestriction(err)) {
+        storeRestriction(err.body)
+        return err.body.error as 'banned' | 'suspended'
       }
-    } catch (error) {
-      logout();
+      return false
     }
-  };
+  }, [queryClient])
 
-  const login = async (username: string, password: string) => {
+  const login = useCallback(
+    async (username: string, password: string): Promise<LoginReturnType> => {
+      try {
+        await apiLogin(username, password)
+        const me = await queryClient.fetchQuery({
+          ...meQueryOptions,
+          staleTime: 0,
+        })
+        await queryClient.invalidateQueries({ queryKey: ['me'] })
+        return me.is_admin ? 'admin' : 'client'
+      } catch (err) {
+        if (isRestriction(err)) {
+          storeRestriction(err.body)
+          return err.body.error as 'banned' | 'suspended'
+        }
+        return 'fail'
+      }
+    },
+    [queryClient],
+  )
+
+  // Alias for a potential two-step login flow; behaves identically until backend supports it.
+  const confirmLogin = useCallback(
+    (username: string, password: string) => login(username, password),
+    [login],
+  )
+
+  const logout = useCallback(async (): Promise<'success' | 'fail'> => {
     try {
-      const data = await loginMutation.mutateAsync({ username, password });
-      const accessToken = data.access_token;
-      localStorage.setItem('token', accessToken);
-      setToken(accessToken);
-      setIsAuthenticated(true);
-      // Set admin based on token
-      const roles = data.realm_access?.roles || [];
-      setIsAdmin(roles.includes('admin'));
-      navigate({ to: '/files' });
-    } catch (error) {
-      throw error;
+      await apiLogout()
+      queryClient.clear()
+      return 'success'
+    } catch {
+      return 'fail'
     }
-  };
+  }, [queryClient])
 
-  const logout = () => {
-    if (token) {
-      logoutMutation.mutate(localStorage.getItem('refreshToken') || '');
-    }
-    localStorage.removeItem('token');
-    localStorage.removeItem('refreshToken');
-    setToken(null);
-    setIsAuthenticated(false);
-    setIsAdmin(false);
-    navigate({ to: '/login' });
-  };
+  const updateProfile = useCallback(
+    async (updatedUser: User): Promise<'success' | 'fail'> => {
+      queryClient.setQueryData(meQueryOptions.queryKey, updatedUser)
+      try {
+        await getMe()
+        return 'success'
+      } catch {
+        return 'fail'
+      }
+    },
+    [queryClient],
+  )
 
   return (
-    <AuthContext.Provider value={{ isAuthenticated, isAdmin, login, logout, token }}>
+    <AuthContext.Provider
+      value={{
+        user: user ?? null,
+        isLoading,
+        isAuthenticated: !!user,
+        validateAuth,
+        login,
+        confirmLogin,
+        logout,
+        admin: user?.is_admin ?? false,
+        updateProfile,
+      }}
+    >
       {children}
     </AuthContext.Provider>
-  );
-};
+  )
+}
+
+export function useAuth() {
+  const context = useContext(AuthContext)
+
+  if (!context) throw new Error('useAuth must be used within an AuthProvider')
+
+  return context
+}

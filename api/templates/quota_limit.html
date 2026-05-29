@@ -1,0 +1,71 @@
+{{/*
+  Template name : "quota_limit"
+  Trigger       : User's storage reaches 100% of their quota
+  Data fields   :
+    AppName        string
+    AppURL         string
+    Email          string
+    Username       string
+    UsedFormatted  string — human-readable used storage e.g. "10 GB"
+    QuotaFormatted string — human-readable total quota  e.g. "10 GB"
+*/}}
+{{define "quota_limit"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <title>Storage full — {{.AppName}}</title>
+</head>
+<body>
+  <div class="email-wrapper">
+    <div class="email-card">
+
+      {{template "header" .}}
+
+      <div class="email-body">
+        <h1>Your storage is full</h1>
+        <p>Hi <strong>{{.Username}}</strong>,</p>
+        <p>
+          You have used all <strong>{{.QuotaFormatted}}</strong> of your storage
+          quota. New uploads are currently <strong>blocked</strong> until you
+          free up space.
+        </p>
+
+        <p class="usage-label">Storage used — 100%</p>
+        <div class="usage-bar-wrapper">
+          <div class="usage-bar-fill danger" style="width: 100%"></div>
+        </div>
+
+        <div class="alert alert-danger">
+          <strong>Uploads are blocked.</strong> You must delete existing files or
+          ask your administrator to increase your quota before you can upload
+          anything new.
+        </div>
+
+        <p>
+          Go to your file manager to review and permanently delete files you no
+          longer need. Deleted files are removed immediately and cannot be
+          recovered.
+        </p>
+
+        <div class="btn-wrapper">
+          <a href="{{.AppURL}}" class="btn-primary">Free up space</a>
+        </div>
+
+        <hr class="email-divider" />
+
+        <p>
+          If you believe your quota should be higher, contact your administrator
+          and reference your account: <strong>{{.Email}}</strong>.
+        </p>
+      </div>
+
+      {{template "footer" .}}
+
+    </div>
+  </div>
+</body>
+</html>
+{{end}}

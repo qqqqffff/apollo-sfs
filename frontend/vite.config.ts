@@ -1,26 +1,28 @@
-import { defineConfig, loadEnv } from 'vite'
+import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
-import tailwindcss from '@tailwindcss/vite'
 import { tanstackRouter } from '@tanstack/router-plugin/vite'
+import tailwindcss from '@tailwindcss/vite'
 
-
-
-// https://vite.dev/config/
-export default defineConfig(({ mode }) => {
-  const env = loadEnv(mode, process.cwd(), '')
-
-  return {
-    plugins: [
-      react(),
-      tailwindcss(),
-      tanstackRouter()
-    ],
-    server: {
-      port: 3000,
-      host: true
+export default defineConfig({
+  plugins: [
+    tanstackRouter({
+      target: 'react',
+      autoCodeSplitting: true
+    }),
+    tailwindcss(),
+    react(),
+  ],
+  define: {
+    global: 'globalThis',
+  },
+  server: {
+    port: 5173,
+    proxy: {
+      // Forward all /api requests to the Go backend in dev.
+      '/api': {
+        target: 'http://localhost:8080',
+        changeOrigin: true,
+      },
     },
-    define: {
-      'process.env': env
-    }
-  }
+  },
 })

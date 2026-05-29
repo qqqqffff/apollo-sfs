@@ -1,0 +1,381 @@
+name: apollo-sfs
+
+# All services run on app-network (internal Docker bridge).
+# Only the API port is bound to 127.0.0.1 so Nginx on the host can proxy to it.
+#
+# MinIO is the only service whose data is bind-mounted to the NVMe drive.
+# Create that directory before running `docker compose up` for the first time:
+#
+#   sudo mkdir -p /minio/nvme-1/data
+#
+# All other persistent data (PostgreSQL) uses standard named Docker volumes
+# managed under the Docker data root (/minio/nvme-1/docker if you've moved it there).
+#
+# Place the Keycloak realm import JSON at ./keycloak/import/realm-export.json
+# before first boot — Keycloak imports it once, then skips on subsequent starts.
+
+services:
+
+  # ── Frontend ───────────────────────────────────────────────────────────────
+  # Vite build output served by nginx:alpine.
+  # Bound to 127.0.0.1 only — the host nginx proxies inbound HTTPS traffic here.
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    platform: linux/arm64
+    container_name: apollo-sfs-frontend
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:80"
+    networks:
+      - app-network
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ── Backend (Go) test runner sidecar ──────────────────────────────────────
+  # Runs `go test ./tests/... -count=1` via cmd/testserver on the internal bridge.
+  #   POST /run-tests  — Go unit tests
+  # The API calls this endpoint to trigger the suite.
+  # This service is NOT present in production — remove or comment it out there.
+  api-tests:
+    build:
+      context: ./api
+      dockerfile: Dockerfile.test
+    platform: linux/arm64
+    container_name: apollo-sfs-api-tests
+    restart: unless-stopped
+    networks:
+      - app-network
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  # ── Frontend test runner sidecar ──────────────────────────────────────────
+  # Runs Jest and Playwright via test-server.js on the internal Docker bridge.
+  #   POST /run-tests  — Jest unit tests
+  #   POST /run-e2e    — Playwright E2E tests (Chromium, headless)
+  # The API calls these endpoints to trigger the suites.
+  # This service is NOT present in production — remove or comment it out there.
+  frontend-tests:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.test
+    platform: linux/arm64
+    container_name: apollo-sfs-frontend-tests
+    restart: unless-stopped
+    environment:
+      # Playwright connects to the already-running frontend nginx container
+      # instead of spinning up a Vite dev server inside the sidecar.
+      PLAYWRIGHT_BASE_URL: http://frontend:80
+    depends_on:
+      - frontend
+    networks:
+      - app-network
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  # ── App API ────────────────────────────────────────────────────────────────
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    platform: linux/arm64
+    container_name: apollo-sfs-api
+    restart: unless-stopped
+    # privileged + user: root are required for the remote kill switch endpoint.
+    # The kill switch escapes the container cgroup, enters host namespaces via
+    # nsenter, runs `docker compose down`, then powers off the host.
+    # Remove both if you don't need remote shutdown capability.
+    privileged: true
+    user: root
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      # Used by the kill switch to identify the Compose stack to stop.
+      COMPOSE_PROJECT_NAME: apollo-sfs
+      # PostgreSQL — app DB
+      POSTGRES_APP_HOST: db-app
+      POSTGRES_APP_PORT: 5432
+      POSTGRES_APP_USER: ${POSTGRES_APP_USER}
+      POSTGRES_APP_PASSWORD: ${POSTGRES_APP_PASSWORD}
+      POSTGRES_APP_DB: ${POSTGRES_APP_DB}
+      # MinIO
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_BUCKET_NAME: ${MINIO_BUCKET_NAME}
+      MINIO_USE_SSL: "false"
+      # Keycloak
+      KEYCLOAK_REALM: ${KEYCLOAK_REALM}
+      KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID}
+      KEYCLOAK_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET}
+      KEYCLOAK_INTERNAL_URL: http://keycloak:8180
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+      # Encryption
+      KEY_ENCRYPTION_KEY: ${KEY_ENCRYPTION_KEY}
+      GIN_MODE: release
+      # Session
+      SESSION_KEY: ${SESSION_KEY}
+      # Cookies & session
+      COOKIE_DOMAIN: ${COOKIE_DOMAIN}
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      APP_BASE_URL: ${APP_BASE_URL}
+      # Email — Postfix submission point (internal Docker only)
+      POSTFIX_INTERNAL_HOST: postfix:587
+      MAIL_FROM: ${MAIL_FROM}
+      MAIL_DOMAIN: ${MAIL_DOMAIN}
+      QUOTA_WARNING_THRESHOLD_PERCENT: ${QUOTA_WARNING_THRESHOLD_PERCENT:-80}
+      DISK_STATS_PATH: /data
+      # Cloudflare Turnstile — bot protection for the interest form
+      CLOUDFLARE_TURNSTILE_SECRET_KEY: ${CLOUDFLARE_TURNSTILE_SECRET_KEY}
+      CLOUDFLARE_TURNSTILE_SITE_KEY: ${CLOUDFLARE_TURNSTILE_SITE_KEY}
+      # Test runners — point at the sidecar containers on the Docker bridge.
+      BACKEND_TEST_URL: http://api-tests:9228/run-tests
+      FRONTEND_TEST_URL: http://frontend-tests:9229/run-tests
+      FRONTEND_E2E_URL: http://frontend-tests:9229/run-e2e
+    volumes:
+      - /home/apollo/apollo-sfs/minio/nvme-01:/data:ro
+      - /var/lib/GeoIP:/var/lib/GeoIP:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      db-app:
+        condition: service_healthy
+      keycloak:
+        condition: service_started
+      minio:
+        condition: service_healthy
+      postfix:
+        condition: service_started
+      api-tests:
+        condition: service_started
+      frontend-tests:
+        condition: service_started
+    networks:
+      - app-network
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ── MinIO object storage ───────────────────────────────────────────────────
+  # Encrypted file blobs are stored here. Data is bind-mounted directly to the
+  # NVMe drive at /minio/nvme-1/data so uploaded files land on fast storage.
+  # Port 9000 is internal only — accessed by the API on the Docker network.
+  # Port 9001 (MinIO console) is NOT exposed to the host; access via SSH tunnel
+  # during setup if needed: ssh -L 9001:localhost:9001 <pi>
+  minio:
+    image: minio/minio:latest
+    platform: linux/arm64
+    container_name: apollo-sfs-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    networks:
+      - app-network
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ── Keycloak auth server ───────────────────────────────────────────────────
+  # Never exposed publicly — the API communicates with it on the internal network.
+  # Realm import: place realm JSON files in ./keycloak/import/ before first boot.
+  keycloak:
+    # Keycloak does not publish floating major-version tags — always use a full
+    # semver. Check the latest release at https://www.keycloak.org/downloads
+    image: quay.io/keycloak/keycloak:26.0.7
+    platform: linux/arm64
+    container_name: apollo-sfs-keycloak
+    restart: unless-stopped
+    # Bound to 127.0.0.1 only — access via SSH tunnel, never exposed publicly
+    ports:
+      - "127.0.0.1:8180:8180"
+    command: start --import-realm
+    environment:
+      # Database backend
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://db-keycloak:5432/${POSTGRES_KC_DB}
+      KC_DB_USERNAME: ${POSTGRES_KC_USER}
+      KC_DB_PASSWORD: ${POSTGRES_KC_PASSWORD}
+      # HTTP (TLS terminated by Nginx on the host)
+      KC_HTTP_ENABLED: "true"
+      KC_HTTP_PORT: 8180
+      KC_HTTPS_ENABLED: "false"
+      KC_HEALTH_ENABLED: "true"
+      # Full URL including protocol — KC 26 requires this, not a bare hostname
+      KC_HOSTNAME: ${APP_BASE_URL}
+      KC_HOSTNAME_STRICT: "true"
+      KC_HOSTNAME_ADMIN: http://localhost:8180
+      # Trust X-Forwarded-* headers set by Nginx
+      KC_PROXY_HEADERS: xforwarded
+      # Bootstrap admin credentials (Keycloak 26+)
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+      # Limit JVM heap — important on a memory-constrained Pi
+      JAVA_OPTS_APPEND: -Xms256m -Xmx512m
+    volumes:
+      # Realm JSON files are imported on first boot, then skipped if realm exists
+      - ./keycloak/import:/opt/keycloak/data/import:ro
+    depends_on:
+      db-keycloak:
+        condition: service_healthy
+    healthcheck:
+      # Port 9000 is Keycloak 26's dedicated management port — health endpoints
+      # are always available here regardless of any KC_HEALTH_ENABLED setting
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/9000; echo -e 'GET /health/live HTTP/1.1\r\nhost: localhost\r\nConnection: close\r\n\r\n' >&3; grep 'HTTP/1.1 200 OK' <&3"]
+      interval: 30s
+      timeout: 15s
+      retries: 10
+      # Keycloak JVM startup is slow on a Pi — give it plenty of time
+      start_period: 180s
+    networks:
+      - app-network
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ── Postfix SMTP relay ─────────────────────────────────────────────────────
+  # Internal submission hub only — accepts mail from the API and Keycloak on
+  # port 587, then relays outbound through SendGrid. Never exposed to the host.
+  # boky/postfix is multi-arch (amd64 + arm64) and configures Postfix as a
+  # pure relay via environment variables — no config file needed.
+  postfix:
+    image: boky/postfix:latest
+    platform: linux/arm64
+    container_name: apollo-sfs-postfix
+    restart: unless-stopped
+    environment:
+      # Accept submissions from the internal Docker network only
+      ALLOWED_SENDER_DOMAINS: ${MAIL_DOMAIN}
+      RELAYHOST: smtp.sendgrid.net:587
+      RELAYHOST_USERNAME: apikey
+      RELAYHOST_PASSWORD: ${SENDGRID_SMTP_PASSWORD}
+      # Match the From address used by the API
+      POSTFIX_myhostname: ${MAIL_DOMAIN}
+    volumes:
+      - ./docker/postfix:/var/spool/postfix
+    networks:
+      - app-network
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ── Cloudflare DDNS ────────────────────────────────────────────────────────
+  # Polls your public IP every 5 minutes and updates the Cloudflare A record.
+  # Uses a scoped API token with DNS-edit-only permission (never full zone access).
+  ddns:
+    image: favonia/cloudflare-ddns:latest
+    platform: linux/arm64
+    container_name: apollo-sfs-ddns
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      CF_API_TOKEN: ${CLOUDFLARE_API_TOKEN}
+      DOMAINS: ${CLOUDFLARE_RECORD_NAME}
+      PROXIED: "true"
+    networks:
+      - app-network
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ── PostgreSQL — app metadata DB ───────────────────────────────────────────
+  db-app:
+    image: postgres:16-alpine
+    platform: linux/arm64
+    container_name: apollo-sfs-postgresql-app
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_APP_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_APP_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_APP_DB}
+    volumes:
+      - ./docker/postgresql-app:/var/lib/postgresql/data
+      - ./db:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_APP_USER} -d ${POSTGRES_APP_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - app-network
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ── PostgreSQL — Keycloak DB ───────────────────────────────────────────────
+  db-keycloak:
+    image: postgres:16-alpine
+    platform: linux/arm64
+    container_name: apollo-sfs-postgresql-keycloak
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_KC_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_KC_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_KC_DB}
+    volumes:
+      - ./docker/postgresql-keycloak:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_KC_USER} -d ${POSTGRES_KC_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - app-network
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  app-network:
+    driver: bridge
+
+volumes:
+  # Bind-mounted to the NVMe drive — this is where uploaded file blobs live.
+  # The host directory must exist before `docker compose up`:
+  #   sudo mkdir -p /minio/nvme-1/data
+  minio-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /home/apollo/apollo-sfs/minio/nvme-01/data
+

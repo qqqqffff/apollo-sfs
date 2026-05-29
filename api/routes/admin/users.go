@@ -1,0 +1,146 @@
+package admin
+
+import (
+	"database/sql"
+	"errors"
+	"net/http"
+	"strings"
+
+	"github.com/gin-gonic/gin"
+
+	"apollo-sfs.com/api/db"
+	"apollo-sfs.com/api/sanitize"
+)
+
+type updateQuotaRequest struct {
+	QuotaBytes int64 `json:"quota_bytes" binding:"required,min=0"`
+}
+
+// GetUsers handles GET /api/v1/admin/users
+func (h *Handler) GetUsers(c *gin.Context) {
+	page := db.PageInput{
+		Cursor: strings.TrimSpace(c.Query("cursor")),
+	}
+	if err := parseLimit(c, &page.Limit); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "limit must be a positive integer"})
+		return
+	}
+
+	result, err := h.queries.ListUsers(c.Request.Context(), page)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not list users"})
+		return
+	}
+
+	c.JSON(http.StatusOK, result)
+}
+
+// GetUser handles GET /api/v1/admin/users/:user_id
+func (h *Handler) GetUser(c *gin.Context) {
+	username := sanitize.String(c.Param("user_id"))
+	if username == "" || len(username) > 150 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user_id"})
+		return
+	}
+
+	user, err := h.queries.GetUserByUsername(c.Request.Context(), username)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not fetch user"})
+		return
+	}
+
+	c.JSON(http.StatusOK, user)
+}
+
+// UpdateUserQuota handles PATCH /api/v1/admin/users/:user_id/quota
+func (h *Handler) UpdateUserQuota(c *gin.Context) {
+	ctx := c.Request.Context()
+	username := sanitize.String(c.Param("user_id"))
+	if username == "" || len(username) > 150 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user_id"})
+		return
+	}
+
+	var req updateQuotaRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "quota_bytes is required and must be >= 0"})
+		return
+	}
+
+	// Validate that the user's current drive can accommodate the new quota.
+	alloc, err := h.queries.GetUserDrive(ctx, username)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not retrieve drive allocation"})
+		return
+	}
+	if alloc != nil {
+		user, err := h.queries.GetUserByUsername(ctx, username)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "could not retrieve user"})
+			return
+		}
+		avail, err := h.queries.GetDriveAvailableBytes(ctx, alloc.DriveID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "could not check drive capacity"})
+			return
+		}
+		// Available space for this user = free drive space + their existing quota slot.
+		maxQuota := avail + user.StorageQuotaBytes
+		if req.QuotaBytes > maxQuota {
+			c.JSON(http.StatusConflict, gin.H{
+				"error":      "quota exceeds drive capacity",
+				"max_bytes":  maxQuota,
+				"drive_label": alloc.Drive.Label,
+			})
+			return
+		}
+	}
+
+	if err := h.queries.UpdateUserQuota(ctx, username, req.QuotaBytes); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not update quota"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "quota updated"})
+}
+
+type updateUsernameRequest struct {
+	NewUsername string `json:"new_username" binding:"required,min=3,max=150"`
+}
+
+// UpdateUsername handles PATCH /api/v1/admin/users/:user_id/username.
+// Renames the user in both Keycloak and the app DB.
+func (h *Handler) UpdateUsername(c *gin.Context) {
+	oldUsername := sanitize.String(c.Param("user_id"))
+	if oldUsername == "" || len(oldUsername) > 150 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user_id"})
+		return
+	}
+
+	var req updateUsernameRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "new_username is required (3–150 characters)"})
+		return
+	}
+
+	newUsername := sanitize.String(req.NewUsername)
+	if newUsername == oldUsername {
+		c.JSON(http.StatusOK, gin.H{"message": "username unchanged"})
+		return
+	}
+
+	if err := h.auth.RenameUser(c.Request.Context(), oldUsername, newUsername); err != nil {
+		if strings.Contains(err.Error(), "already taken") || strings.Contains(err.Error(), "not found") {
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "username updated"})
+}

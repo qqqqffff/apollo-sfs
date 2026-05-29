@@ -1,0 +1,65 @@
+{{/*
+  Template name : "interest_notification"
+  Trigger       : Someone submits the interest form
+  Data fields   :
+    AppName          string
+    AppURL           string
+    Name             string — submitter's name
+    Email            string — submitter's email
+    DesiredStorageGB int    — requested storage in GB
+    UseCase          string — submitter's reason / use case
+    AdminURL         string — link to the admin interest submissions page
+*/}}
+{{define "interest_notification"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <title>New interest form submission — {{.AppName}}</title>
+</head>
+<body>
+  <div class="email-wrapper">
+    <div class="email-card">
+
+      {{template "header" .}}
+
+      <div class="email-body">
+        <h1>New interest form submission</h1>
+        <p>
+          Someone has filled out the interest form on <strong>{{.AppName}}</strong>.
+          Review the details below and provision an account from the admin panel if appropriate.
+        </p>
+
+        <table style="width:100%;border-collapse:collapse;margin:20px 0;">
+          <tr>
+            <td style="padding:8px 12px;font-weight:600;color:#374151;width:40%;border-bottom:1px solid #e5e7eb;">Name</td>
+            <td style="padding:8px 12px;color:#111827;border-bottom:1px solid #e5e7eb;">{{.Name}}</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 12px;font-weight:600;color:#374151;border-bottom:1px solid #e5e7eb;">Email</td>
+            <td style="padding:8px 12px;color:#111827;border-bottom:1px solid #e5e7eb;">{{.Email}}</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 12px;font-weight:600;color:#374151;border-bottom:1px solid #e5e7eb;">Desired storage</td>
+            <td style="padding:8px 12px;color:#111827;border-bottom:1px solid #e5e7eb;">{{.DesiredStorageGB}} GB</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 12px;font-weight:600;color:#374151;vertical-align:top;">Use case</td>
+            <td style="padding:8px 12px;color:#111827;">{{.UseCase}}</td>
+          </tr>
+        </table>
+
+        <div class="btn-wrapper">
+          <a href="{{.AdminURL}}" class="btn-primary">View in admin panel</a>
+        </div>
+      </div>
+
+      {{template "footer" .}}
+
+    </div>
+  </div>
+</body>
+</html>
+{{end}}

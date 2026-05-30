@@ -73,8 +73,8 @@ export function listInvitations(cursor?: string) {
   return get<PageResult<Invitation>>(`/admin/invitations${qs}`)
 }
 
-export function createInvitation(email: string, initialQuotaBytes: number, grantAdmin = false) {
-  return post<Invitation>('/admin/invitations', { email, initial_quota_bytes: initialQuotaBytes, grant_admin: grantAdmin })
+export function createInvitation(email: string, initialQuotaBytes: number, grantAdmin = false, grantPremium = false) {
+  return post<Invitation>('/admin/invitations', { email, initial_quota_bytes: initialQuotaBytes, grant_admin: grantAdmin, grant_premium: grantPremium })
 }
 
 export function revokeInvitation(id: string) {

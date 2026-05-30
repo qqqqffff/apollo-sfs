@@ -248,9 +248,31 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
   if (isLoading) return <p className="text-sm text-gray-500">Loading…</p>
   if (error) return <p className="text-sm text-red-500">Failed to load files.</p>
 
+  const isPremium = user?.is_premium || user?.is_admin
+
   // Media collections render as a date-sorted gallery with hidden/subcollection
   // controls instead of the standard file/folder listing.
   if (folder && folder.kind === 'media') {
+    if (!isPremium) {
+      return (
+        <div className="flex flex-col items-center justify-center py-16 gap-4 text-center">
+          <MdPhotoLibrary className="text-6xl text-purple-300" />
+          <h2 className="text-lg font-semibold text-gray-900 m-0">Media Collections</h2>
+          <p className="text-sm text-gray-500 max-w-xs">
+            Media collections are a premium feature. Upgrade to access photo and video galleries.
+          </p>
+          <a
+            href="/premium"
+            className="px-4 py-2 text-sm bg-amber-500 hover:bg-amber-600 text-white rounded-lg font-medium transition-colors"
+          >
+            Upgrade to Premium
+          </a>
+          <button onClick={goBack} className="text-sm text-gray-500 hover:text-gray-700 bg-transparent border-0 cursor-pointer">
+            Go back
+          </button>
+        </div>
+      )
+    }
     return (
       <MediaCollectionView
         folderId={folder.id}
@@ -308,13 +330,15 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
           >
             <MdCreateNewFolder className="text-base text-gray-500" /> New folder
           </button>
-          <button
-            onClick={() => startCreate('media')}
-            disabled={creatingFolder}
-            className="inline-flex items-center gap-1.5 px-3 py-2 text-sm border border-gray-200 rounded-lg text-gray-700 hover:bg-gray-50 cursor-pointer transition-colors disabled:opacity-40"
-          >
-            <MdPhotoLibrary className="text-base text-purple-400" /> New collection
-          </button>
+          {isPremium && (
+            <button
+              onClick={() => startCreate('media')}
+              disabled={creatingFolder}
+              className="inline-flex items-center gap-1.5 px-3 py-2 text-sm border border-gray-200 rounded-lg text-gray-700 hover:bg-gray-50 cursor-pointer transition-colors disabled:opacity-40"
+            >
+              <MdPhotoLibrary className="text-base text-purple-400" /> New collection
+            </button>
+          )}
           <input
             ref={fileRef}
             type="file"

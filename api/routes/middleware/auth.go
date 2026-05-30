@@ -123,6 +123,19 @@ type keycloakClaims struct {
 	} `json:"realm_access"`
 }
 
+// RequirePremium returns a middleware that gates access to premium-only routes.
+// Must be chained after RequireAuth so that "isPremium" is present in context.
+// Returns 402 Payment Required for authenticated non-premium users.
+func (m *AuthMiddleware) RequirePremium() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if ok, _ := c.Get("isPremium"); ok != true {
+			c.AbortWithStatusJSON(http.StatusPaymentRequired, gin.H{"error": "premium subscription required"})
+			return
+		}
+		c.Next()
+	}
+}
+
 // RequireAuth reads the access_token from the session, verifies its signature
 // and expiry using the Keycloak JWKS, then injects the following keys into the
 // Gin context for use by downstream middleware and handlers:

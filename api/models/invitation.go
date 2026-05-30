@@ -21,4 +21,5 @@ type Invitation struct {
 	CreatedAt         time.Time  `json:"created_at" db:"created_at"`
 	InitialQuotaBytes int64      `json:"initial_quota_bytes" db:"initial_quota_bytes"`
 	GrantAdmin        bool       `json:"grant_admin" db:"grant_admin"`
+	GrantPremium      bool       `json:"grant_premium" db:"grant_premium"`
 }

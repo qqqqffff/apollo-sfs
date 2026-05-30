@@ -313,7 +313,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		protected.GET("/me", h.Me)
 		protected.POST("/me/password", h.ChangePassword)
 		protected.GET("/me/preferences", h.GetPreferences)
-		protected.PUT("/me/preferences", h.UpdatePreferences)
+		// PUT /me/preferences is premium-only (media auto-upload); registered below.
 
 		// Files — single upload (small files ≤ 5 MB)
 		protected.POST("/files/upload", h.UploadFile)
@@ -351,7 +351,6 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		protected.GET("/folders", h.ListFolders)
 		protected.GET("/folders/:folder_id", h.GetFolder)
 		protected.GET("/folders/:folder_id/ancestors", h.GetFolderAncestors)
-		protected.GET("/folders/:folder_id/media", h.GetMediaFolder)
 		protected.POST("/folders", h.CreateFolder)
 		protected.PATCH("/folders/:folder_id", h.UpdateFolder)
 		protected.PATCH("/folders/:folder_id/move", h.MoveFolder)
@@ -367,10 +366,16 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		protected.POST("/payments/orders", paymentsHandler.CreateOrder)
 		protected.POST("/payments/orders/:order_id/capture", paymentsHandler.CaptureOrder)
 
-		// Media subcollection pointers
-		protected.POST("/collections/:collection_id/items/:file_id", h.CopyFileToCollection)
-		protected.PATCH("/collections/:collection_id/items/:file_id/move", h.MoveCollectionItem)
-		protected.DELETE("/collections/:collection_id/items/:file_id", h.RemoveFileFromCollection)
+		// ── Premium-only: media collections ──────────────────────────────────
+		premiumGroup := protected.Group("")
+		premiumGroup.Use(mw.RequirePremium())
+		{
+			premiumGroup.GET("/folders/:folder_id/media", h.GetMediaFolder)
+			premiumGroup.PUT("/me/preferences", h.UpdatePreferences)
+			premiumGroup.POST("/collections/:collection_id/items/:file_id", h.CopyFileToCollection)
+			premiumGroup.PATCH("/collections/:collection_id/items/:file_id/move", h.MoveCollectionItem)
+			premiumGroup.DELETE("/collections/:collection_id/items/:file_id", h.RemoveFileFromCollection)
+		}
 
 		// ── Admin — JWT + admin realm role ───────────────────────────────────
 		adminGroup := protected.Group("/admin")
@@ -452,10 +457,10 @@ func seedDefaultServer(ctx context.Context, queries *db.Queries, cfg Config, kek
 		return nil // already seeded
 	}
 
-	// Detect physical capacity from the data mount.
+	// Detect usable capacity from the data mount (excludes filesystem-reserved blocks).
 	var capacityBytes int64
 	if usage, err := psdisk.Usage(cfg.DiskStatsPath); err == nil {
-		capacityBytes = int64(usage.Total)
+		capacityBytes = int64(usage.Used) + int64(usage.Free)
 	} else {
 		log.Printf("seed: could not detect disk capacity (%v); defaulting to 1 TiB", err)
 		capacityBytes = 1 << 40

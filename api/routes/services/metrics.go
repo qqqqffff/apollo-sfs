@@ -34,7 +34,9 @@ const (
 
 var (
 	rePktLoss = regexp.MustCompile(`(\d+(?:\.\d+)?)% packet loss`)
-	reRTTAvg  = regexp.MustCompile(`rtt min/avg/max/mdev = [\d.]+/([\d.]+)/`)
+	// Matches both iputils-ping ("rtt min/avg/max/mdev = ...") and
+	// busybox ping ("round-trip min/avg/max = ..."). Average is the 2nd field.
+	reRTTAvg = regexp.MustCompile(`(?:rtt|round-trip) min/avg/max(?:/mdev)? = [\d.]+/([\d.]+)/`)
 )
 
 // pingResult holds the most recent ISP ping measurement.
@@ -246,22 +248,24 @@ func (s *MetricsService) runSampler(ctx context.Context) {
 				log.Printf("metrics: collect: %v", err)
 				continue
 			}
+			// Populate the latest speed test result before inserting so it is
+			// persisted to the DB and available in historical graph queries.
+			s.speedTestMu.RLock()
+			st := s.speedTestStream
+			s.speedTestMu.RUnlock()
+			if st != nil {
+				if result := st.LatestSpeedTestResult(); result != nil {
+					snap.SpeedTestUploadMbps = &result.UploadMbps
+					snap.SpeedTestDownloadMbps = &result.DownloadMbps
+					snap.SpeedTestTestedAt = &result.TestedAt
+					snap.SpeedTestError = result.Error
+				}
+			}
 			if err := s.queries.InsertSnapshot(ctx, snap); err != nil {
 				log.Printf("metrics: insert: %v", err)
 				continue
 			}
 			if s.hub.ClientCount() > 0 {
-				s.speedTestMu.RLock()
-				st := s.speedTestStream
-				s.speedTestMu.RUnlock()
-				if st != nil {
-					if result := st.LatestSpeedTestResult(); result != nil {
-						snap.SpeedTestUploadMbps = &result.UploadMbps
-						snap.SpeedTestDownloadMbps = &result.DownloadMbps
-						snap.SpeedTestTestedAt = &result.TestedAt
-						snap.SpeedTestError = result.Error
-					}
-				}
 				if msg, err := json.Marshal(snap); err == nil {
 					s.hub.Broadcast(msg)
 				}
@@ -338,8 +342,10 @@ func (s *MetricsService) collectSnapshot(ctx context.Context) (*models.ServerMet
 
 	var diskTotal, diskFree int64
 	if usage, err := psdisk.Usage(s.diskStatsPath); err == nil {
-		diskTotal = int64(usage.Total)
+		// Free = Bavail (available to non-root, excludes the 5% root-reserved blocks).
+		// Use Used+Free as the total so percentages exclude system-reserved space.
 		diskFree = int64(usage.Free)
+		diskTotal = int64(usage.Used) + int64(usage.Free)
 	} else {
 		log.Printf("metrics: disk stats for %q: %v", s.diskStatsPath, err)
 	}

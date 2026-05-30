@@ -60,7 +60,7 @@ type AdminQuerier interface {
 
 // AdminInviteService is the subset of *services.InviteService used by admin handlers.
 type AdminInviteService interface {
-	Create(ctx context.Context, invitedByUserID uuid.UUID, invitedByUsername, email string, initialQuotaBytes int64, grantAdmin bool) (*models.Invitation, error)
+	Create(ctx context.Context, invitedByUserID uuid.UUID, invitedByUsername, email string, initialQuotaBytes int64, grantAdmin bool, grantPremium bool) (*models.Invitation, error)
 	List(ctx context.Context, page db.PageInput) (*db.PageResult[models.Invitation], error)
 	InvitationURL(token string) string
 	Resend(ctx context.Context, id uuid.UUID, byUsername string) error

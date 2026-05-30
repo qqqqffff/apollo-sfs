@@ -192,8 +192,39 @@ func (s *AuthService) Register(ctx context.Context, username, email, password, i
 	if err != nil {
 		return nil, fmt.Errorf("register: get admin token: %w", err)
 	}
-	if err := s.kcCreateUser(ctx, adminToken, username, email, password); err != nil {
+	kcUserID, err := s.kcCreateUser(ctx, adminToken, username, email, password)
+	if err != nil {
 		return nil, fmt.Errorf("register: create keycloak user: %w", err)
+	}
+
+	// 2a. Grant realm roles if the invitation requests them.
+	// Non-fatal — account is still usable; admin can grant roles manually.
+	if inv.GrantAdmin || inv.GrantPremium {
+		var rolesToGrant []kcRoleRef
+		for _, roleName := range func() []string {
+			var names []string
+			if inv.GrantAdmin {
+				names = append(names, "admin")
+			}
+			if inv.GrantPremium || inv.GrantAdmin {
+				// admins implicitly receive premium at the app layer, but we
+				// also grant it explicitly so the Keycloak JWT carries the role.
+				names = append(names, "premium")
+			}
+			return names
+		}() {
+			role, roleErr := s.kcGetRealmRole(ctx, adminToken, roleName)
+			if roleErr != nil {
+				continue
+			}
+			rolesToGrant = append(rolesToGrant, *role)
+		}
+		if len(rolesToGrant) > 0 {
+			if grantErr := s.kcGrantRealmRoles(ctx, adminToken, kcUserID, rolesToGrant); grantErr != nil {
+				// Log but do not fail registration.
+				_ = grantErr
+			}
+		}
 	}
 
 	// 3. Provision encryption key.
@@ -408,8 +439,66 @@ func (s *AuthService) adminToken(ctx context.Context) (string, error) {
 	return tokens.AccessToken, nil
 }
 
+// kcRoleRef is the minimal representation Keycloak requires to assign a realm role.
+type kcRoleRef struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// kcGetRealmRole fetches the role definition for roleName so we have its UUID.
+func (s *AuthService) kcGetRealmRole(ctx context.Context, adminToken, roleName string) (*kcRoleRef, error) {
+	endpoint := fmt.Sprintf("%s/admin/realms/%s/roles/%s", s.kcURL, s.kcRealm, url.PathEscape(roleName))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	resp, err := s.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("keycloak request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("realm role %q not found", roleName)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("keycloak returned %s", resp.Status)
+	}
+	var role kcRoleRef
+	if err := json.NewDecoder(resp.Body).Decode(&role); err != nil {
+		return nil, err
+	}
+	return &role, nil
+}
+
+// kcGrantRealmRoles assigns the given realm roles to the Keycloak user.
+func (s *AuthService) kcGrantRealmRoles(ctx context.Context, adminToken, userID string, roles []kcRoleRef) error {
+	body, err := json.Marshal(roles)
+	if err != nil {
+		return err
+	}
+	endpoint := fmt.Sprintf("%s/admin/realms/%s/users/%s/role-mappings/realm", s.kcURL, s.kcRealm, userID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(string(body)))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	resp, err := s.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("keycloak request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("keycloak returned %s: %s", resp.Status, string(b))
+	}
+	return nil
+}
+
 // kcCreateUser calls POST /admin/realms/{realm}/users to create the account.
-func (s *AuthService) kcCreateUser(ctx context.Context, adminToken, username, email, password string) error {
+// Returns the new user's Keycloak UUID extracted from the Location response header.
+func (s *AuthService) kcCreateUser(ctx context.Context, adminToken, username, email, password string) (string, error) {
 	user := kcUser{
 		Username:      username,
 		Email:         email,
@@ -421,31 +510,38 @@ func (s *AuthService) kcCreateUser(ctx context.Context, adminToken, username, em
 	}
 	body, err := json.Marshal(user)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	endpoint := fmt.Sprintf("%s/admin/realms/%s/users", s.kcURL, s.kcRealm)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(string(body)))
 	if err != nil {
-		return err
+		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+adminToken)
 
 	resp, err := s.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("keycloak request: %w", err)
+		return "", fmt.Errorf("keycloak request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusConflict {
-		return fmt.Errorf("username or email already exists")
+		return "", fmt.Errorf("username or email already exists")
 	}
 	if resp.StatusCode != http.StatusCreated {
 		b, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("keycloak returned %s: %s", resp.Status, string(b))
+		return "", fmt.Errorf("keycloak returned %s: %s", resp.Status, string(b))
 	}
-	return nil
+
+	// Extract the new user UUID from the Location header
+	// e.g. http://keycloak:8180/admin/realms/myrealm/users/<uuid>
+	loc := resp.Header.Get("Location")
+	if idx := strings.LastIndex(loc, "/"); idx >= 0 {
+		return loc[idx+1:], nil
+	}
+	return "", fmt.Errorf("could not extract user ID from Location header: %q", loc)
 }
 
 // kcFindUserByEmail looks up a Keycloak user ID by exact email match.

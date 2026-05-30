@@ -29,6 +29,7 @@ type InviteValidation struct {
 	InvitedByUserID uuid.UUID `json:"invited_by_user_id"`
 	ExpiresAt       time.Time `json:"expires_at"`
 	GrantAdmin      bool      `json:"grant_admin"`
+	GrantPremium    bool      `json:"grant_premium"`
 }
 
 // ── Service ───────────────────────────────────────────────────────────────────
@@ -74,6 +75,7 @@ func (s *InviteService) Create(
 	email string,
 	initialQuotaBytes int64,
 	grantAdmin bool,
+	grantPremium bool,
 ) (*models.Invitation, error) {
 	token, err := generateInviteToken()
 	if err != nil {
@@ -93,6 +95,7 @@ func (s *InviteService) Create(
 		TokenExpiresAt:    expiresAt,
 		InitialQuotaBytes: initialQuotaBytes,
 		GrantAdmin:        grantAdmin,
+		GrantPremium:      grantPremium,
 	}
 
 	if err := s.queries.CreateInvitation(ctx, inv); err != nil {
@@ -145,6 +148,7 @@ func (s *InviteService) Validate(ctx context.Context, token string) (*InviteVali
 		InvitedByUserID: inv.InvitedByUserID,
 		ExpiresAt:       inv.TokenExpiresAt,
 		GrantAdmin:      inv.GrantAdmin,
+		GrantPremium:    inv.GrantPremium,
 	}, nil
 }
 

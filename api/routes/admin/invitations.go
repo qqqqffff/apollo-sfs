@@ -24,6 +24,7 @@ type createInvitationRequest struct {
 	Email             string `json:"email" binding:"required,email,max=254"`
 	InitialQuotaBytes int64  `json:"initial_quota_bytes"`
 	GrantAdmin        bool   `json:"grant_admin"`
+	GrantPremium      bool   `json:"grant_premium"`
 }
 
 // CreateInvitation handles POST /api/v1/admin/invitations.
@@ -44,7 +45,7 @@ func (h *Handler) CreateInvitation(c *gin.Context) {
 		return
 	}
 
-	inv, err := h.invites.Create(c.Request.Context(), userID, invitedByUsername.(string), req.Email, req.InitialQuotaBytes, req.GrantAdmin)
+	inv, err := h.invites.Create(c.Request.Context(), userID, invitedByUsername.(string), req.Email, req.InitialQuotaBytes, req.GrantAdmin, req.GrantPremium)
 	if err != nil {
 		if errors.Is(err, services.ErrInviteAlreadyPending) {
 			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})

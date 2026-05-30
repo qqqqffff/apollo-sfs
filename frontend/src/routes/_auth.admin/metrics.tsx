@@ -330,6 +330,16 @@ function RouteComponent() {
 
   const graphW = Math.min(820, window.innerWidth - 80)
 
+  // For windows >= 24 hr the x-axis spans multiple calendar days, so show
+  // the date alongside the time to avoid ambiguity.
+  const formatGraphX = hours >= 24
+    ? (ms: number) => {
+        const d = new Date(ms)
+        return d.toLocaleDateString([], { month: 'numeric', day: 'numeric' }) +
+          ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      }
+    : undefined
+
   return (
     <div className="max-w-4xl">
       <div className="flex items-center justify-between mb-6">
@@ -424,7 +434,11 @@ function RouteComponent() {
             />
           )}
           {(driveTemps?.length ?? 0) > 0 && (
-            <NvmeTempsCard temps={driveTemps!} />
+            <NvmeTempsCard
+              temps={driveTemps!}
+              selected={selectedMetric === 'drive_temp'}
+              onClick={() => setSelectedMetric('drive_temp')}
+            />
           )}
           <PingCard
             serverMs={latest?.server_isp_ping_ms ?? null}
@@ -465,11 +479,11 @@ function RouteComponent() {
             <div className="flex flex-col gap-4">
               <div>
                 <div className="text-xs text-gray-400 mb-2">↑ Upload</div>
-                <LineGraph points={netUploadPoints} width={graphW} height={160} color="#3b82f6" formatY={formatBytesPerSec} />
+                <LineGraph points={netUploadPoints} width={graphW} height={160} color="#3b82f6" formatY={formatBytesPerSec} formatX={formatGraphX} />
               </div>
               <div>
                 <div className="text-xs text-gray-400 mb-2">↓ Download</div>
-                <LineGraph points={netDownloadPoints} width={graphW} height={160} color="#10b981" formatY={formatBytesPerSec} />
+                <LineGraph points={netDownloadPoints} width={graphW} height={160} color="#10b981" formatY={formatBytesPerSec} formatX={formatGraphX} />
               </div>
             </div>
           )}
@@ -477,37 +491,37 @@ function RouteComponent() {
             <div className="flex flex-col gap-4">
               <div>
                 <div className="text-xs text-gray-400 mb-2">↑ Upload (Mbps)</div>
-                <LineGraph points={speedUploadPoints} width={graphW} height={160} color="#3b82f6" formatY={(v) => `${v.toFixed(1)} Mb/s`} />
+                <LineGraph points={speedUploadPoints} width={graphW} height={160} color="#3b82f6" formatY={(v) => `${v.toFixed(1)} Mb/s`} formatX={formatGraphX} />
               </div>
               <div>
                 <div className="text-xs text-gray-400 mb-2">↓ Download (Mbps)</div>
-                <LineGraph points={speedDownloadPoints} width={graphW} height={160} color="#10b981" formatY={(v) => `${v.toFixed(1)} Mb/s`} />
+                <LineGraph points={speedDownloadPoints} width={graphW} height={160} color="#10b981" formatY={(v) => `${v.toFixed(1)} Mb/s`} formatX={formatGraphX} />
               </div>
             </div>
           )}
           {selectedMetric === 'ping' && (
-            <LineGraph points={netPingPoints} width={graphW} height={200} color="#f59e0b" formatY={(v) => `${v.toFixed(1)} ms`} />
+            <LineGraph points={netPingPoints} width={graphW} height={200} color="#f59e0b" formatY={(v) => `${v.toFixed(1)} ms`} formatX={formatGraphX} />
           )}
           {selectedMetric === 'loss' && (
-            <LineGraph points={netLossPoints} width={graphW} height={200} color="#ef4444" formatY={(v) => `${v.toFixed(1)}%`} />
+            <LineGraph points={netLossPoints} width={graphW} height={200} color="#ef4444" formatY={(v) => `${v.toFixed(1)}%`} formatX={formatGraphX} />
           )}
           {selectedMetric === 'total_users' && (
-            <LineGraph points={usersPoints} width={graphW} height={200} color="#8b5cf6" formatY={formatCount} />
+            <LineGraph points={usersPoints} width={graphW} height={200} color="#8b5cf6" formatY={formatCount} formatX={formatGraphX} />
           )}
           {selectedMetric === 'active_users' && (
-            <LineGraph points={activeUsersPoints} width={graphW} height={200} color="#06b6d4" formatY={formatCount} />
+            <LineGraph points={activeUsersPoints} width={graphW} height={200} color="#06b6d4" formatY={formatCount} formatX={formatGraphX} />
           )}
           {selectedMetric === 'disk' && (
-            <LineGraph points={diskPoints} width={graphW} height={200} color="#3b82f6" />
+            <LineGraph points={diskPoints} width={graphW} height={200} color="#3b82f6" formatX={formatGraphX} />
           )}
           {selectedMetric === 'memory' && (
-            <LineGraph points={memoryPoints} width={graphW} height={200} color="#8b5cf6" />
+            <LineGraph points={memoryPoints} width={graphW} height={200} color="#8b5cf6" formatX={formatGraphX} />
           )}
           {selectedMetric === 'cpu_temp' && (
-            <LineGraph points={cpuTempPoints} width={graphW} height={200} color="#f59e0b" formatY={formatTempY} />
+            <LineGraph points={cpuTempPoints} width={graphW} height={200} color="#f59e0b" formatY={formatTempY} formatX={formatGraphX} />
           )}
           {selectedMetric === 'drive_temp' && (
-            <LineGraph points={driveTempPoints} width={graphW} height={200} color="#10b981" formatY={formatTempY} />
+            <LineGraph points={driveTempPoints} width={graphW} height={200} color="#10b981" formatY={formatTempY} formatX={formatGraphX} />
           )}
         </div>
       </section>
@@ -764,14 +778,17 @@ function tempColor(c: number): string {
   return 'text-emerald-600'
 }
 
-function NvmeTempsCard({ temps }: { temps: DriveTemp[] }) {
+function NvmeTempsCard({ temps, selected, onClick }: { temps: DriveTemp[]; selected?: boolean; onClick?: () => void }) {
   return (
-    <div className="bg-white border border-gray-200 rounded-xl px-4 py-3 cursor-default hover:border-gray-300 transition-colors">
+    <div
+      className={`bg-white border rounded-xl px-4 py-3 transition-colors ${onClick ? 'cursor-pointer' : ''} ${selected ? 'border-blue-500 ring-1 ring-blue-500' : 'border-gray-200 hover:border-gray-300'}`}
+      onClick={onClick}
+    >
       <div className="text-xs text-gray-400 mb-2">NVMe temps</div>
       <div className="flex flex-col gap-1 max-h-28 overflow-y-auto pr-1">
         {temps.map((d) => (
           <div key={d.name} className="flex items-center justify-between gap-2">
-            <span className="text-xs text-gray-500 truncate" title={d.name}>{d.name}</span>
+            <span className="text-xs text-gray-600 font-medium truncate" title={d.name}>{d.name}</span>
             <span className={`text-xs font-semibold tabular-nums shrink-0 ${tempColor(d.temp_celsius)}`}>
               {d.temp_celsius.toFixed(1)}°C
             </span>

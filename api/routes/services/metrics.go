@@ -70,8 +70,10 @@ func (p *pingCollector) run(ctx context.Context) {
 func (p *pingCollector) collect() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	// -c 5: 5 probes  -i 0.2: 200 ms between probes  -W 1: 1 s deadline  -q: quiet (summary only)
-	out, err := exec.CommandContext(ctx, "ping", "-c", "5", "-i", "0.2", "-W", "1", "-q", pingTarget).Output()
+	// -c 4: 4 probes  -W 2: 2 s deadline per probe  -q: quiet (summary only)
+	// No -i flag: busybox ping rejects fractional intervals, so we use the
+	// default 1-second interval which works on both busybox and iputils-ping.
+	out, err := exec.CommandContext(ctx, "ping", "-c", "4", "-W", "2", "-q", pingTarget).Output()
 	if err != nil {
 		p.mu.Lock()
 		p.latest = pingResult{}

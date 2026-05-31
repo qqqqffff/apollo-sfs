@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react'
 import {
   addDrive,
   createServer,
+  deleteDrive,
   driveTempsQueryOptions,
   getMetricsHistoryByHours,
   infrastructureQueryOptions,
@@ -11,6 +12,7 @@ import {
   runTests,
   shutdownServer,
   speedTestQueryOptions,
+  syncDriveCapacity,
   triggerSpeedTest,
   updateDrive,
   updateServer,
@@ -109,6 +111,29 @@ function RouteComponent() {
       notify('success', 'Drive added')
     },
     onError: () => notify('error', 'Failed to add drive'),
+  })
+
+  const deleteDriveMutation = useMutation({
+    mutationFn: ({ serverId, driveId }: { serverId: string; driveId: string }) =>
+      deleteDrive(serverId, driveId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['admin', 'infrastructure'] })
+      notify('success', 'Drive removed')
+    },
+    onError: (err: unknown) => {
+      const msg = err instanceof Error ? err.message : 'Failed to remove drive'
+      notify('error', msg)
+    },
+  })
+
+  const syncCapacityMutation = useMutation({
+    mutationFn: (driveId: string) => syncDriveCapacity(driveId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['admin', 'infrastructure'] })
+      queryClient.invalidateQueries({ queryKey: ['admin', 'capacity'] })
+      notify('success', 'Drive capacity synced from disk')
+    },
+    onError: () => notify('error', 'Failed to sync drive capacity'),
   })
 
   const latest = snapshots[snapshots.length - 1]
@@ -613,6 +638,12 @@ function RouteComponent() {
                         driveId: d.drive_id,
                         active: !d.drive_is_active,
                       })}
+                      onDelete={() => {
+                        if (confirm(`Remove drive "${d.drive_label}" from ${d.server_name}? This cannot be undone.`)) {
+                          deleteDriveMutation.mutate({ serverId: d.server_id, driveId: d.drive_id })
+                        }
+                      }}
+                      onSyncCapacity={() => syncCapacityMutation.mutate(d.drive_id)}
                     />
                   ))}
                 </div>
@@ -932,7 +963,12 @@ function formatBytesPerSec(bps: number): string {
   return `${bps.toFixed(0)} B/s`
 }
 
-function DriveBar({ drive, onToggle }: { drive: DriveSummary; onToggle: () => void }) {
+function DriveBar({ drive, onToggle, onDelete, onSyncCapacity }: {
+  drive: DriveSummary
+  onToggle: () => void
+  onDelete: () => void
+  onSyncCapacity: () => void
+}) {
   const cap = drive.capacity_bytes || 1
   const allocPct = Math.min(100, (drive.allocated_quota_bytes / cap) * 100)
   const usedPct = Math.min(100, (drive.used_bytes / cap) * 100)
@@ -951,10 +987,23 @@ function DriveBar({ drive, onToggle }: { drive: DriveSummary; onToggle: () => vo
             {(drive.capacity_bytes / GB).toFixed(0)} GB
           </span>
           <button
+            onClick={onSyncCapacity}
+            title="Re-detect capacity from disk"
+            className="text-gray-400 hover:text-blue-600 cursor-pointer bg-transparent border border-gray-200 hover:border-blue-300 rounded px-2 py-0.5 transition-colors"
+          >
+            Sync
+          </button>
+          <button
             onClick={onToggle}
             className="text-gray-400 hover:text-gray-700 cursor-pointer bg-transparent border border-gray-200 hover:border-gray-400 rounded px-2 py-0.5 transition-colors"
           >
             {drive.drive_is_active ? 'Deactivate' : 'Activate'}
+          </button>
+          <button
+            onClick={onDelete}
+            className="text-red-400 hover:text-red-600 cursor-pointer bg-transparent border border-red-200 hover:border-red-400 rounded px-2 py-0.5 transition-colors"
+          >
+            Remove
           </button>
         </div>
       </div>

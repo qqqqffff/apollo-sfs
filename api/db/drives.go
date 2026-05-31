@@ -122,6 +122,39 @@ func (q *Queries) UpdateDrive(ctx context.Context, id uuid.UUID, p UpdateDrivePa
 	return d, nil
 }
 
+// DeleteDrive removes a drive record. Returns an error if any users are
+// currently allocated to it; the caller must reassign them first.
+func (q *Queries) DeleteDrive(ctx context.Context, id uuid.UUID) error {
+	var count int
+	if err := q.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM user_drive_allocations WHERE drive_id = $1`, id,
+	).Scan(&count); err != nil {
+		return fmt.Errorf("DeleteDrive: check allocations: %w", err)
+	}
+	if count > 0 {
+		return fmt.Errorf("DeleteDrive: drive has %d user allocations; reassign them first", count)
+	}
+	_, err := q.db.ExecContext(ctx, `DELETE FROM drives WHERE id = $1`, id)
+	if err != nil {
+		return fmt.Errorf("DeleteDrive: %w", err)
+	}
+	return nil
+}
+
+// UpdateDriveCapacity sets the capacity_bytes for a drive and returns the
+// updated row. Used by the sync-capacity endpoint to auto-detect disk size.
+func (q *Queries) UpdateDriveCapacity(ctx context.Context, id uuid.UUID, capacityBytes int64) (*models.Drive, error) {
+	row := q.db.QueryRowContext(ctx, `
+		UPDATE drives SET capacity_bytes = $2 WHERE id = $1 RETURNING`+driveColumns,
+		id, capacityBytes,
+	)
+	d, err := scanDrive(row)
+	if err != nil {
+		return nil, fmt.Errorf("UpdateDriveCapacity: %w", err)
+	}
+	return d, nil
+}
+
 // ── Capacity queries ──────────────────────────────────────────────────────────
 
 // GetDriveAvailableBytes returns the unallocated capacity on a drive:

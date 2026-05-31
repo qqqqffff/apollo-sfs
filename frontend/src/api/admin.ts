@@ -185,6 +185,14 @@ export function updateDrive(
   )
 }
 
+export function deleteDrive(serverId: string, driveId: string) {
+  return del<{ message: string }>(`/admin/system/servers/${serverId}/drives/${driveId}`)
+}
+
+export function syncDriveCapacity(driveId: string) {
+  return post<{ id: string; label: string; capacity_bytes: number }>(`/admin/system/drives/${driveId}/sync-capacity`)
+}
+
 export const infrastructureQueryOptions = {
   queryKey: ['admin', 'infrastructure'] as const,
   queryFn: listInfrastructure,

@@ -44,6 +44,8 @@ type AdminQuerier interface {
 	GetDrive(ctx context.Context, id uuid.UUID) (*models.Drive, error)
 	CreateDrive(ctx context.Context, p db.CreateDriveParams) (*models.Drive, error)
 	UpdateDrive(ctx context.Context, id uuid.UUID, p db.UpdateDriveParams) (*models.Drive, error)
+	DeleteDrive(ctx context.Context, id uuid.UUID) error
+	UpdateDriveCapacity(ctx context.Context, id uuid.UUID, capacityBytes int64) (*models.Drive, error)
 
 	// Alarm settings
 	GetAlarmSettings(ctx context.Context) (*models.AlarmSettings, error)

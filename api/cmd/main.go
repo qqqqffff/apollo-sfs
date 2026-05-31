@@ -228,7 +228,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	h := routes.NewHandler(queries, fileSvc, folderSvc, inviteSvc, favSvc, authSvc, uploadStore, emailSvc, presignSvc, cfg.TurnstileSecretKey)
 	routes.SetAPIKeyService(h, apiKeySvc)
 	authHandler := auth.NewHandler(authSvc)
-	adminHandler := admin.NewHandler(queries, inviteSvc, metricsSvc, authSvc, fileSvc, registry, geoReader, cfg.BackendTestURL, cfg.AppDir, cfg.FrontendTestURL, cfg.FrontendE2EURL, shutdownCh)
+	adminHandler := admin.NewHandler(queries, inviteSvc, metricsSvc, authSvc, fileSvc, registry, geoReader, cfg.DiskStatsPath, cfg.BackendTestURL, cfg.AppDir, cfg.FrontendTestURL, cfg.FrontendE2EURL, shutdownCh)
 	sfsHandler := sfs.NewHandler(queries, fileSvc, presignSvc, apiKeySvc)
 	inboundEmailHandler := admin.NewInboundEmailHandler(inboundEmailSvc, cfg.SendgridWebhookSecret)
 
@@ -407,6 +407,8 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 			adminGroup.PATCH("/system/servers/:server_id", adminHandler.UpdateServer)
 			adminGroup.POST("/system/servers/:server_id/drives", adminHandler.AddDrive)
 			adminGroup.PATCH("/system/servers/:server_id/drives/:drive_id", adminHandler.UpdateDrive)
+			adminGroup.DELETE("/system/servers/:server_id/drives/:drive_id", adminHandler.DeleteDrive)
+			adminGroup.POST("/system/drives/:drive_id/sync-capacity", adminHandler.SyncDriveCapacity)
 
 			adminGroup.GET("/banned-ips", adminHandler.ListBannedIPs)
 			adminGroup.POST("/banned-ips/:id/unban", adminHandler.UnbanIP)

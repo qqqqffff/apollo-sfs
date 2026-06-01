@@ -8,7 +8,13 @@ export const Route = createFileRoute('/login')({
   beforeLoad: async ({ context }) => {
     const result = await context.auth.validateAuth()
     if (result && result !== 'banned' && result !== 'suspended') {
-      throw redirect({ to: '/client' })
+      throw redirect({
+        to: '/client',
+        search: {
+          file: undefined,
+          folder: undefined
+        }
+      })
     }
   },
   component: RouteComponent,

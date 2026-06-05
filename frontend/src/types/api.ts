@@ -100,6 +100,7 @@ export interface Invitation {
   created_at: string
   initial_quota_bytes: number
   grant_admin: boolean
+  grant_premium: boolean
   invitation_url?: string
 }
 

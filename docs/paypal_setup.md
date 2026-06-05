@@ -62,13 +62,39 @@ If you skip this step, the card-payment button still works; only the Apple Pay t
 
 The premium flag is the source of truth in **Keycloak** so it travels in the access token's `realm_access.roles` claim. The API mirrors the claim into `users.is_premium` on every authenticated request (`api/routes/middleware/auth.go:RequireAuth`).
 
-If you are setting up a fresh realm, re-import `keycloak/import/realm.json` (it now includes the `premium` realm role and the `premium` group with that role assigned). If you are upgrading an existing realm:
+Run the following `kcadm.sh` commands from the project root. `$KEYCLOAK_ADMIN` and `$KEYCLOAK_ADMIN_PASSWORD` are the values from your `.env`.
 
-1. Sign in to the Keycloak admin console.
-2. Select your realm.
-3. **Realm roles → Create role** — name: `premium`, description: "Premium subscriber — unlocks the SFS S3-like programmatic API".
-4. **Groups → Create group** — name: `premium`.
-5. Open the new group → **Role mapping → Assign role** → realm role `premium`.
+```bash
+# 1. Authenticate against the master realm
+docker exec apollo-sfs-keycloak /opt/keycloak/bin/kcadm.sh config credentials \
+  --server http://localhost:8180 \
+  --realm master \
+  --user "$KEYCLOAK_ADMIN" \
+  --password "$KEYCLOAK_ADMIN_PASSWORD"
+
+# 2. Create the premium realm role
+docker exec apollo-sfs-keycloak /opt/keycloak/bin/kcadm.sh create roles \
+  -r apollo-sfs-realm \
+  -s name=premium \
+  -s 'description=Premium subscriber — unlocks the SFS S3-like programmatic API. Granted by adding the user to the "premium" realm group after a successful PayPal capture.' \
+  -s composite=false \
+  -s clientRole=false
+
+# 3. Create the premium group
+docker exec apollo-sfs-keycloak /opt/keycloak/bin/kcadm.sh create groups \
+  -r apollo-sfs-realm \
+  -s name=premium
+
+# 4. Capture the new group's ID, then assign the premium role to it
+GROUP_ID=$(docker exec apollo-sfs-keycloak /opt/keycloak/bin/kcadm.sh get groups \
+  -r apollo-sfs-realm --fields id,name \
+  | jq -r '.[] | select(.name=="premium") | .id')
+
+docker exec apollo-sfs-keycloak /opt/keycloak/bin/kcadm.sh add-roles \
+  -r apollo-sfs-realm \
+  --gid "$GROUP_ID" \
+  --rolename premium
+```
 
 The API's `apollo-sfs-api` confidential client already has the service account permissions required to manage group membership through the Admin REST API. No additional client setup is needed.
 

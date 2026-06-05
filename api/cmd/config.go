@@ -83,6 +83,17 @@ type Config struct {
 	// PremiumTierPriceCents is the one-time charge for the premium tier.
 	PremiumTierPriceCents int
 	PremiumTierCurrency   string // ISO 4217, e.g. "USD"
+
+	// ── Inbound email (SendGrid Inbound Parse) ──────────────────────────────
+	// EmailStoragePath is the absolute directory inbound emails are written to,
+	// laid out as <path>/<worker_name>/<YYYY-MM>/<id>.json.
+	EmailStoragePath string
+
+	// SendgridWebhookSecret, when set, must be supplied as the ?token= query
+	// param on the inbound webhook URL. SendGrid Inbound Parse provides no
+	// signature, so this shared secret guards the public endpoint. Empty
+	// disables the check (only safe behind a trusted network).
+	SendgridWebhookSecret string
 }
 
 func loadConfig() Config {
@@ -142,6 +153,9 @@ func loadConfig() Config {
 		PayPalEnvironment:     getEnv("PAYPAL_ENV", "sandbox"),
 		PremiumTierPriceCents: premiumPrice,
 		PremiumTierCurrency:   getEnv("PREMIUM_TIER_CURRENCY", "USD"),
+
+		EmailStoragePath:      getEnv("EMAIL_STORAGE_PATH", "/home/app/service-worker-email"),
+		SendgridWebhookSecret: getEnv("SENDGRID_WEBHOOK_SECRET", ""),
 	}
 }
 

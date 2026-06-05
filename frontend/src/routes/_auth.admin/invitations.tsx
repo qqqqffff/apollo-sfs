@@ -39,6 +39,7 @@ function RouteComponent() {
   const [customGb, setCustomGb] = useState('')
   const [useCustom, setUseCustom] = useState(false)
   const [grantAdmin, setGrantAdmin] = useState(false)
+  const [grantPremium, setGrantPremium] = useState(false)
   const { notify } = useNotification()
   const [createError, setCreateError] = useState<string | null>(null)
   const [copiedId, setCopiedId] = useState<string | null>(null)
@@ -50,10 +51,11 @@ function RouteComponent() {
     : quotaBytes
 
   const createMutation = useMutation({
-    mutationFn: () => createInvitation(email, effectiveQuota, grantAdmin),
+    mutationFn: () => createInvitation(email, effectiveQuota, grantAdmin, grantPremium),
     onSuccess: () => {
       setEmail('')
       setGrantAdmin(false)
+      setGrantPremium(false)
       setCreateError(null)
       queryClient.invalidateQueries({ queryKey: ['admin', 'invitations'] })
       notify('success', 'Invitation sent')
@@ -190,15 +192,32 @@ function RouteComponent() {
             </div>
           )}
         </div>
-        <label className="flex items-center gap-2 cursor-pointer select-none w-fit">
-          <input
-            type="checkbox"
-            checked={grantAdmin}
-            onChange={(e) => setGrantAdmin(e.target.checked)}
-            className="w-4 h-4 rounded border-gray-300 accent-blue-600 cursor-pointer"
-          />
-          <span className="text-xs text-gray-600">Grant admin access</span>
-        </label>
+        <div className="flex flex-wrap gap-4">
+          <label className="flex items-center gap-2 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={grantAdmin}
+              onChange={(e) => {
+                setGrantAdmin(e.target.checked)
+                if (e.target.checked) setGrantPremium(false)
+              }}
+              className="w-4 h-4 rounded border-gray-300 accent-blue-600 cursor-pointer"
+            />
+            <span className="text-xs text-gray-600">Grant admin access</span>
+          </label>
+          <label className={`flex items-center gap-2 select-none ${grantAdmin ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}`}>
+            <input
+              type="checkbox"
+              checked={grantAdmin ? true : grantPremium}
+              disabled={grantAdmin}
+              onChange={(e) => setGrantPremium(e.target.checked)}
+              className="w-4 h-4 rounded border-gray-300 accent-blue-600 cursor-pointer"
+            />
+            <span className="text-xs text-gray-600">
+              Grant premium{grantAdmin ? ' (included with admin)' : ''}
+            </span>
+          </label>
+        </div>
       </form>
       {createError && <p className="text-sm text-red-500 mb-4">{createError}</p>}
 

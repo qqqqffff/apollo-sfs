@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react'
 import {
   addDrive,
   createServer,
+  deleteDrive,
   driveTempsQueryOptions,
   getMetricsHistoryByHours,
   infrastructureQueryOptions,
@@ -11,6 +12,7 @@ import {
   runTests,
   shutdownServer,
   speedTestQueryOptions,
+  syncDriveCapacity,
   triggerSpeedTest,
   updateDrive,
   updateServer,
@@ -109,6 +111,29 @@ function RouteComponent() {
       notify('success', 'Drive added')
     },
     onError: () => notify('error', 'Failed to add drive'),
+  })
+
+  const deleteDriveMutation = useMutation({
+    mutationFn: ({ serverId, driveId }: { serverId: string; driveId: string }) =>
+      deleteDrive(serverId, driveId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['admin', 'infrastructure'] })
+      notify('success', 'Drive removed')
+    },
+    onError: (err: unknown) => {
+      const msg = err instanceof Error ? err.message : 'Failed to remove drive'
+      notify('error', msg)
+    },
+  })
+
+  const syncCapacityMutation = useMutation({
+    mutationFn: (driveId: string) => syncDriveCapacity(driveId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['admin', 'infrastructure'] })
+      queryClient.invalidateQueries({ queryKey: ['admin', 'capacity'] })
+      notify('success', 'Drive capacity synced from disk')
+    },
+    onError: () => notify('error', 'Failed to sync drive capacity'),
   })
 
   const latest = snapshots[snapshots.length - 1]
@@ -330,6 +355,16 @@ function RouteComponent() {
 
   const graphW = Math.min(820, window.innerWidth - 80)
 
+  // For windows >= 24 hr the x-axis spans multiple calendar days, so show
+  // the date alongside the time to avoid ambiguity.
+  const formatGraphX = hours >= 24
+    ? (ms: number) => {
+        const d = new Date(ms)
+        return d.toLocaleDateString([], { month: 'numeric', day: 'numeric' }) +
+          ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      }
+    : undefined
+
   return (
     <div className="max-w-4xl">
       <div className="flex items-center justify-between mb-6">
@@ -424,7 +459,11 @@ function RouteComponent() {
             />
           )}
           {(driveTemps?.length ?? 0) > 0 && (
-            <NvmeTempsCard temps={driveTemps!} />
+            <NvmeTempsCard
+              temps={driveTemps!}
+              selected={selectedMetric === 'drive_temp'}
+              onClick={() => setSelectedMetric('drive_temp')}
+            />
           )}
           <PingCard
             serverMs={latest?.server_isp_ping_ms ?? null}
@@ -465,11 +504,11 @@ function RouteComponent() {
             <div className="flex flex-col gap-4">
               <div>
                 <div className="text-xs text-gray-400 mb-2">↑ Upload</div>
-                <LineGraph points={netUploadPoints} width={graphW} height={160} color="#3b82f6" formatY={formatBytesPerSec} />
+                <LineGraph points={netUploadPoints} width={graphW} height={160} color="#3b82f6" formatY={formatBytesPerSec} formatX={formatGraphX} />
               </div>
               <div>
                 <div className="text-xs text-gray-400 mb-2">↓ Download</div>
-                <LineGraph points={netDownloadPoints} width={graphW} height={160} color="#10b981" formatY={formatBytesPerSec} />
+                <LineGraph points={netDownloadPoints} width={graphW} height={160} color="#10b981" formatY={formatBytesPerSec} formatX={formatGraphX} />
               </div>
             </div>
           )}
@@ -477,37 +516,37 @@ function RouteComponent() {
             <div className="flex flex-col gap-4">
               <div>
                 <div className="text-xs text-gray-400 mb-2">↑ Upload (Mbps)</div>
-                <LineGraph points={speedUploadPoints} width={graphW} height={160} color="#3b82f6" formatY={(v) => `${v.toFixed(1)} Mb/s`} />
+                <LineGraph points={speedUploadPoints} width={graphW} height={160} color="#3b82f6" formatY={(v) => `${v.toFixed(1)} Mb/s`} formatX={formatGraphX} />
               </div>
               <div>
                 <div className="text-xs text-gray-400 mb-2">↓ Download (Mbps)</div>
-                <LineGraph points={speedDownloadPoints} width={graphW} height={160} color="#10b981" formatY={(v) => `${v.toFixed(1)} Mb/s`} />
+                <LineGraph points={speedDownloadPoints} width={graphW} height={160} color="#10b981" formatY={(v) => `${v.toFixed(1)} Mb/s`} formatX={formatGraphX} />
               </div>
             </div>
           )}
           {selectedMetric === 'ping' && (
-            <LineGraph points={netPingPoints} width={graphW} height={200} color="#f59e0b" formatY={(v) => `${v.toFixed(1)} ms`} />
+            <LineGraph points={netPingPoints} width={graphW} height={200} color="#f59e0b" formatY={(v) => `${v.toFixed(1)} ms`} formatX={formatGraphX} />
           )}
           {selectedMetric === 'loss' && (
-            <LineGraph points={netLossPoints} width={graphW} height={200} color="#ef4444" formatY={(v) => `${v.toFixed(1)}%`} />
+            <LineGraph points={netLossPoints} width={graphW} height={200} color="#ef4444" formatY={(v) => `${v.toFixed(1)}%`} formatX={formatGraphX} />
           )}
           {selectedMetric === 'total_users' && (
-            <LineGraph points={usersPoints} width={graphW} height={200} color="#8b5cf6" formatY={formatCount} />
+            <LineGraph points={usersPoints} width={graphW} height={200} color="#8b5cf6" formatY={formatCount} formatX={formatGraphX} />
           )}
           {selectedMetric === 'active_users' && (
-            <LineGraph points={activeUsersPoints} width={graphW} height={200} color="#06b6d4" formatY={formatCount} />
+            <LineGraph points={activeUsersPoints} width={graphW} height={200} color="#06b6d4" formatY={formatCount} formatX={formatGraphX} />
           )}
           {selectedMetric === 'disk' && (
-            <LineGraph points={diskPoints} width={graphW} height={200} color="#3b82f6" />
+            <LineGraph points={diskPoints} width={graphW} height={200} color="#3b82f6" formatX={formatGraphX} />
           )}
           {selectedMetric === 'memory' && (
-            <LineGraph points={memoryPoints} width={graphW} height={200} color="#8b5cf6" />
+            <LineGraph points={memoryPoints} width={graphW} height={200} color="#8b5cf6" formatX={formatGraphX} />
           )}
           {selectedMetric === 'cpu_temp' && (
-            <LineGraph points={cpuTempPoints} width={graphW} height={200} color="#f59e0b" formatY={formatTempY} />
+            <LineGraph points={cpuTempPoints} width={graphW} height={200} color="#f59e0b" formatY={formatTempY} formatX={formatGraphX} />
           )}
           {selectedMetric === 'drive_temp' && (
-            <LineGraph points={driveTempPoints} width={graphW} height={200} color="#10b981" formatY={formatTempY} />
+            <LineGraph points={driveTempPoints} width={graphW} height={200} color="#10b981" formatY={formatTempY} formatX={formatGraphX} />
           )}
         </div>
       </section>
@@ -599,6 +638,12 @@ function RouteComponent() {
                         driveId: d.drive_id,
                         active: !d.drive_is_active,
                       })}
+                      onDelete={() => {
+                        if (confirm(`Remove drive "${d.drive_label}" from ${d.server_name}? This cannot be undone.`)) {
+                          deleteDriveMutation.mutate({ serverId: d.server_id, driveId: d.drive_id })
+                        }
+                      }}
+                      onSyncCapacity={() => syncCapacityMutation.mutate(d.drive_id)}
                     />
                   ))}
                 </div>
@@ -764,14 +809,17 @@ function tempColor(c: number): string {
   return 'text-emerald-600'
 }
 
-function NvmeTempsCard({ temps }: { temps: DriveTemp[] }) {
+function NvmeTempsCard({ temps, selected, onClick }: { temps: DriveTemp[]; selected?: boolean; onClick?: () => void }) {
   return (
-    <div className="bg-white border border-gray-200 rounded-xl px-4 py-3 cursor-default hover:border-gray-300 transition-colors">
+    <div
+      className={`bg-white border rounded-xl px-4 py-3 transition-colors ${onClick ? 'cursor-pointer' : ''} ${selected ? 'border-blue-500 ring-1 ring-blue-500' : 'border-gray-200 hover:border-gray-300'}`}
+      onClick={onClick}
+    >
       <div className="text-xs text-gray-400 mb-2">NVMe temps</div>
       <div className="flex flex-col gap-1 max-h-28 overflow-y-auto pr-1">
         {temps.map((d) => (
           <div key={d.name} className="flex items-center justify-between gap-2">
-            <span className="text-xs text-gray-500 truncate" title={d.name}>{d.name}</span>
+            <span className="text-xs text-gray-600 font-medium truncate" title={d.name}>{d.name}</span>
             <span className={`text-xs font-semibold tabular-nums shrink-0 ${tempColor(d.temp_celsius)}`}>
               {d.temp_celsius.toFixed(1)}°C
             </span>
@@ -915,7 +963,12 @@ function formatBytesPerSec(bps: number): string {
   return `${bps.toFixed(0)} B/s`
 }
 
-function DriveBar({ drive, onToggle }: { drive: DriveSummary; onToggle: () => void }) {
+function DriveBar({ drive, onToggle, onDelete, onSyncCapacity }: {
+  drive: DriveSummary
+  onToggle: () => void
+  onDelete: () => void
+  onSyncCapacity: () => void
+}) {
   const cap = drive.capacity_bytes || 1
   const allocPct = Math.min(100, (drive.allocated_quota_bytes / cap) * 100)
   const usedPct = Math.min(100, (drive.used_bytes / cap) * 100)
@@ -934,10 +987,23 @@ function DriveBar({ drive, onToggle }: { drive: DriveSummary; onToggle: () => vo
             {(drive.capacity_bytes / GB).toFixed(0)} GB
           </span>
           <button
+            onClick={onSyncCapacity}
+            title="Re-detect capacity from disk"
+            className="text-gray-400 hover:text-blue-600 cursor-pointer bg-transparent border border-gray-200 hover:border-blue-300 rounded px-2 py-0.5 transition-colors"
+          >
+            Sync
+          </button>
+          <button
             onClick={onToggle}
             className="text-gray-400 hover:text-gray-700 cursor-pointer bg-transparent border border-gray-200 hover:border-gray-400 rounded px-2 py-0.5 transition-colors"
           >
             {drive.drive_is_active ? 'Deactivate' : 'Activate'}
+          </button>
+          <button
+            onClick={onDelete}
+            className="text-red-400 hover:text-red-600 cursor-pointer bg-transparent border border-red-200 hover:border-red-400 rounded px-2 py-0.5 transition-colors"
+          >
+            Remove
           </button>
         </div>
       </div>

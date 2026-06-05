@@ -109,6 +109,12 @@ func main() {
 		log.Fatalf("email service: %v", err)
 	}
 
+	inboundEmailSvc, err := services.NewInboundEmailService(queries, cfg.EmailStoragePath)
+	if err != nil {
+		log.Fatalf("inbound email service: %v", err)
+	}
+	log.Printf("inbound email: storing messages under %s", cfg.EmailStoragePath)
+
 	transcodeSvc := services.NewTranscodeService()
 	if transcodeSvc.Available() {
 		log.Printf("transcode: ffmpeg found — background 480p variants enabled")
@@ -152,7 +158,7 @@ func main() {
 	go emailSvc.Start(context.Background())
 
 	shutdownCh := make(chan struct{})
-	r := setupRouter(cfg, queries, oidcVerifier, authSvc, fileSvc, folderSvc, favSvc, inviteSvc, metricsSvc, registry, geoReader, emailSvc, shutdownCh)
+	r := setupRouter(cfg, queries, oidcVerifier, authSvc, fileSvc, folderSvc, favSvc, inviteSvc, metricsSvc, registry, geoReader, emailSvc, inboundEmailSvc, shutdownCh)
 
 	addr := ":" + cfg.Port
 	log.Printf("apollo-sfs API listening on %s", addr)
@@ -183,7 +189,7 @@ func main() {
 	log.Println("server stopped")
 }
 
-func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVerifier, authSvc *services.AuthService, fileSvc *services.FileService, folderSvc *services.FolderService, favSvc *services.FavoriteService, inviteSvc *services.InviteService, metricsSvc *services.MetricsService, registry *services.MinIORegistry, geoReader *geoip2.Reader, emailSvc *services.EmailService, shutdownCh chan struct{}) *gin.Engine {
+func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVerifier, authSvc *services.AuthService, fileSvc *services.FileService, folderSvc *services.FolderService, favSvc *services.FavoriteService, inviteSvc *services.InviteService, metricsSvc *services.MetricsService, registry *services.MinIORegistry, geoReader *geoip2.Reader, emailSvc *services.EmailService, inboundEmailSvc *services.InboundEmailService, shutdownCh chan struct{}) *gin.Engine {
 	r := gin.New()
 	r.Use(gin.Logger())
 	r.Use(gin.Recovery())
@@ -222,8 +228,9 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	h := routes.NewHandler(queries, fileSvc, folderSvc, inviteSvc, favSvc, authSvc, uploadStore, emailSvc, presignSvc, cfg.TurnstileSecretKey)
 	routes.SetAPIKeyService(h, apiKeySvc)
 	authHandler := auth.NewHandler(authSvc)
-	adminHandler := admin.NewHandler(queries, inviteSvc, metricsSvc, authSvc, fileSvc, registry, geoReader, cfg.BackendTestURL, cfg.AppDir, cfg.FrontendTestURL, cfg.FrontendE2EURL, shutdownCh)
+	adminHandler := admin.NewHandler(queries, inviteSvc, metricsSvc, authSvc, fileSvc, registry, geoReader, cfg.DiskStatsPath, cfg.BackendTestURL, cfg.AppDir, cfg.FrontendTestURL, cfg.FrontendE2EURL, shutdownCh)
 	sfsHandler := sfs.NewHandler(queries, fileSvc, presignSvc, apiKeySvc)
+	inboundEmailHandler := admin.NewInboundEmailHandler(inboundEmailSvc, cfg.SendgridWebhookSecret)
 
 	paypalClient := services.NewPayPalClient(services.PayPalConfig{
 		Environment:  cfg.PayPalEnvironment,
@@ -255,6 +262,9 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 
 	// ── PayPal webhook (no auth — verified via signature) ────────────────────
 	v1.POST("/payments/webhook", paymentsHandler.Webhook)
+
+	// ── SendGrid Inbound Parse webhook (no auth — guarded by ?token= secret) ──
+	v1.POST("/webhooks/email-inbound", inboundEmailHandler.InboundEmailWebhook)
 
 	// ── Presigned file endpoints (token auth, no session cookie required) ────
 	v1.GET("/files/:file_id/download/p", h.DownloadFilePresigned)
@@ -303,7 +313,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		protected.GET("/me", h.Me)
 		protected.POST("/me/password", h.ChangePassword)
 		protected.GET("/me/preferences", h.GetPreferences)
-		protected.PUT("/me/preferences", h.UpdatePreferences)
+		// PUT /me/preferences is premium-only (media auto-upload); registered below.
 
 		// Files — single upload (small files ≤ 5 MB)
 		protected.POST("/files/upload", h.UploadFile)
@@ -341,7 +351,6 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		protected.GET("/folders", h.ListFolders)
 		protected.GET("/folders/:folder_id", h.GetFolder)
 		protected.GET("/folders/:folder_id/ancestors", h.GetFolderAncestors)
-		protected.GET("/folders/:folder_id/media", h.GetMediaFolder)
 		protected.POST("/folders", h.CreateFolder)
 		protected.PATCH("/folders/:folder_id", h.UpdateFolder)
 		protected.PATCH("/folders/:folder_id/move", h.MoveFolder)
@@ -357,10 +366,16 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		protected.POST("/payments/orders", paymentsHandler.CreateOrder)
 		protected.POST("/payments/orders/:order_id/capture", paymentsHandler.CaptureOrder)
 
-		// Media subcollection pointers
-		protected.POST("/collections/:collection_id/items/:file_id", h.CopyFileToCollection)
-		protected.PATCH("/collections/:collection_id/items/:file_id/move", h.MoveCollectionItem)
-		protected.DELETE("/collections/:collection_id/items/:file_id", h.RemoveFileFromCollection)
+		// ── Premium-only: media collections ──────────────────────────────────
+		premiumGroup := protected.Group("")
+		premiumGroup.Use(mw.RequirePremium())
+		{
+			premiumGroup.GET("/folders/:folder_id/media", h.GetMediaFolder)
+			premiumGroup.PUT("/me/preferences", h.UpdatePreferences)
+			premiumGroup.POST("/collections/:collection_id/items/:file_id", h.CopyFileToCollection)
+			premiumGroup.PATCH("/collections/:collection_id/items/:file_id/move", h.MoveCollectionItem)
+			premiumGroup.DELETE("/collections/:collection_id/items/:file_id", h.RemoveFileFromCollection)
+		}
 
 		// ── Admin — JWT + admin realm role ───────────────────────────────────
 		adminGroup := protected.Group("/admin")
@@ -392,6 +407,8 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 			adminGroup.PATCH("/system/servers/:server_id", adminHandler.UpdateServer)
 			adminGroup.POST("/system/servers/:server_id/drives", adminHandler.AddDrive)
 			adminGroup.PATCH("/system/servers/:server_id/drives/:drive_id", adminHandler.UpdateDrive)
+			adminGroup.DELETE("/system/servers/:server_id/drives/:drive_id", adminHandler.DeleteDrive)
+			adminGroup.POST("/system/drives/:drive_id/sync-capacity", adminHandler.SyncDriveCapacity)
 
 			adminGroup.GET("/banned-ips", adminHandler.ListBannedIPs)
 			adminGroup.POST("/banned-ips/:id/unban", adminHandler.UnbanIP)
@@ -417,6 +434,12 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 
 			adminGroup.GET("/system/alarm/settings", adminHandler.GetAlarmSettings)
 			adminGroup.POST("/system/alarm/subscribe", adminHandler.ToggleAlarmSubscription)
+
+			adminGroup.GET("/emails/workers", inboundEmailHandler.ListEmailWorkers)
+			adminGroup.GET("/emails", inboundEmailHandler.ListEmails)
+			adminGroup.GET("/emails/:id", inboundEmailHandler.GetEmail)
+			adminGroup.PATCH("/emails/:id/read", inboundEmailHandler.MarkEmailRead)
+			adminGroup.DELETE("/emails/:id", inboundEmailHandler.DeleteEmail)
 		}
 	}
 
@@ -436,10 +459,10 @@ func seedDefaultServer(ctx context.Context, queries *db.Queries, cfg Config, kek
 		return nil // already seeded
 	}
 
-	// Detect physical capacity from the data mount.
+	// Detect usable capacity from the data mount (excludes filesystem-reserved blocks).
 	var capacityBytes int64
 	if usage, err := psdisk.Usage(cfg.DiskStatsPath); err == nil {
-		capacityBytes = int64(usage.Total)
+		capacityBytes = int64(usage.Used) + int64(usage.Free)
 	} else {
 		log.Printf("seed: could not detect disk capacity (%v); defaulting to 1 TiB", err)
 		capacityBytes = 1 << 40

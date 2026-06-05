@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	psdisk "github.com/shirou/gopsutil/v4/disk"
 
 	"apollo-sfs.com/api/db"
 	"apollo-sfs.com/api/routes/services"
@@ -240,6 +241,71 @@ func (h *Handler) UpdateDrive(c *gin.Context) {
 	})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not update drive"})
+		return
+	}
+
+	c.JSON(http.StatusOK, drive)
+}
+
+// DeleteDrive handles DELETE /api/v1/admin/system/servers/:server_id/drives/:drive_id.
+// Refuses if any users are still allocated to the drive.
+func (h *Handler) DeleteDrive(c *gin.Context) {
+	ctx := c.Request.Context()
+	driveID, err := uuid.Parse(c.Param("drive_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid drive_id"})
+		return
+	}
+
+	existing, err := h.queries.GetDrive(ctx, driveID)
+	if err != nil || existing == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "drive not found"})
+		return
+	}
+
+	if err := h.queries.DeleteDrive(ctx, driveID); err != nil {
+		if strings.Contains(err.Error(), "user allocations") {
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not delete drive"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "drive deleted"})
+}
+
+// SyncDriveCapacity handles POST /api/v1/admin/system/drives/:drive_id/sync-capacity.
+// Re-detects disk capacity from the configured stats path and updates the drive record.
+func (h *Handler) SyncDriveCapacity(c *gin.Context) {
+	ctx := c.Request.Context()
+	driveID, err := uuid.Parse(c.Param("drive_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid drive_id"})
+		return
+	}
+
+	existing, err := h.queries.GetDrive(ctx, driveID)
+	if err != nil || existing == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "drive not found"})
+		return
+	}
+
+	if h.diskStatsPath == "" {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "disk stats path not configured"})
+		return
+	}
+
+	usage, err := psdisk.Usage(h.diskStatsPath)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("could not read disk stats: %v", err)})
+		return
+	}
+
+	newCapacity := int64(usage.Used) + int64(usage.Free)
+	drive, err := h.queries.UpdateDriveCapacity(ctx, driveID, newCapacity)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not update drive capacity"})
 		return
 	}
 

@@ -62,7 +62,7 @@ function RootLayout() {
 
 function PublicHeader() {
   return (
-    <header className="bg-white border-b border-gray-200 px-6 h-14 flex items-center justify-between">
+    <header className="sticky top-0 z-50 bg-white border-b border-gray-200 px-6 h-14 flex items-center justify-between">
       <Link to="/" className="flex items-center gap-2 no-underline">
         <AppIcon size={26} />
         <span className="font-semibold text-gray-900 text-sm tracking-tight">Apollo SFS</span>

@@ -11,6 +11,7 @@ jest.mock('@tanstack/react-router', () => ({
     options: opts,
     useLoaderData: () => ({ token: mockToken }),
   }),
+  useNavigate: () => jest.fn(),
 }))
 
 const mockValidateInviteToken = jest.fn()

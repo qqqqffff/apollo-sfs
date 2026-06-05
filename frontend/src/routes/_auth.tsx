@@ -113,6 +113,7 @@ function RouteComponent() {
 
   return (
     <div className="min-h-screen bg-gray-50">
+      <div className="sticky top-0 z-50">
       <nav className="bg-white border-b border-gray-200 px-4 sm:px-6 h-14 flex items-center justify-between gap-3">
 
         {/* Left: brand + desktop nav */}
@@ -134,6 +135,7 @@ function RouteComponent() {
                 <NavLink to="/admin/users" onClick={closeMenu}>Users</NavLink>
                 <NavLink to="/admin/invitations" onClick={closeMenu}>Invitations</NavLink>
                 <NavLink to="/admin/interest" onClick={closeMenu}>Interest</NavLink>
+                <NavLink to="/admin/emails" onClick={closeMenu}>Emails</NavLink>
                 <NavLink to="/admin/bans" onClick={closeMenu}>Bans & Suspensions</NavLink>
                 <NavLink to="/admin/metrics" onClick={closeMenu}>Metrics</NavLink>
                 <NavLink to="/admin/alarm" onClick={closeMenu}>Alarms</NavLink>
@@ -241,6 +243,7 @@ function RouteComponent() {
               <MobileNavLink to="/admin/users" onClick={closeMenu}>Users</MobileNavLink>
               <MobileNavLink to="/admin/invitations" onClick={closeMenu}>Invitations</MobileNavLink>
               <MobileNavLink to="/admin/interest" onClick={closeMenu}>Interest</MobileNavLink>
+              <MobileNavLink to="/admin/emails" onClick={closeMenu}>Emails</MobileNavLink>
               <MobileNavLink to="/admin/bans" onClick={closeMenu}>Bans & Suspensions</MobileNavLink>
               <MobileNavLink to="/admin/metrics" onClick={closeMenu}>Metrics</MobileNavLink>
               <MobileNavLink to="/admin/alarm" onClick={closeMenu}>Alarms</MobileNavLink>
@@ -257,6 +260,7 @@ function RouteComponent() {
           </div>
         </div>
       )}
+      </div>
 
       <main className="max-w-5xl mx-auto px-4 sm:px-6 py-6 sm:py-8">
         <Outlet />

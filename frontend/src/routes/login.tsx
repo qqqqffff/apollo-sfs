@@ -1,10 +1,22 @@
 import { useState } from 'react'
-import { createFileRoute, useNavigate } from '@tanstack/react-router'
+import { createFileRoute, redirect, useNavigate } from '@tanstack/react-router'
 import { MdClose } from 'react-icons/md'
 import { useAuth } from '../auth'
 import { forgotPassword, resetPassword } from '../api/auth'
 
 export const Route = createFileRoute('/login')({
+  beforeLoad: async ({ context }) => {
+    const result = await context.auth.validateAuth()
+    if (result && result !== 'banned' && result !== 'suspended') {
+      throw redirect({
+        to: '/client',
+        search: {
+          file: undefined,
+          folder: undefined
+        }
+      })
+    }
+  },
   component: RouteComponent,
 })
 

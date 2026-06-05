@@ -114,6 +114,8 @@ jest.mock('../../../api/folders', () => ({
   createFolder: jest.fn(),
   deleteFolder: jest.fn(),
   moveFolder:   jest.fn(),
+  getAncestors: jest.fn(),
+  ancestorsQueryOptions: (id: string) => ({ queryKey: ['ancestors', id], queryFn: jest.fn() }),
 }))
 jest.mock('../../../api/files', () => ({
   deleteFile:      jest.fn(),

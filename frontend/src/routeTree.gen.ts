@@ -25,6 +25,7 @@ import { Route as AuthAdminUsersRouteImport } from './routes/_auth.admin/users'
 import { Route as AuthAdminMetricsRouteImport } from './routes/_auth.admin/metrics'
 import { Route as AuthAdminInvitationsRouteImport } from './routes/_auth.admin/invitations'
 import { Route as AuthAdminInterestRouteImport } from './routes/_auth.admin/interest'
+import { Route as AuthAdminEmailsRouteImport } from './routes/_auth.admin/emails'
 import { Route as AuthAdminBansRouteImport } from './routes/_auth.admin/bans'
 import { Route as AuthAdminBannedIpsRouteImport } from './routes/_auth.admin/banned-ips'
 import { Route as AuthAdminAlarmRouteImport } from './routes/_auth.admin/alarm'
@@ -108,6 +109,11 @@ const AuthAdminInterestRoute = AuthAdminInterestRouteImport.update({
   path: '/admin/interest',
   getParentRoute: () => AuthRoute,
 } as any)
+const AuthAdminEmailsRoute = AuthAdminEmailsRouteImport.update({
+  id: '/admin/emails',
+  path: '/admin/emails',
+  getParentRoute: () => AuthRoute,
+} as any)
 const AuthAdminBansRoute = AuthAdminBansRouteImport.update({
   id: '/admin/bans',
   path: '/admin/bans',
@@ -135,6 +141,7 @@ export interface FileRoutesByFullPath {
   '/admin/alarm': typeof AuthAdminAlarmRoute
   '/admin/banned-ips': typeof AuthAdminBannedIpsRoute
   '/admin/bans': typeof AuthAdminBansRoute
+  '/admin/emails': typeof AuthAdminEmailsRoute
   '/admin/interest': typeof AuthAdminInterestRoute
   '/admin/invitations': typeof AuthAdminInvitationsRoute
   '/admin/metrics': typeof AuthAdminMetricsRoute
@@ -155,6 +162,7 @@ export interface FileRoutesByTo {
   '/admin/alarm': typeof AuthAdminAlarmRoute
   '/admin/banned-ips': typeof AuthAdminBannedIpsRoute
   '/admin/bans': typeof AuthAdminBansRoute
+  '/admin/emails': typeof AuthAdminEmailsRoute
   '/admin/interest': typeof AuthAdminInterestRoute
   '/admin/invitations': typeof AuthAdminInvitationsRoute
   '/admin/metrics': typeof AuthAdminMetricsRoute
@@ -177,6 +185,7 @@ export interface FileRoutesById {
   '/_auth/admin/alarm': typeof AuthAdminAlarmRoute
   '/_auth/admin/banned-ips': typeof AuthAdminBannedIpsRoute
   '/_auth/admin/bans': typeof AuthAdminBansRoute
+  '/_auth/admin/emails': typeof AuthAdminEmailsRoute
   '/_auth/admin/interest': typeof AuthAdminInterestRoute
   '/_auth/admin/invitations': typeof AuthAdminInvitationsRoute
   '/_auth/admin/metrics': typeof AuthAdminMetricsRoute
@@ -199,6 +208,7 @@ export interface FileRouteTypes {
     | '/admin/alarm'
     | '/admin/banned-ips'
     | '/admin/bans'
+    | '/admin/emails'
     | '/admin/interest'
     | '/admin/invitations'
     | '/admin/metrics'
@@ -219,6 +229,7 @@ export interface FileRouteTypes {
     | '/admin/alarm'
     | '/admin/banned-ips'
     | '/admin/bans'
+    | '/admin/emails'
     | '/admin/interest'
     | '/admin/invitations'
     | '/admin/metrics'
@@ -240,6 +251,7 @@ export interface FileRouteTypes {
     | '/_auth/admin/alarm'
     | '/_auth/admin/banned-ips'
     | '/_auth/admin/bans'
+    | '/_auth/admin/emails'
     | '/_auth/admin/interest'
     | '/_auth/admin/invitations'
     | '/_auth/admin/metrics'
@@ -374,6 +386,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthAdminInterestRouteImport
       parentRoute: typeof AuthRoute
     }
+    '/_auth/admin/emails': {
+      id: '/_auth/admin/emails'
+      path: '/admin/emails'
+      fullPath: '/admin/emails'
+      preLoaderRoute: typeof AuthAdminEmailsRouteImport
+      parentRoute: typeof AuthRoute
+    }
     '/_auth/admin/bans': {
       id: '/_auth/admin/bans'
       path: '/admin/bans'
@@ -403,6 +422,7 @@ interface AuthRouteChildren {
   AuthAdminAlarmRoute: typeof AuthAdminAlarmRoute
   AuthAdminBannedIpsRoute: typeof AuthAdminBannedIpsRoute
   AuthAdminBansRoute: typeof AuthAdminBansRoute
+  AuthAdminEmailsRoute: typeof AuthAdminEmailsRoute
   AuthAdminInterestRoute: typeof AuthAdminInterestRoute
   AuthAdminInvitationsRoute: typeof AuthAdminInvitationsRoute
   AuthAdminMetricsRoute: typeof AuthAdminMetricsRoute
@@ -418,6 +438,7 @@ const AuthRouteChildren: AuthRouteChildren = {
   AuthAdminAlarmRoute: AuthAdminAlarmRoute,
   AuthAdminBannedIpsRoute: AuthAdminBannedIpsRoute,
   AuthAdminBansRoute: AuthAdminBansRoute,
+  AuthAdminEmailsRoute: AuthAdminEmailsRoute,
   AuthAdminInterestRoute: AuthAdminInterestRoute,
   AuthAdminInvitationsRoute: AuthAdminInvitationsRoute,
   AuthAdminMetricsRoute: AuthAdminMetricsRoute,

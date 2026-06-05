@@ -34,7 +34,9 @@ const (
 
 var (
 	rePktLoss = regexp.MustCompile(`(\d+(?:\.\d+)?)% packet loss`)
-	reRTTAvg  = regexp.MustCompile(`rtt min/avg/max/mdev = [\d.]+/([\d.]+)/`)
+	// Matches both iputils-ping ("rtt min/avg/max/mdev = ...") and
+	// busybox ping ("round-trip min/avg/max = ..."). Average is the 2nd field.
+	reRTTAvg = regexp.MustCompile(`(?:rtt|round-trip) min/avg/max(?:/mdev)? = [\d.]+/([\d.]+)/`)
 )
 
 // pingResult holds the most recent ISP ping measurement.
@@ -68,8 +70,10 @@ func (p *pingCollector) run(ctx context.Context) {
 func (p *pingCollector) collect() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	// -c 5: 5 probes  -i 0.2: 200 ms between probes  -W 1: 1 s deadline  -q: quiet (summary only)
-	out, err := exec.CommandContext(ctx, "ping", "-c", "5", "-i", "0.2", "-W", "1", "-q", pingTarget).Output()
+	// -c 4: 4 probes  -W 2: 2 s deadline per probe  -q: quiet (summary only)
+	// No -i flag: busybox ping rejects fractional intervals, so we use the
+	// default 1-second interval which works on both busybox and iputils-ping.
+	out, err := exec.CommandContext(ctx, "ping", "-c", "4", "-W", "2", "-q", pingTarget).Output()
 	if err != nil {
 		p.mu.Lock()
 		p.latest = pingResult{}
@@ -246,22 +250,24 @@ func (s *MetricsService) runSampler(ctx context.Context) {
 				log.Printf("metrics: collect: %v", err)
 				continue
 			}
+			// Populate the latest speed test result before inserting so it is
+			// persisted to the DB and available in historical graph queries.
+			s.speedTestMu.RLock()
+			st := s.speedTestStream
+			s.speedTestMu.RUnlock()
+			if st != nil {
+				if result := st.LatestSpeedTestResult(); result != nil {
+					snap.SpeedTestUploadMbps = &result.UploadMbps
+					snap.SpeedTestDownloadMbps = &result.DownloadMbps
+					snap.SpeedTestTestedAt = &result.TestedAt
+					snap.SpeedTestError = result.Error
+				}
+			}
 			if err := s.queries.InsertSnapshot(ctx, snap); err != nil {
 				log.Printf("metrics: insert: %v", err)
 				continue
 			}
 			if s.hub.ClientCount() > 0 {
-				s.speedTestMu.RLock()
-				st := s.speedTestStream
-				s.speedTestMu.RUnlock()
-				if st != nil {
-					if result := st.LatestSpeedTestResult(); result != nil {
-						snap.SpeedTestUploadMbps = &result.UploadMbps
-						snap.SpeedTestDownloadMbps = &result.DownloadMbps
-						snap.SpeedTestTestedAt = &result.TestedAt
-						snap.SpeedTestError = result.Error
-					}
-				}
 				if msg, err := json.Marshal(snap); err == nil {
 					s.hub.Broadcast(msg)
 				}
@@ -338,8 +344,10 @@ func (s *MetricsService) collectSnapshot(ctx context.Context) (*models.ServerMet
 
 	var diskTotal, diskFree int64
 	if usage, err := psdisk.Usage(s.diskStatsPath); err == nil {
-		diskTotal = int64(usage.Total)
+		// Free = Bavail (available to non-root, excludes the 5% root-reserved blocks).
+		// Use Used+Free as the total so percentages exclude system-reserved space.
 		diskFree = int64(usage.Free)
+		diskTotal = int64(usage.Used) + int64(usage.Free)
 	} else {
 		log.Printf("metrics: disk stats for %q: %v", s.diskStatsPath, err)
 	}

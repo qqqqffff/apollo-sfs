@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"log"
 	"net/http"
 	"strings"
 
@@ -34,6 +35,7 @@ func (h *Handler) Login(c *gin.Context) {
 
 	tokens, err := h.svc.Login(c.Request.Context(), req.Username, req.Password)
 	if err != nil {
+		log.Printf("login failed for %q: %v", req.Username, err)
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
 		return
 	}

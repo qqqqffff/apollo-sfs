@@ -2,6 +2,8 @@ import { createFileRoute, Link } from '@tanstack/react-router'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { MdTimer, MdCheck, MdClose, MdEmojiEvents, MdLock, MdReplay } from 'react-icons/md'
 import { useAuth } from '../auth'
+import { listMathScores, saveMathScore } from '../api/mathGame'
+import type { MathGameScore } from '../types/api'
 
 export const Route = createFileRoute('/math-game')({
   component: RouteComponent,
@@ -60,15 +62,22 @@ function buildGame(): Question[] {
   return Array.from({ length: QUESTIONS_PER_GAME }, buildQuestion)
 }
 
-// ── Per-user score persistence (localStorage) ─────────────────────────────────
+// ── Score persistence ─────────────────────────────────────────────────────────
+//
+// Signed-in users persist to the backend (math_game_scores table) so their
+// history follows their account. Anonymous players are tracked client-side in
+// sessionStorage — kept for the browser session only, never sent to the server.
 
-function storageKey(username: string): string {
-  return `apollo_math_game_scores_${username}`
+const ANON_STORAGE_KEY = 'apollo_math_game_scores_anon'
+
+// toAttempt normalises a backend score row into the display shape.
+function toAttempt(s: MathGameScore): Attempt {
+  return { date: s.created_at, score: s.score, total: s.total, durationMs: s.duration_ms }
 }
 
-function loadAttempts(username: string): Attempt[] {
+function loadAnonAttempts(): Attempt[] {
   try {
-    const raw = localStorage.getItem(storageKey(username))
+    const raw = sessionStorage.getItem(ANON_STORAGE_KEY)
     if (!raw) return []
     const parsed = JSON.parse(raw)
     return Array.isArray(parsed) ? (parsed as Attempt[]) : []
@@ -77,10 +86,10 @@ function loadAttempts(username: string): Attempt[] {
   }
 }
 
-function saveAttempt(username: string, attempt: Attempt): Attempt[] {
-  const next = [attempt, ...loadAttempts(username)].slice(0, MAX_STORED_ATTEMPTS)
+function saveAnonAttempt(attempt: Attempt): Attempt[] {
+  const next = [attempt, ...loadAnonAttempts()].slice(0, MAX_STORED_ATTEMPTS)
   try {
-    localStorage.setItem(storageKey(username), JSON.stringify(next))
+    sessionStorage.setItem(ANON_STORAGE_KEY, JSON.stringify(next))
   } catch {
     /* ignore quota / unavailable storage */
   }
@@ -105,10 +114,24 @@ function RouteComponent() {
   const savedRef = useRef(false)
   const inputRef = useRef<HTMLInputElement>(null)
 
-  // Load saved attempts whenever the signed-in user changes.
+  // Load history: from the backend for signed-in users, from sessionStorage for
+  // anonymous players.
   useEffect(() => {
-    setAttempts(username ? loadAttempts(username) : [])
-  }, [username])
+    if (isAuthenticated) {
+      let cancelled = false
+      listMathScores()
+        .then((scores) => {
+          if (!cancelled) setAttempts(scores.map(toAttempt))
+        })
+        .catch(() => {
+          if (!cancelled) setAttempts([])
+        })
+      return () => {
+        cancelled = true
+      }
+    }
+    setAttempts(loadAnonAttempts())
+  }, [isAuthenticated, username])
 
   const startGame = useCallback(() => {
     setQuestions(buildGame())
@@ -177,19 +200,26 @@ function RouteComponent() {
 
   const score = answers.filter((a) => a.correct).length
 
-  // Persist the finished game for signed-in users (guard against StrictMode double-run).
+  // Persist the finished game (guard against StrictMode double-run). Signed-in
+  // users save to the backend; anonymous players save to sessionStorage.
   useEffect(() => {
     if (phase !== 'done' || savedRef.current) return
     savedRef.current = true
-    if (!username) return
     const attempt: Attempt = {
       date: new Date().toISOString(),
       score,
       total: QUESTIONS_PER_GAME,
       durationMs: Date.now() - startRef.current,
     }
-    setAttempts(saveAttempt(username, attempt))
-  }, [phase, score, username])
+    if (isAuthenticated) {
+      saveMathScore({ score, total: QUESTIONS_PER_GAME, duration_ms: attempt.durationMs })
+        .then((saved) => setAttempts((prev) => [toAttempt(saved), ...prev]))
+        // Even if the network call fails, show the just-finished game locally.
+        .catch(() => setAttempts((prev) => [attempt, ...prev]))
+      return
+    }
+    setAttempts(saveAnonAttempt(attempt))
+  }, [phase, score, isAuthenticated])
 
   return (
     <div className="min-h-screen bg-gray-50 pb-24">
@@ -237,8 +267,9 @@ function RouteComponent() {
           )}
         </section>
 
-        {/* Score history (signed-in users only) */}
-        {isAuthenticated && <ScoreHistory attempts={attempts} />}
+        {/* Score history: backed by your account when signed in, otherwise by
+            this browser session. */}
+        <ScoreHistory attempts={attempts} isAuthenticated={isAuthenticated} />
 
         {/* Reference article */}
         <ReferenceArticle />
@@ -280,7 +311,8 @@ function StartScreen({
             <Link to="/login" className="text-blue-600 hover:text-blue-800 no-underline">
               Sign in
             </Link>{' '}
-            to track your scores across games.
+            to save your scores to your account — otherwise they are kept only
+            for this browser session.
           </span>
         </p>
       )}
@@ -397,9 +429,11 @@ function DoneScreen({
         <p className="text-sm text-gray-500">
           {pct}% correct · finished in {(durationMs / 1000).toFixed(1)}s
         </p>
-        {isAuthenticated && (
-          <p className="text-xs text-green-600 mt-2">Saved to your score history.</p>
-        )}
+        <p className="text-xs text-green-600 mt-2">
+          {isAuthenticated
+            ? 'Saved to your account.'
+            : 'Saved for this browser session.'}
+        </p>
       </div>
 
       {/* Per-question review */}
@@ -451,12 +485,23 @@ function DoneScreen({
 
 // ── Score history ─────────────────────────────────────────────────────────────
 
-function ScoreHistory({ attempts }: { attempts: Attempt[] }) {
+function ScoreHistory({
+  attempts,
+  isAuthenticated,
+}: {
+  attempts: Attempt[]
+  isAuthenticated: boolean
+}) {
   const best = attempts.reduce((m, a) => Math.max(m, a.score), 0)
   return (
     <section className="bg-white rounded-xl border border-gray-200 overflow-hidden">
       <div className="px-6 py-4 flex items-center justify-between">
-        <h3 className="text-sm font-semibold text-gray-900">Your score history</h3>
+        <div>
+          <h3 className="text-sm font-semibold text-gray-900">Your score history</h3>
+          <p className="text-xs text-gray-400 mt-0.5">
+            {isAuthenticated ? 'Saved to your account' : 'This browser session only'}
+          </p>
+        </div>
         {attempts.length > 0 && (
           <span className="text-xs font-medium text-blue-600">
             Best: {best} / {QUESTIONS_PER_GAME}

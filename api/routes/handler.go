@@ -21,6 +21,15 @@ type FavServicer interface {
 
 var _ FavServicer = (*services.FavoriteService)(nil)
 
+// MathGameServicer is the subset of *services.MathGameService used by route
+// handlers.
+type MathGameServicer interface {
+	Add(ctx context.Context, userID uuid.UUID, in services.AddInput) (*models.MathGameScore, error)
+	List(ctx context.Context, userID uuid.UUID) ([]models.MathGameScore, error)
+}
+
+var _ MathGameServicer = (*services.MathGameService)(nil)
+
 // InviteService is the subset of *services.InviteService used by route handlers.
 type InviteService interface {
 	Validate(ctx context.Context, token string) (*services.InviteValidation, error)
@@ -74,6 +83,7 @@ type Handler struct {
 	folders         FolderServicer
 	invites         InviteService
 	favorites       FavServicer
+	mathGame        MathGameServicer
 	auth            *services.AuthService
 	uploads         *services.UploadSessionStore
 	email           *services.EmailService
@@ -114,6 +124,13 @@ func SetVerifyCaptcha(h *Handler, fn func(secret, token, ip string) (bool, error
 // causes the management endpoints to return 503 (configured, not crash).
 func SetAPIKeyService(h *Handler, svc *services.APIKeyService) {
 	h.apiKeys = svc
+}
+
+// SetMathGameService installs the math game score service on an existing
+// Handler. Wired from main; nil is tolerated and causes the math-game score
+// endpoints to return 503 (configured, not crash).
+func SetMathGameService(h *Handler, svc MathGameServicer) {
+	h.mathGame = svc
 }
 
 // SetInviteService replaces the invite service on an existing Handler.

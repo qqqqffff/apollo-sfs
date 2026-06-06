@@ -1,5 +1,5 @@
 import React from 'react'
-import { render, screen, fireEvent, act } from '@testing-library/react'
+import { render, screen, fireEvent, act, waitFor } from '@testing-library/react'
 import '@testing-library/jest-dom'
 
 jest.mock('@tanstack/react-router', () => {
@@ -16,14 +16,30 @@ jest.mock('../../auth', () => ({
   useAuth: () => mockAuth,
 }))
 
+const mockListMathScores = jest.fn()
+const mockSaveMathScore = jest.fn()
+jest.mock('../../api/mathGame', () => ({
+  listMathScores: (...args: any[]) => mockListMathScores(...args),
+  saveMathScore: (...args: any[]) => mockSaveMathScore(...args),
+}))
+
 import { Route } from '../../routes/math-game'
 
 const Page = Route.options.component as React.ComponentType
 
 beforeEach(() => {
   mockAuth = { user: null, isAuthenticated: false }
-  localStorage.clear()
+  sessionStorage.clear()
   jest.useRealTimers()
+  mockListMathScores.mockReset().mockResolvedValue([])
+  mockSaveMathScore.mockReset().mockResolvedValue({
+    id: 'abc',
+    username: 'tester',
+    score: 0,
+    total: 10,
+    duration_ms: 1000,
+    created_at: new Date().toISOString(),
+  })
 })
 
 // Plays through all 10 questions by repeatedly submitting an answer.
@@ -58,11 +74,25 @@ describe('Math game page (/math-game)', () => {
     expect(screen.getByText(/10 seconds per question/i)).toBeInTheDocument()
   })
 
-  test('prompts anonymous users to sign in to track scores', () => {
+  test('prompts anonymous users to sign in but still shows a session history', () => {
     render(<Page />)
     expect(screen.getByRole('link', { name: /sign in/i })).toHaveAttribute('href', '/login')
-    // No score-history section for signed-out users.
-    expect(screen.queryByText(/your score history/i)).not.toBeInTheDocument()
+    // Anonymous players get a session-scoped score history (sessionStorage).
+    expect(screen.getByText(/your score history/i)).toBeInTheDocument()
+    expect(screen.getByText(/this browser session only/i)).toBeInTheDocument()
+    // The backend is never contacted for anonymous players.
+    expect(mockListMathScores).not.toHaveBeenCalled()
+  })
+
+  test('anonymous scores are persisted to sessionStorage', () => {
+    render(<Page />)
+    fireEvent.click(screen.getByRole('button', { name: /start test/i }))
+    answerAll('0')
+    expect(screen.getByText(/saved for this browser session/i)).toBeInTheDocument()
+    const stored = JSON.parse(sessionStorage.getItem('apollo_math_game_scores_anon') || '[]')
+    expect(stored).toHaveLength(1)
+    expect(stored[0].total).toBe(10)
+    expect(mockSaveMathScore).not.toHaveBeenCalled()
   })
 
   test('starting the test shows the first question and timer', () => {
@@ -92,18 +122,24 @@ describe('Math game page (/math-game)', () => {
     expect(screen.getByText(/Question 2 \/ 10/i)).toBeInTheDocument()
   })
 
-  test('signed-in users see a score history that records a finished game', () => {
+  test('signed-in users load history from and save a finished game to the backend', async () => {
     mockAuth = { user: { username: 'tester' }, isAuthenticated: true }
     render(<Page />)
+
+    // History is loaded from the backend on mount.
+    await waitFor(() => expect(mockListMathScores).toHaveBeenCalled())
     expect(screen.getByText(/your score history/i)).toBeInTheDocument()
+    expect(screen.getByText(/saved to your account/i)).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: /start test/i }))
     answerAll('0')
 
-    // Completion screen confirms the save, and an attempt is persisted per-user.
-    expect(screen.getByText(/saved to your score history/i)).toBeInTheDocument()
-    const stored = JSON.parse(localStorage.getItem('apollo_math_game_scores_tester') || '[]')
-    expect(stored).toHaveLength(1)
-    expect(stored[0].total).toBe(10)
+    // The finished game is POSTed to the backend with the right shape.
+    await waitFor(() => expect(mockSaveMathScore).toHaveBeenCalledTimes(1))
+    expect(mockSaveMathScore).toHaveBeenCalledWith(
+      expect.objectContaining({ total: 10, score: expect.any(Number) }),
+    )
+    // Nothing is written to sessionStorage for signed-in users.
+    expect(sessionStorage.getItem('apollo_math_game_scores_anon')).toBeNull()
   })
 })

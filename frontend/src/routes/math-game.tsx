@@ -47,15 +47,16 @@ function randInt(min: number, max: number): number {
 
 function buildQuestion(): Question {
   const op: Operator = Math.random() < 0.5 ? '+' : '-'
+  // Work in integer tenths to avoid floating-point drift in the stored answer.
+  const aTenths = randInt(9700, 10100) // 970.0–1010.0
+  const bTenths = randInt(50, 200)     // 5.0–20.0
+  const a = aTenths / 10
+  const b = bTenths / 10
   if (op === '+') {
-    const a = randInt(2, 99)
-    const b = randInt(2, 99)
-    return { a, b, op, answer: a + b }
+    return { a, b, op, answer: (aTenths + bTenths) / 10 }
   }
-  // Subtraction: keep the result non-negative for a clean mental-math test.
-  const a = randInt(2, 99)
-  const b = randInt(1, a)
-  return { a, b, op, answer: a - b }
+  // Subtraction always yields a positive result (min: 9700-200=9500 → 950.0).
+  return { a, b, op, answer: (aTenths - bTenths) / 10 }
 }
 
 function buildGame(): Question[] {
@@ -378,7 +379,7 @@ function PlayScreen({
         <input
           ref={inputRef}
           type="number"
-          inputMode="numeric"
+          inputMode="decimal"
           value={input}
           onChange={(e) => setInput(e.target.value)}
           autoFocus

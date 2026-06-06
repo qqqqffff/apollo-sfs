@@ -1,6 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   addDrive,
   createServer,
@@ -55,14 +55,38 @@ function formatCount(v: number): string {
   return v.toFixed(0)
 }
 
+const INACTIVE_MS = 10 * 60 * 1000
+
 function RouteComponent() {
   const { notify } = useNotification()
   const queryClient = useQueryClient()
-  const { snapshots, connected } = useMetricsStream()
+  const [inactive, setInactive] = useState(false)
+  const resetTimerRef = useRef<() => void>()
+
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout>
+    function resetTimer() {
+      clearTimeout(timer)
+      setInactive(false)
+      timer = setTimeout(() => setInactive(true), INACTIVE_MS)
+    }
+    resetTimerRef.current = resetTimer
+    const events = ['mousemove', 'mousedown', 'keypress', 'scroll', 'touchstart'] as const
+    events.forEach(e => window.addEventListener(e, resetTimer, { passive: true }))
+    resetTimer()
+    return () => {
+      clearTimeout(timer)
+      events.forEach(e => window.removeEventListener(e, resetTimer))
+    }
+  }, [])
+
+  const resume = useCallback(() => resetTimerRef.current?.(), [])
+
+  const { snapshots, connected } = useMetricsStream(inactive)
   const [hours, setHours] = useState<HourWindow>(12)
   const [selectedMetric, setSelectedMetric] = useState<MetricKey>('traffic')
 
-  const { data: infraData } = useQuery(infrastructureQueryOptions)
+  const { data: infraData } = useQuery({ ...infrastructureQueryOptions, enabled: !inactive })
   const drives = infraData?.drives ?? []
 
   // Group drives by server
@@ -169,7 +193,7 @@ function RouteComponent() {
     queryKey: ['admin', 'metrics', 'history', hours],
     queryFn: () => getMetricsHistoryByHours(hours),
     staleTime: 60_000,
-    enabled: hours > 1,
+    enabled: hours > 1 && !inactive,
     retry: 1,
   })
 
@@ -188,7 +212,7 @@ function RouteComponent() {
   const cpuTempPoints = hours === 1 ? wsCpuTempPoints : historyCpuTempPoints
   const driveTempPoints = hours === 1 ? wsDriveTempPoints : historyDriveTempPoints
 
-  const { pingMs: clientPingMs, packetLossPercent: clientPacketLoss, history: clientPingHistory } = useServerPing()
+  const { pingMs: clientPingMs, packetLossPercent: clientPacketLoss, history: clientPingHistory } = useServerPing(inactive)
 
   // Network rate line points (live — derived from consecutive snapshot diffs)
   const wsNetUploadPoints: LinePoint[] = []
@@ -289,11 +313,12 @@ function RouteComponent() {
   const hasCpuTemp = latest?.cpu_temp_celsius != null
   const hasDriveTemp = latest?.drive_temp_celsius != null
 
-  const { data: driveTemps } = useQuery(driveTempsQueryOptions)
+  const { data: driveTemps } = useQuery({ ...driveTempsQueryOptions, enabled: !inactive })
 
   const { data: speedTest, error: speedTestError } = useQuery({
     ...speedTestQueryOptions,
     retry: false,
+    enabled: !inactive,
   })
 
   useEffect(() => {
@@ -371,10 +396,19 @@ function RouteComponent() {
         <div className="flex items-center gap-3">
           <h2 className="text-lg font-semibold text-gray-900 m-0">System Metrics</h2>
           <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${
+            inactive ? 'bg-gray-100 text-gray-500' :
             connected ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-600'
           }`}>
-            {connected ? 'Live' : 'Reconnecting…'}
+            {inactive ? 'Disconnected' : connected ? 'Live' : 'Reconnecting…'}
           </span>
+          {inactive && (
+            <button
+              onClick={resume}
+              className="text-xs text-blue-600 hover:text-blue-800 cursor-pointer bg-transparent border border-blue-200 hover:border-blue-400 rounded px-2 py-0.5 transition-colors"
+            >
+              Resume
+            </button>
+          )}
         </div>
         <div className="flex items-center gap-2">
           {shutdownConfirm ? (
@@ -917,7 +951,7 @@ function NetworkTrafficCard({ sent, recv, selected, onClick }: { sent: string; r
 
 const PING_HISTORY_MS = 60 * 60 * 1000 // keep up to 1 hour of probe history for the graph
 
-function useServerPing() {
+function useServerPing(paused = false) {
   const [result, setResult] = useState<{ pingMs: number | null; packetLossPercent: number; history: LinePoint[] }>({
     pingMs: null,
     packetLossPercent: 0,
@@ -926,6 +960,8 @@ function useServerPing() {
   const probesRef = useRef<Array<{ t: number; rtt: number | null }>>([])
 
   useEffect(() => {
+    if (paused) return
+
     async function probe() {
       let rtt: number | null = null
       try {
@@ -950,7 +986,7 @@ function useServerPing() {
     probe()
     const id = setInterval(probe, 5000)
     return () => clearInterval(id)
-  }, [])
+  }, [paused])
 
   return result
 }

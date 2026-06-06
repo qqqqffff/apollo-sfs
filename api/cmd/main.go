@@ -227,6 +227,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 
 	h := routes.NewHandler(queries, fileSvc, folderSvc, inviteSvc, favSvc, authSvc, uploadStore, emailSvc, presignSvc, cfg.TurnstileSecretKey)
 	routes.SetAPIKeyService(h, apiKeySvc)
+	routes.SetMathGameService(h, services.NewMathGameService(queries))
 	authHandler := auth.NewHandler(authSvc)
 	adminHandler := admin.NewHandler(queries, inviteSvc, metricsSvc, authSvc, fileSvc, registry, geoReader, cfg.DiskStatsPath, cfg.BackendTestURL, cfg.AppDir, cfg.FrontendTestURL, cfg.FrontendE2EURL, shutdownCh)
 	sfsHandler := sfs.NewHandler(queries, fileSvc, presignSvc, apiKeySvc)
@@ -346,6 +347,10 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		protected.DELETE("/favorites/files/:file_id", h.UnfavoriteFile)
 		protected.POST("/favorites/folders/:folder_id", h.FavoriteFolder)
 		protected.DELETE("/favorites/folders/:folder_id", h.UnfavoriteFolder)
+
+		// Math game scores (per-user history for the /math-game test)
+		protected.GET("/math-game/scores", h.ListMathScores)
+		protected.POST("/math-game/scores", h.SaveMathScore)
 
 		// Folders
 		protected.GET("/folders", h.ListFolders)

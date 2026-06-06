@@ -54,6 +54,17 @@ export interface File {
   has_low_variant?: boolean
 }
 
+// MathGameScore mirrors a row in the backend `math_game_scores` table: one
+// completed game of the /math-game mental-math test for the signed-in user.
+export interface MathGameScore {
+  id: string
+  username: string
+  score: number
+  total: number
+  duration_ms: number
+  created_at: string
+}
+
 export type FolderKind = 'regular' | 'media'
 
 export interface Folder {

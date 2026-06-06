@@ -11,6 +11,7 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as SuspendedRouteImport } from './routes/suspended'
 import { Route as RegisterRouteImport } from './routes/register'
+import { Route as MathGameRouteImport } from './routes/math-game'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as InterestRouteImport } from './routes/interest'
 import { Route as AboutRouteImport } from './routes/about'
@@ -38,6 +39,11 @@ const SuspendedRoute = SuspendedRouteImport.update({
 const RegisterRoute = RegisterRouteImport.update({
   id: '/register',
   path: '/register',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const MathGameRoute = MathGameRouteImport.update({
+  id: '/math-game',
+  path: '/math-game',
   getParentRoute: () => rootRouteImport,
 } as any)
 const LoginRoute = LoginRouteImport.update({
@@ -135,6 +141,7 @@ export interface FileRoutesByFullPath {
   '/about': typeof AboutRoute
   '/interest': typeof InterestRoute
   '/login': typeof LoginRoute
+  '/math-game': typeof MathGameRoute
   '/register': typeof RegisterRoute
   '/suspended': typeof SuspendedRoute
   '/premium': typeof AuthPremiumRoute
@@ -156,6 +163,7 @@ export interface FileRoutesByTo {
   '/about': typeof AboutRoute
   '/interest': typeof InterestRoute
   '/login': typeof LoginRoute
+  '/math-game': typeof MathGameRoute
   '/register': typeof RegisterRoute
   '/suspended': typeof SuspendedRoute
   '/premium': typeof AuthPremiumRoute
@@ -179,6 +187,7 @@ export interface FileRoutesById {
   '/about': typeof AboutRoute
   '/interest': typeof InterestRoute
   '/login': typeof LoginRoute
+  '/math-game': typeof MathGameRoute
   '/register': typeof RegisterRoute
   '/suspended': typeof SuspendedRoute
   '/_auth/premium': typeof AuthPremiumRoute
@@ -202,6 +211,7 @@ export interface FileRouteTypes {
     | '/about'
     | '/interest'
     | '/login'
+    | '/math-game'
     | '/register'
     | '/suspended'
     | '/premium'
@@ -223,6 +233,7 @@ export interface FileRouteTypes {
     | '/about'
     | '/interest'
     | '/login'
+    | '/math-game'
     | '/register'
     | '/suspended'
     | '/premium'
@@ -245,6 +256,7 @@ export interface FileRouteTypes {
     | '/about'
     | '/interest'
     | '/login'
+    | '/math-game'
     | '/register'
     | '/suspended'
     | '/_auth/premium'
@@ -268,6 +280,7 @@ export interface RootRouteChildren {
   AboutRoute: typeof AboutRoute
   InterestRoute: typeof InterestRoute
   LoginRoute: typeof LoginRoute
+  MathGameRoute: typeof MathGameRoute
   RegisterRoute: typeof RegisterRoute
   SuspendedRoute: typeof SuspendedRoute
 }
@@ -286,6 +299,13 @@ declare module '@tanstack/react-router' {
       path: '/register'
       fullPath: '/register'
       preLoaderRoute: typeof RegisterRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/math-game': {
+      id: '/math-game'
+      path: '/math-game'
+      fullPath: '/math-game'
+      preLoaderRoute: typeof MathGameRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/login': {
@@ -457,6 +477,7 @@ const rootRouteChildren: RootRouteChildren = {
   AboutRoute: AboutRoute,
   InterestRoute: InterestRoute,
   LoginRoute: LoginRoute,
+  MathGameRoute: MathGameRoute,
   RegisterRoute: RegisterRoute,
   SuspendedRoute: SuspendedRoute,
 }

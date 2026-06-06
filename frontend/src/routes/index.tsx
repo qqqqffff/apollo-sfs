@@ -1,5 +1,5 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
-import { MdFolder, MdLock, MdInsertDriveFile, MdPeople, MdBarChart, MdStar } from 'react-icons/md'
+import { MdFolder, MdLock, MdInsertDriveFile, MdPeople, MdBarChart, MdStar, MdTimer } from 'react-icons/md'
 
 export const Route = createFileRoute('/')({
   component: RouteComponent,
@@ -94,6 +94,37 @@ function RouteComponent() {
             </div>
           ))}
         </div>
+      </section>
+
+      {/* Math game reference */}
+      <section className="max-w-4xl mx-auto px-6 pb-16">
+        <article className="bg-white rounded-xl border border-gray-200 px-8 py-8">
+          <div className="flex items-start gap-4">
+            <div className="w-10 h-10 rounded-lg bg-blue-50 flex items-center justify-center shrink-0">
+              <MdTimer className="text-blue-600 text-xl" />
+            </div>
+            <div>
+              <span className="text-xs font-semibold uppercase tracking-widest text-blue-600">
+                Just for fun
+              </span>
+              <h2 className="text-xl font-bold text-gray-900 mt-1 mb-3">
+                Radiation Therapy Math Test
+              </h2>
+              <p className="text-sm text-gray-500 leading-relaxed max-w-2xl mb-4">
+                A timed mental-math game inspired by the rapid addition and subtraction drills used
+                in radiation therapy, where therapists and dosimetrists working with systems like
+                those from Varian routinely verify dose numbers in their heads. Ten questions, ten
+                seconds each, no calculator. Sign in to track your scores across games.
+              </p>
+              <Link
+                to="/math-game"
+                className="inline-block px-6 py-2.5 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold rounded-xl no-underline transition-colors shadow-sm"
+              >
+                Play the math game
+              </Link>
+            </div>
+          </div>
+        </article>
       </section>
 
       {/* About Apollo SFS */}

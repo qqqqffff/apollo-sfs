@@ -1,11 +1,19 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
 import { MdFolder, MdLock, MdInsertDriveFile, MdPeople, MdBarChart, MdStar, MdTimer } from 'react-icons/md'
+import { FaGem } from "react-icons/fa";
+import { IconType } from 'react-icons';
 
 export const Route = createFileRoute('/')({
   component: RouteComponent,
 })
 
-const FEATURES = [
+type FeaturesList = {
+  icon: IconType,
+  title: string,
+  desc: string
+}
+
+const FEATURES: FeaturesList[] = [
   {
     icon: MdLock,
     title: 'Double-encrypted at rest',
@@ -23,8 +31,8 @@ const FEATURES = [
   },
   {
     icon: MdStar,
-    title: 'Favourites',
-    desc: 'Star any file or folder to pin it to your Favourites page for quick access across sessions.',
+    title: 'Favorites',
+    desc: 'Star any file or folder to pin it to your Favorites page for quick access across sessions.',
   },
   {
     icon: MdPeople,
@@ -36,6 +44,11 @@ const FEATURES = [
     title: 'Admin dashboard',
     desc: 'Real-time CPU, memory, storage, and network metrics. Manage users, adjust quotas, and send invitations.',
   },
+  {
+    icon: FaGem,
+    title: 'Premium Features',
+    desc:  'API offered application integrations with dynamic api keys. Photo collection stores with smart uploads and rich features.'
+  }
 ]
 
 function RouteComponent() {
@@ -108,13 +121,12 @@ function RouteComponent() {
                 Just for fun
               </span>
               <h2 className="text-xl font-bold text-gray-900 mt-1 mb-3">
-                Radiation Therapy Math Test
+                Math Test
               </h2>
               <p className="text-sm text-gray-500 leading-relaxed max-w-2xl mb-4">
-                A timed mental-math game inspired by the rapid addition and subtraction drills used
-                in radiation therapy, where therapists and dosimetrists working with systems like
-                those from Varian routinely verify dose numbers in their heads. Ten questions, ten
-                seconds each, no calculator. Sign in to track your scores across games.
+                A timed mental-math game inspired by the rapid addition and subtraction drills.
+                Ten questions, ten seconds each, no time for a calculator. 
+                Sign in to track your scores across games.
               </p>
               <Link
                 to="/math-game"

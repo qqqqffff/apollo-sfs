@@ -131,7 +131,7 @@ describe('createInvitation', () => {
     await createInvitation('bob@example.com', 5 * 1024 ** 3)
     expect(lastUrl()).toBe('/api/v1/admin/invitations')
     expect(lastInit().method).toBe('POST')
-    expect(lastBody()).toEqual({ email: 'bob@example.com', initial_quota_bytes: 5 * 1024 ** 3, grant_admin: false })
+    expect(lastBody()).toEqual({ email: 'bob@example.com', initial_quota_bytes: 5 * 1024 ** 3, grant_admin: false, grant_premium: false })
   })
 })
 

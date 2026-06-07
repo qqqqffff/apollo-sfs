@@ -55,23 +55,16 @@ describe('Math game page (/math-game)', () => {
   test('renders the hero heading', () => {
     render(<Page />)
     expect(
-      screen.getByRole('heading', { name: /Radiation Therapy Math Test/i, level: 1 }),
+      screen.getByRole('heading', { name: /Math Test/i, level: 1 }),
     ).toBeInTheDocument()
   })
 
-  test('renders the reference article mentioning Varian', () => {
-    render(<Page />)
-    expect(screen.getByText(/Why mental math matters in radiation therapy/i)).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: /Learn more about Varian/i })).toHaveAttribute(
-      'href',
-      'https://www.varian.com/',
-    )
-  })
-
-  test('shows the start screen with the rules', () => {
+  test('shows the start screen with the rules, both mode buttons, and mod-1000 note', () => {
     render(<Page />)
     expect(screen.getByRole('button', { name: /start test/i })).toBeInTheDocument()
-    expect(screen.getByText(/10 seconds per question/i)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /practice/i })).toBeInTheDocument()
+    expect(screen.getByText(/15 seconds per question/i)).toBeInTheDocument()
+    expect(screen.getByText(/numbers wrap around at 1000/i)).toBeInTheDocument()
   })
 
   test('prompts anonymous users to sign in but still shows a session history', () => {
@@ -95,11 +88,11 @@ describe('Math game page (/math-game)', () => {
     expect(mockSaveMathScore).not.toHaveBeenCalled()
   })
 
-  test('starting the test shows the first question and timer', () => {
+  test('starting the test shows the first question and 15-second timer', () => {
     render(<Page />)
     fireEvent.click(screen.getByRole('button', { name: /start test/i }))
     expect(screen.getByText(/Question 1 \/ 10/i)).toBeInTheDocument()
-    expect(screen.getByText('10s')).toBeInTheDocument()
+    expect(screen.getByText('15s')).toBeInTheDocument()
     expect(screen.getByLabelText('Your answer')).toBeInTheDocument()
   })
 
@@ -111,13 +104,13 @@ describe('Math game page (/math-game)', () => {
     expect(screen.getByRole('button', { name: /play again/i })).toBeInTheDocument()
   })
 
-  test('a timed-out question auto-advances when the clock hits zero', () => {
+  test('a timed-out question auto-advances when the 15-second clock hits zero', () => {
     jest.useFakeTimers()
     render(<Page />)
     fireEvent.click(screen.getByRole('button', { name: /start test/i }))
     expect(screen.getByText(/Question 1 \/ 10/i)).toBeInTheDocument()
     act(() => {
-      jest.advanceTimersByTime(10_000)
+      jest.advanceTimersByTime(15_000)
     })
     expect(screen.getByText(/Question 2 \/ 10/i)).toBeInTheDocument()
   })
@@ -141,5 +134,88 @@ describe('Math game page (/math-game)', () => {
     )
     // Nothing is written to sessionStorage for signed-in users.
     expect(sessionStorage.getItem('apollo_math_game_scores_anon')).toBeNull()
+  })
+})
+
+describe('Practice mode', () => {
+  test('clicking Practice enters practice mode with a Stop button and no countdown', () => {
+    render(<Page />)
+    fireEvent.click(screen.getByRole('button', { name: /practice/i }))
+    expect(screen.getByText(/practice mode/i)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /stop/i })).toBeInTheDocument()
+    expect(screen.getByLabelText('Your answer')).toBeInTheDocument()
+    // No per-question countdown — elements whose full text is purely "NNs" shouldn't exist.
+    expect(screen.queryByText(/^\d+s$/)).toBeNull()
+  })
+
+  test('answering a practice question records it and shows a running score', () => {
+    render(<Page />)
+    fireEvent.click(screen.getByRole('button', { name: /practice/i }))
+    const input = screen.getByLabelText('Your answer') as HTMLInputElement
+    fireEvent.change(input, { target: { value: '0' } })
+    fireEvent.click(screen.getByRole('button', { name: /submit/i }))
+    // Running score appears (format: "x / 1 correct")
+    expect(screen.getByText(/\/ 1 correct/i)).toBeInTheDocument()
+    // Input is cleared for the next question
+    expect(input.value).toBe('')
+  })
+
+  test('Stop button shows the practice-done summary screen', () => {
+    render(<Page />)
+    fireEvent.click(screen.getByRole('button', { name: /practice/i }))
+    fireEvent.click(screen.getByRole('button', { name: /stop/i }))
+    expect(screen.getByRole('heading', { name: /practice session complete/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /practice again/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /back to menu/i })).toBeInTheDocument()
+  })
+
+  test('practice summary shows score fraction and average time after answering', () => {
+    render(<Page />)
+    fireEvent.click(screen.getByRole('button', { name: /practice/i }))
+    const input = screen.getByLabelText('Your answer') as HTMLInputElement
+    fireEvent.change(input, { target: { value: '0' } })
+    fireEvent.click(screen.getByRole('button', { name: /submit/i }))
+    fireEvent.click(screen.getByRole('button', { name: /stop/i }))
+    // Score fraction (x / 1) and average time are shown
+    expect(screen.getByText(/\/ 1/)).toBeInTheDocument()
+    expect(screen.getByText(/avg/i)).toBeInTheDocument()
+    // Per-question breakdown renders the answered question with "="
+    expect(screen.getByText(/=/)).toBeInTheDocument()
+  })
+
+  test('Back to menu returns to the start screen', () => {
+    render(<Page />)
+    fireEvent.click(screen.getByRole('button', { name: /practice/i }))
+    fireEvent.click(screen.getByRole('button', { name: /stop/i }))
+    fireEvent.click(screen.getByRole('button', { name: /back to menu/i }))
+    expect(screen.getByRole('button', { name: /start test/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /practice/i })).toBeInTheDocument()
+  })
+
+  test('Practice again restarts practice with a clean slate', () => {
+    render(<Page />)
+    fireEvent.click(screen.getByRole('button', { name: /practice/i }))
+    // Answer one question so there is state to clear
+    const input = screen.getByLabelText('Your answer') as HTMLInputElement
+    fireEvent.change(input, { target: { value: '0' } })
+    fireEvent.click(screen.getByRole('button', { name: /submit/i }))
+    fireEvent.click(screen.getByRole('button', { name: /stop/i }))
+    fireEvent.click(screen.getByRole('button', { name: /practice again/i }))
+    expect(screen.getByText(/practice mode/i)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /stop/i })).toBeInTheDocument()
+    // Records reset — running score not yet shown
+    expect(screen.queryByText(/\/ \d+ correct/i)).toBeNull()
+  })
+
+  test('score history is hidden during practice and practice-done phases', () => {
+    render(<Page />)
+    // Visible on the idle start screen
+    expect(screen.getByText(/your score history/i)).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: /practice/i }))
+    expect(screen.queryByText(/your score history/i)).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: /stop/i }))
+    expect(screen.queryByText(/your score history/i)).toBeNull()
   })
 })

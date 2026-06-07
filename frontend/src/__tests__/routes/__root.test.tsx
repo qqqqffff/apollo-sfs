@@ -146,7 +146,7 @@ describe('Root — authenticated', () => {
 
 describe('Root — session expired handler', () => {
   it('navigates to /login when session-expired event fires', () => {
-    renderRoot(false)
+    renderRoot(true)
     act(() => {
       window.dispatchEvent(new CustomEvent('apollo:session-expired'))
     })
@@ -154,7 +154,7 @@ describe('Root — session expired handler', () => {
   })
 
   it('clears the query client cache on session expiry', () => {
-    renderRoot(false)
+    renderRoot(true)
     act(() => {
       window.dispatchEvent(new CustomEvent('apollo:session-expired'))
     })
@@ -162,7 +162,7 @@ describe('Root — session expired handler', () => {
   })
 
   it('clears the skip-delete cookie on session expiry', () => {
-    renderRoot(false)
+    renderRoot(true)
     act(() => {
       window.dispatchEvent(new CustomEvent('apollo:session-expired'))
     })
@@ -170,7 +170,7 @@ describe('Root — session expired handler', () => {
   })
 
   it('shows a session-expired error notification', () => {
-    renderRoot(false)
+    renderRoot(true)
     act(() => {
       window.dispatchEvent(new CustomEvent('apollo:session-expired'))
     })

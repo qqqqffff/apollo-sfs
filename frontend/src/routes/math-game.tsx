@@ -280,7 +280,7 @@ function RouteComponent() {
           <span className="text-xs font-semibold uppercase tracking-widest text-blue-600">
             Mental Math Challenge
           </span>
-          <h1 className="text-3xl font-bold text-gray-900 mt-2 mb-3">Radiation Therapy Math Test</h1>
+          <h1 className="text-3xl font-bold text-gray-900 mt-2 mb-3">Math Test</h1>
           <p className="text-gray-500 text-sm leading-relaxed max-w-xl">
             A timed addition and subtraction drill on a mod-1000 looping scale — numbers wrap around
             from 999.9 back to 0.0. Answer {QUESTIONS_PER_GAME} questions, with just{' '}
@@ -340,9 +340,6 @@ function RouteComponent() {
         {(phase === 'idle' || phase === 'done') && (
           <ScoreHistory attempts={attempts} isAuthenticated={isAuthenticated} />
         )}
-
-        {/* Reference article */}
-        <ReferenceArticle />
       </div>
     </div>
   )
@@ -804,42 +801,6 @@ function ScoreHistory({
           ))}
         </div>
       )}
-    </section>
-  )
-}
-
-// ── Reference article ─────────────────────────────────────────────────────────
-
-function ReferenceArticle() {
-  return (
-    <section className="bg-white rounded-xl border border-gray-200 px-8 py-8">
-      <span className="text-xs font-semibold uppercase tracking-widest text-blue-600">
-        Reference
-      </span>
-      <h2 className="text-xl font-bold text-gray-900 mt-2 mb-3">
-        Why mental math matters in radiation therapy
-      </h2>
-      <p className="text-sm text-gray-500 leading-relaxed max-w-2xl mb-3">
-        Radiation therapists and medical dosimetrists working with treatment systems — such as
-        those built by Varian, a leading manufacturer of radiation oncology equipment — routinely
-        rely on quick mental arithmetic. Verifying monitor units, summing fraction doses, and
-        sanity-checking treatment-plan numbers all demand fast, confident addition and subtraction.
-        Because of this, timed mental-math screenings are a common part of training and hiring in
-        the field.
-      </p>
-      <p className="text-sm text-gray-500 leading-relaxed max-w-2xl mb-4">
-        This game is a lightweight homage to that drill: ten quick questions, a fifteen-second clock,
-        and no calculator. It is built purely for practice and fun, and is not affiliated with or
-        endorsed by Varian Medical Systems.
-      </p>
-      <a
-        href="https://www.varian.com/"
-        target="_blank"
-        rel="noopener noreferrer"
-        className="inline-flex items-center gap-1.5 px-3 py-1 text-xs font-medium text-blue-600 bg-blue-50 rounded-full border border-blue-100 hover:bg-blue-100 transition-colors no-underline"
-      >
-        Learn more about Varian
-      </a>
     </section>
   )
 }

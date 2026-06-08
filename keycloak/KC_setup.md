@@ -31,6 +31,16 @@ API_CLIENT_ID="filestorage-api"             # Must match clientId in realm.json
 ADMIN_CLIENT_ID="filestorage-admin"         # Must match clientId in realm.json
 REALM_JSON_PATH="./realm.json"              # Path to realm.json on the HOST
 REALM_JSON_CONTAINER_PATH="/tmp/realm.json" # Where it gets copied inside the container
+
+# ── Social IdP credentials (optional — needed for step 5) ────────────────────
+# Set these before running to configure Sign in with Apple and Sign in with Google.
+# Leave unset to skip IdP configuration.
+APPLE_SERVICES_ID="${APPLE_SERVICES_ID:-}"           # e.g. com.apollosfs.app.signin
+APPLE_TEAM_ID="${APPLE_TEAM_ID:-}"                   # 10-char Apple Team ID
+APPLE_KEY_ID="${APPLE_KEY_ID:-}"                     # Key ID from Apple Developer
+APPLE_P8_PATH="${APPLE_P8_PATH:-}"                   # Path to downloaded .p8 private key
+GOOGLE_OIDC_CLIENT_ID="${GOOGLE_OIDC_CLIENT_ID:-}"   # Web application OAuth2 Client ID
+GOOGLE_OIDC_CLIENT_SECRET="${GOOGLE_OIDC_CLIENT_SECRET:-}" # OAuth2 Client Secret
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -135,7 +145,7 @@ echo "    manage-users role assigned."
 
 # ── Step 5: Fetch and print client secrets ────────────────────────────────────
 echo ""
-echo "==> [4/4] Fetching client secrets..."
+echo "==> [4/5] Fetching client secrets..."
 
 API_CLIENT_UUID=$(get_client_uuid "$API_CLIENT_ID")
 
@@ -173,3 +183,149 @@ echo "   KEYCLOAK_CLIENT_SECRET=$API_SECRET"
 echo "   KEYCLOAK_ADMIN_CLIENT_ID=$ADMIN_CLIENT_ID"
 echo "   KEYCLOAK_ADMIN_CLIENT_SECRET=$ADMIN_SECRET"
 echo "============================================================"
+
+
+# ── Step 5: Social Identity Providers (Apple & Google) ───────────────────────
+#
+# The mobile app's /api/v1/mobile/auth/apple and /google endpoints rely on
+# Keycloak Token Exchange: the client presents an Apple/Google id_token and
+# Keycloak exchanges it for a Keycloak access_token + refresh_token.
+#
+# Prerequisites before running this step:
+#   Apple:
+#     1. In Apple Developer → Identifiers, create a Services ID
+#        (e.g. com.apollosfs.app.signin) and add the Keycloak redirect URI:
+#        https://<your-domain>/realms/filestorage/broker/apple/endpoint
+#     2. Create a Key with Sign In with Apple enabled, download the .p8 file.
+#   Google:
+#     1. In Google Cloud Console → APIs & Services → Credentials, create an
+#        OAuth 2.0 Client ID (type: Web application).
+#     2. Add authorised redirect URI:
+#        https://<your-domain>/realms/filestorage/broker/google/endpoint
+
+configure_social_idps() {
+  echo ""
+  echo "==> [5/5] Configuring Social Identity Providers..."
+
+  # ── Token Exchange ───────────────────────────────────────────────────────
+  # Keycloak 26+ exposes token exchange as a realm attribute.
+  # On Keycloak 21-25 you must grant the token-exchange permission via
+  # fine-grained authorization on the API client instead — see:
+  # https://www.keycloak.org/docs/latest/securing_apps/#_token-exchange
+  echo "    Enabling token exchange on realm '$REALM'..."
+  $KCADM update realms/"$REALM" \
+    -s 'attributes.token-exchange-standard-flow-enabled=true' 2>/dev/null || true
+
+  # ── Apple Identity Provider ──────────────────────────────────────────────
+  if [ -n "$APPLE_SERVICES_ID" ] && [ -n "$APPLE_TEAM_ID" ] && \
+     [ -n "$APPLE_KEY_ID" ]       && [ -f "$APPLE_P8_PATH" ]; then
+
+    echo "    Creating Apple Identity Provider (alias: apple)..."
+
+    # Strip PEM header/footer and newlines to get the bare base64 key
+    APPLE_PRIVATE_KEY=$(grep -v 'BEGIN\|END' "$APPLE_P8_PATH" | tr -d '\n')
+
+    $KCADM create identity-provider/instances \
+      -r "$REALM" \
+      -s alias=apple \
+      -s providerId=apple \
+      -s enabled=true \
+      -s 'config.hideOnLoginPage=false' \
+      -s "config.clientId=$APPLE_SERVICES_ID" \
+      -s "config.teamId=$APPLE_TEAM_ID" \
+      -s "config.keyId=$APPLE_KEY_ID" \
+      -s "config.privateKey=$APPLE_PRIVATE_KEY" \
+      -s 'config.defaultScope=name email' \
+      -s 'config.syncMode=FORCE'
+
+    # Map email claim → user email attribute
+    $KCADM create identity-provider/instances/apple/mappers \
+      -r "$REALM" \
+      -s name=apple-email \
+      -s identityProviderMapper=oidc-user-attribute-idp-mapper \
+      -s 'config.claim=email' \
+      -s 'config.attribute=email' \
+      -s 'config.syncMode=INHERIT'
+
+    # Map given_name → firstName (only present on first Apple sign-in)
+    $KCADM create identity-provider/instances/apple/mappers \
+      -r "$REALM" \
+      -s name=apple-first-name \
+      -s identityProviderMapper=oidc-user-attribute-idp-mapper \
+      -s 'config.claim=given_name' \
+      -s 'config.attribute=firstName' \
+      -s 'config.syncMode=INHERIT'
+
+    # Map family_name → lastName
+    $KCADM create identity-provider/instances/apple/mappers \
+      -r "$REALM" \
+      -s name=apple-last-name \
+      -s identityProviderMapper=oidc-user-attribute-idp-mapper \
+      -s 'config.claim=family_name' \
+      -s 'config.attribute=lastName' \
+      -s 'config.syncMode=INHERIT'
+
+    # Build a stable username from provider alias + Apple subject
+    $KCADM create identity-provider/instances/apple/mappers \
+      -r "$REALM" \
+      -s name=apple-username \
+      -s identityProviderMapper=oidc-username-idp-mapper \
+      -s 'config.template=${ALIAS}.${CLAIM.sub}' \
+      -s 'config.syncMode=INHERIT'
+
+    echo "    Apple IdP configured."
+  else
+    echo "    Skipping Apple IdP — set APPLE_SERVICES_ID, APPLE_TEAM_ID, APPLE_KEY_ID, APPLE_P8_PATH."
+  fi
+
+  # ── Google Identity Provider ─────────────────────────────────────────────
+  if [ -n "$GOOGLE_OIDC_CLIENT_ID" ] && [ -n "$GOOGLE_OIDC_CLIENT_SECRET" ]; then
+
+    echo "    Creating Google Identity Provider (alias: google)..."
+
+    $KCADM create identity-provider/instances \
+      -r "$REALM" \
+      -s alias=google \
+      -s providerId=google \
+      -s enabled=true \
+      -s 'config.hideOnLoginPage=false' \
+      -s "config.clientId=$GOOGLE_OIDC_CLIENT_ID" \
+      -s "config.clientSecret=$GOOGLE_OIDC_CLIENT_SECRET" \
+      -s 'config.defaultScope=openid email profile' \
+      -s 'config.syncMode=FORCE' \
+      -s 'config.useJwksUrl=true'
+
+    # Map email claim → user email
+    $KCADM create identity-provider/instances/google/mappers \
+      -r "$REALM" \
+      -s name=google-email \
+      -s identityProviderMapper=oidc-user-attribute-idp-mapper \
+      -s 'config.claim=email' \
+      -s 'config.attribute=email' \
+      -s 'config.syncMode=INHERIT'
+
+    # Map given_name → firstName
+    $KCADM create identity-provider/instances/google/mappers \
+      -r "$REALM" \
+      -s name=google-first-name \
+      -s identityProviderMapper=oidc-user-attribute-idp-mapper \
+      -s 'config.claim=given_name' \
+      -s 'config.attribute=firstName' \
+      -s 'config.syncMode=INHERIT'
+
+    # Map family_name → lastName
+    $KCADM create identity-provider/instances/google/mappers \
+      -r "$REALM" \
+      -s name=google-last-name \
+      -s identityProviderMapper=oidc-user-attribute-idp-mapper \
+      -s 'config.claim=family_name' \
+      -s 'config.attribute=lastName' \
+      -s 'config.syncMode=INHERIT'
+
+    echo "    Google IdP configured."
+  else
+    echo "    Skipping Google IdP — set GOOGLE_OIDC_CLIENT_ID and GOOGLE_OIDC_CLIENT_SECRET."
+  fi
+}
+
+configure_social_idps

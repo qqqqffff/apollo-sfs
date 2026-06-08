@@ -29,15 +29,16 @@ describe('Landing page (/)', () => {
     expect(link).toHaveAttribute('href', '/login')
   })
 
-  test('renders all six feature card titles', () => {
+  test('renders all seven feature card titles', () => {
     render(<Page />)
     const titles = [
       'Double-encrypted at rest',
       'Folder hierarchy',
       'In-browser previews',
-      'Favourites',
+      'Favorites',
       'Invite-only access',
       'Admin dashboard',
+      'Premium Features',
     ]
     titles.forEach((t) => expect(screen.getByText(t)).toBeInTheDocument())
   })

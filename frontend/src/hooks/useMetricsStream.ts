@@ -4,7 +4,7 @@ import type { MetricsSnapshot } from '../api/admin'
 // 720 snapshots ≈ 1 hour at 5-second intervals
 const MAX_SNAPSHOTS = 720
 
-export function useMetricsStream() {
+export function useMetricsStream(paused = false) {
   const [snapshots, setSnapshots] = useState<MetricsSnapshot[]>([])
   const [connected, setConnected] = useState(false)
   const reconnectDelay = useRef(1_000)
@@ -12,7 +12,18 @@ export function useMetricsStream() {
   const wsRef = useRef<WebSocket | null>(null)
 
   useEffect(() => {
+    if (paused) {
+      cancelledRef.current = true
+      if (wsRef.current) {
+        wsRef.current.close()
+        wsRef.current = null
+      }
+      setConnected(false)
+      return
+    }
+
     cancelledRef.current = false
+    reconnectDelay.current = 1_000
 
     function connect() {
       if (cancelledRef.current) return
@@ -66,7 +77,7 @@ export function useMetricsStream() {
         wsRef.current = null
       }
     }
-  }, [])
+  }, [paused])
 
   return { snapshots, connected }
 }

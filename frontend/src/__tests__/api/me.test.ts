@@ -66,11 +66,11 @@ describe('meQueryOptions', () => {
     expect(meQueryOptions.staleTime).toBe(5 * 60 * 1000)
   })
 
-  it('has a refetchInterval of 4 minutes', () => {
-    expect(meQueryOptions.refetchInterval).toBe(4 * 60 * 1000)
+  it('does not refetch on an interval', () => {
+    expect((meQueryOptions as Record<string, unknown>).refetchInterval).toBeUndefined()
   })
 
   it('does not refetch in background', () => {
-    expect(meQueryOptions.refetchIntervalInBackground).toBe(false)
+    expect((meQueryOptions as Record<string, unknown>).refetchIntervalInBackground).toBeUndefined()
   })
 })

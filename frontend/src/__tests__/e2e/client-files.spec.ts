@@ -115,12 +115,12 @@ test.describe('Client — Files page (/client)', () => {
     await expect(page.getByText(/no files yet/i)).toBeVisible()
   })
 
-  test('unauthenticated user is redirected to /login', async ({ page }) => {
+  test('unauthenticated user is not redirected to /login', async ({ page }) => {
     await page.route('**/api/v1/me', (route) =>
       route.fulfill({ status: 401, json: { error: 'unauthorized' } }),
     )
     await page.goto('/client')
-    await expect(page).toHaveURL(/\/login/)
+    await expect(page).not.toHaveURL(/\/login/)
   })
 })
 

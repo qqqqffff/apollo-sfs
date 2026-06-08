@@ -1,5 +1,5 @@
 import { createRootRouteWithContext, Link, Outlet, useNavigate } from '@tanstack/react-router'
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import type { QueryClient } from '@tanstack/react-query'
 import { AuthContext, AuthProvider, useAuth } from '../auth'
@@ -38,10 +38,17 @@ function RootLayout() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const { notify } = useNotification()
+  const wasAuthenticated = useRef(false)
+
+  useEffect(() => {
+    if (isAuthenticated) wasAuthenticated.current = true
+  }, [isAuthenticated])
 
   useEffect(() => {
     function handleSessionExpired() {
+      if (!wasAuthenticated.current) return
       if (window.location.pathname === '/login') return
+      wasAuthenticated.current = false
       clearSkipDeleteCookie()
       queryClient.clear()
       notify('error', 'Your session has expired. Please sign in again.')

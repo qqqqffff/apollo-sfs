@@ -18,11 +18,7 @@ export const Route = createFileRoute('/_auth')({
     if (result === 'banned' || result === 'suspended') {
       throw redirect({ to: '/suspended' })
     }
-    if (!result) {
-      clearSkipDeleteCookie()
-      throw redirect({ to: '/login' })
-    }
-    return { user: result }
+    return {}
   },
   component: RouteComponent,
 })

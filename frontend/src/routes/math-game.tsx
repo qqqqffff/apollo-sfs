@@ -58,8 +58,8 @@ function randInt(min: number, max: number): number {
 
 function buildQuestion(): Question {
   const op: Operator = Math.random() < 0.5 ? '+' : '-'
-  const aTenths = randInt(9500, 11000)  // 950.0–1100.0, keeps a in the upper/900s to lower 1000s range
-  const bTenths = randInt(50, 300)     // 5.0–30.0, small operand for mental math
+  const aTenths = randInt(9700, 10500)  // keeps a in the upper/900s to lower 1000s range
+  const bTenths = randInt(50, 300)     // small operand for mental math
   const a = aTenths / 10
   const b = bTenths / 10
   const MODULUS = 10000
@@ -526,7 +526,7 @@ function PracticeScreen({
       {/* Question */}
       <div className="text-center mb-8">
         <span className="text-4xl font-bold text-gray-900 tabular-nums">
-          {question.a} {question.op} {question.b}
+          {(question.a % 1000).toFixed(1)} {question.op} {question.b}
         </span>
       </div>
 
@@ -557,7 +557,7 @@ function PracticeScreen({
           {lastFive.map((r, i) => (
             <div key={i} className="flex items-center justify-between px-4 py-2 text-xs">
               <span className="text-gray-500 tabular-nums">
-                {r.question.a} {r.question.op} {r.question.b} = {r.question.answer}
+                {(r.question.a % 1000).toFixed(1)} {r.question.op} {r.question.b} = {r.question.answer}
               </span>
               <div className="flex items-center gap-3">
                 <span className="text-gray-400 tabular-nums">{(r.timeMs / 1000).toFixed(1)}s</span>

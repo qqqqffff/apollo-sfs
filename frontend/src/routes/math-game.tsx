@@ -58,8 +58,8 @@ function randInt(min: number, max: number): number {
 
 function buildQuestion(): Question {
   const op: Operator = Math.random() < 0.5 ? '+' : '-'
-  const aTenths = randInt(0, 9999)   // 0.0–999.9
-  const bTenths = randInt(50, 300)   // 5.0–30.0, small operand for mental math
+  const aTenths = randInt(9500, 11000)  // 950.0–1100.0, keeps a in the upper/900s to lower 1000s range
+  const bTenths = randInt(50, 300)     // 5.0–30.0, small operand for mental math
   const a = aTenths / 10
   const b = bTenths / 10
   const MODULUS = 10000
@@ -458,6 +458,7 @@ function PlayScreen({
           ref={inputRef}
           type="number"
           inputMode="decimal"
+          step="any"
           value={input}
           onChange={(e) => setInput(e.target.value)}
           autoFocus
@@ -534,6 +535,7 @@ function PracticeScreen({
           ref={inputRef}
           type="number"
           inputMode="decimal"
+          step="any"
           value={input}
           onChange={(e) => setInput(e.target.value)}
           autoFocus

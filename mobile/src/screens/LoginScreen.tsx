@@ -16,19 +16,19 @@ import { useAuth } from '../context/AuthContext';
 import { colors, radius, spacing } from '../theme';
 
 export default function LoginScreen({ navigation }: { navigation: any }) {
-  const [username, setUsername] = useState('');
+  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const { refreshProfile } = useAuth();
 
   const handleLogin = async () => {
-    if (!username.trim() || !password) return;
+    if (!email.trim() || !password) return;
     setLoading(true);
     try {
-      await login(username.trim(), password);
+      await login(email.trim(), password);
       await refreshProfile();
     } catch {
-      Alert.alert('Login failed', 'Invalid username or password.');
+      Alert.alert('Login failed', 'Invalid email or password.');
     } finally {
       setLoading(false);
     }
@@ -76,15 +76,16 @@ export default function LoginScreen({ navigation }: { navigation: any }) {
       </View>
 
       <View style={styles.form}>
-        <Text style={styles.inputLabel}>Username</Text>
+        <Text style={styles.inputLabel}>Email</Text>
         <TextInput
           style={styles.input}
-          placeholder="your-username"
+          placeholder="you@example.com"
           placeholderTextColor={colors.textMuted}
           autoCapitalize="none"
           autoCorrect={false}
-          value={username}
-          onChangeText={setUsername}
+          keyboardType="email-address"
+          value={email}
+          onChangeText={setEmail}
         />
 
         <Text style={styles.inputLabel}>Password</Text>
@@ -127,12 +128,6 @@ export default function LoginScreen({ navigation }: { navigation: any }) {
         </TouchableOpacity>
       </View>
 
-      <TouchableOpacity style={styles.footer} onPress={() => navigation.navigate('Register')}>
-        <Text style={styles.footerText}>
-          Don't have an account?{' '}
-          <Text style={styles.footerLink}>Register with an invite</Text>
-        </Text>
-      </TouchableOpacity>
     </KeyboardAvoidingView>
   );
 }

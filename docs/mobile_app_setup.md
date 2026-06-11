@@ -83,7 +83,7 @@ Open `ios/ApolloSFS/Info.plist` and add:
 
 1. Open `ios/ApolloSFS.xcworkspace` in Xcode.
 2. Select the **ApolloSFS** target → **Signing & Capabilities**.
-3. Set **Bundle Identifier** to `com.apollosfs.app`.
+3. Set **Bundle Identifier** to `com.apollorowe.apollosfs`.
 4. Select your **Team** (requires Apple Developer account).
 5. Add capability: **Associated Domains** → add `applinks:apollo-sfs.com`.
 6. Add capability: **Sign In with Apple**.

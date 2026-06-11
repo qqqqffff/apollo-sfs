@@ -8,7 +8,7 @@ import (
 )
 
 type mobileLoginRequest struct {
-	Username string `json:"username" binding:"required,max=150"`
+	Email    string `json:"email" binding:"required,email,max=254"`
 	Password string `json:"password" binding:"required,max=1024"`
 }
 
@@ -37,16 +37,16 @@ type tokenResponse struct {
 func (h *Handler) MobileLogin(c *gin.Context) {
 	var req mobileLoginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "username and password are required"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "email and password are required"})
 		return
 	}
-	req.Username = strings.TrimSpace(req.Username)
-	if req.Username == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "username and password are required"})
+	req.Email = strings.TrimSpace(req.Email)
+	if req.Email == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "email and password are required"})
 		return
 	}
 
-	tokens, err := h.svc.Login(c.Request.Context(), req.Username, req.Password)
+	tokens, err := h.svc.Login(c.Request.Context(), req.Email, req.Password)
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
 		return

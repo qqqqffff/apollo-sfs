@@ -7,8 +7,8 @@ export interface TokenResponse {
   refresh_expires_in?: number;
 }
 
-export async function login(username: string, password: string): Promise<TokenResponse> {
-  const res = await api.post<TokenResponse>('/api/v1/mobile/auth/login', { username, password });
+export async function login(email: string, password: string): Promise<TokenResponse> {
+  const res = await api.post<TokenResponse>('/api/v1/mobile/auth/login', { email, password });
   await storeTokens(res.data.access_token, res.data.refresh_token);
   return res.data;
 }

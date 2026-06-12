@@ -18,6 +18,8 @@ export const colors = {
   warningBg: '#fef3c7',
   info: '#3b82f6',
   infoBg: '#eff6ff',
+  mediaAccent: '#7c3aed',
+  mediaAccentLighter: '#f5f3ff',
 };
 
 export const spacing = {

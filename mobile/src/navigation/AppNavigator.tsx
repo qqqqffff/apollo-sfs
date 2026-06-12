@@ -3,14 +3,13 @@ import { Linking } from 'react-native';
 import { NavigationContainer, LinkingOptions } from '@react-navigation/native';
 import { createStackNavigator } from '@react-navigation/stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
-import { Home, Folder, Star, User, Settings } from 'lucide-react-native';
+import { Home, Folder, User, Settings } from 'lucide-react-native';
 import { useAuth } from '../context/AuthContext';
 import { colors } from '../theme';
 import LoginScreen from '../screens/LoginScreen';
 import RegisterScreen from '../screens/RegisterScreen';
 import HomeScreen from '../screens/HomeScreen';
 import FilesScreen from '../screens/FilesScreen';
-import FavoritesScreen from '../screens/FavoritesScreen';
 import ProfileScreen from '../screens/ProfileScreen';
 import SettingsScreen from '../screens/SettingsScreen';
 
@@ -20,7 +19,6 @@ const Tab = createBottomTabNavigator();
 const TAB_ICONS: Record<string, React.ComponentType<{ size: number; color: string; strokeWidth?: number }>> = {
   Home: Home,
   Files: Folder,
-  Favorites: Star,
   Profile: User,
   Settings: Settings,
 };
@@ -69,7 +67,6 @@ function MainTabs() {
     >
       <Tab.Screen name="Home" component={HomeScreen} options={{ title: 'Home' }} />
       <Tab.Screen name="Files" component={FilesScreen} options={{ title: 'Files' }} />
-      <Tab.Screen name="Favorites" component={FavoritesScreen} options={{ title: 'Favorites' }} />
       <Tab.Screen name="Profile" component={ProfileScreen} options={{ title: 'Profile' }} />
       <Tab.Screen name="Settings" component={SettingsScreen} options={{ title: 'Settings' }} />
     </Tab.Navigator>

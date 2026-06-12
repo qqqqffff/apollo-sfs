@@ -21,6 +21,9 @@ const WIFI_ONLY_KEY = 'apollo_wifi_only';
 
 interface SyncServiceOptions {
   onPendingCountChange?: (count: number) => void;
+  onSyncedCountChange?: (count: number) => void;
+  onFileStart?: (filename: string) => void;
+  onFileComplete?: (filename: string) => void;
 }
 
 export class SyncService {
@@ -83,7 +86,7 @@ export class SyncService {
 
   private async scanCameraRoll(): Promise<void> {
     const granted = await this.requestPhotoPermission();
-    if (!granted) return;
+    if (!granted) throw new Error('Photo library permission denied');
 
     const cursor = (await AsyncStorage.getItem(CURSOR_KEY)) ?? '1970-01-01T00:00:00Z';
     const fromTime = new Date(cursor).getTime();
@@ -153,6 +156,7 @@ export class SyncService {
     for (const item of items) {
       if (!(await this.networkOk())) break;
 
+      this.opts.onFileStart?.(item.filename);
       try {
         await setStatus(item.local_asset_id, 'uploading');
 
@@ -173,13 +177,18 @@ export class SyncService {
         } else {
           await incrementRetry(item.local_asset_id);
         }
+      } finally {
+        this.opts.onFileComplete?.(item.filename);
       }
     }
   }
 
   private async notifyPendingCount(): Promise<void> {
-    if (!this.opts.onPendingCountChange) return;
-    const count = await countByStatus('pending');
-    this.opts.onPendingCountChange(count);
+    if (this.opts.onPendingCountChange) {
+      this.opts.onPendingCountChange(await countByStatus('pending'));
+    }
+    if (this.opts.onSyncedCountChange) {
+      this.opts.onSyncedCountChange(await countByStatus('done'));
+    }
   }
 }

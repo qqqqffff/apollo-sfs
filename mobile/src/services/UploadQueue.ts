@@ -114,3 +114,30 @@ export async function isAlreadyDone(localAssetID: string): Promise<boolean> {
   if (results.rows.length === 0) return false;
   return (results.rows.item(0) as { status: string }).status === 'done';
 }
+
+export async function getAllDoneItems(): Promise<QueueItem[]> {
+  const d = await getDB();
+  const [results] = await d.executeSql(
+    `SELECT * FROM upload_queue WHERE status = 'done' ORDER BY created_at ASC`,
+    [],
+  );
+  const items: QueueItem[] = [];
+  for (let i = 0; i < results.rows.length; i++) {
+    items.push(results.rows.item(i) as QueueItem);
+  }
+  return items;
+}
+
+export async function getDoneHashSet(): Promise<Set<string>> {
+  const d = await getDB();
+  const [results] = await d.executeSql(
+    `SELECT sha256_hash FROM upload_queue WHERE status = 'done' AND sha256_hash IS NOT NULL`,
+    [],
+  );
+  const set = new Set<string>();
+  for (let i = 0; i < results.rows.length; i++) {
+    const row = results.rows.item(i) as { sha256_hash: string };
+    set.add(row.sha256_hash);
+  }
+  return set;
+}

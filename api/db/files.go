@@ -110,7 +110,8 @@ func (q *Queries) CreateFile(ctx context.Context, f *models.File) (*models.File,
 // GetFileByID returns a single file record. Returns sql.ErrNoRows if not found.
 func (q *Queries) GetFileByID(ctx context.Context, id uuid.UUID) (*models.File, error) {
 	row := q.db.QueryRowContext(ctx,
-		`SELECT`+fileColumns+`FROM files WHERE id = $1`, id)
+		`SELECT`+fileColumns+`
+		FROM files WHERE id = $1`, id)
 	f, err := scanFile(row)
 	if err != nil {
 		return nil, fmt.Errorf("GetFileByID %s: %w", id, err)

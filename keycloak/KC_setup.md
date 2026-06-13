@@ -39,22 +39,41 @@ docker exec apollo-sfs-keycloak /opt/keycloak/bin/kcadm.sh update realms/apollo-
 
 ## 2. Apple Identity Provider
 
+Apple is not a built-in Keycloak social provider. This setup uses the [apple-identity-provider-keycloak](https://github.com/klausbetz/apple-identity-provider-keycloak) extension, which handles Apple's JWT-based client secret automatically.
+
 ### Requirements
 
-1. In **Apple Developer → Identifiers**, create a **Services ID** (e.g. `com.apollorowe.apollosfs.signin`).
-2. Under the Services ID, enable **Sign In with Apple** and add the Keycloak redirect URI:
+1. Download the JAR matching your Keycloak version from the [releases page](https://github.com/klausbetz/apple-identity-provider-keycloak/releases) and place it in `keycloak/providers/`:
+   ```bash
+   curl -L -o keycloak/providers/apple-identity-provider-keycloak-<version>.jar \
+     https://github.com/klausbetz/apple-identity-provider-keycloak/releases/download/<version>/apple-identity-provider-keycloak-<version>.jar
+   ```
+2. Restart Keycloak so it picks up the new provider JAR:
+   ```bash
+   docker compose restart keycloak
+   ```
+3. In **Apple Developer → Identifiers**, create a **Services ID**: `com.apollorowe.apollosfs.signin`.
+4. Under the Services ID, enable **Sign In with Apple** and add the redirect URI:
    ```
    https://apollo-sfs.com/realms/apollo-sfs-realm/broker/apple/endpoint
    ```
-3. Create a **Key** with Sign In with Apple enabled. Download the `.p8` file and note the **Key ID**.
-4. Note your 10-character **Team ID** from the Apple Developer account page.
+5. Create a **Key** with Sign In with Apple enabled. Download the `.p8` file and note the **Key ID**.
+6. Note your 10-character **Team ID** from the Apple Developer account page.
 
 ### Commands
 
-1. Create the Apple IdP (replace the placeholders before running):
+1. Authenticate, then create the Apple IdP:
 
 ```bash
-APPLE_PRIVATE_KEY=$(grep -v 'BEGIN\|END' /path/to/AuthKey_XXXXXXXXXX.p8 | tr -d '\n')
+docker exec apollo-sfs-keycloak /opt/keycloak/bin/kcadm.sh config credentials \
+  --server http://localhost:8180 \
+  --realm master \
+  --user "$KEYCLOAK_ADMIN" \
+  --password "$KEYCLOAK_ADMIN_PASSWORD"
+```
+
+```bash
+APPLE_PRIVATE_KEY=$(grep -v 'BEGIN\|END' /path/to/AuthKey_8QB482NU55.p8 | tr -d '\n')
 
 docker exec apollo-sfs-keycloak /opt/keycloak/bin/kcadm.sh create identity-provider/instances \
   -r apollo-sfs-realm \
@@ -62,9 +81,9 @@ docker exec apollo-sfs-keycloak /opt/keycloak/bin/kcadm.sh create identity-provi
   -s providerId=apple \
   -s enabled=true \
   -s 'config.hideOnLoginPage=false' \
-  -s 'config.clientId=com.apollosfs.app.signin' \
-  -s 'config.teamId=<APPLE_TEAM_ID>' \
-  -s 'config.keyId=<APPLE_KEY_ID>' \
+  -s 'config.clientId=com.apollorowe.apollosfs.signin' \
+  -s 'config.teamId=2R46Z987AY' \
+  -s 'config.keyId=8QB482NU55' \
   -s "config.privateKey=$APPLE_PRIVATE_KEY" \
   -s 'config.defaultScope=name email' \
   -s 'config.syncMode=FORCE'

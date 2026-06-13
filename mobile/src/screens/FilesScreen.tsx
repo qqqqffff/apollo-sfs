@@ -24,6 +24,8 @@ import {
   Trash2,
   Upload,
   Video,
+  ZoomIn,
+  ZoomOut,
 } from 'lucide-react-native';
 import DocumentPicker from 'react-native-document-picker';
 import {
@@ -68,6 +70,8 @@ export default function FilesScreen() {
   const [error, setError] = useState<string | null>(null);
 
   // Create folder modal
+  const [galleryCols, setGalleryCols] = useState(3);
+
   const [createVisible, setCreateVisible] = useState(false);
   const [createKind, setCreateKind] = useState<CreateKind>('regular');
   const [createName, setCreateName] = useState('');
@@ -211,6 +215,17 @@ export default function FilesScreen() {
             </React.Fragment>
           ))}
         </ScrollView>
+        {isMediaFolder && (
+          <TouchableOpacity
+            style={styles.addBtn}
+            onPress={() => setGalleryCols((c) => (c >= 5 ? 1 : c + 1))}
+          >
+            {galleryCols >= 5
+              ? <ZoomIn size={18} color={colors.primary} strokeWidth={2} />
+              : <ZoomOut size={18} color={colors.primary} strokeWidth={2} />
+            }
+          </TouchableOpacity>
+        )}
         {canCreateNew && (
           <TouchableOpacity style={styles.addBtn} onPress={openCreateModal}>
             <Plus size={18} color={colors.primary} strokeWidth={2.5} />
@@ -232,6 +247,7 @@ export default function FilesScreen() {
           files={files}
           currentFolderID={currentFolderID!}
           isSubcollection={isInsideSubcollection}
+          cols={galleryCols}
           onDeleteFile={(id) => setFiles((prev) => prev.filter((f) => f.id !== id))}
         />
       ) : (

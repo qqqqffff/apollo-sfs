@@ -39,17 +39,20 @@ import { colors, radius, spacing } from '../theme';
 
 const { width: SCREEN_W } = Dimensions.get('window');
 const GAP = 1;
-const COL = 3;
-const TILE_SIZE = Math.floor((SCREEN_W - GAP * (COL - 1)) / COL);
 const SELECT_BAR_H = 64;
 
+function tileSize(cols: number) {
+  return Math.floor((SCREEN_W - GAP * (cols - 1)) / cols);
+}
+
 const urlCache = new Map<string, string>();
+export function __clearUrlCache(): void { urlCache.clear(); }
 
 // ─── Grouping ─────────────────────────────────────────────────────────────────
 
 type GallerySection = { title: string; dateKey: string; data: ApiFile[][] };
 
-function buildSections(files: ApiFile[]): GallerySection[] {
+function buildSections(files: ApiFile[], cols: number): GallerySection[] {
   const sorted = [...files].sort((a, b) =>
     new Date(b.taken_at ?? b.created_at).getTime() -
     new Date(a.taken_at ?? a.created_at).getTime(),
@@ -65,7 +68,7 @@ function buildSections(files: ApiFile[]): GallerySection[] {
     const d = new Date(`${dateKey}-15T12:00:00`);
     const title = d.toLocaleDateString(undefined, { year: 'numeric', month: 'long' });
     const rows: ApiFile[][] = [];
-    for (let i = 0; i < items.length; i += COL) rows.push(items.slice(i, i + COL));
+    for (let i = 0; i < items.length; i += cols) rows.push(items.slice(i, i + cols));
     return { title, dateKey, data: rows };
   });
 }
@@ -80,6 +83,7 @@ function formatBytes(b: number) {
 
 interface TileProps {
   file: ApiFile;
+  size: number;
   isSelected: boolean;
   isSelectMode: boolean;
   isSynced: boolean;
@@ -90,7 +94,7 @@ interface TileProps {
   onInfo: () => void;
 }
 
-function Tile({ file, isSelected, isSelectMode, isSynced, onToggle, onLongPress, onFavorite, onDelete, onInfo }: TileProps) {
+function Tile({ file, size, isSelected, isSelectMode, isSynced, onToggle, onLongPress, onFavorite, onDelete, onInfo }: TileProps) {
   const [url, setUrl] = useState<string | null>(urlCache.get(file.id) ?? null);
   const [fetching, setFetching] = useState(!urlCache.has(file.id));
   const [urlError, setUrlError] = useState(false);
@@ -130,7 +134,7 @@ function Tile({ file, isSelected, isSelectMode, isSynced, onToggle, onLongPress,
 
   const translateX = scanAnim.interpolate({
     inputRange: [0, 1],
-    outputRange: [-TILE_SIZE, TILE_SIZE],
+    outputRange: [-size, size],
   });
 
   const handlePress = () => {
@@ -150,7 +154,7 @@ function Tile({ file, isSelected, isSelectMode, isSynced, onToggle, onLongPress,
       onLongPress={handleLongPress}
       delayLongPress={350}
       activeOpacity={0.85}
-      style={{ width: TILE_SIZE, height: TILE_SIZE, overflow: 'hidden', backgroundColor: colors.divider }}
+      style={{ width: size, height: size, overflow: 'hidden', backgroundColor: colors.divider }}
     >
       {/* Image */}
       {url && isImage && !urlError ? (
@@ -240,6 +244,7 @@ interface MediaGalleryProps {
   files: ApiFile[];
   currentFolderID: string;
   isSubcollection?: boolean;
+  cols?: number;
   onDeleteFile: (id: string) => void;
 }
 
@@ -248,7 +253,9 @@ interface MoveDestinations {
   others: ApiFolder[];
 }
 
-export default function MediaGallery({ files, currentFolderID, isSubcollection, onDeleteFile }: MediaGalleryProps) {
+export default function MediaGallery({ files, currentFolderID, isSubcollection, cols: colsProp, onDeleteFile }: MediaGalleryProps) {
+  const cols = Math.min(5, Math.max(1, colsProp ?? 3));
+  const ts = tileSize(cols);
   // View state
   const [toolbarFileId, setToolbarFileId] = useState<string | null>(null);
   const [infoFile, setInfoFile] = useState<ApiFile | null>(null);
@@ -272,7 +279,7 @@ export default function MediaGallery({ files, currentFolderID, isSubcollection, 
     getDoneHashSet().then(setSyncedHashes).catch(() => {});
   }, []);
 
-  const sections = useMemo(() => buildSections(files), [files]);
+  const sections = useMemo(() => buildSections(files, cols), [files, cols]);
   const dates = useMemo(() => sections.map((s) => ({ key: s.dateKey, title: s.title })), [sections]);
 
   const scrollToDate = (dateKey: string, index: number) => {
@@ -441,7 +448,7 @@ export default function MediaGallery({ files, currentFolderID, isSubcollection, 
           </View>
         )}
         renderItem={({ item: row }) => {
-          const padded: (ApiFile | null)[] = [...row, ...Array(COL - row.length).fill(null)];
+          const padded: (ApiFile | null)[] = [...row, ...Array(cols - row.length).fill(null)];
           return (
             <View style={styles.gridRow}>
               {padded.map((file, i) => (
@@ -450,6 +457,7 @@ export default function MediaGallery({ files, currentFolderID, isSubcollection, 
                   {file ? (
                     <Tile
                       file={file}
+                      size={ts}
                       isSelected={isSelectMode ? selectedIds.has(file.id) : toolbarFileId === file.id}
                       isSelectMode={isSelectMode}
                       isSynced={!!file.sha256_hash && syncedHashes.has(file.sha256_hash)}
@@ -466,7 +474,7 @@ export default function MediaGallery({ files, currentFolderID, isSubcollection, 
                       onInfo={() => { setInfoFile(file); setToolbarFileId(null); }}
                     />
                   ) : (
-                    <View style={{ width: TILE_SIZE, height: TILE_SIZE }} />
+                    <View style={{ width: ts, height: ts }} />
                   )}
                 </React.Fragment>
               ))}

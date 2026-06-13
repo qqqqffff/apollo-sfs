@@ -1,6 +1,6 @@
 # PayPal + Premium Tier Setup
 
-The premium tier unlocks the SFS S3-like API (see `docs/sfs_api.md`) for a one-time payment processed through PayPal Orders v2. This guide walks an operator through provisioning the PayPal application, configuring the Keycloak group that carries the premium realm role, and wiring the relevant environment variables.
+The premium tier unlocks the SFS S3-like API (see `docs/sfs_api.md`) for a recurring subscription processed through PayPal. This guide walks an operator through provisioning the PayPal application, configuring the Keycloak group that carries the premium realm role, and wiring the relevant environment variables.
 
 There are three concerns:
 
@@ -23,7 +23,7 @@ There are three concerns:
    - **Apple Pay** (if you plan to offer it — see §3)
 5. Repeat the same steps under *Live* once you have a verified PayPal business account.
 
-The environment variable `PAYPAL_ENV` selects which set of credentials is used at runtime (`sandbox` or `live`). The API service auto-routes API calls to `https://api-m.sandbox.paypal.com` or `https://api-m.paypal.com` accordingly.
+The environment variable `PAYPAL_ENV` selects which set of credentials is used at runtime (`sandbox` or `live`). The API auto-routes calls to `https://api-m.sandbox.paypal.com` or `https://api-m.paypal.com` accordingly, and reads the matching `SANDBOX_PAYPAL_*` or `PAYPAL_*` credential variables.
 
 ---
 
@@ -47,12 +47,48 @@ The webhook is how PayPal asynchronously confirms captures and notifies us of re
 To show the Apple Pay button in Safari you must prove that you control the domain hosting the checkout page.
 
 1. In the PayPal Developer dashboard, under your app → *Settings* → *Apple Pay*, click **Register Domain**.
-2. Enter your `APP_BASE_URL` host (e.g. `files.example.com`).
+2. Enter your `APP_BASE_URL` host (e.g. `apollo-sfs.com`).
 3. PayPal will issue a verification file. Save its contents.
 4. Serve it at the well-known path the verification check expects:
-   - Path: `https://files.example.com/.well-known/apple-developer-merchantid-domain-association`
-5. The repo's `nginx/` config already serves `/.well-known/` from `/usr/share/nginx/html/.well-known/`. Drop the file at that path on the host (the volume mount in `docker-compose.yml`) and run `docker compose restart nginx`.
-6. Click **Verify** in PayPal. Verification typically takes seconds.
+   - Path: `https://apollo-sfs.com/.well-known/apple-developer-merchantid-domain-association`
+
+### Hosting the verification file (nginx on the host, not Docker)
+
+The site nginx config already has a `/.well-known/` location block that serves static files from `/etc/nginx/well-known/.well-known/`:
+
+```nginx
+location /.well-known/ {
+    alias /etc/nginx/well-known/.well-known/;
+    default_type application/json;
+    ...
+}
+```
+
+Drop the PayPal-issued file into that directory and reload nginx — no restart needed:
+
+```bash
+# Copy the file PayPal gave you
+sudo cp apple-developer-merchantid-domain-association \
+    /etc/nginx/well-known/.well-known/apple-developer-merchantid-domain-association
+
+# Reload nginx config (graceful — no dropped connections)
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+If you manage the repo's `nginx/well-known/` directory as the authoritative source, add the file there instead and re-sync it to the server so it survives the next deploy:
+
+```bash
+# On your local machine — add to the repo
+cp apple-developer-merchantid-domain-association \
+    nginx/well-known/.well-known/apple-developer-merchantid-domain-association
+
+# On the server — sync from repo after pulling
+sudo cp nginx/well-known/.well-known/apple-developer-merchantid-domain-association \
+    /etc/nginx/well-known/.well-known/
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+5. Click **Verify** in PayPal. Verification typically takes seconds.
 
 If you skip this step, the card-payment button still works; only the Apple Pay tile fails to render in Safari.
 
@@ -72,7 +108,12 @@ docker exec apollo-sfs-keycloak /opt/keycloak/bin/kcadm.sh config credentials \
   --user "$KEYCLOAK_ADMIN" \
   --password "$KEYCLOAK_ADMIN_PASSWORD"
 
-# 2. Create the premium realm role
+# 2. List existing realm roles (to check if "premium" already exists)
+docker exec apollo-sfs-keycloak /opt/keycloak/bin/kcadm.sh get roles \
+  -r apollo-sfs-realm \
+  --fields name,description
+
+# 3. Create the premium realm role (skip if it already appears above)
 docker exec apollo-sfs-keycloak /opt/keycloak/bin/kcadm.sh create roles \
   -r apollo-sfs-realm \
   -s name=premium \
@@ -80,12 +121,12 @@ docker exec apollo-sfs-keycloak /opt/keycloak/bin/kcadm.sh create roles \
   -s composite=false \
   -s clientRole=false
 
-# 3. Create the premium group
+# 4. Create the premium group
 docker exec apollo-sfs-keycloak /opt/keycloak/bin/kcadm.sh create groups \
   -r apollo-sfs-realm \
   -s name=premium
 
-# 4. Capture the new group's ID, then assign the premium role to it
+# 5. Capture the new group's ID, then assign the premium role to it
 GROUP_ID=$(docker exec apollo-sfs-keycloak /opt/keycloak/bin/kcadm.sh get groups \
   -r apollo-sfs-realm --fields id,name \
   | jq -r '.[] | select(.name=="premium") | .id')
@@ -102,17 +143,24 @@ The API's `apollo-sfs-api` confidential client already has the service account p
 
 ## 5. Environment variables
 
-Add the following to `.env` at the project root:
+Add the following to `.env` at the project root.
 
-| Variable                    | Required | Example                           | Notes                                                                 |
-| --------------------------- | -------- | --------------------------------- | --------------------------------------------------------------------- |
-| `SFS_API_KEY_PEPPER`        | yes      | `<openssl rand -base64 48>`       | ≥ 32 bytes. Mixed into argon2id over every API key secret.            |
-| `PAYPAL_ENV`                | yes      | `sandbox`                         | `sandbox` or `live`.                                                  |
-| `PAYPAL_CLIENT_ID`          | yes      | `AYNJ...`                         | From the PayPal app page.                                             |
-| `PAYPAL_CLIENT_SECRET`      | yes      | `ELk...`                          | From the PayPal app page.                                             |
-| `PAYPAL_WEBHOOK_ID`         | yes      | `2N9...`                          | From the Webhooks panel after creating the subscription in step 2.    |
-| `PREMIUM_TIER_PRICE_CENTS`  | no       | `999`                             | One-time charge in minor units. Default `999` ($9.99 USD).            |
-| `PREMIUM_TIER_CURRENCY`     | no       | `USD`                             | ISO 4217 currency code. Default `USD`.                                |
+The API reads `SANDBOX_PAYPAL_*` variables when `PAYPAL_ENV=sandbox` and `PAYPAL_*` (no prefix) when `PAYPAL_ENV=live`. Only the variables for the active environment need to be populated.
+
+| Variable                         | Required | Example              | Notes                                                                 |
+| -------------------------------- | -------- | -------------------- | --------------------------------------------------------------------- |
+| `SFS_API_KEY_PEPPER`             | yes      | `<openssl rand -base64 48>` | ≥ 32 bytes. Mixed into argon2id over every API key secret.   |
+| `PAYPAL_ENV`                     | yes      | `sandbox`            | `sandbox` or `live`. Controls which credential set is read.           |
+| `SANDBOX_PAYPAL_CLIENT_ID`       | sandbox  | `AYNJ...`            | Client ID from the sandbox app page.                                  |
+| `SANDBOX_PAYPAL_SECRET_KEY`      | sandbox  | `ELk...`             | Secret from the sandbox app page.                                     |
+| `SANDBOX_PAYPAL_WEBHOOK_ID`      | sandbox  | `2N9...`             | Webhook ID from the sandbox app's Webhooks panel.                     |
+| `PAYPAL_CLIENT_ID`               | live     | `AYNJ...`            | Client ID from the live app page.                                     |
+| `PAYPAL_SECRET_KEY`              | live     | `ELk...`             | Secret from the live app page.                                        |
+| `PAYPAL_WEBHOOK_ID`              | live     | `2N9...`             | Webhook ID from the live app's Webhooks panel.                        |
+| `PREMIUM_TIER_PRICE_CENTS`       | no       | `100`                | Charge in minor units. Default `999`. Planned: `100` monthly / `1000` annual. |
+| `PREMIUM_TIER_CURRENCY`          | no       | `USD`                | ISO 4217 currency code. Default `USD`.                                |
+
+> **Planned subscription pricing**: premium will be offered as **$1.00/month** or **$10.00/year**. The current `PREMIUM_TIER_PRICE_CENTS` is a placeholder for the one-time flow; the subscription billing implementation will replace it with per-plan price variables.
 
 Restart the API so it picks up the variables:
 
@@ -142,7 +190,7 @@ If something is broken on the webhook path, the PayPal *Webhook simulator* (unde
 When you're satisfied with sandbox behaviour:
 
 1. Update `PAYPAL_ENV` to `live`.
-2. Replace `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, and `PAYPAL_WEBHOOK_ID` with the values from the *Live* tab of the same app.
+2. Populate `PAYPAL_CLIENT_ID`, `PAYPAL_SECRET_KEY`, and `PAYPAL_WEBHOOK_ID` with the values from the *Live* tab of the same app. The sandbox credentials remain in `.env` unchanged and are simply ignored.
 3. Re-verify the Apple Pay domain if you changed hosts.
 4. Restart the API: `docker compose restart api`.
 5. Pay yourself $0.01 — easier to refund — to confirm the full flow.

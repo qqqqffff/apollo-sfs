@@ -1,6 +1,6 @@
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { useAuth } from './AuthContext';
-import { SyncService } from '../services/SyncService';
+import { SyncService, type PreviewItem } from '../services/SyncService';
 import { countByStatus } from '../services/UploadQueue';
 
 interface SyncContextValue {
@@ -11,6 +11,8 @@ interface SyncContextValue {
   isSyncing: boolean;
   lastError: string | null;
   triggerSync: () => Promise<void>;
+  scanForPreview: () => Promise<PreviewItem[]>;
+  confirmSync: (items: PreviewItem[]) => Promise<void>;
 }
 
 const SyncContext = createContext<SyncContextValue>({
@@ -21,6 +23,8 @@ const SyncContext = createContext<SyncContextValue>({
   isSyncing: false,
   lastError: null,
   triggerSync: async () => {},
+  scanForPreview: async () => [],
+  confirmSync: async () => {},
 });
 
 export function SyncProvider({ children }: { children: React.ReactNode }) {
@@ -62,8 +66,28 @@ export function SyncProvider({ children }: { children: React.ReactNode }) {
     }
   }, [isSyncing]);
 
+  const scanForPreview = useCallback(async (): Promise<PreviewItem[]> => {
+    if (!syncServiceRef.current) return [];
+    return syncServiceRef.current.scanForPreview();
+  }, []);
+
+  const confirmSync = useCallback(async (items: PreviewItem[]) => {
+    if (!syncServiceRef.current || isSyncing) return;
+    setIsSyncing(true);
+    setLastError(null);
+    try {
+      await syncServiceRef.current.runSelected(items);
+      setLastSyncedAt(new Date());
+    } catch (err) {
+      setLastError(err instanceof Error ? err.message : 'sync failed');
+    } finally {
+      setIsSyncing(false);
+      setInProgressFiles([]);
+    }
+  }, [isSyncing]);
+
   return (
-    <SyncContext.Provider value={{ pendingCount, syncedCount, inProgressFiles, lastSyncedAt, isSyncing, lastError, triggerSync }}>
+    <SyncContext.Provider value={{ pendingCount, syncedCount, inProgressFiles, lastSyncedAt, isSyncing, lastError, triggerSync, scanForPreview, confirmSync }}>
       {children}
     </SyncContext.Provider>
   );

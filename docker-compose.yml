@@ -253,6 +253,8 @@ services:
       # Bootstrap admin credentials (Keycloak 26+)
       KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN}
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+      # Enable preview features — required for the Apple social identity provider
+      KC_FEATURES: preview
       # Limit JVM heap — important on a memory-constrained Pi
       JAVA_OPTS_APPEND: -Xms256m -Xmx512m
     volumes:

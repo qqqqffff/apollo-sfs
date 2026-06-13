@@ -13,6 +13,8 @@ import {
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { CameraRoll } from '@react-native-camera-roll/camera-roll';
+import SyncPreviewModal from '../components/SyncPreviewModal';
+import { type PreviewItem } from '../services/SyncService';
 import {
   Check,
   CheckCircle2,
@@ -80,7 +82,7 @@ function fileMimeIcon(mimeType: string) {
 
 export default function HomeScreen() {
   const { profile } = useAuth();
-  const { pendingCount, syncedCount, inProgressFiles, lastSyncedAt, isSyncing, lastError, triggerSync } = useSync();
+  const { pendingCount, syncedCount, inProgressFiles, lastSyncedAt, isSyncing, lastError, scanForPreview, confirmSync } = useSync();
   const [favorites, setFavorites] = useState<FavoriteFile[]>([]);
   const [favLoading, setFavLoading] = useState(true);
   const [statusExpanded, setStatusExpanded] = useState(false);
@@ -94,6 +96,31 @@ export default function HomeScreen() {
 
   const [filesUploading, setFilesUploading] = useState(false);
   const [filesUploadProgress, setFilesUploadProgress] = useState<{ done: number; total: number } | null>(null);
+
+  const [previewItems, setPreviewItems] = useState<PreviewItem[] | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+
+  const handleSyncNow = async () => {
+    if (isSyncing || previewLoading) return;
+    setPreviewLoading(true);
+    try {
+      const items = await scanForPreview();
+      if (items.length === 0) {
+        Alert.alert('Up to date', 'No new photos to sync.');
+        return;
+      }
+      setPreviewItems(items);
+    } catch (e: any) {
+      Alert.alert('Scan failed', e.message);
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
+  const handlePreviewConfirm = async (selected: PreviewItem[]) => {
+    setPreviewItems(null);
+    await confirmSync(selected);
+  };
 
   useEffect(() => {
     (async () => {
@@ -345,11 +372,11 @@ export default function HomeScreen() {
         )}
 
         <TouchableOpacity
-          style={[styles.syncButton, isSyncing && styles.syncButtonDisabled]}
-          onPress={triggerSync}
-          disabled={isSyncing}
+          style={[styles.syncButton, (isSyncing || previewLoading) && styles.syncButtonDisabled]}
+          onPress={handleSyncNow}
+          disabled={isSyncing || previewLoading}
         >
-          {isSyncing ? (
+          {isSyncing || previewLoading ? (
             <ActivityIndicator color={colors.surface} size="small" />
           ) : (
             <>
@@ -509,6 +536,15 @@ export default function HomeScreen() {
         </Pressable>
       </Modal>
       </ScrollView>
+
+      <SyncPreviewModal
+        visible={previewItems !== null}
+        items={previewItems ?? []}
+        quotaBytes={quotaBytes}
+        usedBytes={usedBytes}
+        onConfirm={handlePreviewConfirm}
+        onCancel={() => setPreviewItems(null)}
+      />
     </View>
   );
 }

@@ -100,6 +100,18 @@ func loadConfig() Config {
 	quotaPct, _ := strconv.Atoi(getEnv("QUOTA_WARNING_THRESHOLD_PERCENT", "80"))
 	premiumPrice, _ := strconv.Atoi(getEnv("PREMIUM_TIER_PRICE_CENTS", "999"))
 
+	paypalEnv := getEnv("PAYPAL_ENV", "sandbox")
+	var paypalClientID, paypalClientSecret, paypalWebhookID string
+	if paypalEnv == "sandbox" {
+		paypalClientID     = getEnv("SANDBOX_PAYPAL_CLIENT_ID", "")
+		paypalClientSecret = getEnv("SANDBOX_PAYPAL_SECRET_KEY", "")
+		paypalWebhookID    = getEnv("SANDBOX_PAYPAL_WEBHOOK_ID", "")
+	} else {
+		paypalClientID     = getEnv("PAYPAL_CLIENT_ID", "")
+		paypalClientSecret = getEnv("PAYPAL_SECRET_KEY", "")
+		paypalWebhookID    = getEnv("PAYPAL_WEBHOOK_ID", "")
+	}
+
 	return Config{
 		Port: getEnv("PORT", "8080"),
 		DatabaseDSN: fmt.Sprintf(
@@ -147,10 +159,10 @@ func loadConfig() Config {
 		FrontendE2EURL:  getEnv("FRONTEND_E2E_URL", ""),
 
 		SFSAPIKeyPepper:       requireEnv("SFS_API_KEY_PEPPER"),
-		PayPalClientID:        getEnv("PAYPAL_CLIENT_ID", ""),
-		PayPalClientSecret:    getEnv("PAYPAL_CLIENT_SECRET", ""),
-		PayPalWebhookID:       getEnv("PAYPAL_WEBHOOK_ID", ""),
-		PayPalEnvironment:     getEnv("PAYPAL_ENV", "sandbox"),
+		PayPalClientID:        paypalClientID,
+		PayPalClientSecret:    paypalClientSecret,
+		PayPalWebhookID:       paypalWebhookID,
+		PayPalEnvironment:     paypalEnv,
 		PremiumTierPriceCents: premiumPrice,
 		PremiumTierCurrency:   getEnv("PREMIUM_TIER_CURRENCY", "USD"),
 

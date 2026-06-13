@@ -15,6 +15,14 @@ import {
   setStatus,
 } from './UploadQueue';
 
+export interface PreviewItem {
+  uri: string;
+  filename: string;
+  sizeBytes: number;
+  takenAt: Date;
+  mimeType: string;
+}
+
 const CURSOR_KEY = 'apollo_sync_cursor';
 const DEVICE_ID_KEY = 'apollo_device_id';
 const WIFI_ONLY_KEY = 'apollo_wifi_only';
@@ -31,6 +39,104 @@ export class SyncService {
 
   constructor(opts: SyncServiceOptions = {}) {
     this.opts = opts;
+  }
+
+  async scanForPreview(): Promise<PreviewItem[]> {
+    const granted = await this.requestPhotoPermission();
+    if (!granted) throw new Error('Photo library permission denied');
+
+    const cursor = (await AsyncStorage.getItem(CURSOR_KEY)) ?? '1970-01-01T00:00:00Z';
+    const fromTime = new Date(cursor).getTime();
+
+    const items: PreviewItem[] = [];
+    let hasNextPage = true;
+    let endCursor: string | undefined;
+
+    while (hasNextPage) {
+      const page = await CameraRoll.getPhotos({
+        first: 200,
+        after: endCursor,
+        assetType: 'All',
+        fromTime,
+        include: ['filename', 'fileSize'],
+      });
+
+      for (const edge of page.edges) {
+        const node = edge.node;
+        const assetId = node.image.uri;
+        if (await isAlreadyDone(assetId)) continue;
+        items.push({
+          uri: assetId,
+          filename: node.image.filename ?? `asset_${Date.now()}`,
+          sizeBytes: node.image.fileSize ?? 0,
+          takenAt: new Date(node.timestamp * 1000),
+          mimeType: node.type === 'video' ? 'video/mp4' : 'image/jpeg',
+        });
+      }
+
+      hasNextPage = page.page_info.has_next_page;
+      endCursor = page.page_info.end_cursor;
+    }
+
+    return items;
+  }
+
+  async runSelected(items: PreviewItem[]): Promise<void> {
+    if (!(await this.networkOk())) return;
+
+    for (const item of items) {
+      if (!(await this.networkOk())) break;
+
+      this.opts.onFileStart?.(item.filename);
+      try {
+        const sha256Hash = await this.hashAsset(item.uri);
+
+        if (sha256Hash) {
+          try {
+            const { exists } = await checkHash(sha256Hash);
+            if (exists) {
+              await enqueue({
+                local_asset_id: item.uri,
+                local_uri: item.uri,
+                filename: item.filename,
+                sha256_hash: sha256Hash,
+                size_bytes: item.sizeBytes,
+                mime_type: item.mimeType,
+              });
+              await setStatus(item.uri, 'done');
+              this.opts.onFileComplete?.(item.filename);
+              continue;
+            }
+          } catch {
+            // dedup check failed — proceed to upload
+          }
+        }
+
+        await enqueue({
+          local_asset_id: item.uri,
+          local_uri: item.uri,
+          filename: item.filename,
+          sha256_hash: sha256Hash,
+          size_bytes: item.sizeBytes,
+          mime_type: item.mimeType,
+        });
+        await setStatus(item.uri, 'uploading');
+
+        await uploadFile(item.uri, item.filename, item.mimeType);
+
+        await setStatus(item.uri, 'done');
+
+        const deviceID = await AsyncStorage.getItem(DEVICE_ID_KEY);
+        const delta = await deltaSync(new Date().toISOString(), deviceID ?? undefined);
+        await AsyncStorage.setItem(CURSOR_KEY, delta.server_time);
+      } catch {
+        await incrementRetry(item.uri).catch(() => {});
+      } finally {
+        this.opts.onFileComplete?.(item.filename);
+      }
+    }
+
+    await this.notifyPendingCount();
   }
 
   async run(): Promise<void> {

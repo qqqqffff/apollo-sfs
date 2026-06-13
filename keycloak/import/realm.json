@@ -53,7 +53,7 @@
       },
       {
         "name": "premium",
-        "description": "Premium subscriber \u2014 unlocks the SFS S3-like programmatic API. Granted by adding the user to the \"premium\" realm group after a successful PayPal capture.",
+        "description": "Premium subscriber - unlocks several premium features on the apollo sfs app after successful paypal capture",
         "composite": false,
         "clientRole": false
       }

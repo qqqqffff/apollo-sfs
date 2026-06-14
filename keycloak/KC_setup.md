@@ -61,15 +61,9 @@ Apple is not a built-in Keycloak social provider. This setup uses the [apple-ide
    - **Return URL**: `https://apollo-sfs.com/realms/apollo-sfs-realm/broker/apple/endpoint`
 5. Create a **Key** with Sign In with Apple enabled. Download the `.p8` file and note the **Key ID** (`8QB482NU55`) and **Team ID** (`2R46Z987AY`).
 
-### Admin console setup (via SSH tunnel)
+### Admin console setup
 
-Since the admin console is not publicly exposed, open an SSH tunnel to the server first:
-
-```bash
-ssh -L 8180:localhost:8180 <your-server>
-```
-
-Then open `http://localhost:8180/admin` in your browser, sign in, and navigate to:
+Open `https://apollo-sfs.com/admin` in your browser, sign in, and navigate to:
 
 **apollo-sfs-realm → Identity Providers → Add provider → Apple**
 

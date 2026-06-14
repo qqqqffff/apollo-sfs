@@ -247,7 +247,7 @@ services:
       # Full URL including protocol — KC 26 requires this, not a bare hostname
       KC_HOSTNAME: ${APP_BASE_URL}
       KC_HOSTNAME_STRICT: "true"
-      KC_HOSTNAME_ADMIN: http://localhost:8180
+      KC_HOSTNAME_ADMIN: ${APP_BASE_URL}
       # Trust X-Forwarded-* headers set by Nginx
       KC_PROXY_HEADERS: xforwarded
       # Bootstrap admin credentials (Keycloak 26+)

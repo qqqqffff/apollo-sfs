@@ -39,7 +39,9 @@ docker exec apollo-sfs-keycloak /opt/keycloak/bin/kcadm.sh update realms/apollo-
 
 ## 2. Apple Identity Provider
 
-Apple is not a built-in Keycloak social provider. This setup uses the [apple-identity-provider-keycloak](https://github.com/klausbetz/apple-identity-provider-keycloak) extension, which handles Apple's JWT-based client secret automatically.
+Apple is not a built-in Keycloak social provider. This setup uses the [apple-identity-provider-keycloak](https://github.com/klausbetz/apple-identity-provider-keycloak) extension, which handles Apple's JWT-based client secret automatically. It must be configured through the Keycloak admin console, not kcadm.
+
+> **Keycloak must be reachable from the internet** for Apple's OAuth redirect to complete. The nginx config proxies `/realms/`, `/resources/`, and `/js/` to Keycloak on port 8180. The admin console (`/admin/`) is intentionally not exposed — access it via SSH tunnel.
 
 ### Requirements
 
@@ -48,89 +50,44 @@ Apple is not a built-in Keycloak social provider. This setup uses the [apple-ide
    curl -L -o keycloak/providers/apple-identity-provider-keycloak-<version>.jar \
      https://github.com/klausbetz/apple-identity-provider-keycloak/releases/download/<version>/apple-identity-provider-keycloak-<version>.jar
    ```
-2. Restart Keycloak so it picks up the new provider JAR:
+2. Restart Keycloak and reload nginx so both pick up the changes:
    ```bash
    docker compose restart keycloak
+   sudo nginx -t && sudo systemctl reload nginx
    ```
 3. In **Apple Developer → Identifiers**, create a **Services ID**: `com.apollorowe.apollosfs.signin`.
-4. Under the Services ID, enable **Sign In with Apple** and add the redirect URI:
-   ```
-   https://apollo-sfs.com/realms/apollo-sfs-realm/broker/apple/endpoint
-   ```
-5. Create a **Key** with Sign In with Apple enabled. Download the `.p8` file and note the **Key ID**.
-6. Note your 10-character **Team ID** from the Apple Developer account page.
+4. Under the Services ID, enable **Sign In with Apple** and add:
+   - **Domain**: `apollo-sfs.com`
+   - **Return URL**: `https://apollo-sfs.com/realms/apollo-sfs-realm/broker/apple/endpoint`
+5. Create a **Key** with Sign In with Apple enabled. Download the `.p8` file and note the **Key ID** (`8QB482NU55`) and **Team ID** (`2R46Z987AY`).
 
-### Commands
+### Admin console setup (via SSH tunnel)
 
-1. Authenticate, then create the Apple IdP:
+Since the admin console is not publicly exposed, open an SSH tunnel to the server first:
 
 ```bash
-docker exec apollo-sfs-keycloak /opt/keycloak/bin/kcadm.sh config credentials \
-  --server http://localhost:8180 \
-  --realm master \
-  --user "$KEYCLOAK_ADMIN" \
-  --password "$KEYCLOAK_ADMIN_PASSWORD"
+ssh -L 8180:localhost:8180 <your-server>
 ```
 
-```bash
-APPLE_PRIVATE_KEY=$(grep -v 'BEGIN\|END' /path/to/AuthKey_8QB482NU55.p8 | tr -d '\n')
+Then open `http://localhost:8180/admin` in your browser, sign in, and navigate to:
 
-docker exec apollo-sfs-keycloak /opt/keycloak/bin/kcadm.sh create identity-provider/instances \
-  -r apollo-sfs-realm \
-  -s alias=apple \
-  -s providerId=apple \
-  -s enabled=true \
-  -s 'config.hideOnLoginPage=false' \
-  -s 'config.clientId=com.apollorowe.apollosfs.signin' \
-  -s 'config.teamId=2R46Z987AY' \
-  -s 'config.keyId=8QB482NU55' \
-  -s "config.privateKey=$APPLE_PRIVATE_KEY" \
-  -s 'config.defaultScope=name email' \
-  -s 'config.syncMode=FORCE'
-```
+**apollo-sfs-realm → Identity Providers → Add provider → Apple**
 
-2. Add claim mappers:
+Fill in the fields:
+| Field | Value |
+|---|---|
+| Client ID | `com.apollorowe.apollosfs.signin` |
+| Team ID | `2R46Z987AY` |
+| Key ID | `8QB482NU55` |
+| Private Key | Contents of `AuthKey_8QB482NU55.p8` |
 
-```bash
-# email → user email attribute
-docker exec apollo-sfs-keycloak /opt/keycloak/bin/kcadm.sh create \
-  identity-provider/instances/apple/mappers \
-  -r apollo-sfs-realm \
-  -s name=apple-email \
-  -s identityProviderMapper=oidc-user-attribute-idp-mapper \
-  -s 'config.claim=email' \
-  -s 'config.attribute=email' \
-  -s 'config.syncMode=INHERIT'
+Save, then add claim mappers under the **Mappers** tab:
 
-# given_name → firstName (Apple only sends this on the very first sign-in)
-docker exec apollo-sfs-keycloak /opt/keycloak/bin/kcadm.sh create \
-  identity-provider/instances/apple/mappers \
-  -r apollo-sfs-realm \
-  -s name=apple-first-name \
-  -s identityProviderMapper=oidc-user-attribute-idp-mapper \
-  -s 'config.claim=given_name' \
-  -s 'config.attribute=firstName' \
-  -s 'config.syncMode=INHERIT'
-
-# family_name → lastName
-docker exec apollo-sfs-keycloak /opt/keycloak/bin/kcadm.sh create \
-  identity-provider/instances/apple/mappers \
-  -r apollo-sfs-realm \
-  -s name=apple-last-name \
-  -s identityProviderMapper=oidc-user-attribute-idp-mapper \
-  -s 'config.claim=family_name' \
-  -s 'config.attribute=lastName' \
-  -s 'config.syncMode=INHERIT'
-
-# Build stable username from provider alias + Apple subject claim
-docker exec apollo-sfs-keycloak /opt/keycloak/bin/kcadm.sh create \
-  identity-provider/instances/apple/mappers \
-  -r apollo-sfs-realm \
-  -s name=apple-username \
-  -s identityProviderMapper=oidc-username-idp-mapper \
-  -s 'config.template=${ALIAS}.${CLAIM.sub}' \
-  -s 'config.syncMode=INHERIT'
-```
+| Name | Mapper Type | Claim | User Attribute |
+|---|---|---|---|
+| `apple-email` | Attribute Importer | `email` | `email` |
+| `apple-first-name` | Attribute Importer | `given_name` | `firstName` |
+| `apple-last-name` | Attribute Importer | `family_name` | `lastName` |
 
 ---
 

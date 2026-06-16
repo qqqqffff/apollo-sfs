@@ -1,4 +1,7 @@
-import api from './client';
+import { Platform, Share } from 'react-native';
+import ReactNativeBlobUtil from 'react-native-blob-util';
+import { CameraRoll } from '@react-native-camera-roll/camera-roll';
+import api, { BASE_URL, getStoredTokens } from './client';
 
 export interface ApiFile {
   id: string;
@@ -9,6 +12,9 @@ export interface ApiFile {
   size_bytes: number;
   sha256_hash?: string;
   taken_at?: string;
+  device_id?: string;
+  latitude?: number;
+  longitude?: number;
   hidden: boolean;
   created_at: string;
   updated_at: string;
@@ -46,10 +52,12 @@ export async function uploadFile(
   mimeType: string,
   folderID?: string,
   onProgress?: (pct: number) => void,
+  deviceID?: string,
 ): Promise<ApiFile> {
   const form = new FormData();
   form.append('file', { uri, name, type: mimeType } as unknown as Blob);
   if (folderID) form.append('folder_id', folderID);
+  if (deviceID) form.append('device_id', deviceID);
 
   const res = await api.post<ApiFile>('/api/v1/files/upload', form, {
     headers: { 'Content-Type': 'multipart/form-data' },
@@ -77,6 +85,28 @@ export async function downloadFile(fileID: string): Promise<string> {
     .split(';')[0]
     .trim();
   return `data:${mime};base64,${arrayBufferToBase64(res.data as ArrayBuffer)}`;
+}
+
+export async function downloadAndSaveFile(fileID: string, fileName: string, mimeType: string): Promise<void> {
+  const { access } = await getStoredTokens();
+  const { dirs } = ReactNativeBlobUtil.fs;
+  const safeName = fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
+  const destPath = `${dirs.CacheDir}/${Date.now()}_${safeName}`;
+
+  const res = await ReactNativeBlobUtil.config({ path: destPath }).fetch(
+    'GET',
+    `${BASE_URL}/api/v1/files/${fileID}/preview`,
+    access ? { Authorization: `Bearer ${access}` } : {},
+  );
+
+  const localPath = res.path();
+  const isImage = mimeType.startsWith('image/');
+
+  if (isImage && Platform.OS === 'ios') {
+    await CameraRoll.save(`file://${localPath}`, { type: 'photo' });
+  } else {
+    await Share.share({ url: `file://${localPath}` });
+  }
 }
 
 export async function deleteFile(fileID: string): Promise<void> {

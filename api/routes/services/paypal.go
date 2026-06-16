@@ -325,6 +325,287 @@ func (p *PayPalClient) doAuthed(ctx context.Context, method, path string, body i
 	return resp, nil
 }
 
+// ── Storage add-on orders ─────────────────────────────────────────────────────
+
+// CreateStorageWalletOrder creates a PayPal wallet order for a storage add-on
+// and returns the order ID + approval URL. The mobile app opens the URL, waits
+// for the user to approve in the browser, then calls CaptureOrder.
+func (p *PayPalClient) CreateStorageWalletOrder(ctx context.Context, amountCents int, currency, returnURL, cancelURL string) (*CreateOrderResult, error) {
+	if amountCents <= 0 {
+		return nil, errors.New("paypal: amount must be > 0")
+	}
+	if currency == "" {
+		currency = "USD"
+	}
+	value := fmt.Sprintf("%d.%02d", amountCents/100, amountCents%100)
+	payload := map[string]any{
+		"intent": "CAPTURE",
+		"purchase_units": []any{
+			map[string]any{
+				"amount": map[string]any{
+					"currency_code": currency,
+					"value":         value,
+				},
+			},
+		},
+		"application_context": map[string]any{
+			"return_url":  returnURL,
+			"cancel_url":  cancelURL,
+			"user_action": "PAY_NOW",
+		},
+	}
+	body, _ := json.Marshal(payload)
+	resp, err := p.doAuthed(ctx, http.MethodPost, "/v2/checkout/orders", bytes.NewReader(body), nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("paypal create storage wallet order: %s: %s", resp.Status, string(b))
+	}
+	var out struct {
+		ID    string `json:"id"`
+		Links []struct {
+			Href string `json:"href"`
+			Rel  string `json:"rel"`
+		} `json:"links"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	approve := ""
+	for _, l := range out.Links {
+		if l.Rel == "approve" || l.Rel == "payer-action" {
+			approve = l.Href
+			break
+		}
+	}
+	return &CreateOrderResult{OrderID: out.ID, ApproveURL: approve}, nil
+}
+
+// CardOrderInput holds card details for DirectChargeCard.
+type CardOrderInput struct {
+	AmountCents int
+	Currency    string
+	Number      string
+	ExpiryMonth string // "MM" — two digits
+	ExpiryYear  string // "YYYY" — four digits
+	CVV         string
+	Name        string
+}
+
+// DirectChargeCard creates and immediately captures a PayPal order using raw
+// card details (Advanced Credit and Debit Card Payments). Returns an error
+// if PayPal requires 3DS (status PAYER_ACTION_REQUIRED).
+func (p *PayPalClient) DirectChargeCard(ctx context.Context, in CardOrderInput) (*CaptureOrderResult, error) {
+	if in.Currency == "" {
+		in.Currency = "USD"
+	}
+	ps := map[string]any{
+		"card": map[string]any{
+			"number":        in.Number,
+			"expiry":        in.ExpiryYear + "-" + in.ExpiryMonth,
+			"security_code": in.CVV,
+			"name":          in.Name,
+		},
+	}
+	return p.directOrder(ctx, in.AmountCents, in.Currency, ps)
+}
+
+// ApplePayTokenInput holds fields decoded from a PKPaymentToken for
+// DirectChargeApplePay.
+type ApplePayTokenInput struct {
+	AmountCents int
+	Currency    string
+	// payment_data fields from PKPaymentToken.paymentData
+	Version   string
+	Data      string
+	Signature string
+	Header    map[string]any
+	// payment_method fields returned by our Swift module
+	Network     string // e.g. "visa", "masterCard"
+	DisplayName string // e.g. "Visa 1234"
+}
+
+// DirectChargeApplePay creates and immediately captures a PayPal order using
+// a decrypted Apple Pay token from PKPaymentAuthorizationController.
+func (p *PayPalClient) DirectChargeApplePay(ctx context.Context, in ApplePayTokenInput) (*CaptureOrderResult, error) {
+	if in.Currency == "" {
+		in.Currency = "USD"
+	}
+	ps := map[string]any{
+		"apple_pay": map[string]any{
+			"token": map[string]any{
+				"payment_data": map[string]any{
+					"version":   in.Version,
+					"data":      in.Data,
+					"signature": in.Signature,
+					"header":    in.Header,
+				},
+				"payment_method": map[string]any{
+					"display_name": in.DisplayName,
+					"network":      strings.ToLower(in.Network),
+					"type":         "credit",
+				},
+			},
+		},
+	}
+	return p.directOrder(ctx, in.AmountCents, in.Currency, ps)
+}
+
+// DirectChargeGooglePay creates and immediately captures a PayPal order using
+// a Google Pay token string (paymentMethodData.tokenizationData.token from
+// the Google Pay sheet, gateway-tokenized by PayPal).
+func (p *PayPalClient) DirectChargeGooglePay(ctx context.Context, amountCents int, currency, googlePayToken string) (*CaptureOrderResult, error) {
+	if currency == "" {
+		currency = "USD"
+	}
+	ps := map[string]any{
+		"google_pay": map[string]any{
+			"payment_data": map[string]any{
+				"payment_method_data": map[string]any{
+					"type": "CARD",
+					"tokenization_data": map[string]any{
+						"type":  "PAYMENT_GATEWAY",
+						"token": googlePayToken,
+					},
+				},
+			},
+		},
+	}
+	return p.directOrder(ctx, amountCents, currency, ps)
+}
+
+// directOrder is the shared POST-to-v2/checkout/orders implementation for all
+// direct-capture payment sources (card, Apple Pay, Google Pay). PayPal creates
+// and captures the order in a single call, returning status COMPLETED on
+// success. Returns an error if 3DS is required (PAYER_ACTION_REQUIRED) —
+// callers should surface an alternative payment option to the user.
+func (p *PayPalClient) directOrder(ctx context.Context, amountCents int, currency string, paymentSource map[string]any) (*CaptureOrderResult, error) {
+	if amountCents <= 0 {
+		return nil, errors.New("paypal: amount must be > 0")
+	}
+	value := fmt.Sprintf("%d.%02d", amountCents/100, amountCents%100)
+	payload := map[string]any{
+		"intent": "CAPTURE",
+		"purchase_units": []any{
+			map[string]any{
+				"amount": map[string]any{
+					"currency_code": currency,
+					"value":         value,
+				},
+			},
+		},
+		"payment_source": paymentSource,
+	}
+	body, _ := json.Marshal(payload)
+	resp, err := p.doAuthed(ctx, http.MethodPost, "/v2/checkout/orders", bytes.NewReader(body), nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		var ppErr struct {
+			Message string `json:"message"`
+			Details []struct {
+				Description string `json:"description"`
+			} `json:"details"`
+		}
+		if jerr := json.Unmarshal(raw, &ppErr); jerr == nil && ppErr.Message != "" {
+			if len(ppErr.Details) > 0 {
+				return nil, fmt.Errorf("paypal: %s: %s", ppErr.Message, ppErr.Details[0].Description)
+			}
+			return nil, fmt.Errorf("paypal: %s", ppErr.Message)
+		}
+		return nil, fmt.Errorf("paypal direct charge: %s: %s", resp.Status, string(raw))
+	}
+	var parsed struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+		PurchaseUnits []struct {
+			Payments struct {
+				Captures []struct {
+					ID     string `json:"id"`
+					Amount struct {
+						CurrencyCode string `json:"currency_code"`
+						Value        string `json:"value"`
+					} `json:"amount"`
+				} `json:"captures"`
+			} `json:"payments"`
+		} `json:"purchase_units"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return nil, fmt.Errorf("paypal direct charge decode: %w", err)
+	}
+	if parsed.Status == "PAYER_ACTION_REQUIRED" {
+		return nil, errors.New("3DS authentication required; please use PayPal wallet checkout instead")
+	}
+	if len(parsed.PurchaseUnits) == 0 || len(parsed.PurchaseUnits[0].Payments.Captures) == 0 {
+		return nil, fmt.Errorf("paypal direct charge: unexpected status %q (no captures in response)", parsed.Status)
+	}
+	cap := parsed.PurchaseUnits[0].Payments.Captures[0]
+	cents, err := parseAmountCents(cap.Amount.Value)
+	if err != nil {
+		return nil, fmt.Errorf("paypal direct charge amount: %w", err)
+	}
+	return &CaptureOrderResult{
+		OrderID:     parsed.ID,
+		CaptureID:   cap.ID,
+		AmountCents: cents,
+		Currency:    cap.Amount.CurrencyCode,
+		Status:      parsed.Status,
+		Raw:         raw,
+	}, nil
+}
+
+// RefundResult holds the outcome of a successful refund call.
+type RefundResult struct {
+	RefundID string
+	Status   string
+}
+
+// RefundCapture issues a partial or full refund against a previously captured
+// payment. captureID is the PayPal capture ID; amountCents and currency must
+// match the original charge.
+func (p *PayPalClient) RefundCapture(ctx context.Context, captureID string, amountCents int, currency string) (*RefundResult, error) {
+	if currency == "" {
+		currency = "USD"
+	}
+	value := fmt.Sprintf("%d.%02d", amountCents/100, amountCents%100)
+	payload := map[string]any{
+		"amount": map[string]any{
+			"value":         value,
+			"currency_code": currency,
+		},
+	}
+	body, _ := json.Marshal(payload)
+	resp, err := p.doAuthed(ctx, http.MethodPost,
+		fmt.Sprintf("/v2/payments/captures/%s/refund", captureID),
+		bytes.NewReader(body), nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		var ppErr struct{ Message string `json:"message"` }
+		if jerr := json.Unmarshal(raw, &ppErr); jerr == nil && ppErr.Message != "" {
+			return nil, fmt.Errorf("paypal refund: %s", ppErr.Message)
+		}
+		return nil, fmt.Errorf("paypal refund: %s: %s", resp.Status, string(raw))
+	}
+	var parsed struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return nil, fmt.Errorf("paypal refund decode: %w", err)
+	}
+	return &RefundResult{RefundID: parsed.ID, Status: parsed.Status}, nil
+}
+
 // parseAmountCents parses a PayPal "12.34"-style decimal amount to cents.
 // Rejects negative values or more than 2 decimal places.
 func parseAmountCents(v string) (int, error) {

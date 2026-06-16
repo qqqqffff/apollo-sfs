@@ -38,6 +38,15 @@ cd mobile
 npm install
 ```
 
+### 1c. App icon asset
+
+The loading screen and login page display the app icon from a JS-side asset. Copy it from the iOS asset catalog:
+
+```bash
+cp mobile/ios/ApolloSFS/Images.xcassets/AppIcon.appiconset/icon-1024.png \
+   mobile/src/assets/app-icon.png
+```
+
 ### 1b. Install iOS native dependencies
 
 ```bash
@@ -87,6 +96,9 @@ Open `ios/ApolloSFS/Info.plist` and add:
 4. Select your **Team** (requires Apple Developer account).
 5. Add capability: **Associated Domains** → add `applinks:apollo-sfs.com`.
 6. Add capability: **Sign In with Apple**.
+7. Add capability: **Apple Pay** → add the merchant identifier `merchant.com.apollosfs`.
+
+> The merchant identifier must be registered in your Apple Developer account first — see **Section 2f** below before adding it here.
 
 ### 2d. URL scheme for development deep links
 
@@ -99,7 +111,35 @@ In Xcode → target **ApolloSFS** → **Info** → **URL Types** → click **+**
 
 This registers `apollosfs://` so deep links work in Simulator and development builds.
 
-### 2e. Update production domain
+### 2f. Apple Pay native module
+
+The app uses a hand-written native module (`RNApplePay`) to show the native Apple Pay sheet. The source files are already in the repo but must be added to the Xcode project manually:
+
+1. In Xcode's Project Navigator, right-click the **ApolloSFS** group → **Add Files to "ApolloSFS"**.
+2. Select both files — hold `⌘` to multi-select:
+   - `ios/ApolloSFS/RNApplePay.swift`
+   - `ios/ApolloSFS/RNApplePay.m`
+3. Ensure **Add to targets: ApolloSFS** is checked → click **Add**.
+4. If Xcode prompts **"Create Bridging Header?"** → click **Create Bridging Header**. The header file can remain empty.
+
+**Register the Apple Pay merchant identifier:**
+
+1. Go to [developer.apple.com](https://developer.apple.com) → **Certificates, Identifiers & Profiles** → **Identifiers** → filter by **Merchant IDs**.
+2. Click **+** → type `merchant.com.apollosfs` → **Continue** → **Register**.
+3. Update `APPLE_PAY_MERCHANT_ID` in `mobile/src/config.ts` if you used a different identifier.
+
+**Set up the Payment Processing Certificate (required):**
+
+Apple encrypts payment tokens using a certificate tied to your merchant ID. PayPal holds the private key, so they provide the CSR:
+
+1. Log in to the [PayPal developer dashboard](https://developer.paypal.com) → **My Apps** → your app → **Apple Pay** → download the **CSR file** PayPal provides.
+2. Go to [developer.apple.com](https://developer.apple.com) → **Certificates, Identifiers & Profiles** → **Identifiers** → **Merchant IDs** → select `merchant.com.apollosfs`.
+3. Under **Apple Pay Payment Processing Certificate**, click **Create Certificate** → upload PayPal's CSR → download the resulting `.cer` file.
+4. Back in the PayPal dashboard, upload that `.cer` file to complete the setup.
+
+> **Merchant Identity Certificate** and **Merchant Domains** are only required for browser-based Apple Pay (Apple Pay JS / Payment Request API on the web). They are **not needed** for a native iOS app using `PKPaymentAuthorizationController`.
+
+### 2g. Update production domain
 
 If your production domain is not `apollo-sfs.com`, replace every occurrence in:
 
@@ -289,11 +329,56 @@ First reviews typically take 1–3 days.
 
 - [ ] **Sign In with Apple** capability enabled on the App ID in Apple Developer portal
 - [ ] **Associated Domains** entitlement present (`applinks:apollo-sfs.com`)
+- [ ] **Apple Pay** capability enabled on the App ID; merchant ID `merchant.com.apollosfs` registered
+- [ ] `RNApplePay.swift` and `RNApplePay.m` added to the Xcode project (see §2f)
+- [ ] `com.apple.developer.in-app-payments` entitlement present in `ApolloSFS.entitlements`
 - [ ] `UIBackgroundModes` contains `fetch` and `processing` in Info.plist
-- [ ] `NSPhotoLibraryUsageDescription` present in Info.plist
+- [ ] `NSPhotoLibraryUsageDescription` and `NSPhotoLibraryAddUsageDescription` present in Info.plist
 - [ ] Distribution certificate and provisioning profile valid and selected in Xcode
 - [ ] `apple-app-site-association` file serving correctly from your domain
+- [ ] `APPLE_PAY_MERCHANT_ID` and `PAYPAL_MERCHANT_ID` set correctly in `mobile/src/config.ts`
 - [ ] Version and build number incremented since last submission
+
+---
+
+---
+
+# Part 1.5 — Payment Configuration
+
+The app supports four checkout methods: **PayPal**, **Apple Pay** (iOS), **Google Pay / Samsung Pay** (Android), and **Card** (both platforms). All are processed through PayPal's APIs.
+
+## 7f. Config values
+
+Open `mobile/src/config.ts` and fill in the two payment constants:
+
+```ts
+// The merchant identifier you registered in Apple Developer portal (iOS Apple Pay)
+export const APPLE_PAY_MERCHANT_ID = 'merchant.com.apollosfs';
+
+// Your PayPal merchant account ID — visible in the PayPal dashboard under Account Settings
+export const PAYPAL_MERCHANT_ID = 'YOUR_PAYPAL_MERCHANT_ID';
+```
+
+## 7g. PayPal developer setup
+
+1. Create an app at [developer.paypal.com](https://developer.paypal.com) → **My Apps & Credentials**.
+2. Note the **Client ID** and **Secret** — configure these in the backend (not in the mobile app).
+3. Enable **Advanced Credit and Debit Card Payments** in your PayPal app settings to allow direct card processing.
+4. Enable **Apple Pay** and **Google Pay** under your PayPal account's payment methods and follow PayPal's domain verification steps for each.
+
+## 7h. Required backend endpoints
+
+The mobile app calls these endpoints. The backend must implement all five:
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `POST` | `/api/v1/billing/storage/order` | Create a PayPal wallet order — returns `{ order_id, approval_url }` |
+| `POST` | `/api/v1/billing/storage/order/:id/capture` | Capture an approved PayPal order — returns `{ new_quota_bytes }` |
+| `POST` | `/api/v1/billing/storage/card` | Process card via PayPal ACDC — accepts `{ plan_id, storage_type, card: { number, expiry_month, expiry_year, cvv, name } }` — returns `{ new_quota_bytes }` |
+| `POST` | `/api/v1/billing/storage/apple-pay` | Process Apple Pay token via PayPal — accepts `{ plan_id, storage_type, apple_pay_token }` — returns `{ new_quota_bytes }` |
+| `POST` | `/api/v1/billing/storage/google-pay` | Process Google Pay token via PayPal — accepts `{ plan_id, storage_type, google_pay_token }` — returns `{ new_quota_bytes }` |
+
+All five endpoints require authentication (Bearer token) and must update the user's `storage_quota_bytes` in the database on success.
 
 ---
 
@@ -388,7 +473,36 @@ And apply it in `android/app/build.gradle`:
 apply plugin: 'com.google.gms.google-services'
 ```
 
-### 9e. Update production domain
+### 9f. Google Pay native module
+
+The app uses a hand-written native module (`RNGooglePay`) for the Google Pay sheet. The Kotlin source files are already in the repo and automatically compiled by Gradle. The module is registered in `MainApplication.kt` via `GooglePayPackage`. No manual Xcode-style step is needed.
+
+The `play-services-wallet` dependency is already added to `android/app/build.gradle`:
+
+```groovy
+implementation("com.google.android.gms:play-services-wallet:19.4.0")
+```
+
+**Register with Google Pay & Wallet Console:**
+
+1. Sign in at [pay.google.com/business/console](https://pay.google.com/business/console) and create a merchant profile.
+2. Under **Integration type**, choose **Gateway** → select **PayPal** as the gateway processor.
+3. Note your **Google Merchant ID** — this is separate from your PayPal merchant ID and is used by the Google Pay API.
+4. Set `PAYPAL_MERCHANT_ID` in `mobile/src/config.ts` to the `gatewayMerchantId` value provided by PayPal for Google Pay (found in your PayPal account's Google Pay settings, not the Google Merchant ID itself).
+
+> Samsung Pay users on Android automatically see Google Pay — no separate integration is needed. Samsung Pay tokens are processed through the same Google Pay API call.
+
+### 9g. AndroidManifest.xml — Google Pay metadata
+
+Add inside the `<application>` element of `android/app/src/main/AndroidManifest.xml`:
+
+```xml
+<meta-data
+  android:name="com.google.android.gms.wallet.api.enabled"
+  android:value="true" />
+```
+
+### 9h. Update production domain
 
 If your production domain is not `apollo-sfs.com`, also replace occurrences in:
 
@@ -516,8 +630,12 @@ Build a new AAB with an incremented `versionCode` in `build.gradle`, then upload
 
 - [ ] `targetSdkVersion 34+` in `android/app/build.gradle`
 - [ ] `READ_MEDIA_IMAGES` and `READ_MEDIA_VIDEO` permissions declared in AndroidManifest.xml
+- [ ] `com.google.android.gms.wallet.api.enabled` meta-data tag added to AndroidManifest.xml (see §9g)
+- [ ] `play-services-wallet:19.4.0` in `android/app/build.gradle` dependencies
+- [ ] Merchant profile approved in [Google Pay & Wallet Console](https://pay.google.com/business/console)
+- [ ] `PAYPAL_MERCHANT_ID` set correctly in `mobile/src/config.ts`
 - [ ] Privacy policy URL provided in the Play Console
-- [ ] Data safety form completed (app collects photos/videos and account info; data is encrypted in transit and at rest)
+- [ ] Data safety form completed (app collects photos/videos and account info; data is encrypted in transit and at rest; payment data is processed by PayPal and not stored locally)
 - [ ] SHA-256 fingerprint from `release.keystore` added to `assetlinks.json` (see section 11b)
 - [ ] `google-services.json` present and SHA-1 debug fingerprint added to Google Cloud OAuth client for testing
 
@@ -544,6 +662,28 @@ cd mobile/ios
 pod repo update
 pod install
 ```
+
+### Apple Pay button not appearing
+
+The Apple Pay button only appears if `PKPaymentAuthorizationController.canMakePayments()` returns `true`. This requires:
+- The device has at least one card added to Wallet.
+- The `com.apple.developer.in-app-payments` entitlement is present with the correct merchant ID.
+- The build was signed with a provisioning profile that includes the Apple Pay capability.
+
+The button will never appear on the Simulator — test on a physical device.
+
+### Apple Pay sheet appears but payment fails
+
+- Ensure the `RNApplePay.swift` and `RNApplePay.m` files are included in the Xcode target's **Compile Sources** phase (Target → Build Phases → Compile Sources).
+- Verify the merchant ID in `config.ts` exactly matches the one registered in Apple Developer portal and in Xcode's Apple Pay capability.
+- Check that PayPal's Apple Pay setup is complete (domain verification and merchant validation URL configured in the PayPal dashboard).
+
+### Google Pay button not appearing (Android)
+
+`canMakeGooglePayments()` calls `isReadyToPay` on the Google Pay API. It returns `false` if:
+- The device does not have Google Play Services updated.
+- The merchant has not been approved in the Google Pay & Wallet Console (sandbox works without approval; production requires it).
+- The `com.google.android.gms.wallet.api.enabled` meta-data tag is missing from `AndroidManifest.xml`.
 
 ### Sign In with Apple button not rendering
 
@@ -584,6 +724,12 @@ android {
   }
 }
 ```
+
+### Google Pay: "RESULT_ERROR" or payment sheet doesn't open
+
+- Confirm `play-services-wallet` is in `build.gradle` and the project synced successfully.
+- The `GooglePayPackage` must be registered in `MainApplication.kt` — verify the `add(GooglePayPackage())` line is present.
+- In sandbox/development, use `WalletConstants.ENVIRONMENT_TEST` in `GooglePayModule.kt` instead of `ENVIRONMENT_PRODUCTION` until your merchant account is approved.
 
 ### Google Sign-In: "DEVELOPER_ERROR"
 

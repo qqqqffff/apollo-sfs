@@ -20,9 +20,12 @@ import (
 	"apollo-sfs.com/api/routes/admin"
 	"apollo-sfs.com/api/routes/auth"
 	"apollo-sfs.com/api/routes/middleware"
+	"apollo-sfs.com/api/routes/billing"
+	"apollo-sfs.com/api/routes/expansion"
 	"apollo-sfs.com/api/routes/payments"
 	"apollo-sfs.com/api/routes/services"
 	"apollo-sfs.com/api/routes/sfs"
+	storageroutes "apollo-sfs.com/api/routes/storage"
 )
 
 func main() {
@@ -245,6 +248,19 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		Currency:    cfg.PremiumTierCurrency,
 		AppBaseURL:  cfg.AppBaseURL,
 	})
+	storageHandler := storageroutes.NewHandler(queries)
+	billingHandler := billing.NewHandler(paypalClient, queries, billing.Config{
+		Currency:  cfg.PremiumTierCurrency,
+		ReturnURL: "apollosfs://billing/storage/complete",
+		CancelURL: "apollosfs://billing/storage/cancel",
+	})
+	expansionHandler := expansion.NewHandler(paypalClient, emailSvc, queries, expansion.Config{
+		Currency:  cfg.PremiumTierCurrency,
+		ReturnURL: "apollosfs://billing/expansion/complete",
+		CancelURL: "apollosfs://billing/expansion/cancel",
+		AppURL:    cfg.AppBaseURL,
+	})
+	expansionHandler.StartExpiryLoop(context.Background())
 	metricsSvc.SetSpeedTestProvider(adminHandler)
 	go adminHandler.SpeedTestLoop(context.Background())
 
@@ -391,6 +407,34 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		protected.POST("/payments/orders", paymentsHandler.CreateOrder)
 		protected.POST("/payments/orders/:order_id/capture", paymentsHandler.CaptureOrder)
 
+		// User-facing storage info — separate from admin routes for security.
+		protected.GET("/storage/servers", storageHandler.ListServers)
+		protected.GET("/storage/servers/:server_id/ping", storageHandler.PingServer)
+		protected.GET("/storage/breakdown", storageHandler.GetBreakdown)
+		protected.GET("/storage/speed/download", storageHandler.SpeedTestDownload)
+		protected.POST("/storage/speed/upload", storageHandler.SpeedTestUpload)
+
+		// Storage add-on billing — four payment methods, each backed by PayPal.
+		protected.POST("/billing/storage/order", billingHandler.CreateWalletOrder)
+		protected.POST("/billing/storage/order/:order_id/capture", billingHandler.CaptureWalletOrder)
+		protected.POST("/billing/storage/card", billingHandler.ChargeCard)
+		protected.POST("/billing/storage/apple-pay", billingHandler.ChargeApplePay)
+		protected.POST("/billing/storage/google-pay", billingHandler.ChargeGooglePay)
+
+		// Expansion deposit billing — when a tier is unavailable, user pays a 50% deposit.
+		protected.POST("/billing/storage/expansion/order", expansionHandler.CreateWalletOrder)
+		protected.POST("/billing/storage/expansion/order/:order_id/capture", expansionHandler.CaptureWalletOrder)
+		protected.POST("/billing/storage/expansion/card", expansionHandler.ChargeCardExpansion)
+		protected.POST("/billing/storage/expansion/apple-pay", expansionHandler.ChargeApplePayExpansion)
+		protected.POST("/billing/storage/expansion/google-pay", expansionHandler.ChargeGooglePayExpansion)
+
+		// Pay remaining balance after admin marks server capacity as expanded.
+		protected.POST("/billing/storage/expansion/:id/pay-remaining/order", expansionHandler.PayRemainingWalletOrder)
+		protected.POST("/billing/storage/expansion/:id/pay-remaining/order/:order_id/capture", expansionHandler.CapturePayRemainingWallet)
+		protected.POST("/billing/storage/expansion/:id/pay-remaining/card", expansionHandler.PayRemainingCard)
+		protected.POST("/billing/storage/expansion/:id/pay-remaining/apple-pay", expansionHandler.PayRemainingApplePay)
+		protected.POST("/billing/storage/expansion/:id/pay-remaining/google-pay", expansionHandler.PayRemainingGooglePay)
+
 		// ── Premium-only: media collections ──────────────────────────────────
 		premiumGroup := protected.Group("")
 		premiumGroup.Use(mw.RequirePremium())
@@ -443,6 +487,10 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 			adminGroup.POST("/users/:user_id/suspend", adminHandler.SuspendUser)
 			adminGroup.POST("/users/:user_id/pardon", adminHandler.PardonUser)
 			adminGroup.GET("/bans", adminHandler.ListUserBans)
+
+			adminGroup.GET("/expansion-requests", expansionHandler.ListRequests)
+			adminGroup.POST("/expansion-requests/:id/fulfill", expansionHandler.MarkExpanded)
+			adminGroup.POST("/expansion-requests/:id/cancel", expansionHandler.CancelRequest)
 
 			adminGroup.GET("/interest", adminHandler.ListInterestSubmissions)
 			adminGroup.GET("/interest/settings", adminHandler.GetInterestFormSettings)

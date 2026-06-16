@@ -236,6 +236,77 @@ func (s *EmailService) SendAlarmNotification(
 	return nil
 }
 
+// SendExpansionRequestNotification notifies all admins that a user has
+// submitted a new server capacity expansion request.
+func (s *EmailService) SendExpansionRequestNotification(
+	ctx context.Context,
+	adminEmails []string,
+	username, userEmail, serverName, planLabel, depositFormatted, expiresAt string,
+) error {
+	adminURL := s.appURL + "/admin/requests/expansion"
+	for _, to := range adminEmails {
+		if err := s.enqueue(ctx, to,
+			fmt.Sprintf("New expansion request — %s", s.appName),
+			"expansion_request_admin",
+			map[string]any{
+				"AppName":          s.appName,
+				"AppURL":           s.appURL,
+				"Username":         username,
+				"UserEmail":        userEmail,
+				"ServerName":       serverName,
+				"PlanLabel":        planLabel,
+				"DepositFormatted": depositFormatted,
+				"ExpiresAt":        expiresAt,
+				"AdminURL":         adminURL,
+			},
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SendExpansionPaymentDue notifies the user that server capacity is ready and
+// the remaining balance must be paid within the given deadline.
+func (s *EmailService) SendExpansionPaymentDue(
+	ctx context.Context,
+	toEmail, serverName, planLabel, remainingFmt, paymentDueAt, paymentURL string,
+) error {
+	return s.enqueue(ctx, toEmail,
+		fmt.Sprintf("Your storage expansion is ready — pay now — %s", s.appName),
+		"expansion_payment_due",
+		map[string]any{
+			"AppName":      s.appName,
+			"AppURL":       s.appURL,
+			"ServerName":   serverName,
+			"PlanLabel":    planLabel,
+			"RemainingFmt": remainingFmt,
+			"PaymentDueAt": paymentDueAt,
+			"PaymentURL":   paymentURL,
+		},
+	)
+}
+
+// SendExpansionCancellation notifies the user that their expansion request was
+// cancelled and a deposit refund has been issued.
+func (s *EmailService) SendExpansionCancellation(
+	ctx context.Context,
+	toEmail, serverName, planLabel, refundFormatted, reason string,
+) error {
+	return s.enqueue(ctx, toEmail,
+		fmt.Sprintf("Your expansion request was cancelled — %s", s.appName),
+		"expansion_cancellation",
+		map[string]any{
+			"AppName":         s.appName,
+			"AppURL":          s.appURL,
+			"ServerName":      serverName,
+			"PlanLabel":       planLabel,
+			"RefundFormatted": refundFormatted,
+			"Reason":          reason,
+		},
+	)
+}
+
 // SendPasswordReset enqueues a password-reset email.
 // resetURL must be the full one-time reset URL.
 // expiresIn is shown in the email copy, e.g. "30 minutes".

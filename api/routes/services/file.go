@@ -46,6 +46,9 @@ type UploadInput struct {
 	// MimeType is provided by the client. If empty the service detects it from
 	// the file contents. Always treat as a hint; server-detected type is preferred.
 	MimeType string
+	// DeviceID identifies the mobile device that triggered this upload. Nil for
+	// web uploads. Stored on the file row for "synced from this device" display.
+	DeviceID *uuid.UUID
 	// Reader is the raw plaintext byte stream (multipart file reader).
 	// The service reads it fully into memory before encrypting; this is required
 	// for single-blob AES-256-GCM and for MIME detection. Video files use chunked
@@ -201,11 +204,13 @@ func (s *FileService) Upload(ctx context.Context, in UploadInput) (*models.File,
 	// 2b. Auto-route image/video uploads to the user's media folder if configured.
 	in.FolderID = s.resolveUploadFolder(ctx, in.Username, in.FolderID, mimeType)
 
-	// 2c. For images, extract the capture date now (plaintext is already in
-	// memory). Videos are probed asynchronously after the blob is stored.
+	// 2c. For images, extract the capture date and GPS coordinates now (plaintext
+	// is already in memory). Videos are probed asynchronously after the blob is stored.
 	var takenAt *time.Time
+	var latitude, longitude *float64
 	if strings.HasPrefix(mimeType, "image/") {
 		takenAt = ExtractImageTakenAt(plaintext)
+		latitude, longitude = ExtractImageLocation(plaintext)
 	}
 
 	// 3. Quota check.
@@ -281,6 +286,9 @@ func (s *FileService) Upload(ctx context.Context, in UploadInput) (*models.File,
 		Nonce:          nonce,
 		TakenAt:        takenAt,
 		SHA256Hash:     &hashHex,
+		DeviceID:       in.DeviceID,
+		Latitude:       latitude,
+		Longitude:      longitude,
 	})
 	if err != nil {
 		// Best-effort cleanup: delete the orphaned MinIO object.

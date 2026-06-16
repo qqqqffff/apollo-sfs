@@ -60,6 +60,14 @@ func (h *Handler) UploadFile(c *gin.Context) {
 		folderID = &parsed
 	}
 
+	var deviceID *uuid.UUID
+	if raw := c.PostForm("device_id"); raw != "" {
+		parsed, err := uuid.Parse(raw)
+		if err == nil {
+			deviceID = &parsed
+		}
+	}
+
 	name := sanitize.Name(c.PostForm("name"), 255)
 	if name == "" {
 		name = sanitize.Name(fileHeader.Filename, 255)
@@ -84,6 +92,7 @@ func (h *Handler) UploadFile(c *gin.Context) {
 		Username: username,
 		UserID:   userID,
 		FolderID: folderID,
+		DeviceID: deviceID,
 		Name:     name,
 		MimeType: fileHeader.Header.Get("Content-Type"),
 		Reader:   src,

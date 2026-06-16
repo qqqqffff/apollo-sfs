@@ -1,5 +1,5 @@
 import { del, get, patch, post, put } from './client'
-import type { AuditLog, BannedIP, FavoriteList, FolderContents, Invitation, InterestSubmission, InterestFormSettings, PageResult, User, UserBan } from '../types/api'
+import type { AuditLog, BannedIP, FavoriteList, FolderContents, Invitation, InterestSubmission, InterestFormSettings, PageResult, ServerExpansionRequest, User, UserBan } from '../types/api'
 
 // ── Admin user file browsing ───────────────────────────────────────────────────
 
@@ -432,3 +432,37 @@ export const adminMetricsQueryOptions = {
   queryFn: getMetrics,
   refetchInterval: 10_000,
 }
+
+// ── Expansion requests ─────────────────────────────────────────────────────────
+
+export interface ExpansionRequestFilter {
+  status?: string
+  server_id?: string
+  from?: string
+  to?: string
+  cursor?: string
+}
+
+export function listExpansionRequests(filter: ExpansionRequestFilter = {}) {
+  const params = new URLSearchParams()
+  if (filter.status)    params.set('status',    filter.status)
+  if (filter.server_id) params.set('server_id', filter.server_id)
+  if (filter.from)      params.set('from',       filter.from)
+  if (filter.to)        params.set('to',         filter.to)
+  if (filter.cursor)    params.set('cursor',     filter.cursor)
+  const qs = params.toString()
+  return get<PageResult<ServerExpansionRequest>>(`/admin/expansion-requests${qs ? '?' + qs : ''}`)
+}
+
+export function fulfillExpansionRequest(id: string) {
+  return post<{ new_quota_bytes: number }>(`/admin/expansion-requests/${id}/fulfill`, {})
+}
+
+export function cancelExpansionRequest(id: string, reason: string) {
+  return post<{ refund_id: string }>(`/admin/expansion-requests/${id}/cancel`, { reason })
+}
+
+export const expansionRequestsQueryOptions = (filter: ExpansionRequestFilter = {}) => ({
+  queryKey: ['admin', 'expansion-requests', filter] as const,
+  queryFn: () => listExpansionRequests(filter),
+})

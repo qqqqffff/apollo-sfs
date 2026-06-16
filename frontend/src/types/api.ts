@@ -190,6 +190,33 @@ export interface AccountRestriction {
   expires_at?: string | null
 }
 
+export interface ServerExpansionRequest {
+  id: string
+  username: string
+  server_id: string
+  plan_id: string
+  storage_type: 'nvme' | 'hdd'
+  bytes_requested: number
+  deposit_amount_cents: number
+  full_price_cents: number
+  currency: string
+  payment_method: string
+  paypal_order_id: string
+  paypal_capture_id: string | null
+  status: 'opened' | 'expanded' | 'completed' | 'expired' | 'refunded'
+  pre_quota_bytes: number
+  post_quota_bytes: number | null
+  expires_at: string
+  created_at: string
+  completed_at: string | null
+  refund_id: string | null
+  cancellation_reason: string | null
+  payment_due_at: string | null
+  server_name: string
+  server_state: string
+  user_email: string
+}
+
 export const VIOLATION_CODES: Record<string, string> = {
   illegal_activity:    'Illegal or fraudulent activity (§4)',
   third_party_rights:  'Violation of third-party rights (§4)',

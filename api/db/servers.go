@@ -128,6 +128,52 @@ func (q *Queries) CreateServer(ctx context.Context, p CreateServerParams) (*mode
 	return s, nil
 }
 
+// ServerCapacity holds aggregated capacity info for a single active server.
+type ServerCapacity struct {
+	ServerID           uuid.UUID
+	Name               string
+	State              string
+	TotalCapacityBytes int64
+	AvailableBytes     int64
+}
+
+// ListServerCapacities returns capacity aggregated across active drives for
+// every active server, ordered by name.
+func (q *Queries) ListServerCapacities(ctx context.Context) ([]ServerCapacity, error) {
+	rows, err := q.db.QueryContext(ctx, `
+		SELECT
+			s.id, s.name, s.state,
+			COALESCE(SUM(d.capacity_bytes), 0)                                     AS total_capacity_bytes,
+			COALESCE(SUM(d.capacity_bytes - COALESCE(sub.allocated, 0)), 0)        AS available_bytes
+		FROM servers s
+		LEFT JOIN drives d ON d.server_id = s.id AND d.is_active = true
+		LEFT JOIN (
+			SELECT uda.drive_id, SUM(u.storage_quota_bytes) AS allocated
+			FROM user_drive_allocations uda
+			JOIN users u ON u.username = uda.user_id
+			GROUP BY uda.drive_id
+		) sub ON sub.drive_id = d.id
+		WHERE s.is_active = true
+		GROUP BY s.id
+		ORDER BY s.name ASC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("ListServerCapacities: %w", err)
+	}
+	defer rows.Close()
+
+	var out []ServerCapacity
+	for rows.Next() {
+		var sc ServerCapacity
+		if err := rows.Scan(&sc.ServerID, &sc.Name, &sc.State,
+			&sc.TotalCapacityBytes, &sc.AvailableBytes); err != nil {
+			return nil, fmt.Errorf("ListServerCapacities scan: %w", err)
+		}
+		out = append(out, sc)
+	}
+	return out, rows.Err()
+}
+
 // SetServerActive toggles a server's is_active flag.
 func (q *Queries) SetServerActive(ctx context.Context, id uuid.UUID, active bool) error {
 	_, err := q.db.ExecContext(ctx,

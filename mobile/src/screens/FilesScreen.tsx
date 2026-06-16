@@ -14,6 +14,7 @@ import {
 } from 'react-native';
 import {
   ChevronRight,
+  Download,
   FileText,
   Folder,
   GalleryHorizontalEnd,
@@ -31,6 +32,7 @@ import DocumentPicker from 'react-native-document-picker';
 import {
   createFolder,
   deleteFile,
+  downloadAndSaveFile,
   favoriteFile,
   getFolder,
   listRoot,
@@ -113,6 +115,14 @@ export default function FilesScreen() {
 
   const handleFavorite = async (fileID: string) => {
     try { await favoriteFile(fileID); } catch {}
+  };
+
+  const handleDownload = async (file: ApiFile) => {
+    try {
+      await downloadAndSaveFile(file.id, file.name, file.mime_type);
+    } catch (e: any) {
+      Alert.alert('Download failed', e.message);
+    }
   };
 
   const handleDelete = async (fileID: string) => {
@@ -299,6 +309,9 @@ export default function FilesScreen() {
                   <Text style={styles.name} numberOfLines={1}>{file.name}</Text>
                   <Text style={styles.meta}>{formatBytes(file.size_bytes)}</Text>
                 </View>
+                <TouchableOpacity onPress={() => handleDownload(file)} style={styles.action}>
+                  <Download size={18} color={colors.primary} strokeWidth={1.5} />
+                </TouchableOpacity>
                 <TouchableOpacity onPress={() => handleFavorite(file.id)} style={styles.action}>
                   <Star size={18} color={colors.warning} strokeWidth={1.5} />
                 </TouchableOpacity>

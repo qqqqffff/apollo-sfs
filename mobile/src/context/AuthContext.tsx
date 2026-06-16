@@ -1,5 +1,5 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
-import { clearTokens, getStoredTokens } from '../api/client';
+import { clearTokens, getStoredTokens, setAuthFailureHandler } from '../api/client';
 import { getMe } from '../api/auth';
 
 interface UserProfile {
@@ -49,6 +49,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     loadSession();
   }, [loadSession]);
+
+  useEffect(() => {
+    setAuthFailureHandler(() => setProfile(null));
+  }, []);
 
   const signOut = useCallback(async () => {
     await clearTokens();

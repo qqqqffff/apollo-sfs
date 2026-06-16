@@ -58,7 +58,7 @@ export class SyncService {
         after: endCursor,
         assetType: 'All',
         fromTime,
-        include: ['filename', 'fileSize'],
+        include: ['filename', 'fileSize', 'location'],
       });
 
       for (const edge of page.edges) {
@@ -122,11 +122,12 @@ export class SyncService {
         });
         await setStatus(item.uri, 'uploading');
 
-        await uploadFile(item.uri, item.filename, item.mimeType);
+        const deviceID = await AsyncStorage.getItem(DEVICE_ID_KEY);
+
+        await uploadFile(item.uri, item.filename, item.mimeType, undefined, undefined, deviceID ?? undefined);
 
         await setStatus(item.uri, 'done');
 
-        const deviceID = await AsyncStorage.getItem(DEVICE_ID_KEY);
         const delta = await deltaSync(new Date().toISOString(), deviceID ?? undefined);
         await AsyncStorage.setItem(CURSOR_KEY, delta.server_time);
       } catch {
@@ -206,7 +207,7 @@ export class SyncService {
         after: endCursor,
         assetType: 'All',
         fromTime,
-        include: ['filename', 'fileSize'],
+        include: ['filename', 'fileSize', 'location'],
       });
 
       for (const edge of page.edges) {
@@ -266,15 +267,18 @@ export class SyncService {
       try {
         await setStatus(item.local_asset_id, 'uploading');
 
+        const deviceID = await AsyncStorage.getItem(DEVICE_ID_KEY);
+
         await uploadFile(
           item.local_uri,
           item.filename,
           item.mime_type ?? 'application/octet-stream',
+          undefined,
+          undefined,
+          deviceID ?? undefined,
         );
 
         await setStatus(item.local_asset_id, 'done');
-
-        const deviceID = await AsyncStorage.getItem(DEVICE_ID_KEY);
         const delta = await deltaSync(new Date().toISOString(), deviceID ?? undefined);
         await AsyncStorage.setItem(CURSOR_KEY, delta.server_time);
       } catch {

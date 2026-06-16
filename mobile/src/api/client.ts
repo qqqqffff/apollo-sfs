@@ -24,9 +24,14 @@ export async function storeTokens(access: string, refresh: string) {
 
 export async function clearTokens() {
   await Promise.all([
-    secureStorage.removeItem(STORE_KEY_ACCESS),
-    secureStorage.removeItem(STORE_KEY_REFRESH),
+    secureStorage.removeItem(STORE_KEY_ACCESS).catch(() => {}),
+    secureStorage.removeItem(STORE_KEY_REFRESH).catch(() => {}),
   ]);
+}
+
+let onAuthFailure: (() => void) | null = null;
+export function setAuthFailureHandler(cb: () => void) {
+  onAuthFailure = cb;
 }
 
 const api = axios.create({ baseURL: BASE_URL });
@@ -96,6 +101,7 @@ api.interceptors.response.use(
     } catch (refreshError) {
       drainQueue(null, refreshError);
       await clearTokens();
+      onAuthFailure?.();
       return Promise.reject(refreshError);
     } finally {
       isRefreshing = false;

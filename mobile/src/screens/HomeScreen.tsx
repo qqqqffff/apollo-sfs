@@ -14,6 +14,7 @@ import {
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { CameraRoll } from '@react-native-camera-roll/camera-roll';
 import SyncPreviewModal from '../components/SyncPreviewModal';
+import StorageUpgradeModal from '../components/StorageUpgradeModal';
 import { type PreviewItem } from '../services/SyncService';
 import {
   Check,
@@ -25,6 +26,7 @@ import {
   GalleryHorizontalEnd,
   Image,
   Music,
+  Plus,
   Star,
   Trash2,
   Video,
@@ -61,6 +63,15 @@ interface FavoriteFile {
   size_bytes: number;
 }
 
+function formatEta(seconds: number): string {
+  if (seconds < 60) return `${seconds}s remaining`;
+  const m = Math.round(seconds / 60);
+  if (m < 60) return `~${m} min remaining`;
+  const h = Math.floor(m / 60);
+  const rem = m % 60;
+  return rem > 0 ? `~${h}h ${rem}m remaining` : `~${h}h remaining`;
+}
+
 function formatSyncDate(d: Date): string {
   const now = new Date();
   const isToday = d.toDateString() === now.toDateString();
@@ -81,11 +92,12 @@ function fileMimeIcon(mimeType: string) {
 }
 
 export default function HomeScreen() {
-  const { profile } = useAuth();
-  const { pendingCount, syncedCount, inProgressFiles, lastSyncedAt, isSyncing, lastError, scanForPreview, confirmSync } = useSync();
+  const { profile, refreshProfile } = useAuth();
+  const { pendingCount, syncedCount, inProgressFiles, lastSyncedAt, isSyncing, lastError, etaSeconds, scanForPreview, confirmSync } = useSync();
   const [favorites, setFavorites] = useState<FavoriteFile[]>([]);
   const [favLoading, setFavLoading] = useState(true);
   const [statusExpanded, setStatusExpanded] = useState(false);
+  const [upgradeVisible, setUpgradeVisible] = useState(false);
 
   const [autouploadFolderID, setAutouploadFolderID] = useState<string | null>(null);
   const [filesDestFolderID, setFilesDestFolderID] = useState<string | null>(null);
@@ -278,7 +290,8 @@ export default function HomeScreen() {
       : (mediaFolders.find((f) => f.id === filesDestFolderID)?.name ?? '/');
 
   const usedBytes = profile?.storage_used_bytes ?? 0;
-  const quotaBytes = profile?.storage_quota_bytes ?? 0;
+  const [localQuotaBytes, setLocalQuotaBytes] = useState<number | null>(null);
+  const quotaBytes = localQuotaBytes ?? (profile?.storage_quota_bytes ?? 0);
   const usedPct = quotaBytes > 0 ? (usedBytes / quotaBytes) * 100 : 0;
   const barColor = usedPct > 90 ? colors.error : usedPct > 70 ? colors.warning : colors.primary;
 
@@ -298,6 +311,7 @@ export default function HomeScreen() {
                 {inProgressFiles.length > 0
                   ? `Uploading ${inProgressFiles.length} file${inProgressFiles.length !== 1 ? 's' : ''}…`
                   : 'Scanning camera roll…'}
+                {etaSeconds != null ? `  ·  ${formatEta(etaSeconds)}` : ''}
               </Text>
             </View>
             <ChevronDown
@@ -319,7 +333,12 @@ export default function HomeScreen() {
       <ScrollView contentContainerStyle={styles.content}>
       {/* Storage card */}
       <View style={styles.card}>
-        <Text style={styles.cardLabel}>Storage</Text>
+        <View style={styles.cardHeader}>
+          <Text style={[styles.cardLabel, { marginBottom: 0 }]}>Storage</Text>
+          <TouchableOpacity onPress={() => setUpgradeVisible(true)} hitSlop={8}>
+            <Plus size={18} color={colors.primary} strokeWidth={2.5} />
+          </TouchableOpacity>
+        </View>
         <View style={styles.storageRow}>
           <Text style={styles.storageValue}>{formatBytes(usedBytes)}</Text>
           <Text style={styles.storageQuota}> / {formatBytes(quotaBytes)}</Text>
@@ -544,6 +563,22 @@ export default function HomeScreen() {
         usedBytes={usedBytes}
         onConfirm={handlePreviewConfirm}
         onCancel={() => setPreviewItems(null)}
+        onStoragePurchased={(newQuota) => {
+          setLocalQuotaBytes(newQuota);
+          refreshProfile().catch(() => {});
+        }}
+      />
+
+      <StorageUpgradeModal
+        visible={upgradeVisible}
+        quotaBytes={quotaBytes}
+        usedBytes={usedBytes}
+        onPurchased={(newQuota) => {
+          setLocalQuotaBytes(newQuota);
+          setUpgradeVisible(false);
+          refreshProfile().catch(() => {});
+        }}
+        onClose={() => setUpgradeVisible(false)}
       />
     </View>
   );

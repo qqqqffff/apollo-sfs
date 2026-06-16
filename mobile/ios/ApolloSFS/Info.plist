@@ -34,6 +34,16 @@
 				<string>apollosfs</string>
 			</array>
 		</dict>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>com.googleusercontent.apps.1060276027350-kqb7i8n20b9f5gq32foi77lu6grr2cpp</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>com.googleusercontent.apps.1060276027350-kqb7i8n20b9f5gq32foi77lu6grr2cpp</string>
+			</array>
+		</dict>
 	</array>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
@@ -54,7 +64,6 @@
 	<true/>
 	<key>UIBackgroundModes</key>
 	<array>
-		<string>processing</string>
 		<string>fetch</string>
 	</array>
 	<key>UILaunchStoryboardName</key>

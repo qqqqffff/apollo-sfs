@@ -18,6 +18,7 @@ import {
 import {
   ArrowRightFromLine,
   Check,
+  Download,
   Info,
   Smartphone,
   Star,
@@ -26,6 +27,7 @@ import {
 } from 'lucide-react-native';
 import {
   deleteFile,
+  downloadAndSaveFile,
   downloadFile,
   favoriteFile,
   getFolder,
@@ -34,6 +36,7 @@ import {
   type ApiFile,
   type ApiFolder,
 } from '../api/files';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getDoneHashSet } from '../services/UploadQueue';
 import { colors, radius, spacing } from '../theme';
 
@@ -92,9 +95,10 @@ interface TileProps {
   onFavorite: () => void;
   onDelete: () => void;
   onInfo: () => void;
+  onDownload: () => void;
 }
 
-function Tile({ file, size, isSelected, isSelectMode, isSynced, onToggle, onLongPress, onFavorite, onDelete, onInfo }: TileProps) {
+function Tile({ file, size, isSelected, isSelectMode, isSynced, onToggle, onLongPress, onFavorite, onDelete, onInfo, onDownload }: TileProps) {
   const [url, setUrl] = useState<string | null>(urlCache.get(file.id) ?? null);
   const [fetching, setFetching] = useState(!urlCache.has(file.id));
   const [urlError, setUrlError] = useState(false);
@@ -205,6 +209,9 @@ function Tile({ file, size, isSelected, isSelectMode, isSynced, onToggle, onLong
       {/* Per-tile toolbar (hidden in select mode) */}
       {!isSelectMode && isSelected && (
         <View style={styles.toolbar}>
+          <TouchableOpacity style={styles.toolBtn} onPress={onDownload} hitSlop={6}>
+            <Download size={15} color="#fff" strokeWidth={1.5} />
+          </TouchableOpacity>
           <TouchableOpacity style={styles.toolBtn} onPress={onFavorite} hitSlop={6}>
             <Star size={15} color="#fff" strokeWidth={1.5} />
           </TouchableOpacity>
@@ -260,6 +267,7 @@ export default function MediaGallery({ files, currentFolderID, isSubcollection, 
   const [toolbarFileId, setToolbarFileId] = useState<string | null>(null);
   const [infoFile, setInfoFile] = useState<ApiFile | null>(null);
   const [syncedHashes, setSyncedHashes] = useState<Set<string>>(new Set());
+  const [thisDeviceID, setThisDeviceID] = useState<string | null>(null);
   const [activeDate, setActiveDate] = useState<string | null>(null);
   const listRef = useRef<SectionList<ApiFile[], GallerySection>>(null);
 
@@ -277,6 +285,7 @@ export default function MediaGallery({ files, currentFolderID, isSubcollection, 
 
   useEffect(() => {
     getDoneHashSet().then(setSyncedHashes).catch(() => {});
+    AsyncStorage.getItem('apollo_device_id').then(setThisDeviceID).catch(() => {});
   }, []);
 
   const sections = useMemo(() => buildSections(files, cols), [files, cols]);
@@ -290,6 +299,15 @@ export default function MediaGallery({ files, currentFolderID, isSubcollection, 
   };
 
   // ── Single-item actions ──────────────────────────────────────────────────────
+
+  const handleSingleDownload = async (file: ApiFile) => {
+    try {
+      await downloadAndSaveFile(file.id, file.name, file.mime_type);
+    } catch (e: any) {
+      Alert.alert('Download failed', e.message);
+    }
+    setToolbarFileId(null);
+  };
 
   const handleSingleFavorite = async (fileId: string) => {
     try { await favoriteFile(fileId); } catch {}
@@ -333,6 +351,22 @@ export default function MediaGallery({ files, currentFolderID, isSubcollection, 
   }, []);
 
   // ── Bulk actions ─────────────────────────────────────────────────────────────
+
+  const handleBulkDownload = async () => {
+    setBulkInProgress(true);
+    const ids = Array.from(selectedIds);
+    const fileMap = new Map(files.map((f) => [f.id, f]));
+    try {
+      for (const id of ids) {
+        const f = fileMap.get(id);
+        if (!f) continue;
+        try { await downloadAndSaveFile(f.id, f.name, f.mime_type); } catch {}
+      }
+    } finally {
+      setBulkInProgress(false);
+      exitSelectMode();
+    }
+  };
 
   const handleBulkFavorite = async () => {
     setBulkInProgress(true);
@@ -469,6 +503,7 @@ export default function MediaGallery({ files, currentFolderID, isSubcollection, 
                         }
                       }}
                       onLongPress={() => enterSelectMode(file.id)}
+                      onDownload={() => handleSingleDownload(file)}
                       onFavorite={() => handleSingleFavorite(file.id)}
                       onDelete={() => handleSingleDelete(file.id)}
                       onInfo={() => { setInfoFile(file); setToolbarFileId(null); }}
@@ -501,6 +536,14 @@ export default function MediaGallery({ files, currentFolderID, isSubcollection, 
             <ActivityIndicator color={colors.surface} style={{ marginRight: spacing.md }} />
           ) : (
             <View style={styles.selectBarActions}>
+              <TouchableOpacity
+                style={[styles.selectBarBtn, selectedIds.size === 0 && styles.selectBarBtnDisabled]}
+                onPress={handleBulkDownload}
+                disabled={selectedIds.size === 0}
+              >
+                <Download size={20} color="#fff" strokeWidth={1.5} />
+              </TouchableOpacity>
+
               <TouchableOpacity
                 style={[styles.selectBarBtn, selectedIds.size === 0 && styles.selectBarBtnDisabled]}
                 onPress={handleBulkFavorite}
@@ -602,9 +645,21 @@ export default function MediaGallery({ files, currentFolderID, isSubcollection, 
                 {infoFile.taken_at && <InfoRow label="Taken" value={new Date(infoFile.taken_at).toLocaleString()} />}
                 <InfoRow label="Uploaded" value={new Date(infoFile.created_at).toLocaleString()} />
                 {infoFile.sha256_hash && <InfoRow label="SHA-256" value={`${infoFile.sha256_hash.slice(0, 16)}…`} mono />}
+                {infoFile.latitude != null && infoFile.longitude != null && (
+                  <InfoRow
+                    label="Location"
+                    value={`${infoFile.latitude.toFixed(6)}, ${infoFile.longitude.toFixed(6)}`}
+                  />
+                )}
                 <InfoRow
                   label="Device Sync"
-                  value={infoFile.sha256_hash && syncedHashes.has(infoFile.sha256_hash) ? '✓ Synced from this device' : 'Not from this device'}
+                  value={
+                    infoFile.device_id
+                      ? infoFile.device_id === thisDeviceID
+                        ? '✓ Synced from this device'
+                        : 'Synced from another device'
+                      : 'Uploaded from web'
+                  }
                 />
               </>
             )}

@@ -1,5 +1,6 @@
 import React, { useEffect } from 'react';
-import { Linking } from 'react-native';
+import { Image, Linking, View } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { NavigationContainer, LinkingOptions } from '@react-navigation/native';
 import { createStackNavigator } from '@react-navigation/stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
@@ -38,6 +39,7 @@ function AuthStack({ initialToken }: { initialToken?: string }) {
 
 function MainTabs() {
   return (
+    <SafeAreaView edges={['top']} style={{ flex: 1, backgroundColor: colors.surface }}>
     <Tab.Navigator
       screenOptions={({ route }) => ({
         tabBarIcon: ({ focused, color, size }) => {
@@ -51,18 +53,7 @@ function MainTabs() {
           backgroundColor: colors.surface,
           borderTopColor: colors.border,
         },
-        headerStyle: {
-          backgroundColor: colors.surface,
-          borderBottomColor: colors.border,
-          borderBottomWidth: 1,
-          elevation: 0,
-          shadowOpacity: 0,
-        },
-        headerTitleStyle: {
-          color: colors.textPrimary,
-          fontWeight: '600',
-          fontSize: 17,
-        },
+        headerShown: false,
       })}
     >
       <Tab.Screen name="Home" component={HomeScreen} options={{ title: 'Home' }} />
@@ -70,25 +61,38 @@ function MainTabs() {
       <Tab.Screen name="Profile" component={ProfileScreen} options={{ title: 'Profile' }} />
       <Tab.Screen name="Settings" component={SettingsScreen} options={{ title: 'Settings' }} />
     </Tab.Navigator>
+    </SafeAreaView>
   );
 }
-
-const linking: LinkingOptions<ReactNavigation.RootParamList> = {
-  prefixes: ['apollosfs://', 'https://apollo-sfs.com'],
-  config: {
-    screens: {
-      Auth: {
-        screens: {
-          Register: 'register',
-        },
-      },
-    },
-  },
-};
 
 export default function AppNavigator() {
   const { isAuthenticated, isLoading } = useAuth();
   const [initialToken, setInitialToken] = React.useState<string | undefined>();
+
+  const linking = React.useMemo<LinkingOptions<ReactNavigation.RootParamList>>(() => ({
+    prefixes: ['apollosfs://', 'https://apollo-sfs.com'],
+    config: {
+      screens: isAuthenticated
+        ? {
+            Main: {
+              screens: {
+                Home: 'home',
+                Files: 'files',
+                Profile: 'profile',
+                Settings: 'settings',
+              },
+            },
+          }
+        : {
+            Auth: {
+              screens: {
+                Login: '',
+                Register: 'register',
+              },
+            },
+          },
+    },
+  }), [isAuthenticated]);
 
   useEffect(() => {
     Linking.getInitialURL().then((url) => {
@@ -104,7 +108,13 @@ export default function AppNavigator() {
     });
   }, []);
 
-  if (isLoading) return null;
+  if (isLoading) {
+    return (
+      <View style={{ flex: 1, backgroundColor: '#fff', alignItems: 'center', justifyContent: 'center' }}>
+        <Image source={require('../assets/app-icon.png')} style={{ width: 96, height: 96, borderRadius: 22 }} />
+      </View>
+    );
+  }
 
   return (
     <NavigationContainer linking={linking}>

@@ -6,3 +6,14 @@ minio
 /frontend/coverage
 /frontend/test-results
 /frontend/playwright-report
+
+# Android (mobile/)
+mobile/android/.gradle/
+mobile/android/build/
+mobile/android/app/build/
+mobile/android/local.properties
+mobile/android/.idea/
+mobile/android/**/*.iml
+mobile/android/app/debug.keystore
+mobile/android/captures/
+mobile/android/.navigation/

@@ -10,6 +10,7 @@ interface SyncContextValue {
   lastSyncedAt: Date | null;
   isSyncing: boolean;
   lastError: string | null;
+  etaSeconds: number | null;
   triggerSync: () => Promise<void>;
   scanForPreview: () => Promise<PreviewItem[]>;
   confirmSync: (items: PreviewItem[]) => Promise<void>;
@@ -22,6 +23,7 @@ const SyncContext = createContext<SyncContextValue>({
   lastSyncedAt: null,
   isSyncing: false,
   lastError: null,
+  etaSeconds: null,
   triggerSync: async () => {},
   scanForPreview: async () => [],
   confirmSync: async () => {},
@@ -35,6 +37,8 @@ export function SyncProvider({ children }: { children: React.ReactNode }) {
   const [lastSyncedAt, setLastSyncedAt] = useState<Date | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
   const [lastError, setLastError] = useState<string | null>(null);
+  const [etaSeconds, setEtaSeconds] = useState<number | null>(null);
+  const syncStartRef = useRef<{ time: number; syncedCountAtStart: number } | null>(null);
   const syncServiceRef = useRef<SyncService | null>(null);
 
   useEffect(() => {
@@ -51,8 +55,22 @@ export function SyncProvider({ children }: { children: React.ReactNode }) {
     countByStatus('done').then(setSyncedCount).catch(() => {});
   }, [isAuthenticated]);
 
+  // Recompute ETA whenever pending/synced counts change during an active sync.
+  // Rate = files completed this run / elapsed seconds; ETA = remaining / rate.
+  useEffect(() => {
+    if (!isSyncing || !syncStartRef.current) { setEtaSeconds(null); return; }
+    const completed = syncedCount - syncStartRef.current.syncedCountAtStart;
+    if (completed < 1) return;
+    const elapsed = (Date.now() - syncStartRef.current.time) / 1000;
+    if (elapsed < 2) return;
+    const rate = completed / elapsed;
+    setEtaSeconds(rate > 0 ? Math.round(pendingCount / rate) : null);
+  }, [isSyncing, syncedCount, pendingCount]);
+
   const triggerSync = useCallback(async () => {
     if (!syncServiceRef.current || isSyncing) return;
+    syncStartRef.current = { time: Date.now(), syncedCountAtStart: syncedCount };
+    setEtaSeconds(null);
     setIsSyncing(true);
     setLastError(null);
     try {
@@ -63,8 +81,9 @@ export function SyncProvider({ children }: { children: React.ReactNode }) {
     } finally {
       setIsSyncing(false);
       setInProgressFiles([]);
+      setEtaSeconds(null);
     }
-  }, [isSyncing]);
+  }, [isSyncing, syncedCount]);
 
   const scanForPreview = useCallback(async (): Promise<PreviewItem[]> => {
     if (!syncServiceRef.current) return [];
@@ -73,6 +92,8 @@ export function SyncProvider({ children }: { children: React.ReactNode }) {
 
   const confirmSync = useCallback(async (items: PreviewItem[]) => {
     if (!syncServiceRef.current || isSyncing) return;
+    syncStartRef.current = { time: Date.now(), syncedCountAtStart: syncedCount };
+    setEtaSeconds(null);
     setIsSyncing(true);
     setLastError(null);
     try {
@@ -83,11 +104,12 @@ export function SyncProvider({ children }: { children: React.ReactNode }) {
     } finally {
       setIsSyncing(false);
       setInProgressFiles([]);
+      setEtaSeconds(null);
     }
-  }, [isSyncing]);
+  }, [isSyncing, syncedCount]);
 
   return (
-    <SyncContext.Provider value={{ pendingCount, syncedCount, inProgressFiles, lastSyncedAt, isSyncing, lastError, triggerSync, scanForPreview, confirmSync }}>
+    <SyncContext.Provider value={{ pendingCount, syncedCount, inProgressFiles, lastSyncedAt, isSyncing, lastError, etaSeconds, triggerSync, scanForPreview, confirmSync }}>
       {children}
     </SyncContext.Provider>
   );

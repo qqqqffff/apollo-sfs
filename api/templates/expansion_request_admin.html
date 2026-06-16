@@ -1,0 +1,72 @@
+{{/*
+  Template name : "expansion_request_admin"
+  Trigger       : User submits a server expansion request with deposit
+  Data fields   :
+    AppName          string
+    AppURL           string
+    Username         string
+    UserEmail        string
+    ServerName       string
+    PlanLabel        string — e.g. "256 GB NVMe"
+    DepositFormatted string — e.g. "$50.00"
+    ExpiresAt        string — ISO date string
+    AdminURL         string — link to the admin expansion requests page
+*/}}
+{{define "expansion_request_admin"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <title>New server expansion request — {{.AppName}}</title>
+</head>
+<body>
+  <div class="email-wrapper">
+    <div class="email-card">
+
+      {{template "header" .}}
+
+      <div class="email-body">
+        <h1>New server expansion request</h1>
+        <p>
+          A user has submitted a server capacity expansion request on
+          <strong>{{.AppName}}</strong> and paid a deposit.
+          Review and fulfil from the admin panel within 14 days, or the deposit will be automatically refunded.
+        </p>
+
+        <table style="width:100%;border-collapse:collapse;margin:20px 0;">
+          <tr>
+            <td style="padding:8px 12px;font-weight:600;color:#374151;width:40%;border-bottom:1px solid #e5e7eb;">User</td>
+            <td style="padding:8px 12px;color:#111827;border-bottom:1px solid #e5e7eb;">{{.Username}} ({{.UserEmail}})</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 12px;font-weight:600;color:#374151;border-bottom:1px solid #e5e7eb;">Server</td>
+            <td style="padding:8px 12px;color:#111827;border-bottom:1px solid #e5e7eb;">{{.ServerName}}</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 12px;font-weight:600;color:#374151;border-bottom:1px solid #e5e7eb;">Plan requested</td>
+            <td style="padding:8px 12px;color:#111827;border-bottom:1px solid #e5e7eb;">{{.PlanLabel}}</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 12px;font-weight:600;color:#374151;border-bottom:1px solid #e5e7eb;">Deposit paid</td>
+            <td style="padding:8px 12px;color:#111827;border-bottom:1px solid #e5e7eb;">{{.DepositFormatted}}</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 12px;font-weight:600;color:#374151;">Expires</td>
+            <td style="padding:8px 12px;color:#111827;">{{.ExpiresAt}}</td>
+          </tr>
+        </table>
+
+        <div class="btn-wrapper">
+          <a href="{{.AdminURL}}" class="btn-primary">View in admin panel</a>
+        </div>
+      </div>
+
+      {{template "footer" .}}
+
+    </div>
+  </div>
+</body>
+</html>
+{{end}}

@@ -1,7 +1,7 @@
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { MdCheck, MdClose, MdPhotoLibrary, MdRocketLaunch, MdKey } from 'react-icons/md'
+import { MdCheck, MdClose, MdPhotoLibrary, MdRocketLaunch, MdKey, MdStorage, MdVpnKey, MdCloudUpload, MdSpeed } from 'react-icons/md'
 import { meQueryOptions, changePassword, preferencesQueryOptions, updatePreferences } from '../../api/me'
 import { listRoot } from '../../api/folders'
 import { ApiError } from '../../api/client'
@@ -49,6 +49,8 @@ function CheckItem({ ok, label }: { ok: boolean; label: string }) {
 function RouteComponent() {
   const { data: user, isLoading } = useQuery(meQueryOptions)
 
+  const [showUpgradeModal, setShowUpgradeModal] = useState(false)
+
   const [current, setCurrent] = useState('')
   const [newPw, setNewPw] = useState('')
   const [confirm, setConfirm] = useState('')
@@ -90,7 +92,7 @@ function RouteComponent() {
       <div className="bg-white border border-gray-200 rounded-xl divide-y divide-gray-100">
         <Row label="Username" value={user.username} />
         <Row label="Email" value={user.email} />
-        <Row label="Account type" value={user.is_admin ? 'Admin' : 'User'} />
+        <Row label="Account type" value={user.is_admin ? 'Admin' : user.is_premium ? 'Premium' : 'User'} />
         <Row
           label="Member since"
           value={new Date(user.created_at).toLocaleDateString(undefined, {
@@ -121,7 +123,13 @@ function RouteComponent() {
         </div>
       </div>
 
-      <PremiumCard isPremium={user.is_premium} isAdmin={user.is_admin} grantedAt={user.premium_granted_at} />
+      <PremiumCard
+        isPremium={user.is_premium}
+        isAdmin={user.is_admin}
+        grantedAt={user.premium_granted_at}
+        onUpgrade={() => setShowUpgradeModal(true)}
+      />
+      {showUpgradeModal && <PremiumUpgradeModal onClose={() => setShowUpgradeModal(false)} />}
 
       <MediaAutoUpload />
 
@@ -275,11 +283,9 @@ function Row({ label, value }: { label: string; value: string }) {
   )
 }
 
-// PremiumCard either invites the user to upgrade (free + non-admin) or shows
-// a "you're on Premium" confirmation with a deep link to API key management.
 function PremiumCard({
-  isPremium, isAdmin, grantedAt,
-}: { isPremium: boolean; isAdmin: boolean; grantedAt: string | null }) {
+  isPremium, isAdmin, grantedAt, onUpgrade,
+}: { isPremium: boolean; isAdmin: boolean; grantedAt: string | null; onUpgrade: () => void }) {
   const navigate = useNavigate()
   if (isPremium || isAdmin) {
     return (
@@ -315,11 +321,101 @@ function PremiumCard({
           </p>
         </div>
         <button
-          onClick={() => navigate({ to: '/premium' as never })}
+          onClick={onUpgrade}
           className="px-3 py-2 text-xs bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium cursor-pointer transition-colors"
         >
           Upgrade
         </button>
+      </div>
+    </div>
+  )
+}
+
+const PREMIUM_FEATURES = [
+  {
+    icon: MdStorage,
+    title: 'Expanded storage quota',
+    description: 'Get significantly more storage space for your files and media.',
+  },
+  {
+    icon: MdVpnKey,
+    title: 'Per-directory API keys',
+    description: 'Issue scoped API keys tied to specific folders for fine-grained access control.',
+  },
+  {
+    icon: MdCloudUpload,
+    title: 'S3-compatible API',
+    description: 'Access your files via an S3-like HTTP API — compatible with standard S3 clients and SDKs.',
+  },
+  {
+    icon: MdSpeed,
+    title: 'Priority support',
+    description: 'Jump to the front of the queue when you need help from the SFS team.',
+  },
+]
+
+function PremiumUpgradeModal({ onClose }: { onClose: () => void }) {
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    document.addEventListener('keydown', handler)
+    return () => document.removeEventListener('keydown', handler)
+  }, [onClose])
+
+  useEffect(() => {
+    document.body.style.overflow = 'hidden'
+    return () => { document.body.style.overflow = '' }
+  }, [])
+
+  const navigate = useNavigate()
+
+  return (
+    <div
+      onClick={onClose}
+      className="fixed inset-0 bg-black/60 flex items-center justify-center z-50"
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="bg-white rounded-xl shadow-xl w-120 max-w-[92vw] p-6 flex flex-col gap-5"
+      >
+        <div className="flex items-start gap-3">
+          <MdRocketLaunch className="text-amber-500 text-2xl shrink-0 mt-0.5" />
+          <div className="flex-1">
+            <h3 className="text-base font-semibold text-gray-900 m-0">Upgrade to Premium</h3>
+            <p className="text-sm text-gray-500 m-0 mt-1">One-time payment. No subscriptions.</p>
+          </div>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 cursor-pointer transition-colors">
+            <MdClose className="text-xl" />
+          </button>
+        </div>
+
+        <ul className="flex flex-col gap-3 m-0 p-0 list-none">
+          {PREMIUM_FEATURES.map(({ icon: Icon, title, description }) => (
+            <li key={title} className="flex items-start gap-3">
+              <div className="w-8 h-8 rounded-lg bg-amber-50 flex items-center justify-center shrink-0">
+                <Icon className="text-amber-500 text-base" />
+              </div>
+              <div>
+                <p className="text-sm font-medium text-gray-800 m-0">{title}</p>
+                <p className="text-xs text-gray-500 m-0 mt-0.5">{description}</p>
+              </div>
+            </li>
+          ))}
+        </ul>
+
+        <div className="flex justify-end gap-2 pt-1">
+          <button
+            onClick={onClose}
+            className="px-4 py-2 text-sm rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 cursor-pointer transition-colors"
+          >
+            Maybe later
+          </button>
+          <button
+            onClick={() => { onClose(); navigate({ to: '/premium' as never }) }}
+            className="px-4 py-2 text-sm rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-medium cursor-pointer transition-colors"
+          >
+            Get Premium
+          </button>
+        </div>
       </div>
     </div>
   )

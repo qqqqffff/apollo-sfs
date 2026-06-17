@@ -15,11 +15,16 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { CameraRoll } from '@react-native-camera-roll/camera-roll';
 import SyncPreviewModal from '../components/SyncPreviewModal';
 import StorageUpgradeModal from '../components/StorageUpgradeModal';
+import ICloudBackupModal, { type PickedICloudFile } from '../components/ICloudBackupModal';
+import GoogleBackupModal from '../components/GoogleBackupModal';
+import { listGoogleFiles, type GoogleBackupItem } from '../services/GoogleBackupService';
 import { type PreviewItem } from '../services/SyncService';
+import { GoogleSignin, statusCodes } from '@react-native-google-signin/google-signin';
 import {
   Check,
   CheckCircle2,
   ChevronDown,
+  Cloud,
   CloudUpload,
   FileText,
   FolderUp,
@@ -108,6 +113,13 @@ export default function HomeScreen() {
 
   const [filesUploading, setFilesUploading] = useState(false);
   const [filesUploadProgress, setFilesUploadProgress] = useState<{ done: number; total: number } | null>(null);
+
+  const [icloudFiles, setIcloudFiles] = useState<PickedICloudFile[] | null>(null);
+  const [icloudPickerLoading, setIcloudPickerLoading] = useState(false);
+
+  const [googleBackupItems, setGoogleBackupItems]   = useState<GoogleBackupItem[] | null>(null);
+  const [googleAccessToken, setGoogleAccessToken]   = useState('');
+  const [googleBackupLoading, setGoogleBackupLoading] = useState(false);
 
   const [previewItems, setPreviewItems] = useState<PreviewItem[] | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
@@ -237,6 +249,48 @@ export default function HomeScreen() {
       );
     } catch (e: any) {
       Alert.alert('Error', e.message);
+    }
+  };
+
+  const handleGoogleBackup = async () => {
+    if (!GoogleSignin.hasPreviousSignIn()) {
+      Alert.alert('Link Google first', 'Go to your Profile and link your Google account to use Google Backup.');
+      return;
+    }
+    setGoogleBackupLoading(true);
+    try {
+      const tokens = await GoogleSignin.getTokens();
+      const items  = await listGoogleFiles(tokens.accessToken);
+      setGoogleAccessToken(tokens.accessToken);
+      setGoogleBackupItems(items);
+    } catch (e: any) {
+      const isAuth = e.code !== statusCodes.SIGN_IN_CANCELLED;
+      if (isAuth) {
+        Alert.alert(
+          'Google access failed',
+          e.message?.includes('403') || e.message?.includes('401')
+            ? 'Backup needs additional permissions. Please unlink and re-link your Google account from Profile.'
+            : e.message ?? 'Could not access Google. Try again later.',
+        );
+      }
+    } finally {
+      setGoogleBackupLoading(false);
+    }
+  };
+
+  const handleICloudPick = async () => {
+    setIcloudPickerLoading(true);
+    try {
+      const results = await DocumentPicker.pick({
+        allowMultiSelection: true,
+        presentationStyle: 'fullScreen',
+        copyTo: 'cachesDirectory',
+      });
+      if (results.length > 0) setIcloudFiles(results as PickedICloudFile[]);
+    } catch (e: any) {
+      if (!DocumentPicker.isCancel(e)) Alert.alert('Failed to access iCloud', e.message);
+    } finally {
+      setIcloudPickerLoading(false);
     }
   };
 
@@ -459,6 +513,54 @@ export default function HomeScreen() {
         </TouchableOpacity>
       </View>
 
+      {/* iCloud Backup card — premium iOS users only */}
+      {Platform.OS === 'ios' && profile?.is_premium && (
+        <View style={styles.card}>
+          <Text style={styles.cardLabel}>iCloud Backup</Text>
+          <Text style={styles.icloudDesc}>
+            Select files from iCloud Drive to back up to your SFS account.
+          </Text>
+          <TouchableOpacity
+            style={[styles.syncButton, styles.icloudButton, icloudPickerLoading && styles.syncButtonDisabled]}
+            onPress={handleICloudPick}
+            disabled={icloudPickerLoading}
+          >
+            {icloudPickerLoading ? (
+              <ActivityIndicator color={colors.surface} size="small" />
+            ) : (
+              <>
+                <Cloud size={18} color={colors.surface} strokeWidth={1.5} style={styles.syncIcon} />
+                <Text style={styles.syncButtonText}>Select iCloud Files</Text>
+              </>
+            )}
+          </TouchableOpacity>
+        </View>
+      )}
+
+      {/* Google Backup card — premium users with Google linked */}
+      {profile?.is_premium && (
+        <View style={styles.card}>
+          <Text style={styles.cardLabel}>Google Backup</Text>
+          <Text style={styles.icloudDesc}>
+            Back up files from Google Drive and Google Photos to your SFS account.
+          </Text>
+          <TouchableOpacity
+            style={[styles.syncButton, styles.googleButton, googleBackupLoading && styles.syncButtonDisabled]}
+            onPress={handleGoogleBackup}
+            disabled={googleBackupLoading}
+          >
+            {googleBackupLoading ? (
+              <ActivityIndicator color={colors.surface} size="small" />
+            ) : (
+              <>
+                <Cloud size={18} color={colors.surface} strokeWidth={1.5} style={styles.syncIcon} />
+                <Text style={styles.syncButtonText}>Fetch Google Files</Text>
+              </>
+            )}
+          </TouchableOpacity>
+        </View>
+      )}
+
       {/* Favorites card */}
       <View style={styles.card}>
         <View style={styles.cardHeader}>
@@ -563,6 +665,39 @@ export default function HomeScreen() {
         usedBytes={usedBytes}
         onConfirm={handlePreviewConfirm}
         onCancel={() => setPreviewItems(null)}
+        onStoragePurchased={(newQuota) => {
+          setLocalQuotaBytes(newQuota);
+          refreshProfile().catch(() => {});
+        }}
+      />
+
+      <GoogleBackupModal
+        visible={googleBackupItems !== null}
+        items={googleBackupItems ?? []}
+        accessToken={googleAccessToken}
+        quotaBytes={quotaBytes}
+        usedBytes={usedBytes}
+        onClose={() => setGoogleBackupItems(null)}
+        onDone={() => {
+          setGoogleBackupItems(null);
+          refreshProfile().catch(() => {});
+        }}
+        onStoragePurchased={(newQuota) => {
+          setLocalQuotaBytes(newQuota);
+          refreshProfile().catch(() => {});
+        }}
+      />
+
+      <ICloudBackupModal
+        visible={icloudFiles !== null}
+        files={icloudFiles ?? []}
+        quotaBytes={quotaBytes}
+        usedBytes={usedBytes}
+        onClose={() => setIcloudFiles(null)}
+        onDone={() => {
+          setIcloudFiles(null);
+          refreshProfile().catch(() => {});
+        }}
         onStoragePurchased={(newQuota) => {
           setLocalQuotaBytes(newQuota);
           refreshProfile().catch(() => {});
@@ -781,4 +916,8 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   sheetSpinner: { marginTop: spacing.sm },
+
+  icloudDesc: { fontSize: 13, color: colors.textSecondary, marginBottom: spacing.sm, lineHeight: 18 },
+  icloudButton:  { backgroundColor: colors.info },
+  googleButton:  { backgroundColor: colors.success },
 });

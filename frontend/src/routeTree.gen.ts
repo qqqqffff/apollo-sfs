@@ -9,8 +9,10 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
+import { Route as TermsRouteImport } from './routes/terms'
 import { Route as SuspendedRouteImport } from './routes/suspended'
 import { Route as RegisterRouteImport } from './routes/register'
+import { Route as PrivacyRouteImport } from './routes/privacy'
 import { Route as MathGameRouteImport } from './routes/math-game'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as InterestRouteImport } from './routes/interest'
@@ -31,6 +33,11 @@ import { Route as AuthAdminBansRouteImport } from './routes/_auth.admin/bans'
 import { Route as AuthAdminBannedIpsRouteImport } from './routes/_auth.admin/banned-ips'
 import { Route as AuthAdminAlarmRouteImport } from './routes/_auth.admin/alarm'
 
+const TermsRoute = TermsRouteImport.update({
+  id: '/terms',
+  path: '/terms',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const SuspendedRoute = SuspendedRouteImport.update({
   id: '/suspended',
   path: '/suspended',
@@ -39,6 +46,11 @@ const SuspendedRoute = SuspendedRouteImport.update({
 const RegisterRoute = RegisterRouteImport.update({
   id: '/register',
   path: '/register',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const PrivacyRoute = PrivacyRouteImport.update({
+  id: '/privacy',
+  path: '/privacy',
   getParentRoute: () => rootRouteImport,
 } as any)
 const MathGameRoute = MathGameRouteImport.update({
@@ -142,8 +154,10 @@ export interface FileRoutesByFullPath {
   '/interest': typeof InterestRoute
   '/login': typeof LoginRoute
   '/math-game': typeof MathGameRoute
+  '/privacy': typeof PrivacyRoute
   '/register': typeof RegisterRoute
   '/suspended': typeof SuspendedRoute
+  '/terms': typeof TermsRoute
   '/premium': typeof AuthPremiumRoute
   '/admin/alarm': typeof AuthAdminAlarmRoute
   '/admin/banned-ips': typeof AuthAdminBannedIpsRoute
@@ -164,8 +178,10 @@ export interface FileRoutesByTo {
   '/interest': typeof InterestRoute
   '/login': typeof LoginRoute
   '/math-game': typeof MathGameRoute
+  '/privacy': typeof PrivacyRoute
   '/register': typeof RegisterRoute
   '/suspended': typeof SuspendedRoute
+  '/terms': typeof TermsRoute
   '/premium': typeof AuthPremiumRoute
   '/admin/alarm': typeof AuthAdminAlarmRoute
   '/admin/banned-ips': typeof AuthAdminBannedIpsRoute
@@ -188,8 +204,10 @@ export interface FileRoutesById {
   '/interest': typeof InterestRoute
   '/login': typeof LoginRoute
   '/math-game': typeof MathGameRoute
+  '/privacy': typeof PrivacyRoute
   '/register': typeof RegisterRoute
   '/suspended': typeof SuspendedRoute
+  '/terms': typeof TermsRoute
   '/_auth/premium': typeof AuthPremiumRoute
   '/_auth/admin/alarm': typeof AuthAdminAlarmRoute
   '/_auth/admin/banned-ips': typeof AuthAdminBannedIpsRoute
@@ -212,8 +230,10 @@ export interface FileRouteTypes {
     | '/interest'
     | '/login'
     | '/math-game'
+    | '/privacy'
     | '/register'
     | '/suspended'
+    | '/terms'
     | '/premium'
     | '/admin/alarm'
     | '/admin/banned-ips'
@@ -234,8 +254,10 @@ export interface FileRouteTypes {
     | '/interest'
     | '/login'
     | '/math-game'
+    | '/privacy'
     | '/register'
     | '/suspended'
+    | '/terms'
     | '/premium'
     | '/admin/alarm'
     | '/admin/banned-ips'
@@ -257,8 +279,10 @@ export interface FileRouteTypes {
     | '/interest'
     | '/login'
     | '/math-game'
+    | '/privacy'
     | '/register'
     | '/suspended'
+    | '/terms'
     | '/_auth/premium'
     | '/_auth/admin/alarm'
     | '/_auth/admin/banned-ips'
@@ -281,12 +305,21 @@ export interface RootRouteChildren {
   InterestRoute: typeof InterestRoute
   LoginRoute: typeof LoginRoute
   MathGameRoute: typeof MathGameRoute
+  PrivacyRoute: typeof PrivacyRoute
   RegisterRoute: typeof RegisterRoute
   SuspendedRoute: typeof SuspendedRoute
+  TermsRoute: typeof TermsRoute
 }
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
+    '/terms': {
+      id: '/terms'
+      path: '/terms'
+      fullPath: '/terms'
+      preLoaderRoute: typeof TermsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/suspended': {
       id: '/suspended'
       path: '/suspended'
@@ -299,6 +332,13 @@ declare module '@tanstack/react-router' {
       path: '/register'
       fullPath: '/register'
       preLoaderRoute: typeof RegisterRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/privacy': {
+      id: '/privacy'
+      path: '/privacy'
+      fullPath: '/privacy'
+      preLoaderRoute: typeof PrivacyRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/math-game': {
@@ -478,8 +518,10 @@ const rootRouteChildren: RootRouteChildren = {
   InterestRoute: InterestRoute,
   LoginRoute: LoginRoute,
   MathGameRoute: MathGameRoute,
+  PrivacyRoute: PrivacyRoute,
   RegisterRoute: RegisterRoute,
   SuspendedRoute: SuspendedRoute,
+  TermsRoute: TermsRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

@@ -2,7 +2,9 @@ import React, { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Modal,
   Platform,
+  Pressable,
   ScrollView,
   StyleSheet,
   Switch,
@@ -12,11 +14,18 @@ import {
 } from 'react-native';
 import appleAuth from '@invertase/react-native-apple-authentication';
 import { GoogleSignin, statusCodes } from '@react-native-google-signin/google-signin';
-import { Bug, Cpu, HardDrive, LogOut, Server, Thermometer, Unplug, Wifi } from 'lucide-react-native';
+import { Bug, Cpu, HardDrive, Key, LogOut, Rocket, Server, Thermometer, Upload, Wifi, Zap } from 'lucide-react-native';
 import { linkSocial, unlinkSocial } from '../api/auth';
 import { ALARM_TYPES, type AlarmSettings, getAlarmSettings, toggleAlarmSubscription } from '../api/alarms';
 import { useAuth } from '../context/AuthContext';
 import { colors, radius, shadow, spacing } from '../theme';
+
+const PREMIUM_FEATURES: { Icon: React.ComponentType<{ size: number; color: string; strokeWidth?: number }>; title: string; description: string }[] = [
+  { Icon: Key,    title: 'Per-directory API keys',  description: 'Issue scoped keys tied to specific folders for fine-grained access control.' },
+  { Icon: Server, title: 'S3-compatible API',        description: 'Access your files via an S3-like HTTP API, compatible with standard S3 clients.' },
+  { Icon: Upload, title: 'Expanded storage quota',   description: 'Get significantly more storage space for your files and media.' },
+  { Icon: Zap,    title: 'Priority support',         description: 'Jump to the front of the queue when you need help from the SFS team.' },
+];
 
 const ALARM_ICONS: Record<string, React.ComponentType<{ size: number; color: string; strokeWidth?: number }>> = {
   cpu_usage: Cpu,
@@ -32,6 +41,7 @@ export default function ProfileScreen() {
   const [linking, setLinking] = useState(false);
   const [alarmSettings, setAlarmSettings] = useState<AlarmSettings | null>(null);
   const [alarmLoading, setAlarmLoading] = useState(false);
+  const [upgradeVisible, setUpgradeVisible] = useState(false);
 
   const loadAlarms = useCallback(async () => {
     if (!profile?.is_admin) return;
@@ -125,10 +135,79 @@ export default function ProfileScreen() {
         </View>
         <View style={styles.divider} />
         <View style={styles.infoRow}>
+          <Text style={styles.infoLabel}>Account type</Text>
+          <Text style={[
+            styles.infoValue,
+            profile?.is_admin ? styles.badgeAdmin : profile?.is_premium ? styles.badgePremium : styles.badgeUser,
+          ]}>
+            {profile?.is_admin ? 'Admin' : profile?.is_premium ? 'Premium' : 'User'}
+          </Text>
+        </View>
+        <View style={styles.divider} />
+        <View style={styles.infoRow}>
           <Text style={styles.infoLabel}>Storage used</Text>
           <Text style={styles.infoValue}>{usedPct}%</Text>
         </View>
       </View>
+
+      {/* Premium upgrade card (non-premium, non-admin only) */}
+      {!profile?.is_premium && !profile?.is_admin && (
+        <View style={styles.premiumCard}>
+          <View style={styles.premiumCardInner}>
+            <View style={styles.premiumIconWrap}>
+              <Rocket size={20} color={colors.warning} strokeWidth={1.5} />
+            </View>
+            <View style={styles.premiumCardText}>
+              <Text style={styles.premiumCardTitle}>Upgrade to Premium</Text>
+              <Text style={styles.premiumCardDesc}>Unlock the S3 API, per-directory API keys, and more.</Text>
+            </View>
+            <TouchableOpacity style={styles.upgradeBtn} onPress={() => setUpgradeVisible(true)}>
+              <Text style={styles.upgradeBtnText}>Upgrade</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      )}
+
+      {/* Premium features modal */}
+      <Modal
+        visible={upgradeVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setUpgradeVisible(false)}
+      >
+        <Pressable style={styles.overlay} onPress={() => setUpgradeVisible(false)}>
+          <Pressable style={styles.upgradeSheet} onPress={(e) => e.stopPropagation()}>
+            <View style={styles.upgradeHeader}>
+              <Rocket size={22} color={colors.warning} strokeWidth={1.5} />
+              <View style={styles.upgradeHeaderText}>
+                <Text style={styles.upgradeTitle}>Premium</Text>
+                <Text style={styles.upgradeSubtitle}>One-time payment. No subscriptions.</Text>
+              </View>
+            </View>
+
+            {PREMIUM_FEATURES.map(({ Icon, title, description }, i) => (
+              <View key={title} style={[styles.featureRow, i > 0 && styles.featureRowBorder]}>
+                <View style={styles.featureIconWrap}>
+                  <Icon size={16} color={colors.warning} strokeWidth={1.5} />
+                </View>
+                <View style={styles.featureText}>
+                  <Text style={styles.featureTitle}>{title}</Text>
+                  <Text style={styles.featureDesc}>{description}</Text>
+                </View>
+              </View>
+            ))}
+
+            <View style={styles.upgradeActions}>
+              <TouchableOpacity style={styles.maybeLaterBtn} onPress={() => setUpgradeVisible(false)}>
+                <Text style={styles.maybeLaterText}>Maybe later</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.getPremiumBtn} onPress={() => setUpgradeVisible(false)}>
+                <Text style={styles.getPremiumText}>Get Premium</Text>
+              </TouchableOpacity>
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
 
       {/* Linked accounts */}
       <View style={styles.section}>
@@ -283,4 +362,65 @@ const styles = StyleSheet.create({
     ...shadow.sm,
   },
   signOutText: { color: colors.error, fontWeight: '600', fontSize: 16 },
+
+  badgeAdmin:   { color: colors.primary },
+  badgePremium: { color: colors.warning },
+  badgeUser:    {},
+
+  premiumCard: {
+    backgroundColor: colors.warningBg,
+    borderRadius: radius.lg,
+    borderWidth: 1.5,
+    borderColor: '#fcd34d',
+    marginBottom: spacing.md,
+    ...shadow.sm,
+  },
+  premiumCardInner: { flexDirection: 'row', alignItems: 'center', padding: spacing.md, gap: spacing.sm },
+  premiumIconWrap: {
+    width: 36,
+    height: 36,
+    borderRadius: radius.sm,
+    backgroundColor: '#fef3c7',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  premiumCardText: { flex: 1 },
+  premiumCardTitle: { fontSize: 14, fontWeight: '600', color: colors.textPrimary },
+  premiumCardDesc:  { fontSize: 12, color: colors.textSecondary, marginTop: 2 },
+  upgradeBtn: { backgroundColor: colors.primary, borderRadius: radius.sm, paddingHorizontal: 12, paddingVertical: 7 },
+  upgradeBtnText: { color: '#fff', fontSize: 13, fontWeight: '600' },
+
+  overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.55)', justifyContent: 'center', alignItems: 'center', padding: spacing.md },
+  upgradeSheet: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    width: '100%',
+    maxWidth: 420,
+    padding: spacing.lg,
+    ...shadow.sm,
+  },
+  upgradeHeader: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.md },
+  upgradeHeaderText: { flex: 1 },
+  upgradeTitle:    { fontSize: 17, fontWeight: '700', color: colors.textPrimary },
+  upgradeSubtitle: { fontSize: 13, color: colors.textSecondary, marginTop: 2 },
+
+  featureRow: { flexDirection: 'row', alignItems: 'flex-start', paddingVertical: 10, gap: spacing.sm },
+  featureRowBorder: { borderTopWidth: 1, borderTopColor: colors.divider },
+  featureIconWrap: {
+    width: 30,
+    height: 30,
+    borderRadius: radius.sm,
+    backgroundColor: colors.warningBg,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  featureText:  { flex: 1 },
+  featureTitle: { fontSize: 14, fontWeight: '600', color: colors.textPrimary },
+  featureDesc:  { fontSize: 12, color: colors.textSecondary, marginTop: 2, lineHeight: 16 },
+
+  upgradeActions: { flexDirection: 'row', justifyContent: 'flex-end', gap: spacing.sm, marginTop: spacing.md },
+  maybeLaterBtn: { borderWidth: 1, borderColor: colors.border, borderRadius: radius.sm, paddingHorizontal: 14, paddingVertical: 9 },
+  maybeLaterText: { fontSize: 14, color: colors.textSecondary, fontWeight: '500' },
+  getPremiumBtn: { backgroundColor: colors.primary, borderRadius: radius.sm, paddingHorizontal: 14, paddingVertical: 9 },
+  getPremiumText: { fontSize: 14, color: '#fff', fontWeight: '600' },
 });

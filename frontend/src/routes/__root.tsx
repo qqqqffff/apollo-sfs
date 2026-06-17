@@ -63,7 +63,27 @@ function RootLayout() {
       {!isAuthenticated && <PublicHeader />}
       <Outlet />
       <NotificationBanner />
+      <Footer />
     </>
+  )
+}
+
+function Footer() {
+  return (
+    <footer className="border-t border-gray-200 bg-white px-6 py-4 flex items-center justify-center gap-6">
+      <Link
+        to="/terms"
+        className="text-xs text-gray-400 hover:text-gray-600 no-underline transition-colors"
+      >
+        Terms of Service
+      </Link>
+      <Link
+        to="/privacy"
+        className="text-xs text-gray-400 hover:text-gray-600 no-underline transition-colors"
+      >
+        Privacy Policy
+      </Link>
+    </footer>
   )
 }
 

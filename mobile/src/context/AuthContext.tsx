@@ -8,6 +8,8 @@ interface UserProfile {
   storage_used_bytes: number;
   storage_quota_bytes: number;
   is_admin: boolean;
+  is_premium: boolean;
+  premium_granted_at: string | null;
 }
 
 interface AuthContextValue {

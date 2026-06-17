@@ -6,9 +6,13 @@ import { SyncProvider } from './src/context/SyncContext';
 import AppNavigator from './src/navigation/AppNavigator';
 import { GOOGLE_CLIENT_ID, GOOGLE_IOS_CLIENT_ID } from './src/config';
 
-GoogleSignin.configure({ 
+GoogleSignin.configure({
   webClientId: GOOGLE_CLIENT_ID,
-  iosClientId: GOOGLE_IOS_CLIENT_ID
+  iosClientId: GOOGLE_IOS_CLIENT_ID,
+  scopes: [
+    'https://www.googleapis.com/auth/drive',
+    'https://www.googleapis.com/auth/photoslibrary.readonly',
+  ],
 });
 
 export default function App() {

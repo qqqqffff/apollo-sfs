@@ -344,21 +344,19 @@ function ExpansionTab() {
   const [filter, setFilter] = useState<ExpansionRequestFilter>({})
   const [cursor, setCursor] = useState<string | undefined>()
 
-  // Filters UI state
+  // Filters UI state (draft — not applied until "Apply" is clicked)
   const [statusFilter, setStatusFilter] = useState('')
   const [fromFilter, setFromFilter]     = useState('')
   const [toFilter, setToFilter]         = useState('')
 
-  const appliedFilter: ExpansionRequestFilter = {
-    ...(statusFilter ? { status: statusFilter } : {}),
-    ...(fromFilter   ? { from: fromFilter }     : {}),
-    ...(toFilter     ? { to: toFilter }         : {}),
-    ...(cursor       ? { cursor }               : {}),
+  const activeFilter: ExpansionRequestFilter = {
+    ...filter,
+    ...(cursor ? { cursor } : {}),
   }
 
-  const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ['admin', 'expansion-requests', appliedFilter],
-    queryFn: () => listExpansionRequests(appliedFilter),
+  const { data, isLoading, error } = useQuery({
+    queryKey: ['admin', 'expansion-requests', activeFilter],
+    queryFn: () => listExpansionRequests(activeFilter),
   })
 
   // Fulfill
@@ -401,8 +399,11 @@ function ExpansionTab() {
 
   function applyFilters() {
     setCursor(undefined)
-    setFilter(appliedFilter)
-    refetch()
+    setFilter({
+      ...(statusFilter ? { status: statusFilter } : {}),
+      ...(fromFilter   ? { from: fromFilter }     : {}),
+      ...(toFilter     ? { to: toFilter }         : {}),
+    })
   }
 
   function resetFilters() {

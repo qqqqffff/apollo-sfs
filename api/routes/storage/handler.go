@@ -36,6 +36,7 @@ type serverResponse struct {
 	TotalCapacityBytes int64  `json:"total_capacity_bytes"`
 	AvailableBytes     int64  `json:"available_bytes"`
 	PingURL            string `json:"ping_url"`
+	DriveType          string `json:"drive_type"`
 }
 
 // ListServers returns all active servers with their aggregated capacity so the
@@ -56,6 +57,7 @@ func (h *Handler) ListServers(c *gin.Context) {
 			TotalCapacityBytes: s.TotalCapacityBytes,
 			AvailableBytes:     s.AvailableBytes,
 			PingURL:            fmt.Sprintf("/api/v1/storage/servers/%s/ping", s.ServerID),
+			DriveType:          s.DriveType,
 		}
 	}
 

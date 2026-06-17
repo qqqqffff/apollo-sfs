@@ -483,7 +483,14 @@ export default function StorageUpgradeModal({
                     const sel = servers.find((s) => s.id === selectedServerId);
                     return sel ? (
                       <>
-                        <Text style={styles.serverSelectorName}>{sel.name}</Text>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                          <Text style={styles.serverSelectorName}>{sel.name}</Text>
+                          <View style={sel.drive_type === 'nvme' ? styles.driveBadgeFast : styles.driveBadgeSlow}>
+                            <Text style={styles.driveBadgeText}>
+                              {sel.drive_type === 'nvme' ? 'Fast' : 'Slow'}
+                            </Text>
+                          </View>
+                        </View>
                         <Text style={styles.serverSelectorMeta}>
                           {sel.ping_ms !== null ? `${sel.ping_ms} ms  ·  ` : ''}
                           {formatBytes(sel.available_bytes)} available
@@ -574,9 +581,19 @@ export default function StorageUpgradeModal({
             {/* Expansion notice shown when selected plan is unavailable */}
             {isExpansion && selectedPlan && (
               <View style={styles.expansionNotice}>
-                <Text style={styles.expansionNoticeTitle}>Capacity Expansion Request</Text>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                  <Text style={styles.expansionNoticeTitle}>Capacity Expansion Request</Text>
+                  {selectedServer && (
+                    <View style={selectedServer.drive_type === 'nvme' ? styles.driveBadgeFast : styles.driveBadgeSlow}>
+                      <Text style={styles.driveBadgeText}>
+                        {selectedServer.drive_type === 'nvme' ? 'Fast' : 'Slow'}
+                      </Text>
+                    </View>
+                  )}
+                </View>
                 <Text style={styles.expansionNoticeBody}>
-                  This server doesn't have enough free space for {selectedPlan.label} right now.
+                  This server doesn't have enough free space for {selectedPlan.label}{' '}
+                  {selectedServer ? `(${selectedServer.drive_type === 'nvme' ? 'fast NVMe' : 'slow HDD'} storage)` : ''} right now.
                   Pay a <Text style={{ fontWeight: '700' }}>{depositDisplay} deposit (50%)</Text> to
                   reserve your slot. Our team will expand capacity within{' '}
                   <Text style={{ fontWeight: '700' }}>14 days</Text>. If we can't fulfil the request
@@ -616,11 +633,19 @@ export default function StorageUpgradeModal({
           {/* Plan selection footer */}
           {isSelecting && (
             <>
+              {servers.length === 0 && !serversLoading && (
+                <View style={styles.noServersNotice}>
+                  <Text style={styles.noServersNoticeText}>
+                    No servers are currently available. Payment is disabled until a server comes online.
+                  </Text>
+                </View>
+              )}
+
               {Platform.OS === 'ios' && canApplePay && (
                 <TouchableOpacity
-                  style={[styles.applePayBtn, !selectedPlanId && styles.btnDisabled]}
+                  style={[styles.applePayBtn, (!selectedPlanId || servers.length === 0) && styles.btnDisabled]}
                   onPress={handleApplePay}
-                  disabled={!selectedPlanId}
+                  disabled={!selectedPlanId || servers.length === 0}
                   activeOpacity={0.85}
                 >
                   <Text style={styles.applePayText}>{''} Pay</Text>
@@ -629,9 +654,9 @@ export default function StorageUpgradeModal({
 
               {Platform.OS === 'android' && canGooglePay && (
                 <TouchableOpacity
-                  style={[styles.googlePayBtn, !selectedPlanId && styles.btnDisabled]}
+                  style={[styles.googlePayBtn, (!selectedPlanId || servers.length === 0) && styles.btnDisabled]}
                   onPress={handleGooglePay}
-                  disabled={!selectedPlanId}
+                  disabled={!selectedPlanId || servers.length === 0}
                   activeOpacity={0.85}
                 >
                   <Text style={styles.googlePayText}>G Pay</Text>
@@ -639,26 +664,26 @@ export default function StorageUpgradeModal({
               )}
 
               <TouchableOpacity
-                style={[styles.cardBtn, !selectedPlanId && styles.btnDisabled]}
+                style={[styles.cardBtn, (!selectedPlanId || servers.length === 0) && styles.btnDisabled]}
                 onPress={() => setPurchaseState('card')}
-                disabled={!selectedPlanId}
+                disabled={!selectedPlanId || servers.length === 0}
                 activeOpacity={0.85}
               >
                 <CreditCard
                   size={16}
-                  color={selectedPlanId ? colors.textPrimary : colors.textMuted}
+                  color={(selectedPlanId && servers.length > 0) ? colors.textPrimary : colors.textMuted}
                   strokeWidth={2}
                   style={{ marginRight: 6 }}
                 />
-                <Text style={[styles.cardBtnText, !selectedPlanId && styles.disabledText]}>
+                <Text style={[styles.cardBtnText, (!selectedPlanId || servers.length === 0) && styles.disabledText]}>
                   Pay by Card
                 </Text>
               </TouchableOpacity>
 
               <TouchableOpacity
-                style={[styles.paypalBtn, !selectedPlanId && styles.btnDisabled]}
+                style={[styles.paypalBtn, (!selectedPlanId || servers.length === 0) && styles.btnDisabled]}
                 onPress={handlePayPal}
-                disabled={!selectedPlanId}
+                disabled={!selectedPlanId || servers.length === 0}
                 activeOpacity={0.85}
               >
                 <Text style={styles.paypalPay}>Pay</Text>
@@ -754,9 +779,16 @@ export default function StorageUpgradeModal({
                     activeOpacity={0.75}
                   >
                     <View style={styles.serverPickerRowLeft}>
-                      <Text style={[styles.serverPickerName, sel && styles.serverPickerNameActive]}>
-                        {s.name}
-                      </Text>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                        <Text style={[styles.serverPickerName, sel && styles.serverPickerNameActive]}>
+                          {s.name}
+                        </Text>
+                        <View style={s.drive_type === 'nvme' ? styles.driveBadgeFast : styles.driveBadgeSlow}>
+                          <Text style={styles.driveBadgeText}>
+                            {s.drive_type === 'nvme' ? 'Fast' : 'Slow'}
+                          </Text>
+                        </View>
+                      </View>
                       <Text style={styles.serverPickerMeta}>
                         {s.ping_ms !== null ? `${s.ping_ms} ms  ·  ` : ''}
                         {formatBytes(s.available_bytes)} free of {formatBytes(s.total_capacity_bytes)}
@@ -979,6 +1011,23 @@ const styles = StyleSheet.create({
   serverPickerCheck: {
     width: 9, height: 9, borderRadius: 5, backgroundColor: colors.primary, marginLeft: spacing.sm,
   },
+
+  // Drive speed badges
+  driveBadgeFast: {
+    backgroundColor: '#dcfce7', borderRadius: 4, paddingHorizontal: 5, paddingVertical: 1,
+  },
+  driveBadgeSlow: {
+    backgroundColor: '#f3f4f6', borderRadius: 4, paddingHorizontal: 5, paddingVertical: 1,
+  },
+  driveBadgeText: { fontSize: 10, fontWeight: '700', color: '#374151', textTransform: 'uppercase', letterSpacing: 0.3 },
+
+  // No servers notice
+  noServersNotice: {
+    backgroundColor: '#fef2f2', borderRadius: radius.md,
+    padding: spacing.sm, marginBottom: spacing.sm,
+    borderWidth: 1, borderColor: '#fecaca',
+  },
+  noServersNoticeText: { fontSize: 13, color: '#b91c1c', textAlign: 'center' },
 
   // Unavailable plan card variant
   planCardUnavailable: { borderStyle: 'dashed', opacity: 0.75 },

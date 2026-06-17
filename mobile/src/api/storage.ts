@@ -7,6 +7,7 @@ export interface ServerInfo {
   total_capacity_bytes: number;
   available_bytes: number;
   ping_url: string;
+  drive_type: 'nvme' | 'hdd';
 }
 
 export interface ServerInfoWithPing extends ServerInfo {

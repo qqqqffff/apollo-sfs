@@ -135,6 +135,8 @@ type ServerCapacity struct {
 	State              string
 	TotalCapacityBytes int64
 	AvailableBytes     int64
+	// DriveType is "nvme" if any active drive label contains "nvme" (case-insensitive), otherwise "hdd".
+	DriveType string
 }
 
 // ListServerCapacities returns capacity aggregated across active drives for
@@ -144,7 +146,8 @@ func (q *Queries) ListServerCapacities(ctx context.Context) ([]ServerCapacity, e
 		SELECT
 			s.id, s.name, s.state,
 			COALESCE(SUM(d.capacity_bytes), 0)                                     AS total_capacity_bytes,
-			COALESCE(SUM(d.capacity_bytes - COALESCE(sub.allocated, 0)), 0)        AS available_bytes
+			COALESCE(SUM(d.capacity_bytes - COALESCE(sub.allocated, 0)), 0)        AS available_bytes,
+			CASE WHEN BOOL_OR(lower(d.label) LIKE '%nvme%') THEN 'nvme' ELSE 'hdd' END AS drive_type
 		FROM servers s
 		LEFT JOIN drives d ON d.server_id = s.id AND d.is_active = true
 		LEFT JOIN (
@@ -166,7 +169,7 @@ func (q *Queries) ListServerCapacities(ctx context.Context) ([]ServerCapacity, e
 	for rows.Next() {
 		var sc ServerCapacity
 		if err := rows.Scan(&sc.ServerID, &sc.Name, &sc.State,
-			&sc.TotalCapacityBytes, &sc.AvailableBytes); err != nil {
+			&sc.TotalCapacityBytes, &sc.AvailableBytes, &sc.DriveType); err != nil {
 			return nil, fmt.Errorf("ListServerCapacities scan: %w", err)
 		}
 		out = append(out, sc)

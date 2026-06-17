@@ -146,8 +146,8 @@ func (q *Queries) ListServerCapacities(ctx context.Context) ([]ServerCapacity, e
 		SELECT
 			s.id, s.name, s.state,
 			COALESCE(SUM(d.capacity_bytes), 0)                                     AS total_capacity_bytes,
-			COALESCE(SUM(d.capacity_bytes - COALESCE(sub.allocated, 0)), 0)        AS available_bytes,
-			CASE WHEN BOOL_OR(lower(d.label) LIKE '%nvme%') THEN 'nvme' ELSE 'hdd' END AS drive_type
+			COALESCE(SUM(GREATEST(d.capacity_bytes - COALESCE(sub.allocated, 0), 0)), 0) AS available_bytes,
+			CASE WHEN COALESCE(BOOL_OR(lower(d.label) LIKE '%nvme%'), false) THEN 'nvme' ELSE 'hdd' END AS drive_type
 		FROM servers s
 		LEFT JOIN drives d ON d.server_id = s.id AND d.is_active = true
 		LEFT JOIN (

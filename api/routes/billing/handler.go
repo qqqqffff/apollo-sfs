@@ -1,6 +1,7 @@
 package billing
 
 import (
+	"fmt"
 	"log"
 	"net/http"
 	"time"
@@ -135,6 +136,10 @@ func (h *Handler) CaptureWalletOrder(c *gin.Context) {
 	if err != nil {
 		log.Printf("billing CaptureWalletOrder paypal: %v", err)
 		c.AbortWithStatusJSON(http.StatusBadGateway, gin.H{"error": "paypal capture failed"})
+		return
+	}
+
+	if err := h.checkDriveCapacity(c, username, existing.BytesAdded); err != nil {
 		return
 	}
 
@@ -336,6 +341,31 @@ func (h *Handler) ChargeGooglePay(c *gin.Context) {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+// checkDriveCapacity returns an error response and non-nil error if the user's
+// drive lacks sufficient unallocated space for bytesAdded. Callers should return
+// immediately on non-nil error.
+func (h *Handler) checkDriveCapacity(c *gin.Context, username string, bytesAdded int64) error {
+	alloc, err := h.queries.GetUserDrive(c.Request.Context(), username)
+	if err != nil || alloc == nil {
+		// User has no drive yet — allocation happens at purchase; skip check.
+		return nil
+	}
+	avail, err := h.queries.GetDriveAvailableBytes(c.Request.Context(), alloc.DriveID)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "check drive capacity"})
+		return err
+	}
+	if avail < bytesAdded {
+		c.AbortWithStatusJSON(http.StatusConflict, gin.H{
+			"error":           "insufficient drive capacity",
+			"available_bytes": avail,
+			"requested_bytes": bytesAdded,
+		})
+		return fmt.Errorf("drive full: %d available, %d requested", avail, bytesAdded)
+	}
+	return nil
+}
+
 // persistDirectCapture inserts a completed storage_order row and adds the
 // purchased bytes to the user's quota. Returns the new quota on success, or
 // writes an error response and returns a non-nil error so the caller can return
@@ -346,6 +376,9 @@ func (h *Handler) persistDirectCapture(
 	pl Plan,
 	cap *services.CaptureOrderResult,
 ) (int64, error) {
+	if err := h.checkDriveCapacity(c, username, pl.BytesAdded); err != nil {
+		return 0, err
+	}
 	now := time.Now()
 	order := &models.StorageOrder{
 		Username:        username,

@@ -3,6 +3,8 @@ package billing
 import (
 	"context"
 
+	"github.com/google/uuid"
+
 	"apollo-sfs.com/api/db"
 	"apollo-sfs.com/api/models"
 )
@@ -14,6 +16,8 @@ type Querier interface {
 	GetStorageOrderByPayPalOrderID(ctx context.Context, orderID string) (*models.StorageOrder, error)
 	MarkStorageOrderCaptured(ctx context.Context, orderID, captureID string, raw []byte) (bool, error)
 	AddUserQuota(ctx context.Context, username string, bytesAdded int64) (int64, error)
+	GetUserDrive(ctx context.Context, username string) (*models.UserDriveAllocation, error)
+	GetDriveAvailableBytes(ctx context.Context, driveID uuid.UUID) (int64, error)
 }
 
 // Compile-time check.

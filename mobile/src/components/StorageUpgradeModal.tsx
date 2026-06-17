@@ -97,6 +97,7 @@ export default function StorageUpgradeModal({
   const [selectedServerId, setSelectedServerId] = useState<string | null>(null);
   const [serverPickerVisible, setServerPickerVisible] = useState(false);
   const [serversLoading, setServersLoading] = useState(false);
+  const [serversError, setServersError] = useState<string | null>(null);
 
   const [canApplePay, setCanApplePay] = useState(false);
   const [canGooglePay, setCanGooglePay] = useState(false);
@@ -132,14 +133,19 @@ export default function StorageUpgradeModal({
     }
 
     setServersLoading(true);
+    setServersError(null);
     listServersWithPing()
       .then((list) => {
         setServers(list);
-        if (list.length > 0 && selectedServerId === null) {
-          setSelectedServerId(list[0].id);
-        }
+        setSelectedServerId((prev) => {
+          if (list.length === 0) return null;
+          const stillPresent = list.some((s) => s.id === prev);
+          return stillPresent ? prev : list[0].id;
+        });
       })
-      .catch(() => {})
+      .catch((e: any) => {
+        setServersError(e?.response?.data?.error ?? e?.message ?? 'Could not load servers.');
+      })
       .finally(() => setServersLoading(false));
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible]);
@@ -497,8 +503,8 @@ export default function StorageUpgradeModal({
                         </Text>
                       </>
                     ) : (
-                      <Text style={styles.serverSelectorName}>
-                        {serversLoading ? 'Finding best server…' : 'No servers available'}
+                      <Text style={[styles.serverSelectorName, serversError ? styles.serverSelectorError : null]}>
+                        {serversLoading ? 'Finding best server…' : serversError ? serversError : 'No servers available'}
                       </Text>
                     );
                   })()}
@@ -636,7 +642,8 @@ export default function StorageUpgradeModal({
               {servers.length === 0 && !serversLoading && (
                 <View style={styles.noServersNotice}>
                   <Text style={styles.noServersNoticeText}>
-                    No servers are currently available. Payment is disabled until a server comes online.
+                    <Text>No servers are currently available.</Text>
+                    <Text>Storage upgrade requests are disabled until one is available</Text>
                   </Text>
                 </View>
               )}
@@ -982,6 +989,7 @@ const styles = StyleSheet.create({
   serverSelectorLeft: { flexDirection: 'row', alignItems: 'center', flex: 1 },
   serverSelectorName: { fontSize: 15, fontWeight: '600', color: colors.textPrimary },
   serverSelectorMeta: { fontSize: 12, color: colors.textSecondary, marginTop: 2 },
+  serverSelectorError: { color: '#b91c1c', fontWeight: '500' },
 
   // Server picker modal
   serverPickerOverlay: {

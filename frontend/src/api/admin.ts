@@ -169,7 +169,7 @@ export function updateServer(serverId: string, params: { is_active?: boolean }) 
 
 export function addDrive(
   serverId: string,
-  params: { label: string; minio_bucket: string; capacity_bytes: number },
+  params: { label: string; minio_bucket: string },
 ) {
   return post<DriveSummary>(`/admin/system/servers/${serverId}/drives`, params)
 }
@@ -177,7 +177,7 @@ export function addDrive(
 export function updateDrive(
   serverId: string,
   driveId: string,
-  params: { label?: string; capacity_bytes?: number; is_active?: boolean },
+  params: { label?: string; is_active?: boolean },
 ) {
   return patch<DriveSummary>(
     `/admin/system/servers/${serverId}/drives/${driveId}`,

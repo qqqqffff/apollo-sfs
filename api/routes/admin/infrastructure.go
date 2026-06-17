@@ -139,9 +139,8 @@ func (h *Handler) UpdateServer(c *gin.Context) {
 }
 
 type addDriveRequest struct {
-	Label         string `json:"label" binding:"required"`
-	MinioBucket   string `json:"minio_bucket" binding:"required"`
-	CapacityBytes int64  `json:"capacity_bytes" binding:"required,min=1"`
+	Label       string `json:"label" binding:"required"`
+	MinioBucket string `json:"minio_bucket" binding:"required"`
 }
 
 // AddDrive handles POST /api/v1/admin/system/servers/:server_id/drives.
@@ -179,7 +178,7 @@ func (h *Handler) AddDrive(c *gin.Context) {
 	drive, err := h.queries.CreateDrive(ctx, db.CreateDriveParams{
 		ServerID:      serverID,
 		Label:         sanitize.String(req.Label),
-		CapacityBytes: req.CapacityBytes,
+		CapacityBytes: 0, // set by Sync once the drive is online
 		MinioBucket:   req.MinioBucket,
 	})
 	if err != nil {
@@ -191,16 +190,25 @@ func (h *Handler) AddDrive(c *gin.Context) {
 		return
 	}
 
+	// Auto-detect capacity from disk if the stats path is configured.
+	if h.diskStatsPath != "" {
+		if usage, err := psdisk.Usage(h.diskStatsPath); err == nil {
+			if updated, err := h.queries.UpdateDriveCapacity(ctx, drive.ID, int64(usage.Used+usage.Free)); err == nil {
+				drive = updated
+			}
+		}
+	}
+
 	c.JSON(http.StatusCreated, drive)
 }
 
 type updateDriveRequest struct {
-	Label         string `json:"label"`
-	CapacityBytes int64  `json:"capacity_bytes"`
-	IsActive      *bool  `json:"is_active"`
+	Label    string `json:"label"`
+	IsActive *bool  `json:"is_active"`
 }
 
 // UpdateDrive handles PATCH /api/v1/admin/system/servers/:server_id/drives/:drive_id.
+// Capacity is read-only via this endpoint; use the sync-capacity endpoint instead.
 func (h *Handler) UpdateDrive(c *gin.Context) {
 	ctx := c.Request.Context()
 	driveID, err := uuid.Parse(c.Param("drive_id"))
@@ -225,10 +233,6 @@ func (h *Handler) UpdateDrive(c *gin.Context) {
 	if req.Label != "" {
 		label = sanitize.String(req.Label)
 	}
-	capacityBytes := existing.CapacityBytes
-	if req.CapacityBytes > 0 {
-		capacityBytes = req.CapacityBytes
-	}
 	isActive := existing.IsActive
 	if req.IsActive != nil {
 		isActive = *req.IsActive
@@ -236,7 +240,7 @@ func (h *Handler) UpdateDrive(c *gin.Context) {
 
 	drive, err := h.queries.UpdateDrive(ctx, driveID, db.UpdateDriveParams{
 		Label:         label,
-		CapacityBytes: capacityBytes,
+		CapacityBytes: existing.CapacityBytes, // never changed here; only via SyncDriveCapacity
 		IsActive:      isActive,
 	})
 	if err != nil {

@@ -160,6 +160,7 @@ function RouteComponent() {
     onError: () => notify('error', 'Failed to sync drive capacity'),
   })
 
+
   const latest = snapshots[snapshots.length - 1]
 
   const memPct =
@@ -999,15 +1000,23 @@ function formatBytesPerSec(bps: number): string {
   return `${bps.toFixed(0)} B/s`
 }
 
+function fmtCapacity(bytes: number): string {
+  const gb = bytes / GB
+  return gb >= 1024 ? `${(gb / 1024).toFixed(1)} TB` : `${gb.toFixed(0)} GB`
+}
+
 function DriveBar({ drive, onToggle, onDelete, onSyncCapacity }: {
   drive: DriveSummary
   onToggle: () => void
   onDelete: () => void
   onSyncCapacity: () => void
 }) {
+  const syncRequired = drive.capacity_bytes === 0
+  const overAllocated = !syncRequired && drive.allocated_quota_bytes > drive.capacity_bytes
   const cap = drive.capacity_bytes || 1
   const allocPct = Math.min(100, (drive.allocated_quota_bytes / cap) * 100)
   const usedPct = Math.min(100, (drive.used_bytes / cap) * 100)
+
   return (
     <div className="flex flex-col gap-1">
       <div className="flex items-center justify-between text-xs">
@@ -1015,17 +1024,29 @@ function DriveBar({ drive, onToggle, onDelete, onSyncCapacity }: {
           <span className={`w-1.5 h-1.5 rounded-full ${drive.drive_is_active ? 'bg-green-400' : 'bg-gray-300'}`} />
           <span className="text-gray-700 font-medium">{drive.drive_label}</span>
           <span className="text-gray-400">{drive.minio_bucket}</span>
+          {syncRequired && (
+            <span className="text-amber-500 font-medium" title="Run Sync to detect actual drive capacity before this drive can accept allocations">
+              ⚠ Sync required
+            </span>
+          )}
+          {overAllocated && (
+            <span className="text-red-500 font-medium" title="Allocated quota exceeds detected drive capacity — run Sync to refresh">
+              ⚠ over-allocated
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-3 text-gray-400">
-          <span>
-            {(drive.used_bytes / GB).toFixed(1)} used ·{' '}
-            {(drive.allocated_quota_bytes / GB).toFixed(1)} allocated /{' '}
-            {(drive.capacity_bytes / GB).toFixed(0)} GB
-          </span>
+          {!syncRequired && (
+            <span>
+              {(drive.used_bytes / GB).toFixed(1)} used ·{' '}
+              {(drive.allocated_quota_bytes / GB).toFixed(1)} allocated /{' '}
+              <span className={overAllocated ? 'text-red-500' : ''}>{fmtCapacity(drive.capacity_bytes)}</span>
+            </span>
+          )}
           <button
             onClick={onSyncCapacity}
             title="Re-detect capacity from disk"
-            className="text-gray-400 hover:text-blue-600 cursor-pointer bg-transparent border border-gray-200 hover:border-blue-300 rounded px-2 py-0.5 transition-colors"
+            className={`cursor-pointer bg-transparent border rounded px-2 py-0.5 transition-colors ${syncRequired ? 'text-amber-600 border-amber-300 hover:border-amber-500' : 'text-gray-400 hover:text-blue-600 border-gray-200 hover:border-blue-300'}`}
           >
             Sync
           </button>
@@ -1043,10 +1064,12 @@ function DriveBar({ drive, onToggle, onDelete, onSyncCapacity }: {
           </button>
         </div>
       </div>
-      <div className="relative h-2 bg-gray-100 rounded-full overflow-hidden">
-        <div className="absolute inset-y-0 left-0 bg-blue-200 rounded-full" style={{ width: `${allocPct.toFixed(1)}%` }} />
-        <div className="absolute inset-y-0 left-0 bg-blue-500 rounded-full" style={{ width: `${usedPct.toFixed(1)}%` }} />
-      </div>
+      {!syncRequired && (
+        <div className="relative h-2 bg-gray-100 rounded-full overflow-hidden">
+          <div className="absolute inset-y-0 left-0 bg-blue-200 rounded-full" style={{ width: `${allocPct.toFixed(1)}%` }} />
+          <div className="absolute inset-y-0 left-0 bg-blue-500 rounded-full" style={{ width: `${usedPct.toFixed(1)}%` }} />
+        </div>
+      )}
     </div>
   )
 }
@@ -1097,21 +1120,18 @@ function AddServerForm({ onSubmit, pending }: {
 }
 
 function AddDriveForm({ onSubmit, pending }: {
-  onSubmit: (p: { label: string; minio_bucket: string; capacity_bytes: number }) => void
+  onSubmit: (p: { label: string; minio_bucket: string }) => void
   pending: boolean
 }) {
   const [open, setOpen] = useState(false)
   const [label, setLabel] = useState('')
   const [bucket, setBucket] = useState('')
-  const [capacityGb, setCapacityGb] = useState('')
 
   function submit(e: React.FormEvent) {
     e.preventDefault()
-    const gb = parseFloat(capacityGb)
-    if (isNaN(gb) || gb <= 0) return
-    onSubmit({ label, minio_bucket: bucket, capacity_bytes: Math.round(gb * GB) })
+    onSubmit({ label, minio_bucket: bucket })
     setOpen(false)
-    setLabel(''); setBucket(''); setCapacityGb('')
+    setLabel(''); setBucket('')
   }
 
   if (!open) {
@@ -1126,10 +1146,6 @@ function AddDriveForm({ onSubmit, pending }: {
     <form onSubmit={submit} className="flex flex-wrap gap-2 items-center">
       <input value={label} onChange={e => setLabel(e.target.value)} placeholder="nvme-02" required className="w-24 border border-gray-200 rounded px-2 py-1 text-xs" />
       <input value={bucket} onChange={e => setBucket(e.target.value)} placeholder="Bucket name" required className="w-32 border border-gray-200 rounded px-2 py-1 text-xs" />
-      <div className="flex items-center gap-1">
-        <input value={capacityGb} onChange={e => setCapacityGb(e.target.value)} type="number" min="1" step="0.1" placeholder="TB in GB" required className="w-24 border border-gray-200 rounded px-2 py-1 text-xs" />
-        <span className="text-xs text-gray-400">GB</span>
-      </div>
       <button type="submit" disabled={pending} className="text-xs bg-blue-600 text-white rounded px-2 py-1 disabled:opacity-50 cursor-pointer">
         {pending ? 'Adding…' : 'Add'}
       </button>

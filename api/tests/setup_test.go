@@ -251,6 +251,7 @@ func (s *stubAdminQuerier) DeleteDrive(_ context.Context, _ uuid.UUID) error { r
 func (s *stubAdminQuerier) UpdateDriveCapacity(_ context.Context, _ uuid.UUID, _ int64) (*models.Drive, error) {
 	return nil, nil
 }
+func (s *stubAdminQuerier) AutoSyncDriveCapacities(_ context.Context, _ int64) error { return nil }
 // Alarm settings
 func (s *stubAdminQuerier) GetAlarmSettings(_ context.Context) (*models.AlarmSettings, error) {
 	if s.alarmSettings == nil && s.alarmSettingsErr == nil {
@@ -327,7 +328,7 @@ type stubAdminInviteService struct {
 	revokeErr error
 }
 
-func (s *stubAdminInviteService) Create(_ context.Context, _ uuid.UUID, _, _ string, _ int64, _ bool, _ bool) (*models.Invitation, error) {
+func (s *stubAdminInviteService) Create(_ context.Context, _ uuid.UUID, _, _ string, _ int64, _ bool, _ bool, _ *uuid.UUID) (*models.Invitation, error) {
 	return s.inv, s.invErr
 }
 func (s *stubAdminInviteService) List(_ context.Context, _ db.PageInput) (*db.PageResult[models.Invitation], error) {

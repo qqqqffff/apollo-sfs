@@ -22,4 +22,5 @@ type Invitation struct {
 	InitialQuotaBytes int64      `json:"initial_quota_bytes" db:"initial_quota_bytes"`
 	GrantAdmin        bool       `json:"grant_admin" db:"grant_admin"`
 	GrantPremium      bool       `json:"grant_premium" db:"grant_premium"`
+	InitialDriveID    *uuid.UUID `json:"initial_drive_id,omitempty" db:"initial_drive_id"`
 }

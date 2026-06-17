@@ -243,14 +243,22 @@ func (s *AuthService) Register(ctx context.Context, username, email, password, i
 		quotaBytes = defaultQuotaBytes
 	}
 
-	// Select the best-fit drive before creating the user so we can fail fast
-	// if no drive has enough free capacity for the requested quota.
-	drive, err := s.queries.SelectDriveForQuota(ctx, quotaBytes)
-	if err != nil {
-		if errors.Is(err, db.ErrNoCapacity) {
-			return nil, fmt.Errorf("register: no drive has sufficient capacity for the requested quota")
+	// Select the drive. Use the admin-pinned drive if one was specified on the
+	// invitation; otherwise fall back to auto-selection by available capacity.
+	var drive *models.Drive
+	if inv.InitialDriveID != nil {
+		drive, err = s.queries.GetDrive(ctx, *inv.InitialDriveID)
+		if err != nil || drive == nil {
+			return nil, fmt.Errorf("register: pinned drive not found")
 		}
-		return nil, fmt.Errorf("register: select drive: %w", err)
+	} else {
+		drive, err = s.queries.SelectDriveForQuota(ctx, quotaBytes)
+		if err != nil {
+			if errors.Is(err, db.ErrNoCapacity) {
+				return nil, fmt.Errorf("register: no drive has sufficient capacity for the requested quota")
+			}
+			return nil, fmt.Errorf("register: select drive: %w", err)
+		}
 	}
 
 	if err := s.queries.CreateUser(ctx, &models.User{

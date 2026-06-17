@@ -5,6 +5,7 @@ import { MdContentCopy, MdCheck, MdRefresh } from 'react-icons/md'
 import {
   adminInvitationsInfiniteQueryOptions,
   capacityQueryOptions,
+  infrastructureQueryOptions,
   createInvitation,
   revokeInvitation,
   resendInvitation,
@@ -33,6 +34,15 @@ function RouteComponent() {
   const { data, isLoading, error, hasNextPage, isFetchingNextPage, fetchNextPage } =
     useInfiniteQuery(adminInvitationsInfiniteQueryOptions)
   const { data: capacity } = useQuery(capacityQueryOptions)
+  const { data: infraData } = useQuery(infrastructureQueryOptions)
+
+  // Group drives by server for the dropdowns
+  const serverMap = new Map<string, { name: string; drives: { id: string; label: string }[] }>()
+  for (const d of infraData?.drives ?? []) {
+    if (!serverMap.has(d.server_id)) serverMap.set(d.server_id, { name: d.server_name, drives: [] })
+    serverMap.get(d.server_id)!.drives.push({ id: d.drive_id, label: d.drive_label })
+  }
+  const servers = Array.from(serverMap.entries()).map(([id, v]) => ({ id, ...v }))
 
   const [email, setEmail] = useState('')
   const [quotaBytes, setQuotaBytes] = useState(10 * GB)
@@ -40,6 +50,10 @@ function RouteComponent() {
   const [useCustom, setUseCustom] = useState(false)
   const [grantAdmin, setGrantAdmin] = useState(false)
   const [grantPremium, setGrantPremium] = useState(false)
+  const [selectedServerId, setSelectedServerId] = useState<string>('')
+  const [selectedDriveId, setSelectedDriveId] = useState<string>('')
+
+  const selectedServerDrives = servers.find(s => s.id === selectedServerId)?.drives ?? []
   const { notify } = useNotification()
   const [createError, setCreateError] = useState<string | null>(null)
   const [copiedId, setCopiedId] = useState<string | null>(null)
@@ -51,11 +65,13 @@ function RouteComponent() {
     : quotaBytes
 
   const createMutation = useMutation({
-    mutationFn: () => createInvitation(email, effectiveQuota, grantAdmin, grantPremium),
+    mutationFn: () => createInvitation(email, effectiveQuota, grantAdmin, grantPremium, selectedDriveId || undefined),
     onSuccess: () => {
       setEmail('')
       setGrantAdmin(false)
       setGrantPremium(false)
+      setSelectedServerId('')
+      setSelectedDriveId('')
       setCreateError(null)
       queryClient.invalidateQueries({ queryKey: ['admin', 'invitations'] })
       notify('success', 'Invitation sent')
@@ -192,6 +208,40 @@ function RouteComponent() {
             </div>
           )}
         </div>
+        {servers.length > 0 && (
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-xs text-gray-500 shrink-0">Drive assignment:</span>
+            <select
+              value={selectedServerId}
+              onChange={(e) => {
+                setSelectedServerId(e.target.value)
+                setSelectedDriveId('')
+              }}
+              className="border border-gray-200 rounded px-2 py-1 text-xs text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer"
+            >
+              <option value="">Auto-select server</option>
+              {servers.map(s => (
+                <option key={s.id} value={s.id}>{s.name}</option>
+              ))}
+            </select>
+            {selectedServerId && (
+              <select
+                value={selectedDriveId}
+                onChange={(e) => setSelectedDriveId(e.target.value)}
+                className="border border-gray-200 rounded px-2 py-1 text-xs text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer"
+              >
+                <option value="">Auto-select drive</option>
+                {selectedServerDrives.map(d => (
+                  <option key={d.id} value={d.id}>{d.label}</option>
+                ))}
+              </select>
+            )}
+            {!selectedServerId && (
+              <span className="text-xs text-gray-400">Best-fit drive chosen automatically</span>
+            )}
+          </div>
+        )}
+
         <div className="flex flex-wrap gap-4">
           <label className="flex items-center gap-2 cursor-pointer select-none">
             <input

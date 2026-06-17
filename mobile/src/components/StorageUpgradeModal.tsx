@@ -701,10 +701,6 @@ export default function StorageUpgradeModal({
                   </Text>
                 )}
               </TouchableOpacity>
-
-              <TouchableOpacity style={styles.cancelBtn} onPress={onClose}>
-                <Text style={styles.cancelBtnText}>Cancel</Text>
-              </TouchableOpacity>
             </>
           )}
 

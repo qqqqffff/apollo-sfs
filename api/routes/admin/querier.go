@@ -46,6 +46,7 @@ type AdminQuerier interface {
 	UpdateDrive(ctx context.Context, id uuid.UUID, p db.UpdateDriveParams) (*models.Drive, error)
 	DeleteDrive(ctx context.Context, id uuid.UUID) error
 	UpdateDriveCapacity(ctx context.Context, id uuid.UUID, capacityBytes int64) (*models.Drive, error)
+	AutoSyncDriveCapacities(ctx context.Context, capacityBytes int64) error
 
 	// Alarm settings
 	GetAlarmSettings(ctx context.Context) (*models.AlarmSettings, error)
@@ -62,7 +63,7 @@ type AdminQuerier interface {
 
 // AdminInviteService is the subset of *services.InviteService used by admin handlers.
 type AdminInviteService interface {
-	Create(ctx context.Context, invitedByUserID uuid.UUID, invitedByUsername, email string, initialQuotaBytes int64, grantAdmin bool, grantPremium bool) (*models.Invitation, error)
+	Create(ctx context.Context, invitedByUserID uuid.UUID, invitedByUsername, email string, initialQuotaBytes int64, grantAdmin bool, grantPremium bool, initialDriveID *uuid.UUID) (*models.Invitation, error)
 	List(ctx context.Context, page db.PageInput) (*db.PageResult[models.Invitation], error)
 	InvitationURL(token string) string
 	Resend(ctx context.Context, id uuid.UUID, byUsername string) error

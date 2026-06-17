@@ -95,6 +95,21 @@ func main() {
 		log.Fatalf("startup seed: %v", err)
 	}
 
+	// Auto-sync capacity_bytes for any drive that hasn't been synced yet (capacity_bytes = 0).
+	// This runs every startup so drives added via the API get the real disk size automatically.
+	if cfg.DiskStatsPath != "" {
+		if usage, err := psdisk.Usage(cfg.DiskStatsPath); err == nil {
+			total := int64(usage.Used) + int64(usage.Free)
+			if err := queries.AutoSyncDriveCapacities(context.Background(), total); err != nil {
+				log.Printf("warning: auto-sync drive capacities: %v", err)
+			} else {
+				log.Printf("startup: auto-synced unsynced drives to %d bytes capacity", total)
+			}
+		} else {
+			log.Printf("warning: could not read disk stats for auto-sync: %v", err)
+		}
+	}
+
 	registry, err := services.NewMinIORegistry(context.Background(), queries, encSvc.KEK())
 	if err != nil {
 		log.Fatalf("minio registry: %v", err)

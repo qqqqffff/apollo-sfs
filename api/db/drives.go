@@ -66,7 +66,7 @@ func (q *Queries) ListDrives(ctx context.Context, serverID uuid.UUID) ([]models.
 // GetDrive fetches a single drive by ID.
 func (q *Queries) GetDrive(ctx context.Context, id uuid.UUID) (*models.Drive, error) {
 	row := q.db.QueryRowContext(ctx,
-		`SELECT`+driveColumns+`FROM drives WHERE id = $1`, id)
+		`SELECT`+driveColumns+` FROM drives WHERE id = $1`, id)
 	d, err := scanDrive(row)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -155,6 +155,18 @@ func (q *Queries) UpdateDriveCapacity(ctx context.Context, id uuid.UUID, capacit
 	return d, nil
 }
 
+// AutoSyncDriveCapacities sets capacity_bytes = capacityBytes for every drive
+// where capacity_bytes is currently 0 (i.e. never synced). Called at startup
+// so that newly-added drives get the real disk size without needing a manual Sync.
+func (q *Queries) AutoSyncDriveCapacities(ctx context.Context, capacityBytes int64) error {
+	_, err := q.db.ExecContext(ctx,
+		`UPDATE drives SET capacity_bytes = $1 WHERE capacity_bytes = 0`, capacityBytes)
+	if err != nil {
+		return fmt.Errorf("AutoSyncDriveCapacities: %w", err)
+	}
+	return nil
+}
+
 // ── Capacity queries ──────────────────────────────────────────────────────────
 
 // GetDriveAvailableBytes returns the unallocated capacity on a drive:
@@ -210,7 +222,7 @@ func (q *Queries) SelectDriveForQuota(ctx context.Context, quotaBytes int64) (*m
 func (q *Queries) GetMaxAvailableQuota(ctx context.Context) (int64, error) {
 	var max int64
 	err := q.db.QueryRowContext(ctx, `
-		SELECT COALESCE(MAX(d.capacity_bytes - COALESCE(sub.allocated, 0)), 0)
+		SELECT COALESCE(MAX(GREATEST(d.capacity_bytes - COALESCE(sub.allocated, 0), 0)), 0)
 		FROM drives d
 		JOIN servers s ON s.id = d.server_id
 		LEFT JOIN (

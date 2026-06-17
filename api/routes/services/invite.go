@@ -66,6 +66,8 @@ func NewInviteService(q *db.Queries, emailSvc *EmailService, appURL string, toke
 //
 // invitedByUserID is the Keycloak sub UUID of the admin creating the invite.
 // invitedByUsername is used in the email copy ("X invited you to apollo-sfs").
+// initialDriveID pins the user to a specific drive on registration; nil means
+// auto-select via SelectDriveForQuota.
 //
 // Returns ErrInviteAlreadyPending if a pending invite for this email already exists.
 func (s *InviteService) Create(
@@ -76,6 +78,7 @@ func (s *InviteService) Create(
 	initialQuotaBytes int64,
 	grantAdmin bool,
 	grantPremium bool,
+	initialDriveID *uuid.UUID,
 ) (*models.Invitation, error) {
 	token, err := generateInviteToken()
 	if err != nil {
@@ -96,6 +99,7 @@ func (s *InviteService) Create(
 		InitialQuotaBytes: initialQuotaBytes,
 		GrantAdmin:        grantAdmin,
 		GrantPremium:      grantPremium,
+		InitialDriveID:    initialDriveID,
 	}
 
 	if err := s.queries.CreateInvitation(ctx, inv); err != nil {

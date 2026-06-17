@@ -246,10 +246,10 @@ describe('updateServer', () => {
 describe('addDrive', () => {
   it('POSTs to /admin/system/servers/:id/drives', async () => {
     mockFetch(200, { drive_id: 'd1' })
-    await addDrive('srv-1', { label: 'nvme-02', minio_bucket: 'bucket2', capacity_bytes: 2000 })
+    await addDrive('srv-1', { label: 'nvme-02', minio_bucket: 'bucket2' })
     expect(lastUrl()).toBe('/api/v1/admin/system/servers/srv-1/drives')
     expect(lastInit().method).toBe('POST')
-    expect(lastBody()).toEqual({ label: 'nvme-02', minio_bucket: 'bucket2', capacity_bytes: 2000 })
+    expect(lastBody()).toEqual({ label: 'nvme-02', minio_bucket: 'bucket2' })
   })
 })
 

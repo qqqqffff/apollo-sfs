@@ -94,7 +94,7 @@ function buildHtml(clientId: string, amount: string, currency: string, label: st
       }
 
       if (!paypal.HostedFields.isEligible()) {
-        post({ type: 'ERROR', message: 'Card fields are not available in this environment. Please use PayPal wallet instead.' });
+        post({ type: 'INELIGIBLE', message: 'ACDC not eligible — ensure Advanced Credit and Debit Cards is enabled for this PayPal sandbox app in the developer dashboard.' });
         return;
       }
 
@@ -160,7 +160,7 @@ export default function PayPalCardSheet({ visible, amount, currency, label, onSu
       const msg = JSON.parse(event.nativeEvent.data);
       if (msg.type === 'APPROVED') {
         onSuccess(msg.orderId);
-      } else if (msg.type === 'ERROR') {
+      } else if (msg.type === 'ERROR' || msg.type === 'INELIGIBLE') {
         onError(msg.message ?? 'An error occurred.');
       }
     } catch {}
@@ -179,7 +179,7 @@ export default function PayPalCardSheet({ visible, amount, currency, label, onSu
 
         <WebView
           ref={webViewRef}
-          source={{ html: buildHtml(PAYPAL_CLIENT_ID, amount, currency, label) }}
+          source={{ html: buildHtml(PAYPAL_CLIENT_ID, amount, currency, label), baseUrl: 'https://apollo-sfs.com' }}
           onMessage={handleMessage}
           startInLoadingState
           renderLoading={() => (
@@ -195,6 +195,7 @@ export default function PayPalCardSheet({ visible, amount, currency, label, onSu
           originWhitelist={['*']}
           allowsInlineMediaPlayback
           mixedContentMode="compatibility"
+          allowUniversalAccessFromFileURLs
         />
       </View>
     </Modal>

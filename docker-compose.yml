@@ -155,6 +155,11 @@ services:
       PAYPAL_CLIENT_SECRET: ${PAYPAL_CLIENT_SECRET:-}
       PAYPAL_WEBHOOK_ID: ${PAYPAL_WEBHOOK_ID:-}
       PAYPAL_ENV: ${PAYPAL_ENV:-sandbox}
+      # Aliases used by binaries built before the SANDBOX_* → PAYPAL_* rename.
+      # Safe to remove after all containers have been rebuilt with the new config.
+      SANDBOX_PAYPAL_CLIENT_ID: ${PAYPAL_CLIENT_ID:-}
+      SANDBOX_PAYPAL_SECRET_KEY: ${PAYPAL_CLIENT_SECRET:-}
+      SANDBOX_PAYPAL_WEBHOOK_ID: ${PAYPAL_WEBHOOK_ID:-}
       PREMIUM_TIER_PRICE_CENTS: ${PREMIUM_TIER_PRICE_CENTS:-999}
       PREMIUM_TIER_CURRENCY: ${PREMIUM_TIER_CURRENCY:-USD}
       # Test runners — point at the sidecar containers on the Docker bridge.

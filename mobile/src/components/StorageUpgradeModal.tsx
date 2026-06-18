@@ -46,9 +46,9 @@ interface Plan {
 const PLANS: Plan[] = [
   { id: '64gb',  label: '64 GB',  addBytes: 64   * 1024 ** 3, price: { nvme: '$30',  hdd: '$20'  }, amount: { nvme: '30.00',  hdd: '20.00'  } },
   { id: '128gb', label: '128 GB', addBytes: 128  * 1024 ** 3, price: { nvme: '$50',  hdd: '$30'  }, amount: { nvme: '50.00',  hdd: '30.00'  } },
-  { id: '256gb', label: '256 GB', addBytes: 256  * 1024 ** 3, price: { nvme: '$100', hdd: '$50'  }, amount: { nvme: '100.00', hdd: '50.00'  } },
-  { id: '512gb', label: '512 GB', addBytes: 512  * 1024 ** 3, price: { nvme: '$200', hdd: '$80'  }, amount: { nvme: '200.00', hdd: '80.00'  } },
-  { id: '1tb',   label: '1 TB',   addBytes: 1024 * 1024 ** 3, price: { nvme: '$400', hdd: '$120' }, amount: { nvme: '400.00', hdd: '120.00' } },
+  { id: '256gb', label: '256 GB', addBytes: 256  * 1024 ** 3, price: { nvme: '$80',  hdd: '$50'  }, amount: { nvme: '80.00',  hdd: '50.00'  } },
+  { id: '512gb', label: '512 GB', addBytes: 512  * 1024 ** 3, price: { nvme: '$150', hdd: '$80'  }, amount: { nvme: '150.00', hdd: '80.00'  } },
+  { id: '1tb',   label: '1 TB',   addBytes: 1024 * 1024 ** 3, price: { nvme: '$250', hdd: '$120' }, amount: { nvme: '250.00', hdd: '120.00' } },
 ];
 
 // ── Helpers ────────────────────────────────────────────────────────────────────

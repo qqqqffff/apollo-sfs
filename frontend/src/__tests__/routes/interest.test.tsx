@@ -21,6 +21,9 @@ jest.mock('../../api/interest', () => ({
   submitInterestForm: jest.fn(),
   createInterestDepositOrder: jest.fn(),
   captureInterestDepositOrder: jest.fn(),
+  validateApplePayMerchantForDeposit: jest.fn(),
+  createApplePayInterestDeposit: jest.fn(),
+  createGooglePayInterestDeposit: jest.fn(),
 }))
 
 jest.mock('../../api/client', () => ({
@@ -82,6 +85,15 @@ describe('Interest / request-access page (/interest)', () => {
     expect(screen.getByLabelText(/reason \/ use case/i)).toBeInTheDocument()
   })
 
+  test('required fields have a star indicator', () => {
+    renderPage()
+    // Label text content includes the * character for required fields
+    const nameLabel = screen.getByText((_, el) => el?.tagName === 'LABEL' && /full name/i.test(el.textContent ?? ''))
+    const useCaseLabel = screen.getByText((_, el) => el?.tagName === 'LABEL' && /reason/i.test(el.textContent ?? ''))
+    expect(nameLabel.textContent).toContain('*')
+    expect(useCaseLabel.textContent).toContain('*')
+  })
+
   test('renders the five plan capacity options', () => {
     renderPage()
     expect(screen.getByRole('button', { name: /64 gb/i })).toBeInTheDocument()
@@ -108,16 +120,23 @@ describe('Interest / request-access page (/interest)', () => {
     expect(screen.getByText(/\$10\.00 refundable deposit/i)).toBeInTheDocument()
   })
 
-  test('submit button is disabled when no plan selected and no captcha', () => {
-    // No config → no Turnstile widget → captchaToken stays null
+  test('payment buttons are disabled when no plan is selected', () => {
     renderPage(null)
-    expect(screen.getByRole('button', { name: /select a plan to continue/i })).toBeDisabled()
+    // PayPal and Card buttons exist but are disabled without a plan + captcha
+    const paypalBtn = screen.getByRole('button', { name: /paypal/i })
+    const cardBtn = screen.getByRole('button', { name: /pay by card/i })
+    expect(paypalBtn).toBeDisabled()
+    expect(cardBtn).toBeDisabled()
   })
 
-  test('shows captcha error when form submitted without token', () => {
-    renderPage(null)
+  test('shows captcha error when PayPal clicked without captcha token', async () => {
+    // Turnstile is required (site key present) but not completed → inline error
+    renderPage({ turnstile_site_key: 'key123' })
     fireEvent.click(screen.getByRole('button', { name: /64 gb/i }))
-    fireEvent.submit(screen.getByRole('button', { name: /via paypal/i }).closest('form')!)
+    // Button is now enabled (plan selected); captcha not yet done
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /paypal/i }))
+    })
     expect(screen.getByText(/please complete the security check/i)).toBeInTheDocument()
   })
 
@@ -126,43 +145,57 @@ describe('Interest / request-access page (/interest)', () => {
     expect(screen.getByTestId('turnstile')).toBeInTheDocument()
   })
 
-  test('selecting a plan and completing captcha enables the submit button', () => {
+  test('selecting a plan and completing captcha enables the payment buttons', () => {
     renderPage({ turnstile_site_key: 'key123' })
+    // 256 GB NVMe = $80 → deposit $40.00
     fireEvent.click(screen.getByRole('button', { name: /256 gb/i }))
     fireEvent.click(screen.getByTestId('turnstile'))
-    // Button should be enabled and show deposit amount
-    expect(screen.getByRole('button', { name: /\$50\.00 deposit via paypal/i })).not.toBeDisabled()
+    expect(screen.getByRole('button', { name: /paypal/i })).not.toBeDisabled()
+    expect(screen.getByRole('button', { name: /pay by card/i })).not.toBeDisabled()
+    // Deposit amount visible (50% of $80 = $40)
+    expect(screen.getByText(/\$40\.00 refundable deposit/i)).toBeInTheDocument()
   })
 
-  test('submitting calls createInterestDepositOrder with plan id and storage type', async () => {
+  test('clicking PayPal button calls createInterestDepositOrder with paypal method', async () => {
     mockCreateDepositOrder.mockResolvedValue({ order_id: 'ord-1', approve_url: 'https://paypal.example' })
     renderPage({ turnstile_site_key: 'key123' })
     fireEvent.click(screen.getByRole('button', { name: /256 gb/i }))
     fireEvent.click(screen.getByTestId('turnstile'))
     await act(async () => {
-      fireEvent.submit(screen.getByRole('button', { name: /deposit via paypal/i }).closest('form')!)
+      fireEvent.click(screen.getByRole('button', { name: /paypal/i }))
     })
-    expect(mockCreateDepositOrder).toHaveBeenCalledWith('256gb', 'nvme')
+    expect(mockCreateDepositOrder).toHaveBeenCalledWith('256gb', 'nvme', 'paypal')
   })
 
-  test('shows "Opening PayPal…" while deposit order is being created', () => {
+  test('clicking Pay by Card calls createInterestDepositOrder with card method', async () => {
+    mockCreateDepositOrder.mockResolvedValue({ order_id: 'ord-2', approve_url: 'https://card.example' })
+    renderPage({ turnstile_site_key: 'key123' })
+    fireEvent.click(screen.getByRole('button', { name: /128 gb/i }))
+    fireEvent.click(screen.getByTestId('turnstile'))
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /pay by card/i }))
+    })
+    expect(mockCreateDepositOrder).toHaveBeenCalledWith('128gb', 'nvme', 'card')
+  })
+
+  test('shows Processing… on payment buttons while deposit order is pending', () => {
     mockCreateDepositOrder.mockReturnValue(new Promise(() => {}))
     renderPage({ turnstile_site_key: 'key123' })
     fireEvent.click(screen.getByRole('button', { name: /64 gb/i }))
     fireEvent.click(screen.getByTestId('turnstile'))
     act(() => {
-      fireEvent.submit(screen.getByRole('button', { name: /deposit via paypal/i }).closest('form')!)
+      fireEvent.click(screen.getByRole('button', { name: /paypal/i }))
     })
-    expect(screen.getByRole('button', { name: /opening paypal/i })).toBeInTheDocument()
+    expect(screen.getAllByText(/processing…/i).length).toBeGreaterThan(0)
   })
 
-  test('shows awaiting screen and opens PayPal after deposit order is created', async () => {
+  test('shows awaiting screen and opens URL after deposit order is created', async () => {
     mockCreateDepositOrder.mockResolvedValue({ order_id: 'ord-1', approve_url: 'https://paypal.example' })
     renderPage({ turnstile_site_key: 'key123' })
     fireEvent.click(screen.getByRole('button', { name: /128 gb/i }))
     fireEvent.click(screen.getByTestId('turnstile'))
     await act(async () => {
-      fireEvent.submit(screen.getByRole('button', { name: /deposit via paypal/i }).closest('form')!)
+      fireEvent.click(screen.getByRole('button', { name: /paypal/i }))
     })
     expect(window.open).toHaveBeenCalledWith('https://paypal.example', '_blank', 'noopener,noreferrer')
     expect(screen.getByRole('button', { name: /i've completed payment/i })).toBeInTheDocument()

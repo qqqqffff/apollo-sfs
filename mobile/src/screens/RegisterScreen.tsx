@@ -91,9 +91,11 @@ export default function RegisterScreen({
     try {
       await GoogleSignin.hasPlayServices();
       const response = await GoogleSignin.signIn();
-      const idToken = (response as any).data?.idToken ?? (response as any).idToken;
-      if (!idToken) throw new Error('No ID token');
-      await loginWithGoogle(idToken);
+      const data = (response as any).data ?? response;
+      const serverAuthCode: string | null = data?.serverAuthCode ?? null;
+      const idToken: string | null = data?.idToken ?? null;
+      if (!serverAuthCode && !idToken) throw new Error('No credentials from Google sign-in');
+      await loginWithGoogle(serverAuthCode, idToken);
       await refreshProfile();
     } catch (e: any) {
       if (e.code !== statusCodes.SIGN_IN_CANCELLED) {

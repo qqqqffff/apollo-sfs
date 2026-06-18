@@ -21,8 +21,11 @@ export async function loginWithApple(identityToken: string): Promise<TokenRespon
   return res.data;
 }
 
-export async function loginWithGoogle(idToken: string): Promise<TokenResponse> {
-  const res = await api.post<TokenResponse>('/api/v1/mobile/auth/google', { id_token: idToken });
+export async function loginWithGoogle(serverAuthCode: string | null, idToken?: string | null): Promise<TokenResponse> {
+  const body: Record<string, string> = {};
+  if (serverAuthCode) body.server_auth_code = serverAuthCode;
+  if (idToken) body.id_token = idToken;
+  const res = await api.post<TokenResponse>('/api/v1/mobile/auth/google', body);
   await storeTokens(res.data.access_token, res.data.refresh_token);
   return res.data;
 }
@@ -33,6 +36,10 @@ export async function logout(): Promise<void> {
 
 export async function linkSocial(provider: 'apple' | 'google', token: string): Promise<void> {
   await api.post('/api/v1/me/social/link', { provider, token });
+}
+
+export async function linkSocialGoogle(serverAuthCode: string): Promise<void> {
+  await api.post('/api/v1/me/social/link', { provider: 'google', server_auth_code: serverAuthCode });
 }
 
 export async function unlinkSocial(provider: 'apple' | 'google'): Promise<void> {

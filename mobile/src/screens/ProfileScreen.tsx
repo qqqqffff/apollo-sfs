@@ -15,7 +15,7 @@ import {
 import appleAuth from '@invertase/react-native-apple-authentication';
 import { GoogleSignin, statusCodes } from '@react-native-google-signin/google-signin';
 import { Bug, Cpu, HardDrive, Key, LogOut, Rocket, Server, Thermometer, Upload, Wifi, Zap } from 'lucide-react-native';
-import { linkSocial, unlinkSocial } from '../api/auth';
+import { linkSocial, linkSocialGoogle, unlinkSocial } from '../api/auth';
 import { ALARM_TYPES, type AlarmSettings, getAlarmSettings, toggleAlarmSubscription } from '../api/alarms';
 import { useAuth } from '../context/AuthContext';
 import { colors, radius, shadow, spacing } from '../theme';
@@ -83,16 +83,16 @@ export default function ProfileScreen() {
       });
       if (!credential.identityToken) throw new Error('No token');
       await linkSocial('apple', credential.identityToken);
-      Alert.alert('Apple ID linked');
+      Alert.alert('Apple linked');
     } catch (e: any) {
-      if (e.code !== appleAuth.Error.CANCELED) Alert.alert('Failed to link Apple ID', e.message);
+      if (e.code !== appleAuth.Error.CANCELED) Alert.alert('Failed to link Apple', e.message);
     } finally {
       setLinking(false);
     }
   };
 
   const handleUnlinkApple = async () => {
-    try { await unlinkSocial('apple'); Alert.alert('Apple ID unlinked'); }
+    try { await unlinkSocial('apple'); Alert.alert('Apple unlinked'); }
     catch (e: any) { Alert.alert('Failed', e.message); }
   };
 
@@ -100,9 +100,10 @@ export default function ProfileScreen() {
     try {
       await GoogleSignin.hasPlayServices();
       const response = await GoogleSignin.signIn();
-      const idToken = (response as any).data?.idToken ?? (response as any).idToken;
-      if (!idToken) throw new Error('No ID token');
-      await linkSocial('google', idToken);
+      const data = (response as any).data ?? response;
+      const serverAuthCode: string | null = data?.serverAuthCode ?? null;
+      if (!serverAuthCode) throw new Error('No server auth code from Google sign-in');
+      await linkSocialGoogle(serverAuthCode);
       Alert.alert('Google account linked');
     } catch (e: any) {
       if (e.code !== statusCodes.SIGN_IN_CANCELLED) Alert.alert('Failed to link Google', e.message);
@@ -215,15 +216,17 @@ export default function ProfileScreen() {
 
         {Platform.OS === 'ios' && (
           <View style={styles.linkedRow}>
-            <Text style={styles.linkedLabel}>Apple ID</Text>
+            <Text style={styles.linkedLabel}>Apple</Text>
             <View style={styles.linkedActions}>
-              <TouchableOpacity onPress={handleLinkApple} disabled={linking} style={styles.linkBtn}>
-                <Text style={styles.linkText}>Link</Text>
-              </TouchableOpacity>
-              <Text style={styles.sep}> · </Text>
-              <TouchableOpacity onPress={handleUnlinkApple} style={styles.linkBtn}>
-                <Text style={styles.unlinkText}>Unlink</Text>
-              </TouchableOpacity>
+              {profile?.linked_providers?.includes('apple') ? (
+                <TouchableOpacity onPress={handleUnlinkApple} style={styles.linkBtn}>
+                  <Text style={styles.unlinkText}>Unlink</Text>
+                </TouchableOpacity>
+              ) : (
+                <TouchableOpacity onPress={handleLinkApple} disabled={linking} style={styles.linkBtn}>
+                  <Text style={styles.linkText}>Link</Text>
+                </TouchableOpacity>
+              )}
             </View>
           </View>
         )}
@@ -231,13 +234,15 @@ export default function ProfileScreen() {
         <View style={styles.linkedRow}>
           <Text style={styles.linkedLabel}>Google</Text>
           <View style={styles.linkedActions}>
-            <TouchableOpacity onPress={handleLinkGoogle} style={styles.linkBtn}>
-              <Text style={styles.linkText}>Link</Text>
-            </TouchableOpacity>
-            <Text style={styles.sep}> · </Text>
-            <TouchableOpacity onPress={handleUnlinkGoogle} style={styles.linkBtn}>
-              <Text style={styles.unlinkText}>Unlink</Text>
-            </TouchableOpacity>
+            {profile?.linked_providers?.includes('google') ? (
+              <TouchableOpacity onPress={handleUnlinkGoogle} style={styles.linkBtn}>
+                <Text style={styles.unlinkText}>Unlink</Text>
+              </TouchableOpacity>
+            ) : (
+              <TouchableOpacity onPress={handleLinkGoogle} style={styles.linkBtn}>
+                <Text style={styles.linkText}>Link</Text>
+              </TouchableOpacity>
+            )}
           </View>
         </View>
       </View>

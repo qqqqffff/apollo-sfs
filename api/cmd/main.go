@@ -81,11 +81,13 @@ func main() {
 	rotationSvc := services.NewKeyRotationService(queries, encSvc, 0) // 0 = default 30-day age
 
 	authSvc := services.NewAuthService(queries, services.AuthServiceConfig{
-		KeycloakURL:          cfg.KeycloakInternalURL,
-		KeycloakRealm:        cfg.KeycloakRealm,
-		KeycloakClientID:     cfg.KeycloakClientID,
-		KeycloakClientSecret: cfg.KeycloakClientSecret,
-		AppBaseURL:           cfg.AppBaseURL,
+		KeycloakURL:           cfg.KeycloakInternalURL,
+		KeycloakRealm:         cfg.KeycloakRealm,
+		KeycloakClientID:      cfg.KeycloakClientID,
+		KeycloakClientSecret:  cfg.KeycloakClientSecret,
+		AppBaseURL:            cfg.AppBaseURL,
+		GoogleWebClientID:     cfg.GoogleWebClientID,
+		GoogleWebClientSecret: cfg.GoogleWebClientSecret,
 	})
 	authSvc.ProvisionUserKey = encSvc.ProvisionUserKey
 

@@ -21,7 +21,12 @@ type mobileAppleRequest struct {
 }
 
 type mobileGoogleRequest struct {
-	IDToken string `json:"id_token" binding:"required"`
+	// ServerAuthCode is preferred: the one-time OAuth code from GoogleSignin.signIn()
+	// on iOS. The backend exchanges it with Google to get an id_token whose audience
+	// is the web client ID, which Keycloak's Google IdP accepts.
+	// IDToken is the fallback for flows where only the raw token is available.
+	ServerAuthCode string `json:"server_auth_code"`
+	IDToken        string `json:"id_token"`
 }
 
 // tokenResponse is the JSON shape returned by all mobile auth endpoints.
@@ -107,17 +112,33 @@ func (h *Handler) MobileAppleLogin(c *gin.Context) {
 }
 
 // MobileGoogleLogin handles POST /api/v1/mobile/auth/google.
-// Exchanges a Google id_token for Apollo SFS tokens via Keycloak Token Exchange.
+// Prefers server_auth_code: exchanges it with Google to get an id_token whose
+// audience matches the Keycloak Google IdP client ID (web client). Falls back to
+// using id_token directly when server_auth_code is absent.
 func (h *Handler) MobileGoogleLogin(c *gin.Context) {
 	var req mobileGoogleRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "id_token is required"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "request body required"})
+		return
+	}
+	if req.ServerAuthCode == "" && req.IDToken == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "server_auth_code or id_token is required"})
 		return
 	}
 
-	tokens, err := h.svc.SocialLogin(c.Request.Context(), "google", req.IDToken)
+	idToken := req.IDToken
+	if req.ServerAuthCode != "" {
+		exchanged, err := h.svc.ExchangeGoogleServerAuthCode(c.Request.Context(), req.ServerAuthCode)
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "google auth code exchange failed: " + err.Error()})
+			return
+		}
+		idToken = exchanged
+	}
+
+	tokens, err := h.svc.SocialLogin(c.Request.Context(), "google", idToken)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "google authentication failed"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "google authentication failed: " + err.Error()})
 		return
 	}
 

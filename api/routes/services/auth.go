@@ -33,6 +33,12 @@ type AuthServiceConfig struct {
 	KeycloakClientID     string
 	KeycloakClientSecret string
 	AppBaseURL           string // public-facing base URL, e.g. "https://files.example.com"
+
+	// GoogleWebClientID / GoogleWebClientSecret are used to exchange a mobile
+	// server auth code for a Google id_token whose audience is the web client ID,
+	// which Keycloak's Google IdP accepts during token exchange.
+	GoogleWebClientID     string
+	GoogleWebClientSecret string
 }
 
 // TokenPair is returned on successful login, registration, and token refresh.
@@ -79,13 +85,15 @@ type kcUserResult struct {
 // AuthService handles all authentication operations: login, registration,
 // logout, token refresh, and password-reset email triggering.
 type AuthService struct {
-	queries    *db.Queries
-	kcURL      string
-	kcRealm    string
-	kcClientID string
-	kcSecret   string
-	appBaseURL string
-	http       *http.Client
+	queries       *db.Queries
+	kcURL         string
+	kcRealm       string
+	kcClientID    string
+	kcSecret      string
+	appBaseURL    string
+	http          *http.Client
+	googleClientID string
+	googleSecret   string
 
 	// ProvisionUserKey is called during registration to generate and wrap the
 	// user's per-file AES key with the current master key. When nil (before the
@@ -97,13 +105,15 @@ type AuthService struct {
 // NewAuthService constructs an AuthService with a 10-second HTTP timeout.
 func NewAuthService(q *db.Queries, cfg AuthServiceConfig) *AuthService {
 	return &AuthService{
-		queries:    q,
-		kcURL:      cfg.KeycloakURL,
-		kcRealm:    cfg.KeycloakRealm,
-		kcClientID: cfg.KeycloakClientID,
-		kcSecret:   cfg.KeycloakClientSecret,
-		appBaseURL: strings.TrimRight(cfg.AppBaseURL, "/"),
-		http:       &http.Client{Timeout: 10 * time.Second},
+		queries:        q,
+		kcURL:          cfg.KeycloakURL,
+		kcRealm:        cfg.KeycloakRealm,
+		kcClientID:     cfg.KeycloakClientID,
+		kcSecret:       cfg.KeycloakClientSecret,
+		appBaseURL:     strings.TrimRight(cfg.AppBaseURL, "/"),
+		http:           &http.Client{Timeout: 10 * time.Second},
+		googleClientID: cfg.GoogleWebClientID,
+		googleSecret:   cfg.GoogleWebClientSecret,
 	}
 }
 
@@ -250,6 +260,23 @@ func (s *AuthService) LinkSocialAccount(ctx context.Context, existingUsername, p
 	}
 
 	return tokens, nil
+}
+
+// GetLinkedProviders returns the list of Keycloak IdP aliases linked to the given user.
+func (s *AuthService) GetLinkedProviders(ctx context.Context, kcUserID string) ([]string, error) {
+	adminToken, err := s.adminToken(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("get linked providers: admin token: %w", err)
+	}
+	fids, err := s.kcGetFederatedIdentities(ctx, adminToken, kcUserID)
+	if err != nil {
+		return nil, err
+	}
+	providers := make([]string, 0, len(fids))
+	for _, f := range fids {
+		providers = append(providers, f.IdentityProvider)
+	}
+	return providers, nil
 }
 
 // kcFederatedIdentity is a single entry from Keycloak's federated-identity API.
@@ -1056,6 +1083,54 @@ func (s *AuthService) kcFindUserByUsername(ctx context.Context, adminToken, user
 		return "", nil
 	}
 	return users[0].ID, nil
+}
+
+// ExchangeGoogleServerAuthCode exchanges a one-time server auth code (obtained by
+// the iOS app via GoogleSignin.signIn()) for a Google id_token whose audience is
+// the web client ID. This id_token can then be passed to SocialLogin, where Keycloak
+// validates it against the web client ID configured in its Google IdP.
+//
+// The id_token returned by the mobile SDK directly has aud = iOS client ID, which
+// Keycloak rejects. This two-step approach resolves the audience mismatch.
+func (s *AuthService) ExchangeGoogleServerAuthCode(ctx context.Context, serverAuthCode string) (string, error) {
+	if s.googleClientID == "" || s.googleSecret == "" {
+		return "", fmt.Errorf("google web client credentials not configured")
+	}
+	body := url.Values{
+		"code":          {serverAuthCode},
+		"client_id":     {s.googleClientID},
+		"client_secret": {s.googleSecret},
+		"redirect_uri":  {""},
+		"grant_type":    {"authorization_code"},
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		"https://oauth2.googleapis.com/token", strings.NewReader(body.Encode()))
+	if err != nil {
+		return "", fmt.Errorf("google token exchange: build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := s.http.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("google token exchange: request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var gr struct {
+		IDToken string `json:"id_token"`
+		Error   string `json:"error"`
+		ErrorDesc string `json:"error_description"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&gr); err != nil {
+		return "", fmt.Errorf("google token exchange: decode: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK || gr.IDToken == "" {
+		if gr.ErrorDesc != "" {
+			return "", fmt.Errorf("google token exchange: %s: %s", gr.Error, gr.ErrorDesc)
+		}
+		return "", fmt.Errorf("google token exchange: status %s, no id_token", resp.Status)
+	}
+	return gr.IDToken, nil
 }
 
 // SocialLogin exchanges a provider identity token (Apple or Google) for Apollo

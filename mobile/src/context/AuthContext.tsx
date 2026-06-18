@@ -10,6 +10,7 @@ interface UserProfile {
   is_admin: boolean;
   is_premium: boolean;
   premium_granted_at: string | null;
+  linked_providers: string[];
 }
 
 interface AuthContextValue {

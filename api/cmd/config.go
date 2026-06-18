@@ -95,6 +95,13 @@ type Config struct {
 	// signature, so this shared secret guards the public endpoint. Empty
 	// disables the check (only safe behind a trusted network).
 	SendgridWebhookSecret string
+
+	// GoogleWebClientID / GoogleWebClientSecret are the web OAuth 2.0 credentials
+	// used to exchange a mobile serverAuthCode for a Google id_token on the backend.
+	// The resulting id_token has aud = web client ID, which Keycloak's Google IdP
+	// accepts during token exchange. Set via GOOGLE_WEB_CLIENT_ID / GOOGLE_WEB_CLIENT_SECRET.
+	GoogleWebClientID     string
+	GoogleWebClientSecret string
 }
 
 func loadConfig() Config {
@@ -163,6 +170,9 @@ func loadConfig() Config {
 
 		EmailStoragePath:      getEnv("EMAIL_STORAGE_PATH", "/home/app/service-worker-email"),
 		SendgridWebhookSecret: getEnv("SENDGRID_WEBHOOK_SECRET", ""),
+
+		GoogleWebClientID:     getEnv("GOOGLE_WEB_CLIENT_ID", ""),
+		GoogleWebClientSecret: getEnv("GOOGLE_WEB_CLIENT_SECRET", ""),
 	}
 }
 

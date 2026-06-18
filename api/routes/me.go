@@ -53,6 +53,7 @@ type meResponse struct {
 	LastSeenAt        *time.Time `json:"last_seen_at"`
 	CreatedAt         time.Time  `json:"created_at"`
 	IsAdmin           bool       `json:"is_admin"`
+	LinkedProviders   []string   `json:"linked_providers"`
 }
 
 // Me handles GET /api/v1/me.
@@ -128,6 +129,11 @@ func (h *Handler) Me(c *gin.Context) {
 		usedPct = float64(user.StorageUsedBytes) / float64(user.StorageQuotaBytes) * 100
 	}
 
+	linkedProviders, _ := h.auth.GetLinkedProviders(ctx, c.GetString("userID"))
+	if linkedProviders == nil {
+		linkedProviders = []string{}
+	}
+
 	c.JSON(http.StatusOK, meResponse{
 		Username:          user.Username,
 		Email:             user.Email,
@@ -137,12 +143,14 @@ func (h *Handler) Me(c *gin.Context) {
 		LastSeenAt:        user.LastSeenAt,
 		CreatedAt:         user.CreatedAt,
 		IsAdmin:           isAdmin,
+		LinkedProviders:   linkedProviders,
 	})
 }
 
 type socialLinkRequest struct {
-	Provider string `json:"provider" binding:"required"`
-	Token    string `json:"token"    binding:"required"`
+	Provider       string `json:"provider"        binding:"required"`
+	Token          string `json:"token"`
+	ServerAuthCode string `json:"server_auth_code"`
 }
 
 type socialUnlinkRequest struct {
@@ -160,7 +168,7 @@ func (h *Handler) LinkSocial(c *gin.Context) {
 
 	var req socialLinkRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "provider and token are required"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "provider is required"})
 		return
 	}
 	if req.Provider != "apple" && req.Provider != "google" {
@@ -168,7 +176,21 @@ func (h *Handler) LinkSocial(c *gin.Context) {
 		return
 	}
 
-	if err := h.auth.LinkSocialIdentity(c.Request.Context(), userID, req.Provider, req.Token); err != nil {
+	token := req.Token
+	if req.Provider == "google" && req.ServerAuthCode != "" {
+		idToken, err := h.auth.ExchangeGoogleServerAuthCode(c.Request.Context(), req.ServerAuthCode)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "google auth code exchange failed: " + err.Error()})
+			return
+		}
+		token = idToken
+	}
+	if token == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "token or server_auth_code is required"})
+		return
+	}
+
+	if err := h.auth.LinkSocialIdentity(c.Request.Context(), userID, req.Provider, token); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}

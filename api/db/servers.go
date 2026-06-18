@@ -186,3 +186,13 @@ func (q *Queries) SetServerActive(ctx context.Context, id uuid.UUID, active bool
 	}
 	return nil
 }
+
+// RenameServer updates the display name of a server.
+func (q *Queries) RenameServer(ctx context.Context, id uuid.UUID, name string) error {
+	_, err := q.db.ExecContext(ctx,
+		`UPDATE servers SET name = $2 WHERE id = $1`, id, name)
+	if err != nil {
+		return fmt.Errorf("RenameServer: %w", err)
+	}
+	return nil
+}

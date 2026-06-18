@@ -107,7 +107,8 @@ func (h *Handler) CreateServer(c *gin.Context) {
 }
 
 type updateServerRequest struct {
-	IsActive *bool `json:"is_active"`
+	IsActive *bool  `json:"is_active"`
+	Name     string `json:"name"`
 }
 
 // UpdateServer handles PATCH /api/v1/admin/system/servers/:server_id.
@@ -132,6 +133,13 @@ func (h *Handler) UpdateServer(c *gin.Context) {
 		}
 		if !*req.IsActive {
 			h.registry.Remove(serverID)
+		}
+	}
+
+	if name := sanitize.String(req.Name); name != "" {
+		if err := h.queries.RenameServer(ctx, serverID, name); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "could not rename server"})
+			return
 		}
 	}
 

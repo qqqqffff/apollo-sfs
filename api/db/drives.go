@@ -167,6 +167,17 @@ func (q *Queries) AutoSyncDriveCapacities(ctx context.Context, capacityBytes int
 	return nil
 }
 
+// SyncAllDriveCapacities updates capacity_bytes for ALL drives unconditionally.
+// Used at startup to ensure the stored capacity always reflects the actual disk size.
+func (q *Queries) SyncAllDriveCapacities(ctx context.Context, capacityBytes int64) error {
+	_, err := q.db.ExecContext(ctx,
+		`UPDATE drives SET capacity_bytes = $1`, capacityBytes)
+	if err != nil {
+		return fmt.Errorf("SyncAllDriveCapacities: %w", err)
+	}
+	return nil
+}
+
 // ── Capacity queries ──────────────────────────────────────────────────────────
 
 // GetDriveAvailableBytes returns the unallocated capacity on a drive:

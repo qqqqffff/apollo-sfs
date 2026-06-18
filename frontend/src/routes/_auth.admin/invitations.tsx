@@ -115,7 +115,12 @@ function RouteComponent() {
     return Math.max(0, RESEND_COOLDOWN_MS - (Date.now() - last))
   }
 
-  const maxAvailableBytes = capacity?.max_available_bytes ?? null
+  const selectedDriveSummary = infraData?.drives.find(d => d.drive_id === selectedDriveId)
+  const selectedDriveAvailableBytes = selectedDriveSummary
+    ? Math.max(0, selectedDriveSummary.capacity_bytes - selectedDriveSummary.allocated_quota_bytes)
+    : null
+
+  const maxAvailableBytes = selectedDriveAvailableBytes ?? capacity?.max_available_bytes ?? null
   const maxAvailableGb = maxAvailableBytes !== null ? maxAvailableBytes / GB : null
   const quotaExceedsCapacity = maxAvailableBytes !== null && effectiveQuota > maxAvailableBytes
 
@@ -130,7 +135,9 @@ function RouteComponent() {
 
       {maxAvailableGb !== null && (
         <div className="mb-4 flex items-center gap-2 text-xs text-gray-500">
-          <span className="font-medium text-gray-700">Max quota available:</span>
+          <span className="font-medium text-gray-700">
+            {selectedDriveSummary ? `Max quota on ${selectedDriveSummary.drive_label}:` : 'Max quota available:'}
+          </span>
           <span>{maxAvailableGb.toFixed(1)} GB</span>
           {quotaExceedsCapacity && (
             <span className="text-red-500 font-medium">

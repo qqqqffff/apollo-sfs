@@ -40,6 +40,7 @@ type AdminQuerier interface {
 	CountServersByState(ctx context.Context, state string) (int, error)
 	CreateServer(ctx context.Context, p db.CreateServerParams) (*models.Server, error)
 	SetServerActive(ctx context.Context, id uuid.UUID, active bool) error
+	RenameServer(ctx context.Context, id uuid.UUID, name string) error
 	GetServer(ctx context.Context, id uuid.UUID) (*models.Server, error)
 	GetDrive(ctx context.Context, id uuid.UUID) (*models.Drive, error)
 	CreateDrive(ctx context.Context, p db.CreateDriveParams) (*models.Drive, error)

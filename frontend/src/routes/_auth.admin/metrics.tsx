@@ -104,11 +104,25 @@ function RouteComponent() {
   }
   const servers = Array.from(serverMap.values())
 
+  const [renamingServerId, setRenamingServerId] = useState<string | null>(null)
+  const [renameValue, setRenameValue] = useState('')
+
   const toggleServerMutation = useMutation({
     mutationFn: ({ serverId, active }: { serverId: string; active: boolean }) =>
       updateServer(serverId, { is_active: active }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['admin', 'infrastructure'] }),
     onError: () => notify('error', 'Failed to update server'),
+  })
+
+  const renameServerMutation = useMutation({
+    mutationFn: ({ serverId, name }: { serverId: string; name: string }) =>
+      updateServer(serverId, { name }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['admin', 'infrastructure'] })
+      setRenamingServerId(null)
+      notify('success', 'Server renamed')
+    },
+    onError: () => notify('error', 'Failed to rename server'),
   })
 
   const toggleDriveMutation = useMutation({
@@ -647,7 +661,35 @@ function RouteComponent() {
                 <div className="flex items-center justify-between mb-3">
                   <div className="flex items-center gap-2">
                     <span className={`w-2 h-2 rounded-full shrink-0 ${srv.isActive ? 'bg-green-500' : 'bg-gray-300'}`} />
-                    <span className="font-medium text-gray-800 text-sm">{srv.name}</span>
+                    {renamingServerId === srv.serverId ? (
+                      <form
+                        onSubmit={(e) => {
+                          e.preventDefault()
+                          if (renameValue.trim()) renameServerMutation.mutate({ serverId: srv.serverId, name: renameValue.trim() })
+                        }}
+                        className="flex items-center gap-1"
+                      >
+                        <input
+                          autoFocus
+                          value={renameValue}
+                          onChange={(e) => setRenameValue(e.target.value)}
+                          className="border border-blue-400 rounded px-2 py-0.5 text-sm font-medium text-gray-800 focus:outline-none focus:ring-1 focus:ring-blue-500 w-40"
+                        />
+                        <button type="submit" disabled={renameServerMutation.isPending} className="text-xs text-blue-600 hover:text-blue-800 cursor-pointer bg-transparent border-0 disabled:opacity-50">Save</button>
+                        <button type="button" onClick={() => setRenamingServerId(null)} className="text-xs text-gray-400 hover:text-gray-700 cursor-pointer bg-transparent border-0">Cancel</button>
+                      </form>
+                    ) : (
+                      <>
+                        <span className="font-medium text-gray-800 text-sm">{srv.name}</span>
+                        <button
+                          onClick={() => { setRenamingServerId(srv.serverId); setRenameValue(srv.name) }}
+                          className="text-xs text-gray-400 hover:text-gray-600 cursor-pointer bg-transparent border-0"
+                          title="Rename server"
+                        >
+                          ✎
+                        </button>
+                      </>
+                    )}
                     {!srv.isActive && <span className="text-xs text-gray-400">(inactive)</span>}
                   </div>
                   <div className="flex items-center gap-2">

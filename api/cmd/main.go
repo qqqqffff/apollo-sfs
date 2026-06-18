@@ -91,22 +91,22 @@ func main() {
 
 	// ── MinIO registry ────────────────────────────────────────────────────────
 	// Seed the servers/drives tables on first boot, then build the registry from DB.
-	if err := seedDefaultServer(context.Background(), queries, cfg, encSvc.KEK()); err != nil {
+	if err := seedDefaultServer(context.Background(), queries, cfg, encSvc.KEK(), cfg.DiskStatsDriveLabel); err != nil {
 		log.Fatalf("startup seed: %v", err)
 	}
 
-	// Auto-sync capacity_bytes for any drive that hasn't been synced yet (capacity_bytes = 0).
-	// This runs every startup so drives added via the API get the real disk size automatically.
+	// Sync capacity_bytes for all drives from the real disk on every startup so
+	// the value is always current (not just when a drive is first added).
 	if cfg.DiskStatsPath != "" {
 		if usage, err := psdisk.Usage(cfg.DiskStatsPath); err == nil {
 			total := int64(usage.Used) + int64(usage.Free)
-			if err := queries.AutoSyncDriveCapacities(context.Background(), total); err != nil {
-				log.Printf("warning: auto-sync drive capacities: %v", err)
+			if err := queries.SyncAllDriveCapacities(context.Background(), total); err != nil {
+				log.Printf("warning: sync drive capacities: %v", err)
 			} else {
-				log.Printf("startup: auto-synced unsynced drives to %d bytes capacity", total)
+				log.Printf("startup: synced all drives to %d bytes capacity", total)
 			}
 		} else {
-			log.Printf("warning: could not read disk stats for auto-sync: %v", err)
+			log.Printf("warning: could not read disk stats for sync: %v", err)
 		}
 	}
 
@@ -543,7 +543,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 // It creates a server + drive record from the existing env-var MinIO credentials,
 // auto-detects drive capacity from the disk stats path, backfills files.drive_id,
 // and allocates all existing users to the new drive.
-func seedDefaultServer(ctx context.Context, queries *db.Queries, cfg Config, kek []byte) error {
+func seedDefaultServer(ctx context.Context, queries *db.Queries, cfg Config, kek []byte, driveLabel string) error {
 	servers, err := queries.ListServers(ctx)
 	if err != nil {
 		return fmt.Errorf("list servers: %w", err)
@@ -585,9 +585,13 @@ func seedDefaultServer(ctx context.Context, queries *db.Queries, cfg Config, kek
 		return fmt.Errorf("create server: %w", err)
 	}
 
+	label := driveLabel
+	if label == "" {
+		label = "nvme-01"
+	}
 	drive, err := queries.CreateDrive(ctx, db.CreateDriveParams{
 		ServerID:      server.ID,
-		Label:         "nvme-01",
+		Label:         label,
 		CapacityBytes: capacityBytes,
 		MinioBucket:   cfg.MinIOBucketName,
 	})

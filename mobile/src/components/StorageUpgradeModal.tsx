@@ -33,6 +33,19 @@ import { APPLE_PAY_MERCHANT_ID, PAYPAL_MERCHANT_ID } from '../config';
 import { colors, radius, shadow, spacing } from '../theme';
 import PayPalCardSheet from './PayPalCardSheet';
 
+// ── Helpers ────────────────────────────────────────────────────────────────────
+
+function apiError(e: any): string {
+  const status: number | undefined = e?.response?.status;
+  const body = e?.response?.data;
+  const bodyMsg: string | undefined =
+    typeof body === 'string' ? body :
+    body?.error ?? body?.message ?? body?.detail ?? undefined;
+  const label = status ? `[${status}] ` : '';
+  const msg = bodyMsg ?? e?.message ?? 'Unknown error';
+  return label + msg;
+}
+
 // ── Plans ──────────────────────────────────────────────────────────────────────
 
 interface Plan {
@@ -185,7 +198,7 @@ export default function StorageUpgradeModal({
         onPurchased(new_quota_bytes);
       }
     } catch (e: any) {
-      if ((e as any).code !== 'CANCELLED') Alert.alert('Apple Pay failed', e.message ?? 'Please try again.');
+      if ((e as any).code !== 'CANCELLED') Alert.alert('Apple Pay failed', apiError(e));
       setPurchaseState('selecting');
     }
   };
@@ -209,7 +222,7 @@ export default function StorageUpgradeModal({
         onPurchased(new_quota_bytes);
       }
     } catch (e: any) {
-      if ((e as any).code !== 'CANCELLED') Alert.alert('Google Pay failed', e.message ?? 'Please try again.');
+      if ((e as any).code !== 'CANCELLED') Alert.alert('Google Pay failed', apiError(e));
       setPurchaseState('selecting');
     }
   };
@@ -234,8 +247,9 @@ export default function StorageUpgradeModal({
         onPurchased(new_quota_bytes);
       }
     } catch (e: any) {
+      console.error('[handleCardSuccess] capture failed:', apiError(e));
       setPurchaseState('selecting');
-      Alert.alert('Payment capture failed', e.message ?? 'Please try again or use PayPal wallet.');
+      Alert.alert('Payment capture failed', apiError(e));
     }
   };
 
@@ -251,8 +265,9 @@ export default function StorageUpgradeModal({
       await Linking.openURL(res.approval_url);
       setPurchaseState('awaiting');
     } catch (e: any) {
+      console.error('[handlePayPal] order creation failed:', apiError(e));
       setPurchaseState('selecting');
-      Alert.alert('Could not start PayPal checkout', e.message ?? 'Please try again.');
+      Alert.alert('Could not start PayPal checkout', apiError(e));
     }
   };
 
@@ -271,9 +286,10 @@ export default function StorageUpgradeModal({
         const { new_quota_bytes } = await captureStorageOrder(orderId);
         onPurchased(new_quota_bytes);
       }
-    } catch {
+    } catch (e: any) {
+      console.error('[handleVerifyPayPal] capture failed:', apiError(e));
       setPurchaseState('awaiting');
-      Alert.alert('Payment not found', 'We could not verify your payment. If you completed checkout, please try again.');
+      Alert.alert('Payment not found', apiError(e));
     }
   };
 
@@ -296,26 +312,44 @@ export default function StorageUpgradeModal({
 
   // ── Render ──────────────────────────────────────────────────────────────────
 
-  return (
-    <>
-      <Modal
-        visible={visible}
-        animationType="slide"
-        presentationStyle="pageSheet"
-        onRequestClose={handleClose}
-      >
-        <View style={styles.root}>
+  const cardAmount = selectedPlan
+    ? isExpansion
+      ? (Math.round(parseFloat(selectedPlan.amount[storageType]) * 100 / 2) / 100).toFixed(2)
+      : selectedPlan.amount[storageType]
+    : '0.00';
 
+  return (
+    <Modal
+      visible={visible}
+      animationType="slide"
+      presentationStyle="pageSheet"
+      onRequestClose={handleClose}
+    >
+      <View style={styles.root}>
+
+        {/* Card form — rendered inline to avoid iOS double-modal constraint */}
+        {purchaseState === 'card_form' && (
+          <PayPalCardSheet
+            amount={cardAmount}
+            currency="USD"
+            label={cardLabel}
+            onSuccess={handleCardSuccess}
+            onError={(msg) => {
+              setPurchaseState('selecting');
+              Alert.alert('Card payment failed', msg);
+            }}
+            onCancel={() => setPurchaseState('selecting')}
+          />
+        )}
+
+        {purchaseState !== 'card_form' && (
+          <>
           {/* Header */}
           <View style={styles.header}>
             <TouchableOpacity onPress={handleClose} style={styles.closeBtn} hitSlop={12} disabled={isBusy}>
               <X size={20} color={isBusy ? colors.textMuted : colors.textPrimary} strokeWidth={2} />
             </TouchableOpacity>
-            <Text style={styles.headerTitle}>
-              {isExpansionSuccess
-                ? 'Request Submitted'
-                : (isExpansion && selectedPlanId) ? 'Request Expansion' : 'Upgrade Storage'}
-            </Text>
+            <Text style={styles.headerTitle}>Upgrade Storage</Text>
             <View style={{ width: 36 }} />
           </View>
 
@@ -323,23 +357,6 @@ export default function StorageUpgradeModal({
 
             {/* Server selector */}
             <Text style={styles.sectionLabel}>Server location</Text>
-
-            {/* Fast / standard availability summary */}
-            {!serversLoading && !serversError && servers.length > 0 && (
-              <View style={styles.storageSummary}>
-                <View style={styles.storageCell}>
-                  <Zap size={13} color="#16a34a" strokeWidth={2} />
-                  <Text style={styles.storageCellLabel}>Fast</Text>
-                  <Text style={styles.storageCellValue}>{formatBytes(fastAvailable)}</Text>
-                </View>
-                <View style={styles.storageDivider} />
-                <View style={styles.storageCell}>
-                  <HardDrive size={13} color="#6b7280" strokeWidth={2} />
-                  <Text style={styles.storageCellLabel}>Standard</Text>
-                  <Text style={styles.storageCellValue}>{formatBytes(slowAvailable)}</Text>
-                </View>
-              </View>
-            )}
 
             {/* Dropdown trigger */}
             {serversLoading ? (
@@ -375,6 +392,15 @@ export default function StorageUpgradeModal({
                           <Text style={styles.serverTriggerMeta}>
                             {sel.ping_ms !== null ? `${sel.ping_ms} ms  ·  ` : ''}{formatBytes(sel.available_bytes)} available
                           </Text>
+                          <View style={styles.capacityRow}>
+                            <Zap size={11} color="#16a34a" strokeWidth={2} />
+                            <Text style={styles.capacityLabel}>Fast</Text>
+                            <Text style={styles.capacityValue}>{formatBytes(fastAvailable)}</Text>
+                            <View style={styles.capacityDot} />
+                            <HardDrive size={11} color="#6b7280" strokeWidth={2} />
+                            <Text style={styles.capacityLabel}>Standard</Text>
+                            <Text style={styles.capacityValue}>{formatBytes(slowAvailable)}</Text>
+                          </View>
                         </>
                       ) : (
                         <Text style={styles.serverTriggerName}>No servers available</Text>
@@ -475,7 +501,7 @@ export default function StorageUpgradeModal({
                   <View style={styles.planLeft}>
                     <Text style={[styles.planLabel, sel && styles.planLabelSelected]}>{plan.label}</Text>
                     {unavailable ? (
-                      <Text style={styles.planUnavailableNote}>Expansion request · 14-day SLA</Text>
+                      <Text style={styles.planUnavailableNote}>Server expansion required</Text>
                     ) : (
                       <Text style={styles.planNewTotal}>New total: {formatBytes(quotaBytes + plan.addBytes)}</Text>
                     )}
@@ -491,28 +517,6 @@ export default function StorageUpgradeModal({
                 </TouchableOpacity>
               );
             })}
-
-            {isExpansion && selectedPlan && (
-              <View style={styles.expansionNotice}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-                  <Text style={styles.expansionNoticeTitle}>Capacity Expansion Request</Text>
-                  {selectedServer && (
-                    <View style={selectedServer.drive_type === 'nvme' ? styles.driveBadgeFast : styles.driveBadgeSlow}>
-                      <Text style={styles.driveBadgeText}>{selectedServer.drive_type === 'nvme' ? 'Fast' : 'Standard'}</Text>
-                    </View>
-                  )}
-                </View>
-                <Text style={styles.expansionNoticeBody}>
-                  This server doesn't have enough free space for {selectedPlan.label}{' '}
-                  {selectedServer ? `(${selectedServer.drive_type === 'nvme' ? 'fast NVMe' : 'standard HDD'} storage)` : ''} right now.
-                  Pay a <Text style={{ fontWeight: '700' }}>{depositDisplay} deposit (50%)</Text> to
-                  reserve your slot. Our team will expand capacity within{' '}
-                  <Text style={{ fontWeight: '700' }}>14 days</Text>. If we can't fulfil the request
-                  in time, your deposit is automatically refunded.
-                </Text>
-              </View>
-            )}
-
           </ScrollView>
 
           {/* ── Footer ── */}
@@ -524,6 +528,28 @@ export default function StorageUpgradeModal({
                   <View style={styles.noServersNotice}>
                     <Text style={styles.noServersNoticeText}>
                       No servers are currently available. Storage upgrades are disabled until one is available.
+                    </Text>
+                  </View>
+                )}
+
+                {isExpansion && selectedPlan && (
+                  <View style={styles.expansionNotice}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                      <Text style={styles.expansionNoticeTitle}>Capacity Expansion Request</Text>
+                      {selectedServer && (
+                        <View style={selectedServer.drive_type === 'nvme' ? styles.driveBadgeFast : styles.driveBadgeSlow}>
+                          <Text style={styles.driveBadgeText}>{selectedServer.drive_type === 'nvme' ? 'Fast' : 'Standard'} Storage</Text>
+                        </View>
+                      )}
+                    </View>
+                    <Text style={styles.expansionNoticeBody}>
+                      This server doesn't have enough free space for {selectedPlan.label}{' '}
+                      {selectedServer ? `(${selectedServer.drive_type === 'nvme' ? 'fast' : 'standard'} storage)` : ''} right now.
+                      You can pay a <Text style={{ fontWeight: '700' }}>50% deposit ({depositDisplay})</Text> to
+                      increase server capacity for you. Our team will expand server capacity within{' '}
+                      <Text style={{ fontWeight: '700' }}>14 days</Text> and provision your additional capacity. 
+                      If we can't fulfil the request in time, your deposit is automatically refunded.
+                      The remaining amount will be charged when your additional capacity is provisioned.
                     </Text>
                   </View>
                 )}
@@ -549,6 +575,8 @@ export default function StorageUpgradeModal({
                     <Text style={styles.googlePayText}>G Pay</Text>
                   </TouchableOpacity>
                 )}
+
+                
 
                 <TouchableOpacity
                   style={[styles.cardBtn, (!selectedPlanId || servers.length === 0) && styles.btnDisabled]}
@@ -625,27 +653,10 @@ export default function StorageUpgradeModal({
             )}
 
           </View>
-        </View>
-      </Modal>
-
-      {/* PayPal hosted-fields card sheet — order is created client-side in the WebView */}
-      <PayPalCardSheet
-        visible={purchaseState === 'card_form'}
-        amount={selectedPlan
-          ? isExpansion
-            ? (Math.round(parseFloat(selectedPlan.amount[storageType]) * 100 / 2) / 100).toFixed(2)
-            : selectedPlan.amount[storageType]
-          : '0.00'}
-        currency="USD"
-        label={cardLabel}
-        onSuccess={handleCardSuccess}
-        onError={(msg) => {
-          setPurchaseState('selecting');
-          Alert.alert('Card payment failed', msg);
-        }}
-        onCancel={() => setPurchaseState('selecting')}
-      />
-    </>
+          </>
+        )}
+      </View>
+    </Modal>
   );
 }
 
@@ -665,21 +676,6 @@ const styles = StyleSheet.create({
 
   scrollContent: { padding: spacing.md, paddingBottom: 300 },
 
-  // Storage breakdown summary
-  storageSummary: {
-    flexDirection: 'row', alignItems: 'center',
-    backgroundColor: colors.surface, borderRadius: radius.md,
-    borderWidth: 1, borderColor: colors.border,
-    marginBottom: spacing.sm, overflow: 'hidden',
-  },
-  storageCell: {
-    flex: 1, flexDirection: 'row', alignItems: 'center', gap: 5,
-    paddingVertical: 8, paddingHorizontal: spacing.sm,
-  },
-  storageDivider: { width: 1, height: '100%', backgroundColor: colors.border },
-  storageCellLabel: { fontSize: 12, fontWeight: '600', color: colors.textMuted },
-  storageCellValue: { fontSize: 12, fontWeight: '700', color: colors.textPrimary, marginLeft: 2 },
-
   // Server dropdown trigger
   serverTrigger: {
     flexDirection: 'row', alignItems: 'center',
@@ -693,6 +689,10 @@ const styles = StyleSheet.create({
   },
   serverTriggerName: { fontSize: 15, fontWeight: '600', color: colors.textPrimary },
   serverTriggerMeta: { fontSize: 12, color: colors.textSecondary, marginTop: 2 },
+  capacityRow: { flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 6 },
+  capacityLabel: { fontSize: 11, fontWeight: '600', color: colors.textMuted },
+  capacityValue: { fontSize: 11, fontWeight: '700', color: colors.textPrimary },
+  capacityDot: { width: 3, height: 3, borderRadius: 1.5, backgroundColor: colors.border, marginHorizontal: 2 },
 
   // Expanded dropdown list
   serverDropdown: {

@@ -169,7 +169,7 @@ export function createServer(params: {
   return post<{ id: string; name: string }>('/admin/system/servers', params)
 }
 
-export function updateServer(serverId: string, params: { is_active?: boolean }) {
+export function updateServer(serverId: string, params: { is_active?: boolean; name?: string }) {
   return patch<{ message: string }>(`/admin/system/servers/${serverId}`, params)
 }
 

@@ -87,7 +87,7 @@ api.interceptors.response.use(
 
     try {
       const { refresh } = await getStoredTokens();
-      if (!refresh) throw new Error('no refresh token');
+      if (!refresh) return Promise.reject(error);
 
       const res = await axios.post<{ access_token: string; refresh_token: string }>(
         `${BASE_URL}/api/v1/mobile/auth/refresh`,

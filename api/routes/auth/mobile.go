@@ -130,7 +130,7 @@ func (h *Handler) MobileGoogleLogin(c *gin.Context) {
 	if req.ServerAuthCode != "" {
 		exchanged, err := h.svc.ExchangeGoogleServerAuthCode(c.Request.Context(), req.ServerAuthCode)
 		if err != nil {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "google auth code exchange failed: " + err.Error()})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "google auth code exchange failed: " + err.Error()})
 			return
 		}
 		idToken = exchanged
@@ -138,7 +138,7 @@ func (h *Handler) MobileGoogleLogin(c *gin.Context) {
 
 	tokens, err := h.svc.SocialLogin(c.Request.Context(), "google", idToken)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "google authentication failed: " + err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "google authentication failed: " + err.Error()})
 		return
 	}
 

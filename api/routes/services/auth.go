@@ -109,6 +109,225 @@ func NewAuthService(q *db.Queries, cfg AuthServiceConfig) *AuthService {
 
 // ── Public methods ────────────────────────────────────────────────────────────
 
+// AppBaseURL returns the public-facing base URL of the application.
+func (s *AuthService) AppBaseURL() string { return s.appBaseURL }
+
+// AuthCodeExchange exchanges a Keycloak authorization code for a token pair
+// using the authorization_code grant. redirectURI must match the value used
+// when the authorization request was initiated.
+//
+// If the social identity's email already belongs to an existing app account
+// under a different username, an *ErrEmailConflict is returned instead of
+// provisioning a duplicate. The caller should surface the linking flow.
+func (s *AuthService) AuthCodeExchange(ctx context.Context, code, redirectURI, provider string) (*TokenPair, error) {
+	body := url.Values{
+		"grant_type":    {"authorization_code"},
+		"client_id":     {s.kcClientID},
+		"client_secret": {s.kcSecret},
+		"code":          {code},
+		"redirect_uri":  {redirectURI},
+	}
+	tokens, err := s.tokenRequest(ctx, body)
+	if err != nil {
+		return nil, fmt.Errorf("auth code exchange: %w", err)
+	}
+
+	if err := s.checkEmailConflict(ctx, tokens.AccessToken, provider); err != nil {
+		return nil, err
+	}
+
+	if s.ProvisionUserKey != nil {
+		if err := s.ensureUserProvisioned(ctx, tokens.AccessToken); err != nil {
+			return nil, fmt.Errorf("auth code exchange: provision user: %w", err)
+		}
+	}
+	return tokens, nil
+}
+
+// WebSocialLogin exchanges a provider identity token (Apple or Google) for
+// Apollo SFS tokens via Keycloak's Token Exchange grant, then runs the same
+// email-conflict check as AuthCodeExchange before provisioning. Intended for
+// browser-initiated social sign-in where the provider token is obtained directly
+// (e.g. Sign in with Apple JS SDK) rather than via a Keycloak redirect.
+func (s *AuthService) WebSocialLogin(ctx context.Context, provider, providerToken string) (*TokenPair, error) {
+	body := url.Values{
+		"grant_type":           {"urn:ietf:params:oauth:grant-type:token-exchange"},
+		"client_id":            {s.kcClientID},
+		"client_secret":        {s.kcSecret},
+		"subject_token":        {providerToken},
+		"subject_token_type":   {"urn:ietf:params:oauth:token-type:id_token"},
+		"subject_issuer":       {provider},
+		"requested_token_type": {"urn:ietf:params:oauth:token-type:refresh_token"},
+	}
+	tokens, err := s.tokenRequest(ctx, body)
+	if err != nil {
+		return nil, fmt.Errorf("web social login (%s): %w", provider, err)
+	}
+	if err := s.checkEmailConflict(ctx, tokens.AccessToken, provider); err != nil {
+		return nil, err
+	}
+	if s.ProvisionUserKey != nil {
+		if err := s.ensureUserProvisioned(ctx, tokens.AccessToken); err != nil {
+			return nil, fmt.Errorf("web social login (%s): provision user: %w", provider, err)
+		}
+	}
+	return tokens, nil
+}
+
+// checkEmailConflict decodes the KC access token, and if the token's email
+// already belongs to an existing app account that would not be found by the
+// KC preferred_username, returns an *ErrEmailConflict. Email is the sole
+// deduplication key; usernames are not compared.
+func (s *AuthService) checkEmailConflict(ctx context.Context, accessToken, provider string) error {
+	claims, err := decodeTokenClaims(accessToken)
+	if err != nil || claims.Email == "" {
+		return nil
+	}
+	// If this KC user already has an app DB record, no conflict.
+	_, err = s.queries.GetUserByUsername(ctx, claims.PreferredUsername)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return nil // unexpected DB error — let provisioning handle it
+	}
+	// KC user has no app record yet. Check if the email belongs to another account.
+	existing, err := s.queries.GetUserByEmail(ctx, claims.Email)
+	if err != nil {
+		return nil // email not found — no conflict
+	}
+	return &ErrEmailConflict{
+		Email:            claims.Email,
+		ExistingUsername: existing.Username,
+		PendingKcUserID:  claims.Sub,
+		Provider:         provider,
+	}
+}
+
+// LinkSocialAccount links a social identity (whose temp KC user is identified by
+// pendingKcUserID) to the existing app account verified by username + password.
+// On success it returns tokens for the existing account and cleans up the
+// temporary Keycloak user that was created for the social identity.
+func (s *AuthService) LinkSocialAccount(ctx context.Context, existingUsername, password, pendingKcUserID, provider string) (*TokenPair, error) {
+	// Verify the existing credentials to ensure the user owns the account.
+	tokens, err := s.Login(ctx, existingUsername, password)
+	if err != nil {
+		return nil, fmt.Errorf("link social: %w", err)
+	}
+
+	adminToken, err := s.adminToken(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("link social: admin token: %w", err)
+	}
+
+	// Find the existing user's Keycloak ID.
+	existingKcID, err := s.kcFindUserByUsername(ctx, adminToken, existingUsername)
+	if err != nil || existingKcID == "" {
+		return nil, fmt.Errorf("link social: existing KC user not found")
+	}
+
+	// Fetch the federated identities from the temporary social KC user.
+	fedIDs, err := s.kcGetFederatedIdentities(ctx, adminToken, pendingKcUserID)
+	if err != nil {
+		return nil, fmt.Errorf("link social: fetch federated identities: %w", err)
+	}
+
+	// Link each federated identity from the temp user to the existing user.
+	for _, fid := range fedIDs {
+		if fid.IdentityProvider != provider {
+			continue
+		}
+		if err := s.kcAddFederatedIdentity(ctx, adminToken, existingKcID, fid); err != nil {
+			return nil, fmt.Errorf("link social: add federated identity: %w", err)
+		}
+	}
+
+	// Delete the temporary social Keycloak user now that its identity is linked.
+	if err := s.kcDeleteUser(ctx, adminToken, pendingKcUserID); err != nil {
+		// Non-fatal: log but continue — the link succeeded and the orphan
+		// can be cleaned up manually if needed.
+		fmt.Printf("link social: warning: could not delete temp KC user %s: %v\n", pendingKcUserID, err)
+	}
+
+	return tokens, nil
+}
+
+// kcFederatedIdentity is a single entry from Keycloak's federated-identity API.
+type kcFederatedIdentity struct {
+	IdentityProvider string `json:"identityProvider"`
+	UserID           string `json:"userId"`
+	UserName         string `json:"userName"`
+}
+
+// kcGetFederatedIdentities returns the list of federated identities for a KC user.
+func (s *AuthService) kcGetFederatedIdentities(ctx context.Context, adminToken, kcUserID string) ([]kcFederatedIdentity, error) {
+	endpoint := fmt.Sprintf("%s/admin/realms/%s/users/%s/federated-identity",
+		s.kcURL, s.kcRealm, kcUserID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+
+	resp, err := s.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("keycloak request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("keycloak returned %s", resp.Status)
+	}
+	var ids []kcFederatedIdentity
+	if err := json.NewDecoder(resp.Body).Decode(&ids); err != nil {
+		return nil, fmt.Errorf("decode response: %w", err)
+	}
+	return ids, nil
+}
+
+// kcAddFederatedIdentity links one federated identity to a KC user.
+func (s *AuthService) kcAddFederatedIdentity(ctx context.Context, adminToken, kcUserID string, fid kcFederatedIdentity) error {
+	body, _ := json.Marshal(fid)
+	endpoint := fmt.Sprintf("%s/admin/realms/%s/users/%s/federated-identity/%s",
+		s.kcURL, s.kcRealm, kcUserID, fid.IdentityProvider)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(string(body)))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+
+	resp, err := s.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("keycloak request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusCreated {
+		return fmt.Errorf("keycloak returned %s", resp.Status)
+	}
+	return nil
+}
+
+// kcDeleteUser deletes a Keycloak user by their KC UUID.
+func (s *AuthService) kcDeleteUser(ctx context.Context, adminToken, kcUserID string) error {
+	endpoint := fmt.Sprintf("%s/admin/realms/%s/users/%s", s.kcURL, s.kcRealm, kcUserID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, endpoint, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+
+	resp, err := s.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("keycloak request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("keycloak returned %s", resp.Status)
+	}
+	return nil
+}
+
 // Login performs a Keycloak ROPC grant and returns the token pair on success.
 // Returns a non-nil error if credentials are invalid or Keycloak is unreachable.
 // As a side-effect, it provisions an app DB record for users created directly in
@@ -650,8 +869,24 @@ func (s *AuthService) kcResetPassword(ctx context.Context, adminToken, userID, n
 
 // kcTokenClaims holds the subset of JWT claims needed for user provisioning.
 type kcTokenClaims struct {
+	Sub               string `json:"sub"` // Keycloak user UUID
 	PreferredUsername string `json:"preferred_username"`
 	Email             string `json:"email"`
+}
+
+// ErrEmailConflict is returned by AuthCodeExchange when the social login email
+// matches an existing app account with a different username. The caller should
+// store the PendingKcUserID and Provider in a short-lived session and redirect
+// the user to the account-linking UI.
+type ErrEmailConflict struct {
+	Email            string // email shared by both accounts
+	ExistingUsername string // existing app DB username
+	PendingKcUserID  string // KC user UUID of the new social-identity user
+	Provider         string // "google" or "apple"
+}
+
+func (e *ErrEmailConflict) Error() string {
+	return fmt.Sprintf("email conflict: %s already belongs to %s", e.Email, e.ExistingUsername)
 }
 
 // decodeTokenClaims base64-decodes the JWT payload without verifying the

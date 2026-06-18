@@ -331,6 +331,9 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		authGroup.POST("/refresh", authHandler.Refresh)
 		authGroup.POST("/forgot_password", authHandler.ForgotPassword)
 		authGroup.POST("/reset_password", authHandler.ResetPassword)
+		authGroup.GET("/social/callback", authHandler.SocialCallback)
+		authGroup.POST("/social/link", authHandler.SocialLinkConfirm)
+		authGroup.POST("/social/apple", authHandler.AppleWebLogin)
 	}
 
 	// ── Mobile auth — token-based (no session cookie) ─────────────────────

@@ -9,23 +9,19 @@ import {
   ScrollView,
   StyleSheet,
   Text,
-  TextInput,
   TouchableOpacity,
   View,
 } from 'react-native';
-import { ChevronDown, CreditCard, HardDrive, Server, X, Zap } from 'lucide-react-native';
+import { HardDrive, Server, X, Zap } from 'lucide-react-native';
 import {
   captureStorageOrder,
   createApplePayStorageOrder,
-  createCardStorageOrder,
   createGooglePayStorageOrder,
   createStorageOrder,
   captureExpansionOrder,
   createApplePayExpansionOrder,
-  createCardExpansionOrder,
   createGooglePayExpansionOrder,
   createExpansionOrder,
-  type CardPaymentData,
   type StorageType,
 } from '../api/billing';
 import { listServersWithPing, type ServerInfoWithPing } from '../api/storage';
@@ -60,19 +56,9 @@ function formatBytes(b: number): string {
   return `${(b / 1024 ** 4).toFixed(1)} TB`;
 }
 
-function formatCardNumber(text: string): string {
-  const clean = text.replace(/\D/g, '').slice(0, 16);
-  return clean.replace(/(.{4})/g, '$1 ').trim();
-}
-
-function formatExpiry(text: string): string {
-  const clean = text.replace(/\D/g, '').slice(0, 4);
-  return clean.length > 2 ? `${clean.slice(0, 2)}/${clean.slice(2)}` : clean;
-}
-
 // ── Types ──────────────────────────────────────────────────────────────────────
 
-type PurchaseState = 'selecting' | 'card' | 'processing' | 'awaiting' | 'verifying' | 'expansion_success';
+type PurchaseState = 'selecting' | 'processing' | 'awaiting' | 'verifying' | 'expansion_success';
 
 interface Props {
   visible: boolean;
@@ -95,25 +81,15 @@ export default function StorageUpgradeModal({
 
   const [servers, setServers] = useState<ServerInfoWithPing[]>([]);
   const [selectedServerId, setSelectedServerId] = useState<string | null>(null);
-  const [serverPickerVisible, setServerPickerVisible] = useState(false);
   const [serversLoading, setServersLoading] = useState(false);
   const [serversError, setServersError] = useState<string | null>(null);
 
   const [canApplePay, setCanApplePay] = useState(false);
   const [canGooglePay, setCanGooglePay] = useState(false);
 
-  const [cardNumber, setCardNumber] = useState('');
-  const [cardExpiry, setCardExpiry] = useState('');
-  const [cardCvv, setCardCvv] = useState('');
-  const [cardName, setCardName] = useState('');
-  const [cardError, setCardError] = useState<string | null>(null);
-
   const [expansionRequestId, setExpansionRequestId] = useState<string | null>(null);
   const [expansionExpiresAt, setExpansionExpiresAt] = useState<string | null>(null);
 
-  const expiryRef = useRef<TextInput>(null);
-  const cvvRef = useRef<TextInput>(null);
-  const nameRef = useRef<TextInput>(null);
   const appStateRef = useRef(AppState.currentState);
 
   useEffect(() => {
@@ -122,9 +98,8 @@ export default function StorageUpgradeModal({
     setSelectedPlanId(null);
     setPurchaseState('selecting');
     setPendingOrderId(null);
-    setCardNumber(''); setCardExpiry(''); setCardCvv(''); setCardName(''); setCardError(null);
-    setExpansionRequestId(null); setExpansionExpiresAt(null);
-    setServerPickerVisible(false);
+    setExpansionRequestId(null);
+    setExpansionExpiresAt(null);
 
     if (Platform.OS === 'ios') {
       canMakeApplePayments().then(setCanApplePay).catch(() => setCanApplePay(false));
@@ -167,58 +142,11 @@ export default function StorageUpgradeModal({
   // Expansion mode: tier requires more space than the server currently has available.
   const isExpansion = !!(selectedPlan && selectedServer && selectedPlan.addBytes > selectedServer.available_bytes);
 
-  // ── Card validation ─────────────────────────────────────────────────────────
-
-  const isCardValid = (): boolean => {
-    const num = cardNumber.replace(/\s/g, '');
-    if (num.length !== 16) return false;
-    const parts = cardExpiry.split('/');
-    if (parts.length !== 2 || parts[0].length !== 2 || parts[1].length !== 2) return false;
-    const month = parseInt(parts[0], 10);
-    const year = parseInt(`20${parts[1]}`, 10);
-    const now = new Date();
-    if (month < 1 || month > 12) return false;
-    if (year < now.getFullYear() || (year === now.getFullYear() && month < now.getMonth() + 1)) return false;
-    if (cardCvv.length < 3) return false;
-    return cardName.trim().length > 0;
-  };
-
   // ── Handlers ────────────────────────────────────────────────────────────────
-
-  const handleCardPay = async () => {
-    if (!selectedPlanId || !isCardValid()) return;
-    setCardError(null);
-    setPurchaseState('processing');
-    const num = cardNumber.replace(/\s/g, '');
-    const [month, year] = cardExpiry.split('/');
-    const payload: CardPaymentData = {
-      number: num,
-      expiry_month: month,
-      expiry_year: `20${year}`,
-      cvv: cardCvv,
-      name: cardName.trim(),
-    };
-    try {
-      if (isExpansion && selectedServerId) {
-        const { expansion_request_id, expires_at } = await createCardExpansionOrder(selectedPlanId, storageType, selectedServerId, payload);
-        setExpansionRequestId(expansion_request_id);
-        setExpansionExpiresAt(expires_at);
-        setPurchaseState('expansion_success');
-        onExpansionRequested?.(expansion_request_id, expires_at);
-      } else {
-        const { new_quota_bytes } = await createCardStorageOrder(selectedPlanId, storageType, payload);
-        onPurchased(new_quota_bytes);
-      }
-    } catch (e: any) {
-      setPurchaseState('card');
-      setCardError(e.response?.data?.message ?? e.message ?? 'Card payment failed. Please try again.');
-    }
-  };
 
   const handleApplePay = async () => {
     if (!selectedPlanId || !selectedPlan) return;
     setPurchaseState('processing');
-    // Deposit is 50% of plan price for expansion requests.
     const applePayAmount = isExpansion
       ? (Math.round(parseFloat(selectedPlan.amount[storageType]) * 100 / 2) / 100).toFixed(2)
       : selectedPlan.amount[storageType];
@@ -339,10 +267,8 @@ export default function StorageUpgradeModal({
   const usedPct = quotaBytes > 0 ? Math.min((usedBytes / quotaBytes) * 100, 100) : 0;
   const isBusy = purchaseState === 'processing' || purchaseState === 'verifying';
   const isSelecting = purchaseState === 'selecting';
-  const isCard = purchaseState === 'card';
   const isExpansionSuccess = purchaseState === 'expansion_success';
 
-  // Deposit is 50% of the plan price, displayed as a string like "$50.00".
   const depositDisplay = selectedPlan
     ? `$${(Math.round(parseFloat(selectedPlan.amount[storageType]) * 100 / 2) / 100).toFixed(2)}`
     : '';
@@ -364,277 +290,158 @@ export default function StorageUpgradeModal({
             <X size={20} color={isBusy ? colors.textMuted : colors.textPrimary} strokeWidth={2} />
           </TouchableOpacity>
           <Text style={styles.headerTitle}>
-            {isCard
-              ? (isExpansion ? 'Expansion Deposit' : 'Card Payment')
-              : isExpansionSuccess
+            {isExpansionSuccess
               ? 'Request Submitted'
               : (isExpansion && selectedPlanId) ? 'Request Expansion' : 'Upgrade Storage'}
           </Text>
           <View style={{ width: 36 }} />
         </View>
 
-        {/* ── Card form ── */}
-        {isCard ? (
-          <ScrollView
-            contentContainerStyle={styles.scrollContent}
-            keyboardShouldPersistTaps="handled"
-            showsVerticalScrollIndicator={false}
-          >
-            {selectedPlan && (
-              <View style={styles.planSummary}>
-                <Text style={styles.planSummaryLabel}>
-                  {selectedPlan.label} · {storageType === 'nvme' ? 'NVMe SSD' : 'HDD'}
-                </Text>
-                <Text style={styles.planSummaryPrice}>{selectedPlan.price[storageType]}</Text>
-              </View>
-            )}
+        {/* Plan selection */}
+        <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
 
-            <Text style={styles.fieldLabel}>Card Number</Text>
-            <TextInput
-              style={styles.input}
-              value={cardNumber}
-              onChangeText={(t) => {
-                const f = formatCardNumber(t);
-                setCardNumber(f);
-                if (f.replace(/\s/g, '').length === 16) expiryRef.current?.focus();
-              }}
-              placeholder="1234 5678 9012 3456"
-              placeholderTextColor={colors.textMuted}
-              keyboardType="numeric"
-              maxLength={19}
-              returnKeyType="next"
-              onSubmitEditing={() => expiryRef.current?.focus()}
-            />
-
-            <View style={styles.row}>
-              <View style={{ flex: 1.1 }}>
-                <Text style={styles.fieldLabel}>Expiry</Text>
-                <TextInput
-                  ref={expiryRef}
-                  style={styles.input}
-                  value={cardExpiry}
-                  onChangeText={(t) => {
-                    const f = formatExpiry(t);
-                    setCardExpiry(f);
-                    if (f.length === 5) cvvRef.current?.focus();
-                  }}
-                  placeholder="MM/YY"
-                  placeholderTextColor={colors.textMuted}
-                  keyboardType="numeric"
-                  maxLength={5}
-                  returnKeyType="next"
-                  onSubmitEditing={() => cvvRef.current?.focus()}
-                />
-              </View>
-              <View style={{ flex: 1, marginLeft: spacing.sm }}>
-                <Text style={styles.fieldLabel}>CVV</Text>
-                <TextInput
-                  ref={cvvRef}
-                  style={styles.input}
-                  value={cardCvv}
-                  onChangeText={(t) => {
-                    const c = t.replace(/\D/g, '').slice(0, 4);
-                    setCardCvv(c);
-                    if (c.length >= 3) nameRef.current?.focus();
-                  }}
-                  placeholder="•••"
-                  placeholderTextColor={colors.textMuted}
-                  keyboardType="numeric"
-                  maxLength={4}
-                  secureTextEntry
-                  returnKeyType="next"
-                  onSubmitEditing={() => nameRef.current?.focus()}
-                />
-              </View>
-            </View>
-
-            <Text style={styles.fieldLabel}>Name on Card</Text>
-            <TextInput
-              ref={nameRef}
-              style={styles.input}
-              value={cardName}
-              onChangeText={setCardName}
-              placeholder="Full name"
-              placeholderTextColor={colors.textMuted}
-              autoCapitalize="words"
-              returnKeyType="done"
-              onSubmitEditing={handleCardPay}
-            />
-
-            {cardError != null && (
-              <Text style={styles.cardError}>{cardError}</Text>
-            )}
-          </ScrollView>
-
-        ) : (
-          /* ── Plan selection ── */
-          <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
-
-            {/* Server selector */}
-            <Text style={styles.sectionLabel}>Server location</Text>
-            <TouchableOpacity
-              style={styles.serverSelector}
-              onPress={() => setServerPickerVisible(true)}
-              activeOpacity={0.8}
-              disabled={!isSelecting || serversLoading}
-            >
-              <View style={styles.serverSelectorLeft}>
-                {serversLoading ? (
-                  <ActivityIndicator size="small" color={colors.primary} style={{ marginRight: 8 }} />
-                ) : (
-                  <Server size={16} color={colors.primary} strokeWidth={1.5} style={{ marginRight: 8 }} />
-                )}
-                <View>
-                  {(() => {
-                    const sel = servers.find((s) => s.id === selectedServerId);
-                    return sel ? (
-                      <>
-                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                          <Text style={styles.serverSelectorName}>{sel.name}</Text>
-                          <View style={sel.drive_type === 'nvme' ? styles.driveBadgeFast : styles.driveBadgeSlow}>
-                            <Text style={styles.driveBadgeText}>
-                              {sel.drive_type === 'nvme' ? 'Fast' : 'Slow'}
-                            </Text>
-                          </View>
+          {/* Inline server list */}
+          <Text style={styles.sectionLabel}>Server location</Text>
+          {serversLoading ? (
+            <ActivityIndicator size="small" color={colors.primary} style={{ marginBottom: spacing.md }} />
+          ) : serversError ? (
+            <Text style={styles.serverError}>{serversError}</Text>
+          ) : (
+            <View style={styles.serverList}>
+              {servers.map((s, idx) => {
+                const sel = s.id === selectedServerId;
+                return (
+                  <TouchableOpacity
+                    key={s.id}
+                    style={[
+                      styles.serverRow,
+                      sel && styles.serverRowActive,
+                      idx < servers.length - 1 && styles.serverRowBorder,
+                    ]}
+                    onPress={() => isSelecting && setSelectedServerId(s.id)}
+                    activeOpacity={0.75}
+                    disabled={!isSelecting}
+                  >
+                    <Server size={15} color={sel ? colors.primary : colors.textMuted} strokeWidth={1.5} style={{ marginRight: 10 }} />
+                    <View style={{ flex: 1 }}>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                        <Text style={[styles.serverRowName, sel && styles.serverRowNameActive]}>{s.name}</Text>
+                        <View style={s.drive_type === 'nvme' ? styles.driveBadgeFast : styles.driveBadgeSlow}>
+                          <Text style={styles.driveBadgeText}>
+                            {s.drive_type === 'nvme' ? 'Fast' : 'Slow'}
+                          </Text>
                         </View>
-                        <Text style={styles.serverSelectorMeta}>
-                          {sel.ping_ms !== null ? `${sel.ping_ms} ms  ·  ` : ''}
-                          {formatBytes(sel.available_bytes)} available
-                        </Text>
-                      </>
-                    ) : (
-                      <Text style={[styles.serverSelectorName, serversError ? styles.serverSelectorError : null]}>
-                        {serversLoading ? 'Finding best server…' : serversError ? serversError : 'No servers available'}
+                      </View>
+                      <Text style={styles.serverRowMeta}>
+                        {s.ping_ms !== null ? `${s.ping_ms} ms  ·  ` : ''}
+                        {formatBytes(s.available_bytes)} available
                       </Text>
-                    );
-                  })()}
-                </View>
+                    </View>
+                    {sel && <View style={styles.serverCheck} />}
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          )}
+
+          <View style={styles.quotaCard}>
+            <Text style={styles.quotaLabel}>Current storage</Text>
+            <Text style={styles.quotaValue}>{formatBytes(quotaBytes)}</Text>
+            <Text style={styles.quotaSub}>
+              {formatBytes(usedBytes)} used · {usedPct.toFixed(0)}%
+            </Text>
+            {quotaBytes > 0 && (
+              <View style={styles.miniBar}>
+                <View style={[styles.miniBarFill, { width: `${usedPct}%` as any }]} />
               </View>
-              <ChevronDown size={16} color={colors.textMuted} />
-            </TouchableOpacity>
+            )}
+          </View>
 
-            <View style={styles.quotaCard}>
-              <Text style={styles.quotaLabel}>Current storage</Text>
-              <Text style={styles.quotaValue}>{formatBytes(quotaBytes)}</Text>
-              <Text style={styles.quotaSub}>
-                {formatBytes(usedBytes)} used · {usedPct.toFixed(0)}%
-              </Text>
-              {quotaBytes > 0 && (
-                <View style={styles.miniBar}>
-                  <View style={[styles.miniBarFill, { width: `${usedPct}%` as any }]} />
+          <Text style={styles.sectionLabel}>Storage type</Text>
+          <View style={styles.typeToggle}>
+            {(['nvme', 'hdd'] as StorageType[]).map((t) => (
+              <TouchableOpacity
+                key={t}
+                style={[styles.typeBtn, storageType === t && styles.typeBtnActive]}
+                onPress={() => setStorageType(t)}
+                activeOpacity={0.8}
+                disabled={!isSelecting}
+              >
+                {t === 'nvme'
+                  ? <Zap size={15} color={storageType === t ? colors.surface : colors.textSecondary} strokeWidth={2} style={{ marginRight: 6 }} />
+                  : <HardDrive size={15} color={storageType === t ? colors.surface : colors.textSecondary} strokeWidth={2} style={{ marginRight: 6 }} />
+                }
+                <View>
+                  <Text style={[styles.typeBtnLabel, storageType === t && styles.typeBtnLabelActive]}>
+                    {t === 'nvme' ? 'Fast' : 'Standard'}
+                  </Text>
+                  <Text style={[styles.typeBtnSub, storageType === t && styles.typeBtnSubActive]}>
+                    {t === 'nvme' ? 'NVMe SSD' : 'HDD'}
+                  </Text>
                 </View>
-              )}
-            </View>
+              </TouchableOpacity>
+            ))}
+          </View>
 
-            <Text style={styles.sectionLabel}>Storage type</Text>
-            <View style={styles.typeToggle}>
-              {(['nvme', 'hdd'] as StorageType[]).map((t) => (
-                <TouchableOpacity
-                  key={t}
-                  style={[styles.typeBtn, storageType === t && styles.typeBtnActive]}
-                  onPress={() => setStorageType(t)}
-                  activeOpacity={0.8}
-                  disabled={!isSelecting}
-                >
-                  {t === 'nvme'
-                    ? <Zap size={15} color={storageType === t ? colors.surface : colors.textSecondary} strokeWidth={2} style={{ marginRight: 6 }} />
-                    : <HardDrive size={15} color={storageType === t ? colors.surface : colors.textSecondary} strokeWidth={2} style={{ marginRight: 6 }} />
-                  }
-                  <View>
-                    <Text style={[styles.typeBtnLabel, storageType === t && styles.typeBtnLabelActive]}>
-                      {t === 'nvme' ? 'Fast' : 'Standard'}
-                    </Text>
-                    <Text style={[styles.typeBtnSub, storageType === t && styles.typeBtnSubActive]}>
-                      {t === 'nvme' ? 'NVMe SSD' : 'HDD'}
-                    </Text>
-                  </View>
-                </TouchableOpacity>
-              ))}
-            </View>
-
-            <Text style={styles.sectionLabel}>Select capacity</Text>
-            {PLANS.map((plan) => {
-              const sel = selectedPlanId === plan.id;
-              const unavailable = !!(selectedServer && plan.addBytes > selectedServer.available_bytes);
-              return (
-                <TouchableOpacity
-                  key={plan.id}
-                  style={[styles.planCard, sel && styles.planCardSelected, unavailable && !sel && styles.planCardUnavailable]}
-                  onPress={() => setSelectedPlanId(plan.id)}
-                  activeOpacity={0.8}
-                  disabled={!isSelecting}
-                >
-                  <View style={styles.planLeft}>
-                    <Text style={[styles.planLabel, sel && styles.planLabelSelected]}>{plan.label}</Text>
-                    {unavailable ? (
-                      <Text style={styles.planUnavailableNote}>Expansion request · 14-day SLA</Text>
-                    ) : (
-                      <Text style={styles.planNewTotal}>New total: {formatBytes(quotaBytes + plan.addBytes)}</Text>
-                    )}
-                  </View>
-                  <View style={styles.planRight}>
-                    <Text style={[styles.planPrice, sel && styles.planPriceSelected]}>
-                      {unavailable ? `${plan.price[storageType]}*` : plan.price[storageType]}
-                    </Text>
-                    <View style={[styles.radio, sel && styles.radioSelected]}>
-                      {sel && <View style={styles.radioInner} />}
-                    </View>
-                  </View>
-                </TouchableOpacity>
-              );
-            })}
-
-            {/* Expansion notice shown when selected plan is unavailable */}
-            {isExpansion && selectedPlan && (
-              <View style={styles.expansionNotice}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-                  <Text style={styles.expansionNoticeTitle}>Capacity Expansion Request</Text>
-                  {selectedServer && (
-                    <View style={selectedServer.drive_type === 'nvme' ? styles.driveBadgeFast : styles.driveBadgeSlow}>
-                      <Text style={styles.driveBadgeText}>
-                        {selectedServer.drive_type === 'nvme' ? 'Fast' : 'Slow'}
-                      </Text>
-                    </View>
+          <Text style={styles.sectionLabel}>Select capacity</Text>
+          {PLANS.map((plan) => {
+            const sel = selectedPlanId === plan.id;
+            const unavailable = !!(selectedServer && plan.addBytes > selectedServer.available_bytes);
+            return (
+              <TouchableOpacity
+                key={plan.id}
+                style={[styles.planCard, sel && styles.planCardSelected, unavailable && !sel && styles.planCardUnavailable]}
+                onPress={() => setSelectedPlanId(plan.id)}
+                activeOpacity={0.8}
+                disabled={!isSelecting}
+              >
+                <View style={styles.planLeft}>
+                  <Text style={[styles.planLabel, sel && styles.planLabelSelected]}>{plan.label}</Text>
+                  {unavailable ? (
+                    <Text style={styles.planUnavailableNote}>Expansion request · 14-day SLA</Text>
+                  ) : (
+                    <Text style={styles.planNewTotal}>New total: {formatBytes(quotaBytes + plan.addBytes)}</Text>
                   )}
                 </View>
-                <Text style={styles.expansionNoticeBody}>
-                  This server doesn't have enough free space for {selectedPlan.label}{' '}
-                  {selectedServer ? `(${selectedServer.drive_type === 'nvme' ? 'fast NVMe' : 'slow HDD'} storage)` : ''} right now.
-                  Pay a <Text style={{ fontWeight: '700' }}>{depositDisplay} deposit (50%)</Text> to
-                  reserve your slot. Our team will expand capacity within{' '}
-                  <Text style={{ fontWeight: '700' }}>14 days</Text>. If we can't fulfil the request
-                  in time, your deposit is automatically refunded.
-                </Text>
-              </View>
-            )}
+                <View style={styles.planRight}>
+                  <Text style={[styles.planPrice, sel && styles.planPriceSelected]}>
+                    {unavailable ? `${plan.price[storageType]}*` : plan.price[storageType]}
+                  </Text>
+                  <View style={[styles.radio, sel && styles.radioSelected]}>
+                    {sel && <View style={styles.radioInner} />}
+                  </View>
+                </View>
+              </TouchableOpacity>
+            );
+          })}
 
-          </ScrollView>
-        )}
+          {isExpansion && selectedPlan && (
+            <View style={styles.expansionNotice}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                <Text style={styles.expansionNoticeTitle}>Capacity Expansion Request</Text>
+                {selectedServer && (
+                  <View style={selectedServer.drive_type === 'nvme' ? styles.driveBadgeFast : styles.driveBadgeSlow}>
+                    <Text style={styles.driveBadgeText}>
+                      {selectedServer.drive_type === 'nvme' ? 'Fast' : 'Slow'}
+                    </Text>
+                  </View>
+                )}
+              </View>
+              <Text style={styles.expansionNoticeBody}>
+                This server doesn't have enough free space for {selectedPlan.label}{' '}
+                {selectedServer ? `(${selectedServer.drive_type === 'nvme' ? 'fast NVMe' : 'slow HDD'} storage)` : ''} right now.
+                Pay a <Text style={{ fontWeight: '700' }}>{depositDisplay} deposit (50%)</Text> to
+                reserve your slot. Our team will expand capacity within{' '}
+                <Text style={{ fontWeight: '700' }}>14 days</Text>. If we can't fulfil the request
+                in time, your deposit is automatically refunded.
+              </Text>
+            </View>
+          )}
+
+        </ScrollView>
 
         {/* ── Footer ── */}
         <View style={styles.footer}>
-
-          {/* Card form footer */}
-          {isCard && (
-            <>
-              <TouchableOpacity
-                style={[styles.primaryBtn, !isCardValid() && styles.btnDisabled]}
-                onPress={handleCardPay}
-                disabled={!isCardValid()}
-                activeOpacity={0.85}
-              >
-                <CreditCard size={18} color={colors.surface} strokeWidth={2} style={{ marginRight: 8 }} />
-                <Text style={styles.primaryBtnText}>
-                  {isExpansion
-                    ? `Pay deposit ${depositDisplay}`
-                    : `Pay ${selectedPlan?.price[storageType] ?? ''}`}
-                </Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={styles.cancelBtn} onPress={() => { setPurchaseState('selecting'); setCardError(null); }}>
-                <Text style={styles.cancelBtnText}>Back</Text>
-              </TouchableOpacity>
-            </>
-          )}
 
           {/* Plan selection footer */}
           {isSelecting && (
@@ -655,7 +462,7 @@ export default function StorageUpgradeModal({
                   disabled={!selectedPlanId || servers.length === 0}
                   activeOpacity={0.85}
                 >
-                  <Text style={styles.applePayText}>{''} Pay</Text>
+                  <Text style={styles.applePayText}>{''} Pay</Text>
                 </TouchableOpacity>
               )}
 
@@ -669,23 +476,6 @@ export default function StorageUpgradeModal({
                   <Text style={styles.googlePayText}>G Pay</Text>
                 </TouchableOpacity>
               )}
-
-              <TouchableOpacity
-                style={[styles.cardBtn, (!selectedPlanId || servers.length === 0) && styles.btnDisabled]}
-                onPress={() => setPurchaseState('card')}
-                disabled={!selectedPlanId || servers.length === 0}
-                activeOpacity={0.85}
-              >
-                <CreditCard
-                  size={16}
-                  color={(selectedPlanId && servers.length > 0) ? colors.textPrimary : colors.textMuted}
-                  strokeWidth={2}
-                  style={{ marginRight: 6 }}
-                />
-                <Text style={[styles.cardBtnText, (!selectedPlanId || servers.length === 0) && styles.disabledText]}>
-                  Pay by Card
-                </Text>
-              </TouchableOpacity>
 
               <TouchableOpacity
                 style={[styles.paypalBtn, (!selectedPlanId || servers.length === 0) && styles.btnDisabled]}
@@ -756,55 +546,6 @@ export default function StorageUpgradeModal({
 
         </View>
       </View>
-
-      {/* Server picker sheet */}
-      <Modal
-        visible={serverPickerVisible}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setServerPickerVisible(false)}
-      >
-        <TouchableOpacity
-          style={styles.serverPickerOverlay}
-          activeOpacity={1}
-          onPress={() => setServerPickerVisible(false)}
-        >
-          <TouchableOpacity style={styles.serverPickerSheet} activeOpacity={1} onPress={() => {}}>
-            <Text style={styles.serverPickerTitle}>Select Server</Text>
-            <ScrollView showsVerticalScrollIndicator={false}>
-              {servers.map((s) => {
-                const sel = s.id === selectedServerId;
-                return (
-                  <TouchableOpacity
-                    key={s.id}
-                    style={[styles.serverPickerRow, sel && styles.serverPickerRowActive]}
-                    onPress={() => { setSelectedServerId(s.id); setServerPickerVisible(false); }}
-                    activeOpacity={0.75}
-                  >
-                    <View style={styles.serverPickerRowLeft}>
-                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                        <Text style={[styles.serverPickerName, sel && styles.serverPickerNameActive]}>
-                          {s.name}
-                        </Text>
-                        <View style={s.drive_type === 'nvme' ? styles.driveBadgeFast : styles.driveBadgeSlow}>
-                          <Text style={styles.driveBadgeText}>
-                            {s.drive_type === 'nvme' ? 'Fast' : 'Slow'}
-                          </Text>
-                        </View>
-                      </View>
-                      <Text style={styles.serverPickerMeta}>
-                        {s.ping_ms !== null ? `${s.ping_ms} ms  ·  ` : ''}
-                        {formatBytes(s.available_bytes)} free of {formatBytes(s.total_capacity_bytes)}
-                      </Text>
-                    </View>
-                    {sel && <View style={styles.serverPickerCheck} />}
-                  </TouchableOpacity>
-                );
-              })}
-            </ScrollView>
-          </TouchableOpacity>
-        </TouchableOpacity>
-      </Modal>
     </Modal>
   );
 }
@@ -845,6 +586,24 @@ const styles = StyleSheet.create({
     marginBottom: spacing.sm, marginTop: spacing.xs,
   },
 
+  // Inline server list
+  serverList: {
+    backgroundColor: colors.surface, borderRadius: radius.lg,
+    borderWidth: 1.5, borderColor: colors.border,
+    marginBottom: spacing.md, overflow: 'hidden', ...shadow.sm,
+  },
+  serverRow: {
+    flexDirection: 'row', alignItems: 'center',
+    paddingVertical: 13, paddingHorizontal: spacing.md,
+  },
+  serverRowActive: { backgroundColor: colors.primaryLighter },
+  serverRowBorder: { borderBottomWidth: 1, borderBottomColor: colors.border },
+  serverRowName: { fontSize: 15, fontWeight: '600', color: colors.textPrimary },
+  serverRowNameActive: { color: colors.primary },
+  serverRowMeta: { fontSize: 12, color: colors.textSecondary, marginTop: 2 },
+  serverCheck: { width: 9, height: 9, borderRadius: 5, backgroundColor: colors.primary, marginLeft: spacing.sm },
+  serverError: { fontSize: 13, color: '#b91c1c', marginBottom: spacing.md },
+
   // Storage type toggle
   typeToggle: { flexDirection: 'row', gap: spacing.sm, marginBottom: spacing.md },
   typeBtn: {
@@ -882,30 +641,6 @@ const styles = StyleSheet.create({
   radioSelected: { borderColor: colors.primary },
   radioInner: { width: 10, height: 10, borderRadius: 5, backgroundColor: colors.primary },
 
-  // Card form
-  planSummary: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    backgroundColor: colors.surface, borderRadius: radius.lg,
-    padding: spacing.md, marginBottom: spacing.lg,
-    borderWidth: 1.5, borderColor: colors.primary, ...shadow.sm,
-  },
-  planSummaryLabel: { fontSize: 15, fontWeight: '600', color: colors.textPrimary },
-  planSummaryPrice: { fontSize: 18, fontWeight: '700', color: colors.primary },
-
-  fieldLabel: {
-    fontSize: 12, fontWeight: '600', color: colors.textMuted,
-    textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 6,
-  },
-  input: {
-    backgroundColor: colors.surface,
-    borderRadius: radius.md, borderWidth: 1.5, borderColor: colors.border,
-    paddingHorizontal: spacing.md, paddingVertical: 13,
-    fontSize: 16, color: colors.textPrimary,
-    marginBottom: spacing.md,
-  },
-  row: { flexDirection: 'row' },
-  cardError: { fontSize: 13, color: colors.error, marginTop: -spacing.sm, marginBottom: spacing.sm },
-
   // Footer
   footer: {
     position: 'absolute', bottom: 0, left: 0, right: 0,
@@ -914,7 +649,7 @@ const styles = StyleSheet.create({
     borderTopWidth: 1, borderTopColor: colors.border,
   },
 
-  // Primary (card pay) button
+  // Primary (done) button
   primaryBtn: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
     backgroundColor: colors.primary, borderRadius: radius.md,
@@ -937,15 +672,6 @@ const styles = StyleSheet.create({
     paddingVertical: 14, marginBottom: spacing.sm,
   },
   googlePayText: { fontSize: 16, fontWeight: '600', color: '#fff', letterSpacing: 0.3 },
-
-  // Card (outlined)
-  cardBtn: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
-    backgroundColor: colors.surface, borderRadius: radius.md,
-    paddingVertical: 13, marginBottom: spacing.sm,
-    borderWidth: 1.5, borderColor: colors.border,
-  },
-  cardBtnText: { fontSize: 15, fontWeight: '600', color: colors.textPrimary },
 
   // PayPal
   paypalBtn: {
@@ -975,47 +701,6 @@ const styles = StyleSheet.create({
   cancelBtn: { paddingVertical: 12, alignItems: 'center' },
   cancelBtnText: { fontSize: 15, color: colors.textSecondary, fontWeight: '500' },
 
-  // Server selector
-  serverSelector: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    backgroundColor: colors.surface, borderRadius: radius.lg,
-    padding: spacing.md, marginBottom: spacing.md,
-    borderWidth: 1.5, borderColor: colors.border, ...shadow.sm,
-  },
-  serverSelectorLeft: { flexDirection: 'row', alignItems: 'center', flex: 1 },
-  serverSelectorName: { fontSize: 15, fontWeight: '600', color: colors.textPrimary },
-  serverSelectorMeta: { fontSize: 12, color: colors.textSecondary, marginTop: 2 },
-  serverSelectorError: { color: '#b91c1c', fontWeight: '500' },
-
-  // Server picker modal
-  serverPickerOverlay: {
-    flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'flex-end',
-  },
-  serverPickerSheet: {
-    backgroundColor: colors.surface,
-    borderTopLeftRadius: radius.lg, borderTopRightRadius: radius.lg,
-    paddingTop: spacing.md, paddingBottom: spacing.xl,
-    maxHeight: '60%',
-  },
-  serverPickerTitle: {
-    fontSize: 14, fontWeight: '600', color: colors.textMuted,
-    textTransform: 'uppercase', letterSpacing: 0.8,
-    paddingHorizontal: spacing.md, marginBottom: spacing.sm,
-  },
-  serverPickerRow: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    paddingVertical: 13, paddingHorizontal: spacing.md,
-    borderBottomWidth: 1, borderBottomColor: colors.divider,
-  },
-  serverPickerRowActive: {},
-  serverPickerRowLeft: { flex: 1 },
-  serverPickerName: { fontSize: 15, fontWeight: '500', color: colors.textPrimary },
-  serverPickerNameActive: { color: colors.primary, fontWeight: '600' },
-  serverPickerMeta: { fontSize: 12, color: colors.textSecondary, marginTop: 2 },
-  serverPickerCheck: {
-    width: 9, height: 9, borderRadius: 5, backgroundColor: colors.primary, marginLeft: spacing.sm,
-  },
-
   // Drive speed badges
   driveBadgeFast: {
     backgroundColor: '#dcfce7', borderRadius: 4, paddingHorizontal: 5, paddingVertical: 1,
@@ -1037,7 +722,7 @@ const styles = StyleSheet.create({
   planCardUnavailable: { borderStyle: 'dashed', opacity: 0.75 },
   planUnavailableNote: { fontSize: 11, color: colors.warning ?? '#d97706', marginTop: 3 },
 
-  // Expansion notice banner (shown in plan selection when tier is unavailable)
+  // Expansion notice banner
   expansionNotice: {
     backgroundColor: '#fffbeb', borderRadius: radius.lg,
     padding: spacing.md, marginTop: spacing.sm, marginBottom: spacing.sm,
@@ -1050,7 +735,7 @@ const styles = StyleSheet.create({
     fontSize: 13, color: '#78350f', lineHeight: 19,
   },
 
-  // Expansion success banner (shown after deposit captured)
+  // Expansion success banner
   expansionSuccessBanner: {
     backgroundColor: '#ecfdf5', borderRadius: radius.lg,
     padding: spacing.md, marginBottom: spacing.md,

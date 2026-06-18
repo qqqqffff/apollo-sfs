@@ -60,10 +60,19 @@ function RootLayout() {
 
   return (
     <>
-      {!isAuthenticated && <PublicHeader />}
-      <Outlet />
-      <NotificationBanner />
-      <Footer />
+      {isAuthenticated ? (
+        <>
+          <Outlet />
+          <NotificationBanner />
+        </>
+      ) : (
+        <div className="flex flex-col min-h-screen">
+          <PublicHeader />
+          <Outlet />
+          <NotificationBanner />
+          <Footer />
+        </div>
+      )}
     </>
   )
 }

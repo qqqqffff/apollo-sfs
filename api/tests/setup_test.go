@@ -235,6 +235,7 @@ func (s *stubAdminQuerier) CreateServer(_ context.Context, _ db.CreateServerPara
 	return nil, nil
 }
 func (s *stubAdminQuerier) SetServerActive(_ context.Context, _ uuid.UUID, _ bool) error { return nil }
+func (s *stubAdminQuerier) RenameServer(_ context.Context, _ uuid.UUID, _ string) error  { return nil }
 func (s *stubAdminQuerier) GetServer(_ context.Context, _ uuid.UUID) (*models.Server, error) {
 	return nil, nil
 }

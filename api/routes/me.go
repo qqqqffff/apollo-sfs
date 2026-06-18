@@ -129,9 +129,11 @@ func (h *Handler) Me(c *gin.Context) {
 		usedPct = float64(user.StorageUsedBytes) / float64(user.StorageQuotaBytes) * 100
 	}
 
-	linkedProviders, _ := h.auth.GetLinkedProviders(ctx, c.GetString("userID"))
-	if linkedProviders == nil {
-		linkedProviders = []string{}
+	linkedProviders := []string{}
+	if h.auth != nil {
+		if lp, err := h.auth.GetLinkedProviders(ctx, c.GetString("userID")); err == nil {
+			linkedProviders = lp
+		}
 	}
 
 	c.JSON(http.StatusOK, meResponse{

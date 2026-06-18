@@ -180,6 +180,68 @@ func (h *Handler) CaptureWalletOrder(c *gin.Context) {
 }
 
 // ChargeCardExpansion processes a card deposit payment.
+// ── POST /api/v1/billing/storage/expansion/hosted-card ───────────────────────
+
+// CaptureHostedCardExpansion captures a deposit payment for a capacity expansion
+// request where the order was created client-side via PayPal's hosted fields JS SDK.
+// Body: { plan_id, storage_type, server_id, order_id }.
+// Returns { expansion_request_id, expires_at }.
+func (h *Handler) CaptureHostedCardExpansion(c *gin.Context) {
+	if h.paypal == nil {
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "payments not configured"})
+		return
+	}
+	username, ok := h.currentUsername(c)
+	if !ok {
+		return
+	}
+
+	var req struct {
+		PlanID      string `json:"plan_id"      binding:"required"`
+		StorageType string `json:"storage_type" binding:"required,oneof=nvme hdd"`
+		ServerID    string `json:"server_id"    binding:"required"`
+		OrderID     string `json:"order_id"     binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	serverID, err := uuid.Parse(req.ServerID)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid server_id"})
+		return
+	}
+
+	pl, fullCents, depositCents, ok := h.resolvePlan(c, req.PlanID, req.StorageType)
+	if !ok {
+		return
+	}
+
+	cap, err := h.paypal.CaptureOrder(c.Request.Context(), req.OrderID)
+	if err != nil {
+		log.Printf("expansion CaptureHostedCardExpansion paypal capture: %v", err)
+		c.AbortWithStatusJSON(http.StatusBadGateway, gin.H{"error": "paypal capture failed"})
+		return
+	}
+
+	if cap.AmountCents != depositCents {
+		log.Printf("expansion CaptureHostedCardExpansion amount mismatch: got %d, expected %d", cap.AmountCents, depositCents)
+		c.AbortWithStatusJSON(http.StatusUnprocessableEntity, gin.H{"error": "payment amount does not match deposit"})
+		return
+	}
+
+	r, ok := h.persistDirectExpansion(c, username, serverID, req.PlanID, req.StorageType, "hosted_card", pl, fullCents, depositCents, cap)
+	if !ok {
+		return
+	}
+	go h.notifyAdmins(c.Request.Context(), r)
+	c.JSON(http.StatusCreated, gin.H{
+		"expansion_request_id": r.ID,
+		"expires_at":           r.ExpiresAt,
+	})
+}
+
 // POST /api/v1/billing/storage/expansion/card
 func (h *Handler) ChargeCardExpansion(c *gin.Context) {
 	if h.paypal == nil {

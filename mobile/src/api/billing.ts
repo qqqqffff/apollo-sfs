@@ -33,6 +33,21 @@ export async function captureStorageOrder(orderId: string): Promise<StorageCaptu
   return res.data;
 }
 
+// Backend: POST /api/v1/billing/storage/hosted-card
+// Captures a PayPal order created client-side via hosted fields JS SDK.
+export async function captureHostedCardStorageOrder(
+  orderId: string,
+  planId: string,
+  storageType: StorageType,
+): Promise<StorageCaptureResult> {
+  const res = await api.post<StorageCaptureResult>('/api/v1/billing/storage/hosted-card', {
+    order_id: orderId,
+    plan_id: planId,
+    storage_type: storageType,
+  });
+  return res.data;
+}
+
 export interface CardPaymentData {
   number: string;
   expiry_month: string;
@@ -117,6 +132,23 @@ export async function captureExpansionOrder(orderId: string): Promise<ExpansionR
   const res = await api.post<ExpansionRequestResult>(
     `/api/v1/billing/storage/expansion/order/${orderId}/capture`,
   );
+  return res.data;
+}
+
+// Backend: POST /api/v1/billing/storage/expansion/hosted-card
+// Captures an expansion deposit order created client-side via hosted fields JS SDK.
+export async function captureHostedCardExpansionOrder(
+  orderId: string,
+  planId: string,
+  storageType: StorageType,
+  serverId: string,
+): Promise<ExpansionRequestResult> {
+  const res = await api.post<ExpansionRequestResult>('/api/v1/billing/storage/expansion/hosted-card', {
+    order_id: orderId,
+    plan_id: planId,
+    storage_type: storageType,
+    server_id: serverId,
+  });
   return res.data;
 }
 

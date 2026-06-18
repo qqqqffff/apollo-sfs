@@ -15,6 +15,8 @@ import {
 import { ChevronDown, ChevronUp, CreditCard, HardDrive, Server, X, Zap } from 'lucide-react-native';
 import {
   captureStorageOrder,
+  captureHostedCardStorageOrder,
+  captureHostedCardExpansionOrder,
   createApplePayStorageOrder,
   createGooglePayStorageOrder,
   createStorageOrder,
@@ -59,7 +61,7 @@ function formatBytes(b: number): string {
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
-type PurchaseState = 'selecting' | 'card_creating' | 'card_form' | 'processing' | 'awaiting' | 'verifying' | 'expansion_success';
+type PurchaseState = 'selecting' | 'card_form' | 'processing' | 'awaiting' | 'verifying' | 'expansion_success';
 
 interface Props {
   visible: boolean;
@@ -92,8 +94,6 @@ export default function StorageUpgradeModal({
   const [, setExpansionRequestId] = useState<string | null>(null);
   const [expansionExpiresAt, setExpansionExpiresAt] = useState<string | null>(null);
 
-  // Card sheet state
-  const [cardOrderId, setCardOrderId] = useState<string | null>(null);
 
   const appStateRef = useRef(AppState.currentState);
 
@@ -106,7 +106,6 @@ export default function StorageUpgradeModal({
     setExpansionRequestId(null);
     setExpansionExpiresAt(null);
     setServerListOpen(false);
-    setCardOrderId(null);
 
     if (Platform.OS === 'ios') {
       canMakeApplePayments().then(setCanApplePay).catch(() => setCanApplePay(false));
@@ -215,33 +214,23 @@ export default function StorageUpgradeModal({
     }
   };
 
-  const handleCardPay = async () => {
+  const handleCardPay = () => {
     if (!selectedPlanId) return;
-    setPurchaseState('card_creating');
-    try {
-      const res = isExpansion && selectedServerId
-        ? await createExpansionOrder(selectedPlanId, storageType, selectedServerId)
-        : await createStorageOrder(selectedPlanId, storageType);
-      setCardOrderId(res.order_id);
-      setPurchaseState('card_form');
-    } catch (e: any) {
-      setPurchaseState('selecting');
-      Alert.alert('Could not start card payment', e.message ?? 'Please try again.');
-    }
+    setPurchaseState('card_form');
   };
 
-  const handleCardSuccess = async () => {
-    if (!cardOrderId) return;
+  const handleCardSuccess = async (orderId: string) => {
+    if (!selectedPlanId) return;
     setPurchaseState('verifying');
     try {
-      if (isExpansion) {
-        const { expansion_request_id, expires_at } = await captureExpansionOrder(cardOrderId);
+      if (isExpansion && selectedServerId) {
+        const { expansion_request_id, expires_at } = await captureHostedCardExpansionOrder(orderId, selectedPlanId, storageType, selectedServerId);
         setExpansionRequestId(expansion_request_id);
         setExpansionExpiresAt(expires_at);
         setPurchaseState('expansion_success');
         onExpansionRequested?.(expansion_request_id, expires_at);
       } else {
-        const { new_quota_bytes } = await captureStorageOrder(cardOrderId);
+        const { new_quota_bytes } = await captureHostedCardStorageOrder(orderId, selectedPlanId, storageType);
         onPurchased(new_quota_bytes);
       }
     } catch (e: any) {
@@ -289,7 +278,7 @@ export default function StorageUpgradeModal({
   };
 
   const handleClose = () => {
-    if (purchaseState === 'processing' || purchaseState === 'verifying' || purchaseState === 'card_creating') return;
+    if (purchaseState === 'processing' || purchaseState === 'verifying') return;
     if (purchaseState === 'awaiting') {
       Alert.alert('Cancel purchase?', 'You have an active PayPal checkout. Cancel it?', [
         { text: 'Keep open', style: 'cancel' },
@@ -301,7 +290,7 @@ export default function StorageUpgradeModal({
   };
 
   const usedPct = quotaBytes > 0 ? Math.min((usedBytes / quotaBytes) * 100, 100) : 0;
-  const isBusy = purchaseState === 'processing' || purchaseState === 'verifying' || purchaseState === 'card_creating';
+  const isBusy = purchaseState === 'processing' || purchaseState === 'verifying';
   const isSelecting = purchaseState === 'selecting';
   const isExpansionSuccess = purchaseState === 'expansion_success';
 
@@ -581,17 +570,12 @@ export default function StorageUpgradeModal({
                 >
                   <Text style={styles.paypalPay}>Pay</Text>
                   <Text style={styles.paypalPal}>Pal</Text>
-                  {selectedPlan && (
-                    <Text style={styles.paypalPrice}>
-                      {isExpansion ? ` · deposit ${depositDisplay}` : ` · ${selectedPlan.price[storageType]}`}
-                    </Text>
-                  )}
                 </TouchableOpacity>
               </>
             )}
 
-            {/* Creating card order / processing spinner */}
-            {(purchaseState === 'card_creating' || purchaseState === 'processing') && (
+            {/* Processing spinner */}
+            {purchaseState === 'processing' && (
               <View style={[styles.paypalBtn, styles.btnDisabled]}>
                 <ActivityIndicator color={colors.surface} style={{ marginRight: 8 }} />
                 <Text style={styles.paypalPay}>Processing…</Text>
@@ -644,23 +628,23 @@ export default function StorageUpgradeModal({
         </View>
       </Modal>
 
-      {/* PayPal hosted-fields card sheet */}
-      {cardOrderId != null && (
-        <PayPalCardSheet
-          visible={purchaseState === 'card_form'}
-          orderId={cardOrderId}
-          label={cardLabel}
-          onSuccess={handleCardSuccess}
-          onError={(msg) => {
-            setPurchaseState('selecting');
-            Alert.alert('Card payment failed', msg);
-          }}
-          onCancel={() => {
-            setPurchaseState('selecting');
-            setCardOrderId(null);
-          }}
-        />
-      )}
+      {/* PayPal hosted-fields card sheet — order is created client-side in the WebView */}
+      <PayPalCardSheet
+        visible={purchaseState === 'card_form'}
+        amount={selectedPlan
+          ? isExpansion
+            ? (Math.round(parseFloat(selectedPlan.amount[storageType]) * 100 / 2) / 100).toFixed(2)
+            : selectedPlan.amount[storageType]
+          : '0.00'}
+        currency="USD"
+        label={cardLabel}
+        onSuccess={handleCardSuccess}
+        onError={(msg) => {
+          setPurchaseState('selecting');
+          Alert.alert('Card payment failed', msg);
+        }}
+        onCancel={() => setPurchaseState('selecting')}
+      />
     </>
   );
 }

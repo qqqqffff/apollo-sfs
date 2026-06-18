@@ -172,6 +172,59 @@ func (h *Handler) CaptureWalletOrder(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"new_quota_bytes": newQuota})
 }
 
+// ── POST /api/v1/billing/storage/hosted-card ─────────────────────────────────
+
+// CaptureHostedCard captures a PayPal order that was created client-side via
+// PayPal's hosted fields JS SDK. The order ID is produced by actions.order.create()
+// in the WebView; we verify the captured amount matches the expected plan price
+// before applying the quota.
+// Body: { plan_id, storage_type, order_id }.
+// Returns { new_quota_bytes }.
+func (h *Handler) CaptureHostedCard(c *gin.Context) {
+	if h.paypal == nil {
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "payments not configured"})
+		return
+	}
+	username, ok := h.currentUsername(c)
+	if !ok {
+		return
+	}
+
+	var req struct {
+		PlanID      string `json:"plan_id"      binding:"required"`
+		StorageType string `json:"storage_type" binding:"required,oneof=nvme hdd"`
+		OrderID     string `json:"order_id"     binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	pl, expectedCents, ok := h.resolvePlan(c, req.PlanID, req.StorageType)
+	if !ok {
+		return
+	}
+
+	cap, err := h.paypal.CaptureOrder(c.Request.Context(), req.OrderID)
+	if err != nil {
+		log.Printf("billing CaptureHostedCard paypal capture: %v", err)
+		c.AbortWithStatusJSON(http.StatusBadGateway, gin.H{"error": "paypal capture failed"})
+		return
+	}
+
+	if cap.AmountCents != expectedCents {
+		log.Printf("billing CaptureHostedCard amount mismatch: got %d, expected %d", cap.AmountCents, expectedCents)
+		c.AbortWithStatusJSON(http.StatusUnprocessableEntity, gin.H{"error": "payment amount does not match plan price"})
+		return
+	}
+
+	newQuota, err := h.persistDirectCapture(c, username, req.PlanID, req.StorageType, "hosted_card", pl, cap)
+	if err != nil {
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"new_quota_bytes": newQuota})
+}
+
 // ── POST /api/v1/billing/storage/card ────────────────────────────────────────
 
 // ChargeCard processes a card payment via PayPal ACDC and immediately applies

@@ -13,6 +13,7 @@ jest.mock('@tanstack/react-router', () => {
     Link: ({ children, to, className }: any) =>
       R.createElement('a', { href: to, className }, children),
     useNavigate: () => mockNavigate,
+    useSearch: () => ({ social_error: undefined, link_provider: undefined, link_email: undefined, link_username: undefined }),
   }
 })
 

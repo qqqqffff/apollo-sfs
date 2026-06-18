@@ -150,7 +150,7 @@ describe('Root — session expired handler', () => {
     act(() => {
       window.dispatchEvent(new CustomEvent('apollo:session-expired'))
     })
-    expect(mockNavigate).toHaveBeenCalledWith({ to: '/login' })
+    expect(mockNavigate).toHaveBeenCalledWith({ to: '/login', search: { social_error: undefined, link_provider: undefined, link_email: undefined, link_username: undefined } })
   })
 
   it('clears the query client cache on session expiry', () => {

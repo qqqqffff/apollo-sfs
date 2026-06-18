@@ -435,6 +435,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		// Storage add-on billing — four payment methods, each backed by PayPal.
 		protected.POST("/billing/storage/order", billingHandler.CreateWalletOrder)
 		protected.POST("/billing/storage/order/:order_id/capture", billingHandler.CaptureWalletOrder)
+		protected.POST("/billing/storage/hosted-card", billingHandler.CaptureHostedCard)
 		protected.POST("/billing/storage/card", billingHandler.ChargeCard)
 		protected.POST("/billing/storage/apple-pay", billingHandler.ChargeApplePay)
 		protected.POST("/billing/storage/google-pay", billingHandler.ChargeGooglePay)
@@ -442,6 +443,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		// Expansion deposit billing — when a tier is unavailable, user pays a 50% deposit.
 		protected.POST("/billing/storage/expansion/order", expansionHandler.CreateWalletOrder)
 		protected.POST("/billing/storage/expansion/order/:order_id/capture", expansionHandler.CaptureWalletOrder)
+		protected.POST("/billing/storage/expansion/hosted-card", expansionHandler.CaptureHostedCardExpansion)
 		protected.POST("/billing/storage/expansion/card", expansionHandler.ChargeCardExpansion)
 		protected.POST("/billing/storage/expansion/apple-pay", expansionHandler.ChargeApplePayExpansion)
 		protected.POST("/billing/storage/expansion/google-pay", expansionHandler.ChargeGooglePayExpansion)

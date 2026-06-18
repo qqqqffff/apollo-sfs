@@ -100,17 +100,10 @@ func loadConfig() Config {
 	quotaPct, _ := strconv.Atoi(getEnv("QUOTA_WARNING_THRESHOLD_PERCENT", "80"))
 	premiumPrice, _ := strconv.Atoi(getEnv("PREMIUM_TIER_PRICE_CENTS", "999"))
 
-	paypalEnv := getEnv("PAYPAL_ENV", "sandbox")
-	var paypalClientID, paypalClientSecret, paypalWebhookID string
-	if paypalEnv == "sandbox" {
-		paypalClientID     = getEnv("SANDBOX_PAYPAL_CLIENT_ID", "")
-		paypalClientSecret = getEnv("SANDBOX_PAYPAL_SECRET_KEY", "")
-		paypalWebhookID    = getEnv("SANDBOX_PAYPAL_WEBHOOK_ID", "")
-	} else {
-		paypalClientID     = getEnv("PAYPAL_CLIENT_ID", "")
-		paypalClientSecret = getEnv("PAYPAL_SECRET_KEY", "")
-		paypalWebhookID    = getEnv("PAYPAL_WEBHOOK_ID", "")
-	}
+	paypalEnv          := getEnv("PAYPAL_ENV", "sandbox")
+	paypalClientID     := getEnv("PAYPAL_CLIENT_ID", "")
+	paypalClientSecret := getEnv("PAYPAL_CLIENT_SECRET", "")
+	paypalWebhookID    := getEnv("PAYPAL_WEBHOOK_ID", "")
 
 	return Config{
 		Port: getEnv("PORT", "8080"),

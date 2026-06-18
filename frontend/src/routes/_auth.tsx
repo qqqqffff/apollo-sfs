@@ -16,7 +16,7 @@ export const Route = createFileRoute('/_auth')({
   beforeLoad: async ({ context }) => {
     const result = await context.auth.validateAuth()
     if (!result) {
-      throw redirect({ to: '/login' })
+      throw redirect({ to: '/login', search: { social_error: undefined, link_provider: undefined, link_email: undefined, link_username: undefined } })
     }
     if (result === 'banned' || result === 'suspended') {
       throw redirect({ to: '/suspended' })
@@ -43,7 +43,7 @@ function RouteComponent() {
     onSettled: async () => {
       clearSkipDeleteCookie()
       queryClient.clear()
-      navigate({ to: '/login' })
+      navigate({ to: '/login', search: { social_error: undefined, link_provider: undefined, link_email: undefined, link_username: undefined } })
     },
   })
 

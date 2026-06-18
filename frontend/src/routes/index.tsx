@@ -83,6 +83,7 @@ function RouteComponent() {
         </p>
         <Link
           to="/login"
+          search={{ social_error: undefined, link_provider: undefined, link_email: undefined, link_username: undefined }}
           className="inline-block px-8 py-3 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold rounded-xl no-underline transition-colors shadow-sm"
         >
           Sign in to your account

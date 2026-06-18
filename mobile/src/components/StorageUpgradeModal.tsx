@@ -12,7 +12,7 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import { HardDrive, Server, X, Zap } from 'lucide-react-native';
+import { ChevronDown, ChevronUp, CreditCard, HardDrive, Server, X, Zap } from 'lucide-react-native';
 import {
   captureStorageOrder,
   createApplePayStorageOrder,
@@ -29,6 +29,7 @@ import { canMakeApplePayments, requestApplePayment } from '../services/nativeApp
 import { canMakeGooglePayments, requestGooglePayment } from '../services/nativeGooglePay';
 import { APPLE_PAY_MERCHANT_ID, PAYPAL_MERCHANT_ID } from '../config';
 import { colors, radius, shadow, spacing } from '../theme';
+import PayPalCardSheet from './PayPalCardSheet';
 
 // ── Plans ──────────────────────────────────────────────────────────────────────
 
@@ -58,7 +59,7 @@ function formatBytes(b: number): string {
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
-type PurchaseState = 'selecting' | 'processing' | 'awaiting' | 'verifying' | 'expansion_success';
+type PurchaseState = 'selecting' | 'card_creating' | 'card_form' | 'processing' | 'awaiting' | 'verifying' | 'expansion_success';
 
 interface Props {
   visible: boolean;
@@ -81,14 +82,18 @@ export default function StorageUpgradeModal({
 
   const [servers, setServers] = useState<ServerInfoWithPing[]>([]);
   const [selectedServerId, setSelectedServerId] = useState<string | null>(null);
+  const [serverListOpen, setServerListOpen] = useState(false);
   const [serversLoading, setServersLoading] = useState(false);
   const [serversError, setServersError] = useState<string | null>(null);
 
   const [canApplePay, setCanApplePay] = useState(false);
   const [canGooglePay, setCanGooglePay] = useState(false);
 
-  const [expansionRequestId, setExpansionRequestId] = useState<string | null>(null);
+  const [, setExpansionRequestId] = useState<string | null>(null);
   const [expansionExpiresAt, setExpansionExpiresAt] = useState<string | null>(null);
+
+  // Card sheet state
+  const [cardOrderId, setCardOrderId] = useState<string | null>(null);
 
   const appStateRef = useRef(AppState.currentState);
 
@@ -100,6 +105,8 @@ export default function StorageUpgradeModal({
     setPendingOrderId(null);
     setExpansionRequestId(null);
     setExpansionExpiresAt(null);
+    setServerListOpen(false);
+    setCardOrderId(null);
 
     if (Platform.OS === 'ios') {
       canMakeApplePayments().then(setCanApplePay).catch(() => setCanApplePay(false));
@@ -139,22 +146,33 @@ export default function StorageUpgradeModal({
 
   const selectedPlan = PLANS.find((p) => p.id === selectedPlanId);
   const selectedServer = servers.find((s) => s.id === selectedServerId);
-  // Expansion mode: tier requires more space than the server currently has available.
   const isExpansion = !!(selectedPlan && selectedServer && selectedPlan.addBytes > selectedServer.available_bytes);
+
+  // Aggregate fast (NVMe) and standard (HDD) available bytes across all servers.
+  const fastAvailable  = servers.filter((s) => s.drive_type === 'nvme').reduce((sum, s) => sum + s.available_bytes, 0);
+  const slowAvailable  = servers.filter((s) => s.drive_type === 'hdd').reduce((sum, s) => sum + s.available_bytes, 0);
+
+  const depositDisplay = selectedPlan
+    ? `$${(Math.round(parseFloat(selectedPlan.amount[storageType]) * 100 / 2) / 100).toFixed(2)}`
+    : '';
+
+  const cardLabel = selectedPlan
+    ? isExpansion
+      ? `${selectedPlan.label} Expansion Deposit — ${depositDisplay}`
+      : `${selectedPlan.label} — ${selectedPlan.price[storageType]}`
+    : '';
 
   // ── Handlers ────────────────────────────────────────────────────────────────
 
   const handleApplePay = async () => {
     if (!selectedPlanId || !selectedPlan) return;
     setPurchaseState('processing');
-    const applePayAmount = isExpansion
+    const amount = isExpansion
       ? (Math.round(parseFloat(selectedPlan.amount[storageType]) * 100 / 2) / 100).toFixed(2)
       : selectedPlan.amount[storageType];
     try {
       const token = await requestApplePayment(
-        applePayAmount,
-        'USD',
-        APPLE_PAY_MERCHANT_ID,
+        amount, 'USD', APPLE_PAY_MERCHANT_ID,
         isExpansion ? `Apollo SFS ${selectedPlan.label} Expansion Deposit` : `Apollo SFS ${selectedPlan.label} Storage`,
       );
       if (isExpansion && selectedServerId) {
@@ -168,9 +186,7 @@ export default function StorageUpgradeModal({
         onPurchased(new_quota_bytes);
       }
     } catch (e: any) {
-      if ((e as any).code !== 'CANCELLED') {
-        Alert.alert('Apple Pay failed', e.message ?? 'Please try again.');
-      }
+      if ((e as any).code !== 'CANCELLED') Alert.alert('Apple Pay failed', e.message ?? 'Please try again.');
       setPurchaseState('selecting');
     }
   };
@@ -178,16 +194,11 @@ export default function StorageUpgradeModal({
   const handleGooglePay = async () => {
     if (!selectedPlanId || !selectedPlan) return;
     setPurchaseState('processing');
-    const googlePayAmount = isExpansion
+    const amount = isExpansion
       ? (Math.round(parseFloat(selectedPlan.amount[storageType]) * 100 / 2) / 100).toFixed(2)
       : selectedPlan.amount[storageType];
     try {
-      const token = await requestGooglePayment(
-        googlePayAmount,
-        'USD',
-        'Apollo SFS',
-        PAYPAL_MERCHANT_ID,
-      );
+      const token = await requestGooglePayment(amount, 'USD', 'Apollo SFS', PAYPAL_MERCHANT_ID);
       if (isExpansion && selectedServerId) {
         const { expansion_request_id, expires_at } = await createGooglePayExpansionOrder(selectedPlanId, storageType, selectedServerId, token);
         setExpansionRequestId(expansion_request_id);
@@ -199,10 +210,43 @@ export default function StorageUpgradeModal({
         onPurchased(new_quota_bytes);
       }
     } catch (e: any) {
-      if ((e as any).code !== 'CANCELLED') {
-        Alert.alert('Google Pay failed', e.message ?? 'Please try again.');
-      }
+      if ((e as any).code !== 'CANCELLED') Alert.alert('Google Pay failed', e.message ?? 'Please try again.');
       setPurchaseState('selecting');
+    }
+  };
+
+  const handleCardPay = async () => {
+    if (!selectedPlanId) return;
+    setPurchaseState('card_creating');
+    try {
+      const res = isExpansion && selectedServerId
+        ? await createExpansionOrder(selectedPlanId, storageType, selectedServerId)
+        : await createStorageOrder(selectedPlanId, storageType);
+      setCardOrderId(res.order_id);
+      setPurchaseState('card_form');
+    } catch (e: any) {
+      setPurchaseState('selecting');
+      Alert.alert('Could not start card payment', e.message ?? 'Please try again.');
+    }
+  };
+
+  const handleCardSuccess = async () => {
+    if (!cardOrderId) return;
+    setPurchaseState('verifying');
+    try {
+      if (isExpansion) {
+        const { expansion_request_id, expires_at } = await captureExpansionOrder(cardOrderId);
+        setExpansionRequestId(expansion_request_id);
+        setExpansionExpiresAt(expires_at);
+        setPurchaseState('expansion_success');
+        onExpansionRequested?.(expansion_request_id, expires_at);
+      } else {
+        const { new_quota_bytes } = await captureStorageOrder(cardOrderId);
+        onPurchased(new_quota_bytes);
+      }
+    } catch (e: any) {
+      setPurchaseState('selecting');
+      Alert.alert('Payment capture failed', e.message ?? 'Please try again or use PayPal wallet.');
     }
   };
 
@@ -210,20 +254,12 @@ export default function StorageUpgradeModal({
     if (!selectedPlanId) return;
     setPurchaseState('processing');
     try {
-      let order_id: string;
-      let approval_url: string;
-      if (isExpansion && selectedServerId) {
-        const res = await createExpansionOrder(selectedPlanId, storageType, selectedServerId);
-        order_id = res.order_id;
-        approval_url = res.approval_url;
-      } else {
-        const res = await createStorageOrder(selectedPlanId, storageType);
-        order_id = res.order_id;
-        approval_url = res.approval_url;
-      }
-      setPendingOrderId(order_id);
-      if (!(await Linking.canOpenURL(approval_url))) throw new Error('Cannot open PayPal URL');
-      await Linking.openURL(approval_url);
+      const res = isExpansion && selectedServerId
+        ? await createExpansionOrder(selectedPlanId, storageType, selectedServerId)
+        : await createStorageOrder(selectedPlanId, storageType);
+      setPendingOrderId(res.order_id);
+      if (!(await Linking.canOpenURL(res.approval_url))) throw new Error('Cannot open PayPal URL');
+      await Linking.openURL(res.approval_url);
       setPurchaseState('awaiting');
     } catch (e: any) {
       setPurchaseState('selecting');
@@ -246,14 +282,14 @@ export default function StorageUpgradeModal({
         const { new_quota_bytes } = await captureStorageOrder(orderId);
         onPurchased(new_quota_bytes);
       }
-    } catch (e: any) {
+    } catch {
       setPurchaseState('awaiting');
       Alert.alert('Payment not found', 'We could not verify your payment. If you completed checkout, please try again.');
     }
   };
 
   const handleClose = () => {
-    if (purchaseState === 'processing' || purchaseState === 'verifying') return;
+    if (purchaseState === 'processing' || purchaseState === 'verifying' || purchaseState === 'card_creating') return;
     if (purchaseState === 'awaiting') {
       Alert.alert('Cancel purchase?', 'You have an active PayPal checkout. Cancel it?', [
         { text: 'Keep open', style: 'cancel' },
@@ -265,288 +301,367 @@ export default function StorageUpgradeModal({
   };
 
   const usedPct = quotaBytes > 0 ? Math.min((usedBytes / quotaBytes) * 100, 100) : 0;
-  const isBusy = purchaseState === 'processing' || purchaseState === 'verifying';
+  const isBusy = purchaseState === 'processing' || purchaseState === 'verifying' || purchaseState === 'card_creating';
   const isSelecting = purchaseState === 'selecting';
   const isExpansionSuccess = purchaseState === 'expansion_success';
-
-  const depositDisplay = selectedPlan
-    ? `$${(Math.round(parseFloat(selectedPlan.amount[storageType]) * 100 / 2) / 100).toFixed(2)}`
-    : '';
 
   // ── Render ──────────────────────────────────────────────────────────────────
 
   return (
-    <Modal
-      visible={visible}
-      animationType="slide"
-      presentationStyle="pageSheet"
-      onRequestClose={handleClose}
-    >
-      <View style={styles.root}>
+    <>
+      <Modal
+        visible={visible}
+        animationType="slide"
+        presentationStyle="pageSheet"
+        onRequestClose={handleClose}
+      >
+        <View style={styles.root}>
 
-        {/* Header */}
-        <View style={styles.header}>
-          <TouchableOpacity onPress={handleClose} style={styles.closeBtn} hitSlop={12} disabled={isBusy}>
-            <X size={20} color={isBusy ? colors.textMuted : colors.textPrimary} strokeWidth={2} />
-          </TouchableOpacity>
-          <Text style={styles.headerTitle}>
-            {isExpansionSuccess
-              ? 'Request Submitted'
-              : (isExpansion && selectedPlanId) ? 'Request Expansion' : 'Upgrade Storage'}
-          </Text>
-          <View style={{ width: 36 }} />
-        </View>
-
-        {/* Plan selection */}
-        <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
-
-          {/* Inline server list */}
-          <Text style={styles.sectionLabel}>Server location</Text>
-          {serversLoading ? (
-            <ActivityIndicator size="small" color={colors.primary} style={{ marginBottom: spacing.md }} />
-          ) : serversError ? (
-            <Text style={styles.serverError}>{serversError}</Text>
-          ) : (
-            <View style={styles.serverList}>
-              {servers.map((s, idx) => {
-                const sel = s.id === selectedServerId;
-                return (
-                  <TouchableOpacity
-                    key={s.id}
-                    style={[
-                      styles.serverRow,
-                      sel && styles.serverRowActive,
-                      idx < servers.length - 1 && styles.serverRowBorder,
-                    ]}
-                    onPress={() => isSelecting && setSelectedServerId(s.id)}
-                    activeOpacity={0.75}
-                    disabled={!isSelecting}
-                  >
-                    <Server size={15} color={sel ? colors.primary : colors.textMuted} strokeWidth={1.5} style={{ marginRight: 10 }} />
-                    <View style={{ flex: 1 }}>
-                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                        <Text style={[styles.serverRowName, sel && styles.serverRowNameActive]}>{s.name}</Text>
-                        <View style={s.drive_type === 'nvme' ? styles.driveBadgeFast : styles.driveBadgeSlow}>
-                          <Text style={styles.driveBadgeText}>
-                            {s.drive_type === 'nvme' ? 'Fast' : 'Slow'}
-                          </Text>
-                        </View>
-                      </View>
-                      <Text style={styles.serverRowMeta}>
-                        {s.ping_ms !== null ? `${s.ping_ms} ms  ·  ` : ''}
-                        {formatBytes(s.available_bytes)} available
-                      </Text>
-                    </View>
-                    {sel && <View style={styles.serverCheck} />}
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
-          )}
-
-          <View style={styles.quotaCard}>
-            <Text style={styles.quotaLabel}>Current storage</Text>
-            <Text style={styles.quotaValue}>{formatBytes(quotaBytes)}</Text>
-            <Text style={styles.quotaSub}>
-              {formatBytes(usedBytes)} used · {usedPct.toFixed(0)}%
+          {/* Header */}
+          <View style={styles.header}>
+            <TouchableOpacity onPress={handleClose} style={styles.closeBtn} hitSlop={12} disabled={isBusy}>
+              <X size={20} color={isBusy ? colors.textMuted : colors.textPrimary} strokeWidth={2} />
+            </TouchableOpacity>
+            <Text style={styles.headerTitle}>
+              {isExpansionSuccess
+                ? 'Request Submitted'
+                : (isExpansion && selectedPlanId) ? 'Request Expansion' : 'Upgrade Storage'}
             </Text>
-            {quotaBytes > 0 && (
-              <View style={styles.miniBar}>
-                <View style={[styles.miniBarFill, { width: `${usedPct}%` as any }]} />
+            <View style={{ width: 36 }} />
+          </View>
+
+          <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
+
+            {/* Server selector */}
+            <Text style={styles.sectionLabel}>Server location</Text>
+
+            {/* Fast / standard availability summary */}
+            {!serversLoading && !serversError && servers.length > 0 && (
+              <View style={styles.storageSummary}>
+                <View style={styles.storageCell}>
+                  <Zap size={13} color="#16a34a" strokeWidth={2} />
+                  <Text style={styles.storageCellLabel}>Fast</Text>
+                  <Text style={styles.storageCellValue}>{formatBytes(fastAvailable)}</Text>
+                </View>
+                <View style={styles.storageDivider} />
+                <View style={styles.storageCell}>
+                  <HardDrive size={13} color="#6b7280" strokeWidth={2} />
+                  <Text style={styles.storageCellLabel}>Standard</Text>
+                  <Text style={styles.storageCellValue}>{formatBytes(slowAvailable)}</Text>
+                </View>
               </View>
             )}
-          </View>
 
-          <Text style={styles.sectionLabel}>Storage type</Text>
-          <View style={styles.typeToggle}>
-            {(['nvme', 'hdd'] as StorageType[]).map((t) => (
-              <TouchableOpacity
-                key={t}
-                style={[styles.typeBtn, storageType === t && styles.typeBtnActive]}
-                onPress={() => setStorageType(t)}
-                activeOpacity={0.8}
-                disabled={!isSelecting}
-              >
-                {t === 'nvme'
-                  ? <Zap size={15} color={storageType === t ? colors.surface : colors.textSecondary} strokeWidth={2} style={{ marginRight: 6 }} />
-                  : <HardDrive size={15} color={storageType === t ? colors.surface : colors.textSecondary} strokeWidth={2} style={{ marginRight: 6 }} />
-                }
-                <View>
-                  <Text style={[styles.typeBtnLabel, storageType === t && styles.typeBtnLabelActive]}>
-                    {t === 'nvme' ? 'Fast' : 'Standard'}
-                  </Text>
-                  <Text style={[styles.typeBtnSub, storageType === t && styles.typeBtnSubActive]}>
-                    {t === 'nvme' ? 'NVMe SSD' : 'HDD'}
-                  </Text>
+            {/* Dropdown trigger */}
+            {serversLoading ? (
+              <View style={styles.serverTrigger}>
+                <ActivityIndicator size="small" color={colors.primary} style={{ marginRight: 8 }} />
+                <Text style={[styles.serverTriggerName, { color: colors.textMuted }]}>Finding servers…</Text>
+              </View>
+            ) : serversError ? (
+              <View style={[styles.serverTrigger, { borderColor: colors.error }]}>
+                <Server size={16} color={colors.error} strokeWidth={1.5} style={{ marginRight: 8 }} />
+                <Text style={[styles.serverTriggerName, { color: colors.error, flex: 1 }]}>{serversError}</Text>
+              </View>
+            ) : (
+              <>
+                <TouchableOpacity
+                  style={[styles.serverTrigger, serverListOpen && styles.serverTriggerOpen]}
+                  onPress={() => isSelecting && setServerListOpen((o) => !o)}
+                  activeOpacity={0.8}
+                  disabled={!isSelecting || servers.length === 0}
+                >
+                  <Server size={16} color={colors.primary} strokeWidth={1.5} style={{ marginRight: 8 }} />
+                  <View style={{ flex: 1 }}>
+                    {(() => {
+                      const sel = servers.find((s) => s.id === selectedServerId);
+                      return sel ? (
+                        <>
+                          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                            <Text style={styles.serverTriggerName}>{sel.name}</Text>
+                            <View style={sel.drive_type === 'nvme' ? styles.driveBadgeFast : styles.driveBadgeSlow}>
+                              <Text style={styles.driveBadgeText}>{sel.drive_type === 'nvme' ? 'Fast' : 'Standard'}</Text>
+                            </View>
+                          </View>
+                          <Text style={styles.serverTriggerMeta}>
+                            {sel.ping_ms !== null ? `${sel.ping_ms} ms  ·  ` : ''}{formatBytes(sel.available_bytes)} available
+                          </Text>
+                        </>
+                      ) : (
+                        <Text style={styles.serverTriggerName}>No servers available</Text>
+                      );
+                    })()}
+                  </View>
+                  {serverListOpen
+                    ? <ChevronUp size={16} color={colors.textMuted} />
+                    : <ChevronDown size={16} color={colors.textMuted} />
+                  }
+                </TouchableOpacity>
+
+                {/* Expanded server list */}
+                {serverListOpen && (
+                  <View style={styles.serverDropdown}>
+                    {servers.map((s, idx) => {
+                      const sel = s.id === selectedServerId;
+                      return (
+                        <TouchableOpacity
+                          key={s.id}
+                          style={[
+                            styles.serverDropdownRow,
+                            sel && styles.serverDropdownRowActive,
+                            idx < servers.length - 1 && styles.serverDropdownRowBorder,
+                          ]}
+                          onPress={() => { setSelectedServerId(s.id); setServerListOpen(false); }}
+                          activeOpacity={0.75}
+                        >
+                          <View style={{ flex: 1 }}>
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                              <Text style={[styles.serverDropdownName, sel && styles.serverDropdownNameActive]}>{s.name}</Text>
+                              <View style={s.drive_type === 'nvme' ? styles.driveBadgeFast : styles.driveBadgeSlow}>
+                                <Text style={styles.driveBadgeText}>{s.drive_type === 'nvme' ? 'Fast' : 'Standard'}</Text>
+                              </View>
+                            </View>
+                            <Text style={styles.serverDropdownMeta}>
+                              {s.ping_ms !== null ? `${s.ping_ms} ms  ·  ` : ''}{formatBytes(s.available_bytes)} available
+                            </Text>
+                          </View>
+                          {sel && <View style={styles.serverCheck} />}
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+                )}
+              </>
+            )}
+
+            <View style={styles.quotaCard}>
+              <Text style={styles.quotaLabel}>Current storage</Text>
+              <Text style={styles.quotaValue}>{formatBytes(quotaBytes)}</Text>
+              <Text style={styles.quotaSub}>{formatBytes(usedBytes)} used · {usedPct.toFixed(0)}%</Text>
+              {quotaBytes > 0 && (
+                <View style={styles.miniBar}>
+                  <View style={[styles.miniBarFill, { width: `${usedPct}%` as any }]} />
                 </View>
-              </TouchableOpacity>
-            ))}
-          </View>
+              )}
+            </View>
 
-          <Text style={styles.sectionLabel}>Select capacity</Text>
-          {PLANS.map((plan) => {
-            const sel = selectedPlanId === plan.id;
-            const unavailable = !!(selectedServer && plan.addBytes > selectedServer.available_bytes);
-            return (
-              <TouchableOpacity
-                key={plan.id}
-                style={[styles.planCard, sel && styles.planCardSelected, unavailable && !sel && styles.planCardUnavailable]}
-                onPress={() => setSelectedPlanId(plan.id)}
-                activeOpacity={0.8}
-                disabled={!isSelecting}
-              >
-                <View style={styles.planLeft}>
-                  <Text style={[styles.planLabel, sel && styles.planLabelSelected]}>{plan.label}</Text>
-                  {unavailable ? (
-                    <Text style={styles.planUnavailableNote}>Expansion request · 14-day SLA</Text>
-                  ) : (
-                    <Text style={styles.planNewTotal}>New total: {formatBytes(quotaBytes + plan.addBytes)}</Text>
+            <Text style={styles.sectionLabel}>Storage type</Text>
+            <View style={styles.typeToggle}>
+              {(['nvme', 'hdd'] as StorageType[]).map((t) => (
+                <TouchableOpacity
+                  key={t}
+                  style={[styles.typeBtn, storageType === t && styles.typeBtnActive]}
+                  onPress={() => setStorageType(t)}
+                  activeOpacity={0.8}
+                  disabled={!isSelecting}
+                >
+                  {t === 'nvme'
+                    ? <Zap size={15} color={storageType === t ? colors.surface : colors.textSecondary} strokeWidth={2} style={{ marginRight: 6 }} />
+                    : <HardDrive size={15} color={storageType === t ? colors.surface : colors.textSecondary} strokeWidth={2} style={{ marginRight: 6 }} />
+                  }
+                  <View>
+                    <Text style={[styles.typeBtnLabel, storageType === t && styles.typeBtnLabelActive]}>
+                      {t === 'nvme' ? 'Fast' : 'Standard'}
+                    </Text>
+                    <Text style={[styles.typeBtnSub, storageType === t && styles.typeBtnSubActive]}>
+                      {t === 'nvme' ? 'NVMe SSD' : 'HDD'}
+                    </Text>
+                  </View>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            <Text style={styles.sectionLabel}>Select capacity</Text>
+            {PLANS.map((plan) => {
+              const sel = selectedPlanId === plan.id;
+              const unavailable = !!(selectedServer && plan.addBytes > selectedServer.available_bytes);
+              return (
+                <TouchableOpacity
+                  key={plan.id}
+                  style={[styles.planCard, sel && styles.planCardSelected, unavailable && !sel && styles.planCardUnavailable]}
+                  onPress={() => setSelectedPlanId(plan.id)}
+                  activeOpacity={0.8}
+                  disabled={!isSelecting}
+                >
+                  <View style={styles.planLeft}>
+                    <Text style={[styles.planLabel, sel && styles.planLabelSelected]}>{plan.label}</Text>
+                    {unavailable ? (
+                      <Text style={styles.planUnavailableNote}>Expansion request · 14-day SLA</Text>
+                    ) : (
+                      <Text style={styles.planNewTotal}>New total: {formatBytes(quotaBytes + plan.addBytes)}</Text>
+                    )}
+                  </View>
+                  <View style={styles.planRight}>
+                    <Text style={[styles.planPrice, sel && styles.planPriceSelected]}>
+                      {unavailable ? `${plan.price[storageType]}*` : plan.price[storageType]}
+                    </Text>
+                    <View style={[styles.radio, sel && styles.radioSelected]}>
+                      {sel && <View style={styles.radioInner} />}
+                    </View>
+                  </View>
+                </TouchableOpacity>
+              );
+            })}
+
+            {isExpansion && selectedPlan && (
+              <View style={styles.expansionNotice}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                  <Text style={styles.expansionNoticeTitle}>Capacity Expansion Request</Text>
+                  {selectedServer && (
+                    <View style={selectedServer.drive_type === 'nvme' ? styles.driveBadgeFast : styles.driveBadgeSlow}>
+                      <Text style={styles.driveBadgeText}>{selectedServer.drive_type === 'nvme' ? 'Fast' : 'Standard'}</Text>
+                    </View>
                   )}
                 </View>
-                <View style={styles.planRight}>
-                  <Text style={[styles.planPrice, sel && styles.planPriceSelected]}>
-                    {unavailable ? `${plan.price[storageType]}*` : plan.price[storageType]}
-                  </Text>
-                  <View style={[styles.radio, sel && styles.radioSelected]}>
-                    {sel && <View style={styles.radioInner} />}
-                  </View>
-                </View>
-              </TouchableOpacity>
-            );
-          })}
+                <Text style={styles.expansionNoticeBody}>
+                  This server doesn't have enough free space for {selectedPlan.label}{' '}
+                  {selectedServer ? `(${selectedServer.drive_type === 'nvme' ? 'fast NVMe' : 'standard HDD'} storage)` : ''} right now.
+                  Pay a <Text style={{ fontWeight: '700' }}>{depositDisplay} deposit (50%)</Text> to
+                  reserve your slot. Our team will expand capacity within{' '}
+                  <Text style={{ fontWeight: '700' }}>14 days</Text>. If we can't fulfil the request
+                  in time, your deposit is automatically refunded.
+                </Text>
+              </View>
+            )}
 
-          {isExpansion && selectedPlan && (
-            <View style={styles.expansionNotice}>
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-                <Text style={styles.expansionNoticeTitle}>Capacity Expansion Request</Text>
-                {selectedServer && (
-                  <View style={selectedServer.drive_type === 'nvme' ? styles.driveBadgeFast : styles.driveBadgeSlow}>
-                    <Text style={styles.driveBadgeText}>
-                      {selectedServer.drive_type === 'nvme' ? 'Fast' : 'Slow'}
+          </ScrollView>
+
+          {/* ── Footer ── */}
+          <View style={styles.footer}>
+
+            {isSelecting && (
+              <>
+                {servers.length === 0 && !serversLoading && (
+                  <View style={styles.noServersNotice}>
+                    <Text style={styles.noServersNoticeText}>
+                      No servers are currently available. Storage upgrades are disabled until one is available.
                     </Text>
                   </View>
                 )}
+
+                {Platform.OS === 'ios' && canApplePay && (
+                  <TouchableOpacity
+                    style={[styles.applePayBtn, (!selectedPlanId || servers.length === 0) && styles.btnDisabled]}
+                    onPress={handleApplePay}
+                    disabled={!selectedPlanId || servers.length === 0}
+                    activeOpacity={0.85}
+                  >
+                    <Text style={styles.applePayText}>{''} Pay</Text>
+                  </TouchableOpacity>
+                )}
+
+                {Platform.OS === 'android' && canGooglePay && (
+                  <TouchableOpacity
+                    style={[styles.googlePayBtn, (!selectedPlanId || servers.length === 0) && styles.btnDisabled]}
+                    onPress={handleGooglePay}
+                    disabled={!selectedPlanId || servers.length === 0}
+                    activeOpacity={0.85}
+                  >
+                    <Text style={styles.googlePayText}>G Pay</Text>
+                  </TouchableOpacity>
+                )}
+
+                <TouchableOpacity
+                  style={[styles.cardBtn, (!selectedPlanId || servers.length === 0) && styles.btnDisabled]}
+                  onPress={handleCardPay}
+                  disabled={!selectedPlanId || servers.length === 0}
+                  activeOpacity={0.85}
+                >
+                  <CreditCard size={16} color={(selectedPlanId && servers.length > 0) ? colors.textPrimary : colors.textMuted} strokeWidth={2} style={{ marginRight: 6 }} />
+                  <Text style={[styles.cardBtnText, (!selectedPlanId || servers.length === 0) && styles.disabledText]}>
+                    Pay by Card
+                  </Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[styles.paypalBtn, (!selectedPlanId || servers.length === 0) && styles.btnDisabled]}
+                  onPress={handlePayPal}
+                  disabled={!selectedPlanId || servers.length === 0}
+                  activeOpacity={0.85}
+                >
+                  <Text style={styles.paypalPay}>Pay</Text>
+                  <Text style={styles.paypalPal}>Pal</Text>
+                  {selectedPlan && (
+                    <Text style={styles.paypalPrice}>
+                      {isExpansion ? ` · deposit ${depositDisplay}` : ` · ${selectedPlan.price[storageType]}`}
+                    </Text>
+                  )}
+                </TouchableOpacity>
+              </>
+            )}
+
+            {/* Creating card order / processing spinner */}
+            {(purchaseState === 'card_creating' || purchaseState === 'processing') && (
+              <View style={[styles.paypalBtn, styles.btnDisabled]}>
+                <ActivityIndicator color={colors.surface} style={{ marginRight: 8 }} />
+                <Text style={styles.paypalPay}>Processing…</Text>
               </View>
-              <Text style={styles.expansionNoticeBody}>
-                This server doesn't have enough free space for {selectedPlan.label}{' '}
-                {selectedServer ? `(${selectedServer.drive_type === 'nvme' ? 'fast NVMe' : 'slow HDD'} storage)` : ''} right now.
-                Pay a <Text style={{ fontWeight: '700' }}>{depositDisplay} deposit (50%)</Text> to
-                reserve your slot. Our team will expand capacity within{' '}
-                <Text style={{ fontWeight: '700' }}>14 days</Text>. If we can't fulfil the request
-                in time, your deposit is automatically refunded.
-              </Text>
-            </View>
-          )}
+            )}
 
-        </ScrollView>
-
-        {/* ── Footer ── */}
-        <View style={styles.footer}>
-
-          {/* Plan selection footer */}
-          {isSelecting && (
-            <>
-              {servers.length === 0 && !serversLoading && (
-                <View style={styles.noServersNotice}>
-                  <Text style={styles.noServersNoticeText}>
-                    <Text>No servers are currently available.</Text>
-                    <Text>Storage upgrade requests are disabled until one is available</Text>
+            {/* Awaiting PayPal */}
+            {purchaseState === 'awaiting' && (
+              <>
+                <View style={styles.awaitingBanner}>
+                  <Text style={styles.awaitingText}>
+                    PayPal opened in your browser. Complete the payment there, then return here.
                   </Text>
                 </View>
-              )}
-
-              {Platform.OS === 'ios' && canApplePay && (
-                <TouchableOpacity
-                  style={[styles.applePayBtn, (!selectedPlanId || servers.length === 0) && styles.btnDisabled]}
-                  onPress={handleApplePay}
-                  disabled={!selectedPlanId || servers.length === 0}
-                  activeOpacity={0.85}
-                >
-                  <Text style={styles.applePayText}>{''} Pay</Text>
+                <TouchableOpacity style={styles.verifyBtn} onPress={handleVerifyPayPal} activeOpacity={0.85}>
+                  <Text style={styles.verifyBtnText}>I've completed payment</Text>
                 </TouchableOpacity>
-              )}
-
-              {Platform.OS === 'android' && canGooglePay && (
-                <TouchableOpacity
-                  style={[styles.googlePayBtn, (!selectedPlanId || servers.length === 0) && styles.btnDisabled]}
-                  onPress={handleGooglePay}
-                  disabled={!selectedPlanId || servers.length === 0}
-                  activeOpacity={0.85}
-                >
-                  <Text style={styles.googlePayText}>G Pay</Text>
+                <TouchableOpacity style={styles.cancelBtn} onPress={handleClose}>
+                  <Text style={styles.cancelBtnText}>Cancel</Text>
                 </TouchableOpacity>
-              )}
+              </>
+            )}
 
-              <TouchableOpacity
-                style={[styles.paypalBtn, (!selectedPlanId || servers.length === 0) && styles.btnDisabled]}
-                onPress={handlePayPal}
-                disabled={!selectedPlanId || servers.length === 0}
-                activeOpacity={0.85}
-              >
-                <Text style={styles.paypalPay}>Pay</Text>
-                <Text style={styles.paypalPal}>Pal</Text>
-                {selectedPlan && (
-                  <Text style={styles.paypalPrice}>
-                    {isExpansion ? ` · deposit ${depositDisplay}` : ` · ${selectedPlan.price[storageType]}`}
+            {/* Verifying */}
+            {purchaseState === 'verifying' && (
+              <View style={[styles.paypalBtn, styles.btnDisabled]}>
+                <ActivityIndicator color={colors.surface} style={{ marginRight: 8 }} />
+                <Text style={styles.paypalPay}>Verifying payment…</Text>
+              </View>
+            )}
+
+            {/* Expansion success */}
+            {isExpansionSuccess && (
+              <>
+                <View style={styles.expansionSuccessBanner}>
+                  <Text style={styles.expansionSuccessTitle}>Expansion Request Submitted</Text>
+                  <Text style={styles.expansionSuccessBody}>
+                    Your deposit was received. Our team will expand server capacity and apply your
+                    storage within 14 days. You'll be notified by email once it's ready.
+                    {expansionExpiresAt ? `\n\nExpires: ${new Date(expansionExpiresAt).toLocaleDateString()}` : ''}
                   </Text>
-                )}
-              </TouchableOpacity>
-            </>
-          )}
+                </View>
+                <TouchableOpacity style={styles.primaryBtn} onPress={onClose} activeOpacity={0.85}>
+                  <Text style={styles.primaryBtnText}>Done</Text>
+                </TouchableOpacity>
+              </>
+            )}
 
-          {/* Processing spinner */}
-          {purchaseState === 'processing' && (
-            <View style={[styles.paypalBtn, styles.btnDisabled]}>
-              <ActivityIndicator color={colors.surface} style={{ marginRight: 8 }} />
-              <Text style={styles.paypalPay}>Processing…</Text>
-            </View>
-          )}
-
-          {/* Awaiting PayPal */}
-          {purchaseState === 'awaiting' && (
-            <>
-              <View style={styles.awaitingBanner}>
-                <Text style={styles.awaitingText}>
-                  PayPal opened in your browser. Complete the payment there, then return here.
-                </Text>
-              </View>
-              <TouchableOpacity style={styles.verifyBtn} onPress={handleVerifyPayPal} activeOpacity={0.85}>
-                <Text style={styles.verifyBtnText}>I've completed payment</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={styles.cancelBtn} onPress={handleClose}>
-                <Text style={styles.cancelBtnText}>Cancel</Text>
-              </TouchableOpacity>
-            </>
-          )}
-
-          {/* Verifying PayPal */}
-          {purchaseState === 'verifying' && (
-            <View style={[styles.paypalBtn, styles.btnDisabled]}>
-              <ActivityIndicator color={colors.surface} style={{ marginRight: 8 }} />
-              <Text style={styles.paypalPay}>Verifying payment…</Text>
-            </View>
-          )}
-
-          {/* Expansion request submitted */}
-          {isExpansionSuccess && (
-            <>
-              <View style={styles.expansionSuccessBanner}>
-                <Text style={styles.expansionSuccessTitle}>Expansion Request Submitted</Text>
-                <Text style={styles.expansionSuccessBody}>
-                  Your deposit was received. Our team will expand server capacity and apply your
-                  storage within 14 days. You'll be notified by email once it's ready.
-                  {expansionExpiresAt ? `\n\nExpires: ${new Date(expansionExpiresAt).toLocaleDateString()}` : ''}
-                </Text>
-              </View>
-              <TouchableOpacity style={styles.primaryBtn} onPress={onClose} activeOpacity={0.85}>
-                <Text style={styles.primaryBtnText}>Done</Text>
-              </TouchableOpacity>
-            </>
-          )}
-
+          </View>
         </View>
-      </View>
-    </Modal>
+      </Modal>
+
+      {/* PayPal hosted-fields card sheet */}
+      {cardOrderId != null && (
+        <PayPalCardSheet
+          visible={purchaseState === 'card_form'}
+          orderId={cardOrderId}
+          label={cardLabel}
+          onSuccess={handleCardSuccess}
+          onError={(msg) => {
+            setPurchaseState('selecting');
+            Alert.alert('Card payment failed', msg);
+          }}
+          onCancel={() => {
+            setPurchaseState('selecting');
+            setCardOrderId(null);
+          }}
+        />
+      )}
+    </>
   );
 }
 
@@ -565,6 +680,53 @@ const styles = StyleSheet.create({
   headerTitle: { fontSize: 17, fontWeight: '600', color: colors.textPrimary },
 
   scrollContent: { padding: spacing.md, paddingBottom: 300 },
+
+  // Storage breakdown summary
+  storageSummary: {
+    flexDirection: 'row', alignItems: 'center',
+    backgroundColor: colors.surface, borderRadius: radius.md,
+    borderWidth: 1, borderColor: colors.border,
+    marginBottom: spacing.sm, overflow: 'hidden',
+  },
+  storageCell: {
+    flex: 1, flexDirection: 'row', alignItems: 'center', gap: 5,
+    paddingVertical: 8, paddingHorizontal: spacing.sm,
+  },
+  storageDivider: { width: 1, height: '100%', backgroundColor: colors.border },
+  storageCellLabel: { fontSize: 12, fontWeight: '600', color: colors.textMuted },
+  storageCellValue: { fontSize: 12, fontWeight: '700', color: colors.textPrimary, marginLeft: 2 },
+
+  // Server dropdown trigger
+  serverTrigger: {
+    flexDirection: 'row', alignItems: 'center',
+    backgroundColor: colors.surface, borderRadius: radius.lg,
+    padding: spacing.md, marginBottom: spacing.xs,
+    borderWidth: 1.5, borderColor: colors.border, ...shadow.sm,
+  },
+  serverTriggerOpen: {
+    borderBottomLeftRadius: 0, borderBottomRightRadius: 0,
+    borderBottomColor: colors.divider,
+  },
+  serverTriggerName: { fontSize: 15, fontWeight: '600', color: colors.textPrimary },
+  serverTriggerMeta: { fontSize: 12, color: colors.textSecondary, marginTop: 2 },
+
+  // Expanded dropdown list
+  serverDropdown: {
+    backgroundColor: colors.surface,
+    borderWidth: 1.5, borderTopWidth: 0, borderColor: colors.border,
+    borderBottomLeftRadius: radius.lg, borderBottomRightRadius: radius.lg,
+    marginBottom: spacing.md, overflow: 'hidden', ...shadow.sm,
+  },
+  serverDropdownRow: {
+    flexDirection: 'row', alignItems: 'center',
+    paddingVertical: 12, paddingHorizontal: spacing.md,
+  },
+  serverDropdownRowActive: { backgroundColor: colors.primaryLighter },
+  serverDropdownRowBorder: { borderBottomWidth: 1, borderBottomColor: colors.border },
+  serverDropdownName: { fontSize: 14, fontWeight: '500', color: colors.textPrimary },
+  serverDropdownNameActive: { color: colors.primary, fontWeight: '600' },
+  serverDropdownMeta: { fontSize: 12, color: colors.textSecondary, marginTop: 2 },
+  serverCheck: { width: 9, height: 9, borderRadius: 5, backgroundColor: colors.primary, marginLeft: spacing.sm },
 
   // Quota card
   quotaCard: {
@@ -585,24 +747,6 @@ const styles = StyleSheet.create({
     textTransform: 'uppercase', letterSpacing: 0.8,
     marginBottom: spacing.sm, marginTop: spacing.xs,
   },
-
-  // Inline server list
-  serverList: {
-    backgroundColor: colors.surface, borderRadius: radius.lg,
-    borderWidth: 1.5, borderColor: colors.border,
-    marginBottom: spacing.md, overflow: 'hidden', ...shadow.sm,
-  },
-  serverRow: {
-    flexDirection: 'row', alignItems: 'center',
-    paddingVertical: 13, paddingHorizontal: spacing.md,
-  },
-  serverRowActive: { backgroundColor: colors.primaryLighter },
-  serverRowBorder: { borderBottomWidth: 1, borderBottomColor: colors.border },
-  serverRowName: { fontSize: 15, fontWeight: '600', color: colors.textPrimary },
-  serverRowNameActive: { color: colors.primary },
-  serverRowMeta: { fontSize: 12, color: colors.textSecondary, marginTop: 2 },
-  serverCheck: { width: 9, height: 9, borderRadius: 5, backgroundColor: colors.primary, marginLeft: spacing.sm },
-  serverError: { fontSize: 13, color: '#b91c1c', marginBottom: spacing.md },
 
   // Storage type toggle
   typeToggle: { flexDirection: 'row', gap: spacing.sm, marginBottom: spacing.md },
@@ -649,7 +793,6 @@ const styles = StyleSheet.create({
     borderTopWidth: 1, borderTopColor: colors.border,
   },
 
-  // Primary (done) button
   primaryBtn: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
     backgroundColor: colors.primary, borderRadius: radius.md,
@@ -657,7 +800,6 @@ const styles = StyleSheet.create({
   },
   primaryBtnText: { fontSize: 16, fontWeight: '600', color: colors.surface },
 
-  // Apple Pay
   applePayBtn: {
     alignItems: 'center', justifyContent: 'center',
     backgroundColor: '#000', borderRadius: radius.md,
@@ -665,7 +807,6 @@ const styles = StyleSheet.create({
   },
   applePayText: { fontSize: 17, fontWeight: '600', color: '#fff', letterSpacing: 0.3 },
 
-  // Google Pay
   googlePayBtn: {
     alignItems: 'center', justifyContent: 'center',
     backgroundColor: '#1a1a1a', borderRadius: radius.md,
@@ -673,7 +814,14 @@ const styles = StyleSheet.create({
   },
   googlePayText: { fontSize: 16, fontWeight: '600', color: '#fff', letterSpacing: 0.3 },
 
-  // PayPal
+  cardBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    backgroundColor: colors.surface, borderRadius: radius.md,
+    paddingVertical: 13, marginBottom: spacing.sm,
+    borderWidth: 1.5, borderColor: colors.border,
+  },
+  cardBtnText: { fontSize: 15, fontWeight: '600', color: colors.textPrimary },
+
   paypalBtn: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
     backgroundColor: '#003087', borderRadius: radius.md,
@@ -702,15 +850,10 @@ const styles = StyleSheet.create({
   cancelBtnText: { fontSize: 15, color: colors.textSecondary, fontWeight: '500' },
 
   // Drive speed badges
-  driveBadgeFast: {
-    backgroundColor: '#dcfce7', borderRadius: 4, paddingHorizontal: 5, paddingVertical: 1,
-  },
-  driveBadgeSlow: {
-    backgroundColor: '#f3f4f6', borderRadius: 4, paddingHorizontal: 5, paddingVertical: 1,
-  },
+  driveBadgeFast: { backgroundColor: '#dcfce7', borderRadius: 4, paddingHorizontal: 5, paddingVertical: 1 },
+  driveBadgeSlow: { backgroundColor: '#f3f4f6', borderRadius: 4, paddingHorizontal: 5, paddingVertical: 1 },
   driveBadgeText: { fontSize: 10, fontWeight: '700', color: '#374151', textTransform: 'uppercase', letterSpacing: 0.3 },
 
-  // No servers notice
   noServersNotice: {
     backgroundColor: '#fef2f2', borderRadius: radius.md,
     padding: spacing.sm, marginBottom: spacing.sm,
@@ -718,33 +861,22 @@ const styles = StyleSheet.create({
   },
   noServersNoticeText: { fontSize: 13, color: '#b91c1c', textAlign: 'center' },
 
-  // Unavailable plan card variant
   planCardUnavailable: { borderStyle: 'dashed', opacity: 0.75 },
   planUnavailableNote: { fontSize: 11, color: colors.warning ?? '#d97706', marginTop: 3 },
 
-  // Expansion notice banner
   expansionNotice: {
     backgroundColor: '#fffbeb', borderRadius: radius.lg,
     padding: spacing.md, marginTop: spacing.sm, marginBottom: spacing.sm,
     borderWidth: 1, borderColor: '#fde68a',
   },
-  expansionNoticeTitle: {
-    fontSize: 13, fontWeight: '700', color: '#92400e', marginBottom: 4,
-  },
-  expansionNoticeBody: {
-    fontSize: 13, color: '#78350f', lineHeight: 19,
-  },
+  expansionNoticeTitle: { fontSize: 13, fontWeight: '700', color: '#92400e', marginBottom: 4 },
+  expansionNoticeBody: { fontSize: 13, color: '#78350f', lineHeight: 19 },
 
-  // Expansion success banner
   expansionSuccessBanner: {
     backgroundColor: '#ecfdf5', borderRadius: radius.lg,
     padding: spacing.md, marginBottom: spacing.md,
     borderWidth: 1, borderColor: '#a7f3d0',
   },
-  expansionSuccessTitle: {
-    fontSize: 15, fontWeight: '700', color: '#065f46', marginBottom: 6,
-  },
-  expansionSuccessBody: {
-    fontSize: 13, color: '#064e3b', lineHeight: 19,
-  },
+  expansionSuccessTitle: { fontSize: 15, fontWeight: '700', color: '#065f46', marginBottom: 6 },
+  expansionSuccessBody: { fontSize: 13, color: '#064e3b', lineHeight: 19 },
 });

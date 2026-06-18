@@ -29,7 +29,7 @@ function RouteComponent() {
     onSettled: () => {
       sessionStorage.removeItem('apollo_restriction')
       queryClient.clear()
-      navigate({ to: '/login' })
+      navigate({ to: '/login', search: { social_error: undefined, link_provider: undefined, link_email: undefined, link_username: undefined } })
     },
   })
 

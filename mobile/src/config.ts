@@ -4,4 +4,5 @@ export const GOOGLE_CLIENT_ID = '1060276027350-u1hh5bpe30ltlo0huo6tum2hkg3v4848.
 
 // Payments — replace with real values before release
 export const APPLE_PAY_MERCHANT_ID = 'merchant.com.apollosfs';
-export const PAYPAL_MERCHANT_ID = 'YOUR_PAYPAL_MERCHANT_ID';
+export const PAYPAL_MERCHANT_ID = 'HH4449WYNCH5C';
+export const PAYPAL_CLIENT_ID = 'AZpc08OnDRkmRw7pbESv98g_Lglv65nMncjLck1eS782ZBxOrOteiMPWGdK4mSjUBfTX7xXeJXpQSwr8';

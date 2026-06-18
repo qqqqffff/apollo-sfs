@@ -52,7 +52,7 @@ function RootLayout() {
       clearSkipDeleteCookie()
       queryClient.clear()
       notify('error', 'Your session has expired. Please sign in again.')
-      navigate({ to: '/login' })
+      navigate({ to: '/login', search: { social_error: undefined, link_provider: undefined, link_email: undefined, link_username: undefined } })
     }
     window.addEventListener('apollo:session-expired', handleSessionExpired)
     return () => window.removeEventListener('apollo:session-expired', handleSessionExpired)
@@ -118,6 +118,7 @@ function PublicHeader() {
         </Link>
         <Link
           to="/login"
+          search={{ social_error: undefined, link_provider: undefined, link_email: undefined, link_username: undefined }}
           className="px-4 py-1.5 text-sm font-medium bg-blue-600 hover:bg-blue-700 text-white rounded-lg no-underline transition-colors"
         >
           Sign in

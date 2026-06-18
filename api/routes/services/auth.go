@@ -167,7 +167,8 @@ func (s *AuthService) WebSocialLogin(ctx context.Context, provider, providerToke
 		"subject_token":        {providerToken},
 		"subject_token_type":   {"urn:ietf:params:oauth:token-type:id_token"},
 		"subject_issuer":       {provider},
-		"requested_token_type": {"urn:ietf:params:oauth:token-type:refresh_token"},
+		"requested_token_type": {"urn:ietf:params:oauth:token-type:access_token"},
+		"scope":                {"openid"},
 	}
 	tokens, err := s.tokenRequest(ctx, body)
 	if err != nil {
@@ -1147,7 +1148,8 @@ func (s *AuthService) SocialLogin(ctx context.Context, provider, providerToken s
 		"subject_token":        {providerToken},
 		"subject_token_type":   {"urn:ietf:params:oauth:token-type:id_token"},
 		"subject_issuer":       {provider},
-		"requested_token_type": {"urn:ietf:params:oauth:token-type:refresh_token"},
+		"requested_token_type": {"urn:ietf:params:oauth:token-type:access_token"},
+		"scope":                {"openid"},
 	}
 	tokens, err := s.tokenRequest(ctx, body)
 	if err != nil {

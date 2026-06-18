@@ -53,6 +53,7 @@ type DriveSummary struct {
 	ServerID             uuid.UUID `json:"server_id"`
 	ServerName           string    `json:"server_name"`
 	DriveLabel           string    `json:"drive_label"`
+	DriveType            string    `json:"drive_type"` // "nvme" | "hdd"
 	CapacityBytes        int64     `json:"capacity_bytes"`
 	MinioBucket          string    `json:"minio_bucket"`
 	AllocatedQuotaBytes  int64     `json:"allocated_quota_bytes"`

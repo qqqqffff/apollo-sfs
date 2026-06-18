@@ -37,7 +37,7 @@ const ALARM_ICONS: Record<string, React.ComponentType<{ size: number; color: str
 };
 
 export default function ProfileScreen() {
-  const { profile, signOut } = useAuth();
+  const { profile, signOut, refreshProfile } = useAuth();
   const [linking, setLinking] = useState(false);
   const [alarmSettings, setAlarmSettings] = useState<AlarmSettings | null>(null);
   const [alarmLoading, setAlarmLoading] = useState(false);
@@ -83,6 +83,7 @@ export default function ProfileScreen() {
       });
       if (!credential.identityToken) throw new Error('No token');
       await linkSocial('apple', credential.identityToken);
+      await refreshProfile();
       Alert.alert('Apple linked');
     } catch (e: any) {
       if (e.code !== appleAuth.Error.CANCELED) Alert.alert('Failed to link Apple', e.message);
@@ -92,7 +93,7 @@ export default function ProfileScreen() {
   };
 
   const handleUnlinkApple = async () => {
-    try { await unlinkSocial('apple'); Alert.alert('Apple unlinked'); }
+    try { await unlinkSocial('apple'); await refreshProfile(); Alert.alert('Apple unlinked'); }
     catch (e: any) { Alert.alert('Failed', e.message); }
   };
 
@@ -104,6 +105,7 @@ export default function ProfileScreen() {
       const serverAuthCode: string | null = data?.serverAuthCode ?? null;
       if (!serverAuthCode) throw new Error('No server auth code from Google sign-in');
       await linkSocialGoogle(serverAuthCode);
+      await refreshProfile();
       Alert.alert('Google account linked');
     } catch (e: any) {
       if (e.code !== statusCodes.SIGN_IN_CANCELLED) Alert.alert('Failed to link Google', e.message);
@@ -111,7 +113,7 @@ export default function ProfileScreen() {
   };
 
   const handleUnlinkGoogle = async () => {
-    try { await unlinkSocial('google'); Alert.alert('Google account unlinked'); }
+    try { await unlinkSocial('google'); await refreshProfile(); Alert.alert('Google account unlinked'); }
     catch (e: any) { Alert.alert('Failed', e.message); }
   };
 

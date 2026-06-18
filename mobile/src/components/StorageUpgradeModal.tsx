@@ -158,7 +158,15 @@ export default function StorageUpgradeModal({
 
   const selectedPlan = PLANS.find((p) => p.id === selectedPlanId);
   const selectedServer = servers.find((s) => s.id === selectedServerId);
-  const isExpansion = !!(selectedPlan && selectedServer && selectedPlan.addBytes > selectedServer.available_bytes);
+  // Expansion if: the server's drive type doesn't match the selected storage type,
+  // OR the plan exceeds the server's available capacity.
+  const serverTypeMismatch = !!(selectedServer && (
+    (storageType === 'nvme' && selectedServer.drive_type !== 'nvme') ||
+    (storageType === 'hdd'  && selectedServer.drive_type !== 'hdd')
+  ));
+  const isExpansion = !!(selectedPlan && selectedServer && (
+    serverTypeMismatch || selectedPlan.addBytes > selectedServer.available_bytes
+  ));
 
   // Aggregate fast (NVMe) and standard (HDD) available bytes across all servers.
   const fastAvailable  = servers.filter((s) => s.drive_type === 'nvme').reduce((sum, s) => sum + s.available_bytes, 0);
@@ -489,7 +497,7 @@ export default function StorageUpgradeModal({
             <Text style={styles.sectionLabel}>Select capacity</Text>
             {PLANS.map((plan) => {
               const sel = selectedPlanId === plan.id;
-              const unavailable = !!(selectedServer && plan.addBytes > selectedServer.available_bytes);
+              const unavailable = !!(selectedServer && (serverTypeMismatch || plan.addBytes > selectedServer.available_bytes));
               return (
                 <TouchableOpacity
                   key={plan.id}

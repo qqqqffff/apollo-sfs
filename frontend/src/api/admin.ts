@@ -139,6 +139,7 @@ export interface DriveSummary {
   server_id: string
   server_name: string
   drive_label: string
+  drive_type: 'nvme' | 'hdd'
   capacity_bytes: number
   minio_bucket: string
   allocated_quota_bytes: number

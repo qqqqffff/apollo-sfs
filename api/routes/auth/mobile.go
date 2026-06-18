@@ -99,7 +99,7 @@ func (h *Handler) MobileAppleLogin(c *gin.Context) {
 
 	tokens, err := h.svc.SocialLogin(c.Request.Context(), "apple", req.IdentityToken)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "apple authentication failed"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "apple authentication failed: " + err.Error()})
 		return
 	}
 

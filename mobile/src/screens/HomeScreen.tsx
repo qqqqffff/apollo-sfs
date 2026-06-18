@@ -253,25 +253,22 @@ export default function HomeScreen() {
   };
 
   const handleGoogleBackup = async () => {
-    if (!GoogleSignin.hasPreviousSignIn()) {
-      Alert.alert('Link Google first', 'Go to your Profile and link your Google account to use Google Backup.');
-      return;
-    }
     setGoogleBackupLoading(true);
     try {
+      // Always go through signIn() to guarantee a fresh access token that includes
+      // Drive and Photos scopes. Cached tokens from the account-linking flow may
+      // have been issued without these sensitive scopes, and addScopes/getTokens
+      // can return the stale cached token rather than requesting new consent.
+      await GoogleSignin.hasPlayServices();
+      await GoogleSignin.signIn();
       const tokens = await GoogleSignin.getTokens();
       const items  = await listGoogleFiles(tokens.accessToken);
       setGoogleAccessToken(tokens.accessToken);
       setGoogleBackupItems(items);
     } catch (e: any) {
-      const isAuth = e.code !== statusCodes.SIGN_IN_CANCELLED;
-      if (isAuth) {
-        Alert.alert(
-          'Google access failed',
-          e.message?.includes('403') || e.message?.includes('401')
-            ? 'Backup needs additional permissions. Please unlink and re-link your Google account from Profile.'
-            : e.message ?? 'Could not access Google. Try again later.',
-        );
+      if (e.code !== statusCodes.SIGN_IN_CANCELLED) {
+        console.error('[GoogleBackup]', e);
+        Alert.alert('Google access failed', e.message ?? 'Could not access Google. Try again later.');
       }
     } finally {
       setGoogleBackupLoading(false);
@@ -537,8 +534,8 @@ export default function HomeScreen() {
         </View>
       )}
 
-      {/* Google Backup card — premium users with Google linked */}
-      {profile?.is_premium && (
+      {/* Google Backup card — users with Google linked */}
+      {(profile?.is_premium || profile?.is_admin) && profile?.linked_providers?.includes('google') && (
         <View style={styles.card}>
           <Text style={styles.cardLabel}>Google Backup</Text>
           <Text style={styles.icloudDesc}>

@@ -304,7 +304,9 @@ func (q *Queries) AllocateUserToDrive(ctx context.Context, username string, driv
 func (q *Queries) GetDriveSummaries(ctx context.Context) ([]models.DriveSummary, error) {
 	rows, err := q.db.QueryContext(ctx, `
 		SELECT
-			d.id, d.server_id, s.name, d.label, d.capacity_bytes, d.minio_bucket,
+			d.id, d.server_id, s.name, d.label,
+			CASE WHEN lower(d.label) LIKE '%nvme%' THEN 'nvme' ELSE 'hdd' END AS drive_type,
+			d.capacity_bytes, d.minio_bucket,
 			COALESCE(SUM(u.storage_quota_bytes), 0) AS allocated_quota_bytes,
 			COALESCE(SUM(u.storage_used_bytes), 0)  AS used_bytes,
 			d.is_active, s.is_active
@@ -324,7 +326,7 @@ func (q *Queries) GetDriveSummaries(ctx context.Context) ([]models.DriveSummary,
 	for rows.Next() {
 		var ds models.DriveSummary
 		if err := rows.Scan(
-			&ds.DriveID, &ds.ServerID, &ds.ServerName, &ds.DriveLabel,
+			&ds.DriveID, &ds.ServerID, &ds.ServerName, &ds.DriveLabel, &ds.DriveType,
 			&ds.CapacityBytes, &ds.MinioBucket,
 			&ds.AllocatedQuotaBytes, &ds.UsedBytes,
 			&ds.DriveIsActive, &ds.ServerIsActive,

@@ -1065,6 +1065,13 @@ function DriveBar({ drive, onToggle, onDelete, onSyncCapacity }: {
         <div className="flex items-center gap-2">
           <span className={`w-1.5 h-1.5 rounded-full ${drive.drive_is_active ? 'bg-green-400' : 'bg-gray-300'}`} />
           <span className="text-gray-700 font-medium">{drive.drive_label}</span>
+          <span className={`text-xs font-semibold px-1.5 py-0.5 rounded uppercase tracking-wide ${
+            drive.drive_type === 'nvme'
+              ? 'bg-emerald-50 text-emerald-700'
+              : 'bg-gray-100 text-gray-500'
+          }`}>
+            {drive.drive_type === 'nvme' ? 'Fast' : 'Standard'}
+          </span>
           <span className="text-gray-400">{drive.minio_bucket}</span>
           {syncRequired && (
             <span className="text-amber-500 font-medium" title="Run Sync to detect actual drive capacity before this drive can accept allocations">

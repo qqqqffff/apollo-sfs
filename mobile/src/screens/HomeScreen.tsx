@@ -2,11 +2,13 @@ import React, { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Linking,
   Modal,
   Platform,
   Pressable,
   ScrollView,
   StyleSheet,
+  Switch,
   Text,
   TouchableOpacity,
   View,
@@ -17,7 +19,14 @@ import SyncPreviewModal from '../components/SyncPreviewModal';
 import StorageUpgradeModal from '../components/StorageUpgradeModal';
 import ICloudBackupModal, { type PickedICloudFile } from '../components/ICloudBackupModal';
 import GoogleBackupModal from '../components/GoogleBackupModal';
-import { listGoogleFiles, type GoogleBackupItem } from '../services/GoogleBackupService';
+import {
+  listGoogleDriveFiles,
+  createPhotosPickerSession,
+  getPhotosPickerSession,
+  listPickedPhotos,
+  deletePhotosPickerSession,
+  type GoogleBackupItem,
+} from '../services/GoogleBackupService';
 import { type PreviewItem } from '../services/SyncService';
 import { GoogleSignin, statusCodes } from '@react-native-google-signin/google-signin';
 import {
@@ -120,6 +129,7 @@ export default function HomeScreen() {
   const [googleBackupItems, setGoogleBackupItems]   = useState<GoogleBackupItem[] | null>(null);
   const [googleAccessToken, setGoogleAccessToken]   = useState('');
   const [googleBackupLoading, setGoogleBackupLoading] = useState(false);
+  const [googleDemoEnabled, setGoogleDemoEnabled] = useState(false);
 
   const [previewItems, setPreviewItems] = useState<PreviewItem[] | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
@@ -252,6 +262,36 @@ export default function HomeScreen() {
     }
   };
 
+  // Sends the user to Google's photo picker, then waits for them to finish
+  // selecting. Returns the items they picked (empty if they cancel / time out).
+  // Photos can no longer be listed library-wide — the readonly scope was removed
+  // on 2025-03-31, so the Picker API is the only supported path.
+  const pickGooglePhotos = async (accessToken: string): Promise<GoogleBackupItem[]> => {
+    const session = await createPhotosPickerSession(accessToken);
+    const canOpen = await Linking.canOpenURL(session.pickerUri);
+    if (!canOpen) {
+      await deletePhotosPickerSession(session.id, accessToken);
+      return [];
+    }
+    await Linking.openURL(session.pickerUri);
+
+    // Poll until the user finishes choosing photos or the session times out.
+    const deadline = Date.now() + session.timeoutMs;
+    let current = session;
+    while (!current.mediaItemsSet && Date.now() < deadline) {
+      await new Promise<void>((r) => setTimeout(() => r(), current.pollIntervalMs));
+      current = await getPhotosPickerSession(session.id, accessToken);
+    }
+
+    if (!current.mediaItemsSet) {
+      await deletePhotosPickerSession(session.id, accessToken);
+      return [];
+    }
+    const picked = await listPickedPhotos(session.id, accessToken);
+    await deletePhotosPickerSession(session.id, accessToken);
+    return picked;
+  };
+
   const handleGoogleBackup = async () => {
     setGoogleBackupLoading(true);
     try {
@@ -262,9 +302,11 @@ export default function HomeScreen() {
       await GoogleSignin.hasPlayServices();
       await GoogleSignin.signIn();
       const tokens = await GoogleSignin.getTokens();
-      const items  = await listGoogleFiles(tokens.accessToken);
       setGoogleAccessToken(tokens.accessToken);
-      setGoogleBackupItems(items);
+
+      const driveItems  = await listGoogleDriveFiles(tokens.accessToken);
+      const photoItems  = await pickGooglePhotos(tokens.accessToken);
+      setGoogleBackupItems([...driveItems, ...photoItems]);
     } catch (e: any) {
       if (e.code !== statusCodes.SIGN_IN_CANCELLED) {
         console.error('[GoogleBackup]', e);
@@ -541,6 +583,22 @@ export default function HomeScreen() {
           <Text style={styles.icloudDesc}>
             Back up files from Google Drive and Google Photos to your SFS account.
           </Text>
+
+          {profile?.is_admin && (
+            <View style={styles.demoRow}>
+              <View style={styles.demoRowLeft}>
+                <Text style={styles.demoRowLabel}>Demo Mode</Text>
+                <Text style={styles.demoRowSub}>Admin only · simulates sync for scope review</Text>
+              </View>
+              <Switch
+                value={googleDemoEnabled}
+                onValueChange={setGoogleDemoEnabled}
+                trackColor={{ false: colors.border, true: colors.success }}
+                thumbColor={colors.surface}
+              />
+            </View>
+          )}
+
           <TouchableOpacity
             style={[styles.syncButton, styles.googleButton, googleBackupLoading && styles.syncButtonDisabled]}
             onPress={handleGoogleBackup}
@@ -917,4 +975,17 @@ const styles = StyleSheet.create({
   icloudDesc: { fontSize: 13, color: colors.textSecondary, marginBottom: spacing.sm, lineHeight: 18 },
   icloudButton:  { backgroundColor: colors.info },
   googleButton:  { backgroundColor: colors.success },
+
+  demoRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: spacing.sm,
+    marginBottom: spacing.sm,
+    borderTopWidth: 1,
+    borderTopColor: colors.divider,
+  },
+  demoRowLeft: { flex: 1, marginRight: spacing.sm },
+  demoRowLabel: { fontSize: 14, fontWeight: '500', color: colors.textPrimary },
+  demoRowSub: { fontSize: 12, color: colors.textMuted, marginTop: 2 },
 });

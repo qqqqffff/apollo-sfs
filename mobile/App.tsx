@@ -11,7 +11,9 @@ GoogleSignin.configure({
   iosClientId: GOOGLE_IOS_CLIENT_ID,
   scopes: [
     'https://www.googleapis.com/auth/drive',
-    'https://www.googleapis.com/auth/photoslibrary.readonly',
+    // photoslibrary.readonly was removed by Google on 2025-03-31 — library-wide
+    // listing now 403s. Reading user photos requires the Photos Picker API scope.
+    'https://www.googleapis.com/auth/photospicker.mediaitems.readonly',
   ],
 });
 

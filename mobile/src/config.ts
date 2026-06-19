@@ -1,6 +1,6 @@
 export const API_BASE_URL = 'https://apollo-sfs.com';
-export const GOOGLE_IOS_CLIENT_ID = '1060276027350-kqb7i8n20b9f5gq32foi77lu6grr2cpp.apps.googleusercontent.com';
-export const GOOGLE_CLIENT_ID = '1060276027350-u1hh5bpe30ltlo0huo6tum2hkg3v4848.apps.googleusercontent.com';
+export const GOOGLE_IOS_CLIENT_ID = '550302272436-s70nkrvs7263fl3nda5iqqb1s0929o8c.apps.googleusercontent.com';
+export const GOOGLE_CLIENT_ID = '550302272436-0l08i22en4eifho0msrr07lkqr0t5ouj.apps.googleusercontent.com';
 
 // Payments — replace with real values before release
 export const APPLE_PAY_MERCHANT_ID = 'merchant.com.apollosfs';

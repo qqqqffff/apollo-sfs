@@ -1,23 +1,21 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
-  Linking,
   Modal,
   Platform,
   Pressable,
   ScrollView,
   StyleSheet,
-  Switch,
   Text,
   TouchableOpacity,
   View,
 } from 'react-native';
+import WebView from 'react-native-webview';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { CameraRoll } from '@react-native-camera-roll/camera-roll';
 import SyncPreviewModal from '../components/SyncPreviewModal';
 import StorageUpgradeModal from '../components/StorageUpgradeModal';
-import ICloudBackupModal, { type PickedICloudFile } from '../components/ICloudBackupModal';
 import GoogleBackupModal from '../components/GoogleBackupModal';
 import {
   listGoogleDriveFiles,
@@ -123,13 +121,14 @@ export default function HomeScreen() {
   const [filesUploading, setFilesUploading] = useState(false);
   const [filesUploadProgress, setFilesUploadProgress] = useState<{ done: number; total: number } | null>(null);
 
-  const [icloudFiles, setIcloudFiles] = useState<PickedICloudFile[] | null>(null);
-  const [icloudPickerLoading, setIcloudPickerLoading] = useState(false);
-
   const [googleBackupItems, setGoogleBackupItems]   = useState<GoogleBackupItem[] | null>(null);
   const [googleAccessToken, setGoogleAccessToken]   = useState('');
   const [googleBackupLoading, setGoogleBackupLoading] = useState(false);
-  const [googleDemoEnabled, setGoogleDemoEnabled] = useState(false);
+
+  // In-app Photos Picker WebView state
+  const [photosPickerVisible, setPhotosPickerVisible] = useState(false);
+  const [photosPickerUrl, setPhotosPickerUrl]         = useState('');
+  const photosPickerCancelRef = useRef<(() => void) | null>(null);
 
   const [previewItems, setPreviewItems] = useState<PreviewItem[] | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
@@ -262,50 +261,72 @@ export default function HomeScreen() {
     }
   };
 
-  // Sends the user to Google's photo picker, then waits for them to finish
-  // selecting. Returns the items they picked (empty if they cancel / time out).
-  // Photos can no longer be listed library-wide — the readonly scope was removed
-  // on 2025-03-31, so the Picker API is the only supported path.
-  const pickGooglePhotos = async (accessToken: string): Promise<GoogleBackupItem[]> => {
-    const session = await createPhotosPickerSession(accessToken);
-    const canOpen = await Linking.canOpenURL(session.pickerUri);
-    if (!canOpen) {
-      await deletePhotosPickerSession(session.id, accessToken);
-      return [];
-    }
-    await Linking.openURL(session.pickerUri);
+  // Opens the Photos Picker in an in-app WebView. Polls the session in the
+  // background and resolves when the user finishes selecting or cancels.
+  // Sharing Safari cookies (sharedCookiesEnabled) means the user's existing
+  // Google session is re-used without another sign-in prompt.
+  const pickGooglePhotos = (accessToken: string): Promise<GoogleBackupItem[]> =>
+    new Promise(async (resolve) => {
+      let settled = false;
+      const finish = async (items: GoogleBackupItem[]) => {
+        if (settled) return;
+        settled = true;
+        photosPickerCancelRef.current = null;
+        setPhotosPickerVisible(false);
+        resolve(items);
+      };
 
-    // Poll until the user finishes choosing photos or the session times out.
-    const deadline = Date.now() + session.timeoutMs;
-    let current = session;
-    while (!current.mediaItemsSet && Date.now() < deadline) {
-      await new Promise<void>((r) => setTimeout(() => r(), current.pollIntervalMs));
-      current = await getPhotosPickerSession(session.id, accessToken);
-    }
+      let session;
+      try {
+        session = await createPhotosPickerSession(accessToken);
+      } catch {
+        finish([]);
+        return;
+      }
 
-    if (!current.mediaItemsSet) {
-      await deletePhotosPickerSession(session.id, accessToken);
-      return [];
-    }
-    const picked = await listPickedPhotos(session.id, accessToken);
-    await deletePhotosPickerSession(session.id, accessToken);
-    return picked;
-  };
+      photosPickerCancelRef.current = () => finish([]);
+      setPhotosPickerUrl(session.pickerUri);
+      setPhotosPickerVisible(true);
+
+      // Poll while WebView is shown; stop immediately if user closes it.
+      const deadline = Date.now() + session.timeoutMs;
+      let current = session;
+      while (!current.mediaItemsSet && Date.now() < deadline) {
+        await new Promise<void>((r) => setTimeout(r, current.pollIntervalMs));
+        if (settled) return;
+        try { current = await getPhotosPickerSession(session.id, accessToken); } catch { break; }
+      }
+
+      if (settled) return;
+
+      if (current.mediaItemsSet) {
+        try {
+          const picked = await listPickedPhotos(session.id, accessToken);
+          await deletePhotosPickerSession(session.id, accessToken);
+          finish(picked);
+        } catch { finish([]); }
+      } else {
+        await deletePhotosPickerSession(session.id, accessToken).catch(() => {});
+        finish([]);
+      }
+    });
 
   const handleGoogleBackup = async () => {
     setGoogleBackupLoading(true);
     try {
-      // Always go through signIn() to guarantee a fresh access token that includes
-      // Drive and Photos scopes. Cached tokens from the account-linking flow may
-      // have been issued without these sensitive scopes, and addScopes/getTokens
-      // can return the stale cached token rather than requesting new consent.
       await GoogleSignin.hasPlayServices();
-      await GoogleSignin.signIn();
+      // Try silent sign-in first so already-approved scopes don't prompt again.
+      // Fall back to interactive sign-in only when the session has lapsed.
+      try {
+        await GoogleSignin.signInSilently();
+      } catch {
+        await GoogleSignin.signIn();
+      }
       const tokens = await GoogleSignin.getTokens();
       setGoogleAccessToken(tokens.accessToken);
 
-      const driveItems  = await listGoogleDriveFiles(tokens.accessToken);
-      const photoItems  = await pickGooglePhotos(tokens.accessToken);
+      const driveItems = await listGoogleDriveFiles(tokens.accessToken);
+      const photoItems = await pickGooglePhotos(tokens.accessToken);
       setGoogleBackupItems([...driveItems, ...photoItems]);
     } catch (e: any) {
       if (e.code !== statusCodes.SIGN_IN_CANCELLED) {
@@ -314,22 +335,6 @@ export default function HomeScreen() {
       }
     } finally {
       setGoogleBackupLoading(false);
-    }
-  };
-
-  const handleICloudPick = async () => {
-    setIcloudPickerLoading(true);
-    try {
-      const results = await DocumentPicker.pick({
-        allowMultiSelection: true,
-        presentationStyle: 'fullScreen',
-        copyTo: 'cachesDirectory',
-      });
-      if (results.length > 0) setIcloudFiles(results as PickedICloudFile[]);
-    } catch (e: any) {
-      if (!DocumentPicker.isCancel(e)) Alert.alert('Failed to access iCloud', e.message);
-    } finally {
-      setIcloudPickerLoading(false);
     }
   };
 
@@ -552,30 +557,6 @@ export default function HomeScreen() {
         </TouchableOpacity>
       </View>
 
-      {/* iCloud Backup card — premium iOS users only */}
-      {Platform.OS === 'ios' && profile?.is_premium && (
-        <View style={styles.card}>
-          <Text style={styles.cardLabel}>iCloud Backup</Text>
-          <Text style={styles.icloudDesc}>
-            Select files from iCloud Drive to back up to your SFS account.
-          </Text>
-          <TouchableOpacity
-            style={[styles.syncButton, styles.icloudButton, icloudPickerLoading && styles.syncButtonDisabled]}
-            onPress={handleICloudPick}
-            disabled={icloudPickerLoading}
-          >
-            {icloudPickerLoading ? (
-              <ActivityIndicator color={colors.surface} size="small" />
-            ) : (
-              <>
-                <Cloud size={18} color={colors.surface} strokeWidth={1.5} style={styles.syncIcon} />
-                <Text style={styles.syncButtonText}>Select iCloud Files</Text>
-              </>
-            )}
-          </TouchableOpacity>
-        </View>
-      )}
-
       {/* Google Backup card — users with Google linked */}
       {(profile?.is_premium || profile?.is_admin) && profile?.linked_providers?.includes('google') && (
         <View style={styles.card}>
@@ -583,21 +564,6 @@ export default function HomeScreen() {
           <Text style={styles.icloudDesc}>
             Back up files from Google Drive and Google Photos to your SFS account.
           </Text>
-
-          {profile?.is_admin && (
-            <View style={styles.demoRow}>
-              <View style={styles.demoRowLeft}>
-                <Text style={styles.demoRowLabel}>Demo Mode</Text>
-                <Text style={styles.demoRowSub}>Admin only · simulates sync for scope review</Text>
-              </View>
-              <Switch
-                value={googleDemoEnabled}
-                onValueChange={setGoogleDemoEnabled}
-                trackColor={{ false: colors.border, true: colors.success }}
-                thumbColor={colors.surface}
-              />
-            </View>
-          )}
 
           <TouchableOpacity
             style={[styles.syncButton, styles.googleButton, googleBackupLoading && styles.syncButtonDisabled]}
@@ -743,22 +709,6 @@ export default function HomeScreen() {
         }}
       />
 
-      <ICloudBackupModal
-        visible={icloudFiles !== null}
-        files={icloudFiles ?? []}
-        quotaBytes={quotaBytes}
-        usedBytes={usedBytes}
-        onClose={() => setIcloudFiles(null)}
-        onDone={() => {
-          setIcloudFiles(null);
-          refreshProfile().catch(() => {});
-        }}
-        onStoragePurchased={(newQuota) => {
-          setLocalQuotaBytes(newQuota);
-          refreshProfile().catch(() => {});
-        }}
-      />
-
       <StorageUpgradeModal
         visible={upgradeVisible}
         quotaBytes={quotaBytes}
@@ -770,6 +720,35 @@ export default function HomeScreen() {
         }}
         onClose={() => setUpgradeVisible(false)}
       />
+
+      {/* In-app Google Photos Picker — sharedCookiesEnabled reuses the user's Safari session */}
+      <Modal
+        visible={photosPickerVisible}
+        animationType="slide"
+        presentationStyle="pageSheet"
+        onRequestClose={() => photosPickerCancelRef.current?.()}
+      >
+        <View style={styles.webPickerRoot}>
+          <View style={styles.webPickerHeader}>
+            <TouchableOpacity
+              onPress={() => photosPickerCancelRef.current?.()}
+              style={styles.webPickerClose}
+              hitSlop={12}
+            >
+              <Text style={styles.webPickerCloseText}>Cancel</Text>
+            </TouchableOpacity>
+            <Text style={styles.webPickerTitle}>Select Photos</Text>
+            <View style={styles.webPickerClose} />
+          </View>
+          {photosPickerUrl ? (
+            <WebView
+              source={{ uri: photosPickerUrl }}
+              sharedCookiesEnabled
+              style={styles.webPickerView}
+            />
+          ) : null}
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -988,4 +967,21 @@ const styles = StyleSheet.create({
   demoRowLeft: { flex: 1, marginRight: spacing.sm },
   demoRowLabel: { fontSize: 14, fontWeight: '500', color: colors.textPrimary },
   demoRowSub: { fontSize: 12, color: colors.textMuted, marginTop: 2 },
+
+  // In-app Google Photos Picker WebView
+  webPickerRoot: { flex: 1, backgroundColor: colors.background },
+  webPickerHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.md,
+    paddingVertical: 14,
+    backgroundColor: colors.surface,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+  },
+  webPickerClose: { width: 60 },
+  webPickerCloseText: { fontSize: 16, color: colors.primary },
+  webPickerTitle: { fontSize: 17, fontWeight: '600', color: colors.textPrimary },
+  webPickerView: { flex: 1 },
 });

@@ -161,3 +161,10 @@ export async function favoriteFile(fileID: string): Promise<void> {
 export async function unfavoriteFile(fileID: string): Promise<void> {
   await api.delete(`/api/v1/favorites/files/${fileID}`);
 }
+
+export async function searchFiles(query: string): Promise<ApiFile[]> {
+  const res = await api.get<FolderContents>(
+    `/api/v1/search?q=${encodeURIComponent(query)}&folder_limit=0&file_limit=20`,
+  );
+  return res.data.files?.items ?? [];
+}

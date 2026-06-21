@@ -10,11 +10,12 @@ export interface GoogleBackupItem {
   id: string;
   name: string;
   mimeType: string;
-  size: number | null;       // null for Photos and Google Workspace files
+  size: number | null;          // null for Photos and Google Workspace files
   modifiedTime: string;
   source: 'drive' | 'photos';
-  isGoogleDoc: boolean;      // true = Workspace file, export as PDF
-  baseUrl: string | null;    // Photos only
+  isGoogleDoc: boolean;         // true = Workspace file, export as PDF
+  baseUrl: string | null;       // Photos only
+  thumbnailLink: string | null; // Drive only, time-limited pre-signed URL
 }
 
 export interface PhotosPickerSession {
@@ -52,7 +53,7 @@ export async function listGoogleDriveFiles(accessToken: string): Promise<GoogleB
   while (items.length < MAX_DRIVE_FILES) {
     let url =
       `${DRIVE_API}/files?pageSize=100` +
-      `&fields=nextPageToken,files(id,name,mimeType,size,modifiedTime)` +
+      `&fields=nextPageToken,files(id,name,mimeType,size,modifiedTime,thumbnailLink)` +
       `&q=trashed%3Dfalse+and+mimeType+!%3D+%27application%2Fvnd.google-apps.folder%27`;
     if (pageToken) url += `&pageToken=${encodeURIComponent(pageToken)}`;
 
@@ -62,11 +63,12 @@ export async function listGoogleDriveFiles(accessToken: string): Promise<GoogleB
         id:           f.id,
         name:         f.name,
         mimeType:     f.mimeType,
-        size:         f.size != null ? Number(f.size) : null,
-        modifiedTime: f.modifiedTime ?? '',
-        source:       'drive',
-        isGoogleDoc:  String(f.mimeType).startsWith('application/vnd.google-apps.'),
-        baseUrl:      null,
+        size:          f.size != null ? Number(f.size) : null,
+        modifiedTime:  f.modifiedTime ?? '',
+        source:        'drive',
+        isGoogleDoc:   String(f.mimeType).startsWith('application/vnd.google-apps.'),
+        baseUrl:       null,
+        thumbnailLink: f.thumbnailLink ?? null,
       });
     }
     if (!data.nextPageToken) break;
@@ -143,9 +145,10 @@ export async function listPickedPhotos(
         mimeType:     mf.mimeType ?? 'application/octet-stream',
         size:         null,  // Picker API does not return file size
         modifiedTime: m.createTime ?? '',
-        source:       'photos',
-        isGoogleDoc:  false,
-        baseUrl:      mf.baseUrl ?? null,
+        source:        'photos',
+        isGoogleDoc:   false,
+        baseUrl:       mf.baseUrl ?? null,
+        thumbnailLink: null,
       });
     }
     pageToken = data.nextPageToken;

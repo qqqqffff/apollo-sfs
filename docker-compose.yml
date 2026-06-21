@@ -258,6 +258,11 @@ services:
       KC_HOSTNAME_ADMIN: ${APP_BASE_URL}
       # Trust X-Forwarded-* headers set by Nginx
       KC_PROXY_HEADERS: xforwarded
+      # Enable external→internal token exchange (preview feature). Required by
+      # SocialLogin/WebSocialLogin, which exchange the provider id_token for KC
+      # tokens via grant_type=urn:ietf:params:oauth:grant-type:token-exchange.
+      # Without it, the token endpoint returns "unsupported_grant_type".
+      KC_FEATURES: token-exchange
       # Bootstrap admin credentials (Keycloak 26+)
       KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN}
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}

@@ -29,6 +29,10 @@ export const Route = createFileRoute('/login')({
 
 const KC_REALM = 'apollo-sfs-realm'
 const KC_CLIENT_ID = 'apollo-sfs-api'
+// Keycloak runs on its own hostname (see nginx auth.apollo-sfs.com vhost). The
+// browser is redirected here to start the OIDC code flow; the callback returns
+// to this app's own origin (redirect_uri below).
+const KC_BASE_URL = 'https://auth.apollo-sfs.com'
 
 function socialLoginUrl(provider: 'google' | 'apple') {
   const params = new URLSearchParams({
@@ -39,7 +43,7 @@ function socialLoginUrl(provider: 'google' | 'apple') {
     kc_idp_hint: provider,
     state: provider, // echoed back by KC so the callback knows which provider returned
   })
-  return `/realms/${KC_REALM}/protocol/openid-connect/auth?${params}`
+  return `${KC_BASE_URL}/realms/${KC_REALM}/protocol/openid-connect/auth?${params}`
 }
 
 const SOCIAL_ERROR_MESSAGES: Record<string, string> = {

@@ -252,10 +252,11 @@ services:
       KC_HTTP_PORT: 8180
       KC_HTTPS_ENABLED: "false"
       KC_HEALTH_ENABLED: "true"
-      # Full URL including protocol — KC 26 requires this, not a bare hostname
-      KC_HOSTNAME: ${APP_BASE_URL}
+      # Full URL including protocol — KC 26 requires this, not a bare hostname.
+      # Keycloak has its own hostname so the admin console and realm endpoints are
+      # served at their native paths (see the auth.apollo-sfs.com nginx vhost).
+      KC_HOSTNAME: ${KEYCLOAK_PUBLIC_URL}
       KC_HOSTNAME_STRICT: "true"
-      KC_HOSTNAME_ADMIN: ${APP_BASE_URL}
       # Trust X-Forwarded-* headers set by Nginx
       KC_PROXY_HEADERS: xforwarded
       # Enable external→internal token exchange (preview feature). Required by
@@ -336,7 +337,8 @@ services:
       - no-new-privileges:true
     environment:
       CF_API_TOKEN: ${CLOUDFLARE_API_TOKEN}
-      DOMAINS: ${CLOUDFLARE_RECORD_NAME}
+      # Apex plus the Keycloak subdomain — both A records track the dynamic IP.
+      DOMAINS: ${CLOUDFLARE_RECORD_NAME},${KEYCLOAK_PUBLIC_HOST}
       PROXIED: "true"
       IP6_PROVIDER: "none"
     networks:

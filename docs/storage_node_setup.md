@@ -127,26 +127,27 @@ Verify:
 - the **small (~800G)** ext4 partition is **p2**, mounted at **`/`** — leave it alone.
 
 If the sizes look swapped or p1 shows a mountpoint, **stop** and recheck before formatting.
-Substitute the real partition for `/dev/sdX1` (p1) below. **mkfs erases it.**
+Substitute the real partition for `/dev/sda` (p1) below. **mkfs erases it.**
 
 **2. (Recommended) health check on the physical disk before trusting it with data:**
 ```bash
-sudo smartctl -H /dev/sdX                        # overall health (whole disk, not p1)
-sudo smartctl -t short /dev/sdX                  # ~2 min self-test
+sudo smartctl -H /dev/sda                        # overall health (whole disk, not p1)
+sudo smartctl -t short /dev/sda                  # ~2 min self-test
+sudo smartctl -t long /dev/sda                  # ~2 min self-test
 ```
 
 **3. Reformat p1 from NTFS to XFS (MinIO's recommended filesystem) with a tier label:**
 ```bash
-sudo umount /dev/sdX1 2>/dev/null
-sudo wipefs -a /dev/sdX1                          # clear the NTFS signature
-sudo mkfs.xfs -L standard-01 /dev/sdX1
+sudo umount /dev/sda 2>/dev/null
+sudo wipefs -a /dev/sda                          # clear the NTFS signature
+sudo mkfs.xfs -L standard-01 /dev/sda
 ```
 XFS handles 4K-sector (Advanced Format) HDDs automatically — no manual alignment needed.
 
 **4. Mount p1 by UUID, persistently:**
 ```bash
 sudo mkdir -p /srv/storage/standard-01
-UUID=$(sudo blkid -s UUID -o value /dev/sdX1)
+UUID=$(sudo blkid -s UUID -o value /dev/sda)
 echo "UUID=$UUID  /srv/storage/standard-01  xfs  defaults,noatime,nofail,x-systemd.device-timeout=10  0  2" \
   | sudo tee -a /etc/fstab
 sudo systemctl daemon-reload

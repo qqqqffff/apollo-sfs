@@ -253,6 +253,23 @@ func (s *stubAdminQuerier) UpdateDriveCapacity(_ context.Context, _ uuid.UUID, _
 	return nil, nil
 }
 func (s *stubAdminQuerier) AutoSyncDriveCapacities(_ context.Context, _ int64) error { return nil }
+// Nodes
+func (s *stubAdminQuerier) GetNodeSummaries(_ context.Context) ([]models.NodeSummary, error) {
+	return []models.NodeSummary{}, nil
+}
+func (s *stubAdminQuerier) GetNode(_ context.Context, _ uuid.UUID) (*models.Node, error) {
+	return nil, nil
+}
+func (s *stubAdminQuerier) CreateNode(_ context.Context, _ db.CreateNodeParams) (*models.Node, error) {
+	return nil, nil
+}
+func (s *stubAdminQuerier) UpdateNode(_ context.Context, _ uuid.UUID, _ db.UpdateNodeParams) (*models.Node, error) {
+	return nil, nil
+}
+func (s *stubAdminQuerier) DeleteNode(_ context.Context, _ uuid.UUID) error { return nil }
+func (s *stubAdminQuerier) AssignDriveToNode(_ context.Context, _ uuid.UUID, _ *uuid.UUID) error {
+	return nil
+}
 // Alarm settings
 func (s *stubAdminQuerier) GetAlarmSettings(_ context.Context) (*models.AlarmSettings, error) {
 	if s.alarmSettings == nil && s.alarmSettingsErr == nil {
@@ -502,17 +519,17 @@ func newFolderHandler(folderSvc routes.FolderServicer) *routes.Handler {
 
 // newAdminHandler builds an admin.Handler with only querier and invite service set.
 func newAdminHandler(q admin.AdminQuerier, inv admin.AdminInviteService) *admin.Handler {
-	return admin.NewHandler(q, inv, nil, nil, nil, nil, nil, "", "", "", "", "", nil)
+	return admin.NewHandler(q, inv, nil, nil, nil, nil, nil, "", "", "", "", "", "", nil)
 }
 
 // newMetricsAdminHandler builds an admin.Handler wired with the given metrics stub.
 func newMetricsAdminHandler(q admin.AdminQuerier, m admin.MetricsServicer) *admin.Handler {
-	return admin.NewHandler(q, &stubAdminInviteService{}, m, nil, nil, nil, nil, "", "", "", "", "", nil)
+	return admin.NewHandler(q, &stubAdminInviteService{}, m, nil, nil, nil, nil, "", "", "", "", "", "", nil)
 }
 
 // newAdminHandlerWithFiles builds an admin.Handler wired with the given file service stub.
 func newAdminHandlerWithFiles(q admin.AdminQuerier, fileSvc routes.FileServicer) *admin.Handler {
-	return admin.NewHandler(q, &stubAdminInviteService{}, nil, nil, fileSvc, nil, nil, "", "", "", "", "", nil)
+	return admin.NewHandler(q, &stubAdminInviteService{}, nil, nil, fileSvc, nil, nil, "", "", "", "", "", "", nil)
 }
 
 // ── Stub MetricsService ───────────────────────────────────────────────────────

@@ -49,6 +49,14 @@ type AdminQuerier interface {
 	UpdateDriveCapacity(ctx context.Context, id uuid.UUID, capacityBytes int64) (*models.Drive, error)
 	AutoSyncDriveCapacities(ctx context.Context, capacityBytes int64) error
 
+	// Nodes (storage-node layer between servers and drives)
+	GetNodeSummaries(ctx context.Context) ([]models.NodeSummary, error)
+	GetNode(ctx context.Context, id uuid.UUID) (*models.Node, error)
+	CreateNode(ctx context.Context, p db.CreateNodeParams) (*models.Node, error)
+	UpdateNode(ctx context.Context, id uuid.UUID, p db.UpdateNodeParams) (*models.Node, error)
+	DeleteNode(ctx context.Context, id uuid.UUID) error
+	AssignDriveToNode(ctx context.Context, driveID uuid.UUID, nodeID *uuid.UUID) error
+
 	// Alarm settings
 	GetAlarmSettings(ctx context.Context) (*models.AlarmSettings, error)
 	SetAlarmSubscription(ctx context.Context, alarmType, email string, subscribe bool) (*models.AlarmSettings, error)

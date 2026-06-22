@@ -16,14 +16,23 @@ import (
 )
 
 // GetInfrastructure handles GET /api/v1/admin/system/infrastructure.
-// Returns all servers with their drives and per-drive usage summaries.
+// Returns the server → node → drive topology: every node (with its parent
+// server's fields) and every drive (carrying its node_id and per-drive usage).
+// Nodes are returned even when they hold no drives so the metrics page can show
+// the full cluster layout.
 func (h *Handler) GetInfrastructure(c *gin.Context) {
-	summaries, err := h.queries.GetDriveSummaries(c.Request.Context())
+	ctx := c.Request.Context()
+	summaries, err := h.queries.GetDriveSummaries(ctx)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not retrieve infrastructure"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"drives": summaries})
+	nodes, err := h.queries.GetNodeSummaries(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not retrieve infrastructure"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"nodes": nodes, "drives": summaries})
 }
 
 // GetCapacity handles GET /api/v1/admin/system/capacity.
@@ -149,6 +158,9 @@ func (h *Handler) UpdateServer(c *gin.Context) {
 type addDriveRequest struct {
 	Label       string `json:"label" binding:"required"`
 	MinioBucket string `json:"minio_bucket" binding:"required"`
+	// NodeID, when set, mounts the new drive on a specific node of this server.
+	// Omit to leave the drive unassigned.
+	NodeID string `json:"node_id"`
 }
 
 // AddDrive handles POST /api/v1/admin/system/servers/:server_id/drives.
@@ -183,8 +195,25 @@ func (h *Handler) AddDrive(c *gin.Context) {
 		return
 	}
 
+	// Resolve the optional node assignment, ensuring it belongs to this server.
+	var nodeID *uuid.UUID
+	if req.NodeID != "" {
+		nid, err := uuid.Parse(req.NodeID)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid node_id"})
+			return
+		}
+		node, err := h.queries.GetNode(ctx, nid)
+		if err != nil || node == nil || node.ServerID != serverID {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "node not found on this server"})
+			return
+		}
+		nodeID = &nid
+	}
+
 	drive, err := h.queries.CreateDrive(ctx, db.CreateDriveParams{
 		ServerID:      serverID,
+		NodeID:        nodeID,
 		Label:         sanitize.String(req.Label),
 		CapacityBytes: 0, // set by Sync once the drive is online
 		MinioBucket:   req.MinioBucket,
@@ -213,12 +242,20 @@ func (h *Handler) AddDrive(c *gin.Context) {
 type updateDriveRequest struct {
 	Label    string `json:"label"`
 	IsActive *bool  `json:"is_active"`
+	// NodeID moves the drive to a different node. A pointer-to-pointer distinguishes
+	// "absent" (leave unchanged) from a null/empty value (detach from any node).
+	NodeID *string `json:"node_id"`
 }
 
 // UpdateDrive handles PATCH /api/v1/admin/system/servers/:server_id/drives/:drive_id.
 // Capacity is read-only via this endpoint; use the sync-capacity endpoint instead.
 func (h *Handler) UpdateDrive(c *gin.Context) {
 	ctx := c.Request.Context()
+	serverID, err := uuid.Parse(c.Param("server_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid server_id"})
+		return
+	}
 	driveID, err := uuid.Parse(c.Param("drive_id"))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid drive_id"})
@@ -244,6 +281,28 @@ func (h *Handler) UpdateDrive(c *gin.Context) {
 	isActive := existing.IsActive
 	if req.IsActive != nil {
 		isActive = *req.IsActive
+	}
+
+	// Apply a node reassignment when node_id is present in the request body.
+	if req.NodeID != nil {
+		var nodeID *uuid.UUID
+		if *req.NodeID != "" {
+			nid, err := uuid.Parse(*req.NodeID)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid node_id"})
+				return
+			}
+			node, err := h.queries.GetNode(ctx, nid)
+			if err != nil || node == nil || node.ServerID != serverID {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "node not found on this server"})
+				return
+			}
+			nodeID = &nid
+		}
+		if err := h.queries.AssignDriveToNode(ctx, driveID, nodeID); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "could not reassign drive"})
+			return
+		}
 	}
 
 	drive, err := h.queries.UpdateDrive(ctx, driveID, db.UpdateDriveParams{

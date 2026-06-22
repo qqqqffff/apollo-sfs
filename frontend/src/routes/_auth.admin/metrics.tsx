@@ -3,8 +3,11 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   addDrive,
+  createNode,
   createServer,
   deleteDrive,
+  deleteNode,
+  driveStatsQueryOptions,
   driveTempsQueryOptions,
   getMetricsHistoryByHours,
   infrastructureQueryOptions,
@@ -15,9 +18,10 @@ import {
   syncDriveCapacity,
   triggerSpeedTest,
   updateDrive,
+  updateNode,
   updateServer,
 } from '../../api/admin'
-import type { DriveTemp, DriveSummary, TestRunResponse } from '../../api/admin'
+import type { DriveTemp, DriveStat, DriveSummary, NodeRole, NodeSummary, TestRunResponse } from '../../api/admin'
 import { useMetricsStream } from '../../hooks/useMetricsStream'
 import { LineGraph } from '../../components/LineGraph'
 import type { LinePoint } from '../../components/LineGraph'
@@ -28,6 +32,16 @@ export const Route = createFileRoute('/_auth/admin/metrics')({
 })
 
 const GB = 1024 ** 3
+
+// Infrastructure tree: server → node → drive.
+type NodeGroup = { node: NodeSummary; drives: DriveSummary[] }
+type ServerGroup = {
+  serverId: string
+  name: string
+  isActive: boolean
+  nodes: NodeGroup[]
+  unassigned: DriveSummary[]
+}
 
 type HourWindow = 1 | 12 | 24 | 48 | 72
 const HOUR_OPTIONS: HourWindow[] = [1, 12, 24, 48, 72]
@@ -87,20 +101,35 @@ function RouteComponent() {
   const [selectedMetric, setSelectedMetric] = useState<MetricKey>('traffic')
 
   const { data: infraData } = useQuery({ ...infrastructureQueryOptions, enabled: !inactive })
+  const { data: driveStatsData } = useQuery({ ...driveStatsQueryOptions, enabled: !inactive })
+  const driveStats = driveStatsData?.stats ?? {}
+  const nodes = infraData?.nodes ?? []
   const drives = infraData?.drives ?? []
 
-  // Group drives by server
-  const serverMap = new Map<string, { name: string; serverId: string; isActive: boolean; drives: DriveSummary[] }>()
-  for (const d of drives) {
-    if (!serverMap.has(d.server_id)) {
-      serverMap.set(d.server_id, {
-        name: d.server_name,
-        serverId: d.server_id,
-        isActive: d.server_is_active,
-        drives: [],
-      })
+  // Build the server → node → drive tree. Nodes come from the dedicated list so
+  // empty nodes still render; drives attach to their node or to an "Unassigned"
+  // bucket within their server when node_id is null (or the node is missing).
+  const serverMap = new Map<string, ServerGroup>()
+  const ensureServer = (id: string, name: string, isActive: boolean): ServerGroup => {
+    let s = serverMap.get(id)
+    if (!s) {
+      s = { serverId: id, name, isActive, nodes: [], unassigned: [] }
+      serverMap.set(id, s)
     }
-    serverMap.get(d.server_id)!.drives.push(d)
+    return s
+  }
+  const nodeMap = new Map<string, NodeGroup>()
+  for (const n of nodes) {
+    const s = ensureServer(n.server_id, n.server_name, n.server_is_active)
+    const ng: NodeGroup = { node: n, drives: [] }
+    s.nodes.push(ng)
+    nodeMap.set(n.node_id, ng)
+  }
+  for (const d of drives) {
+    const s = ensureServer(d.server_id, d.server_name, d.server_is_active)
+    const ng = d.node_id ? nodeMap.get(d.node_id) : undefined
+    if (ng) ng.drives.push(d)
+    else s.unassigned.push(d)
   }
   const servers = Array.from(serverMap.values())
 
@@ -139,6 +168,33 @@ function RouteComponent() {
       notify('success', 'Server added')
     },
     onError: () => notify('error', 'Failed to add server'),
+  })
+
+  const addNodeMutation = useMutation({
+    mutationFn: ({ serverId, params }: { serverId: string; params: Parameters<typeof createNode>[1] }) =>
+      createNode(serverId, params),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['admin', 'infrastructure'] })
+      notify('success', 'Node added')
+    },
+    onError: () => notify('error', 'Failed to add node'),
+  })
+
+  const updateNodeMutation = useMutation({
+    mutationFn: ({ serverId, nodeId, params }: { serverId: string; nodeId: string; params: Parameters<typeof updateNode>[2] }) =>
+      updateNode(serverId, nodeId, params),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['admin', 'infrastructure'] }),
+    onError: () => notify('error', 'Failed to update node'),
+  })
+
+  const deleteNodeMutation = useMutation({
+    mutationFn: ({ serverId, nodeId }: { serverId: string; nodeId: string }) =>
+      deleteNode(serverId, nodeId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['admin', 'infrastructure'] })
+      notify('success', 'Node removed')
+    },
+    onError: () => notify('error', 'Failed to remove node'),
   })
 
   const addDriveMutation = useMutation({
@@ -699,30 +755,60 @@ function RouteComponent() {
                     >
                       {srv.isActive ? 'Deactivate' : 'Activate'}
                     </button>
-                    <AddDriveForm
-                      onSubmit={(params) => addDriveMutation.mutate({ serverId: srv.serverId, params })}
-                      pending={addDriveMutation.isPending}
+                    <AddNodeForm
+                      onSubmit={(params) => addNodeMutation.mutate({ serverId: srv.serverId, params })}
+                      pending={addNodeMutation.isPending}
                     />
                   </div>
                 </div>
                 <div className="flex flex-col gap-3">
-                  {srv.drives.map((d) => (
-                    <DriveBar
-                      key={d.drive_id}
-                      drive={d}
-                      onToggle={() => toggleDriveMutation.mutate({
-                        serverId: d.server_id,
-                        driveId: d.drive_id,
-                        active: !d.drive_is_active,
-                      })}
-                      onDelete={() => {
+                  {srv.nodes.length === 0 && srv.unassigned.length === 0 && (
+                    <p className="text-xs text-gray-400 m-0">No nodes registered. Add a node to mount drives.</p>
+                  )}
+                  {srv.nodes.map((ng) => (
+                    <NodeBlock
+                      key={ng.node.node_id}
+                      group={ng}
+                      driveStats={driveStats}
+                      onAddDrive={(params) => addDriveMutation.mutate({ serverId: srv.serverId, params: { ...params, node_id: ng.node.node_id } })}
+                      addDrivePending={addDriveMutation.isPending}
+                      onUpdateNode={(params) => updateNodeMutation.mutate({ serverId: srv.serverId, nodeId: ng.node.node_id, params })}
+                      onDeleteNode={() => {
+                        const msg = ng.drives.length > 0
+                          ? `Remove node "${ng.node.hostname}"? Its ${ng.drives.length} drive(s) will be detached (not deleted).`
+                          : `Remove node "${ng.node.hostname}"?`
+                        if (confirm(msg)) deleteNodeMutation.mutate({ serverId: srv.serverId, nodeId: ng.node.node_id })
+                      }}
+                      onToggleDrive={(d) => toggleDriveMutation.mutate({ serverId: d.server_id, driveId: d.drive_id, active: !d.drive_is_active })}
+                      onDeleteDrive={(d) => {
                         if (confirm(`Remove drive "${d.drive_label}" from ${d.server_name}? This cannot be undone.`)) {
                           deleteDriveMutation.mutate({ serverId: d.server_id, driveId: d.drive_id })
                         }
                       }}
-                      onSyncCapacity={() => syncCapacityMutation.mutate(d.drive_id)}
+                      onSyncCapacity={(d) => syncCapacityMutation.mutate(d.drive_id)}
                     />
                   ))}
+                  {srv.unassigned.length > 0 && (
+                    <div className="border border-dashed border-gray-200 rounded-lg px-3 py-3">
+                      <div className="text-xs font-medium text-gray-400 mb-2">Unassigned drives (no node)</div>
+                      <div className="flex flex-col gap-3">
+                        {srv.unassigned.map((d) => (
+                          <DriveBar
+                            key={d.drive_id}
+                            drive={d}
+                            stat={driveStats[d.drive_id]}
+                            onToggle={() => toggleDriveMutation.mutate({ serverId: d.server_id, driveId: d.drive_id, active: !d.drive_is_active })}
+                            onDelete={() => {
+                              if (confirm(`Remove drive "${d.drive_label}" from ${d.server_name}? This cannot be undone.`)) {
+                                deleteDriveMutation.mutate({ serverId: d.server_id, driveId: d.drive_id })
+                              }
+                            }}
+                            onSyncCapacity={() => syncCapacityMutation.mutate(d.drive_id)}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
             ))}
@@ -1047,23 +1133,30 @@ function fmtCapacity(bytes: number): string {
   return gb >= 1024 ? `${(gb / 1024).toFixed(1)} TB` : `${gb.toFixed(0)} GB`
 }
 
-function DriveBar({ drive, onToggle, onDelete, onSyncCapacity }: {
+function DriveBar({ drive, stat, onToggle, onDelete, onSyncCapacity }: {
   drive: DriveSummary
+  stat?: DriveStat
   onToggle: () => void
   onDelete: () => void
   onSyncCapacity: () => void
 }) {
   const syncRequired = drive.capacity_bytes === 0
   const overAllocated = !syncRequired && drive.allocated_quota_bytes > drive.capacity_bytes
-  const cap = drive.capacity_bytes || 1
+  // When the drive's own mount was discovered, prefer its live figures for
+  // total/used/free; otherwise fall back to the capacity stored in the DB.
+  const live = stat?.online ?? false
+  const totalBytes = live ? stat!.total_bytes : drive.capacity_bytes
+  const usedBytes = live ? stat!.used_bytes : drive.used_bytes
+  const cap = totalBytes || 1
   const allocPct = Math.min(100, (drive.allocated_quota_bytes / cap) * 100)
-  const usedPct = Math.min(100, (drive.used_bytes / cap) * 100)
+  const usedPct = Math.min(100, (usedBytes / cap) * 100)
+  const temp = stat?.temp_celsius
 
   return (
     <div className="flex flex-col gap-1">
       <div className="flex items-center justify-between text-xs">
-        <div className="flex items-center gap-2">
-          <span className={`w-1.5 h-1.5 rounded-full ${drive.drive_is_active ? 'bg-green-400' : 'bg-gray-300'}`} />
+        <div className="flex items-center gap-2 min-w-0">
+          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${drive.drive_is_active ? 'bg-green-400' : 'bg-gray-300'}`} />
           <span className="text-gray-700 font-medium">{drive.drive_label}</span>
           <span className={`text-xs font-semibold px-1.5 py-0.5 rounded uppercase tracking-wide ${
             drive.drive_type === 'nvme'
@@ -1072,24 +1165,35 @@ function DriveBar({ drive, onToggle, onDelete, onSyncCapacity }: {
           }`}>
             {drive.drive_type === 'nvme' ? 'Fast' : 'Standard'}
           </span>
-          <span className="text-gray-400">{drive.minio_bucket}</span>
+          <span className="text-gray-400 truncate">{drive.minio_bucket}</span>
+          {temp != null && (
+            <span className={`font-semibold tabular-nums shrink-0 ${tempColor(temp)}`} title={stat?.device ? `Sensor on ${stat.device}` : 'Drive temperature'}>
+              {temp.toFixed(1)}°C
+            </span>
+          )}
+          {stat && !stat.online && (
+            <span className="text-gray-400 shrink-0" title="Live mount stats unavailable — showing stored capacity. The node may be offline or the mount not visible to the API.">
+              offline
+            </span>
+          )}
           {syncRequired && (
-            <span className="text-amber-500 font-medium" title="Run Sync to detect actual drive capacity before this drive can accept allocations">
+            <span className="text-amber-500 font-medium shrink-0" title="Run Sync to detect actual drive capacity before this drive can accept allocations">
               ⚠ Sync required
             </span>
           )}
           {overAllocated && (
-            <span className="text-red-500 font-medium" title="Allocated quota exceeds detected drive capacity — run Sync to refresh">
+            <span className="text-red-500 font-medium shrink-0" title="Allocated quota exceeds detected drive capacity — run Sync to refresh">
               ⚠ over-allocated
             </span>
           )}
         </div>
-        <div className="flex items-center gap-3 text-gray-400">
+        <div className="flex items-center gap-3 text-gray-400 shrink-0">
           {!syncRequired && (
             <span>
-              {(drive.used_bytes / GB).toFixed(1)} used ·{' '}
+              {(usedBytes / GB).toFixed(1)} used ·{' '}
+              {live && <>{(stat!.free_bytes / GB).toFixed(1)} free · </>}
               {(drive.allocated_quota_bytes / GB).toFixed(1)} allocated /{' '}
-              <span className={overAllocated ? 'text-red-500' : ''}>{fmtCapacity(drive.capacity_bytes)}</span>
+              <span className={overAllocated ? 'text-red-500' : ''}>{fmtCapacity(totalBytes)}</span>
             </span>
           )}
           <button
@@ -1195,6 +1299,141 @@ function AddDriveForm({ onSubmit, pending }: {
     <form onSubmit={submit} className="flex flex-wrap gap-2 items-center">
       <input value={label} onChange={e => setLabel(e.target.value)} placeholder="nvme-02" required className="w-24 border border-gray-200 rounded px-2 py-1 text-xs" />
       <input value={bucket} onChange={e => setBucket(e.target.value)} placeholder="Bucket name" required className="w-32 border border-gray-200 rounded px-2 py-1 text-xs" />
+      <button type="submit" disabled={pending} className="text-xs bg-blue-600 text-white rounded px-2 py-1 disabled:opacity-50 cursor-pointer">
+        {pending ? 'Adding…' : 'Add'}
+      </button>
+      <button type="button" onClick={() => setOpen(false)} className="text-xs text-gray-400 hover:text-gray-700 cursor-pointer bg-transparent border-0">
+        Cancel
+      </button>
+    </form>
+  )
+}
+
+const NODE_ROLES: NodeRole[] = ['manager', 'worker', 'storage']
+
+function roleBadgeClass(role: string): string {
+  switch (role) {
+    case 'manager': return 'bg-indigo-50 text-indigo-700'
+    case 'storage': return 'bg-emerald-50 text-emerald-700'
+    default:        return 'bg-gray-100 text-gray-500'
+  }
+}
+
+function NodeBlock({ group, driveStats, onAddDrive, addDrivePending, onUpdateNode, onDeleteNode, onToggleDrive, onDeleteDrive, onSyncCapacity }: {
+  group: NodeGroup
+  driveStats: Record<string, DriveStat>
+  onAddDrive: (p: { label: string; minio_bucket: string }) => void
+  addDrivePending: boolean
+  onUpdateNode: (params: { hostname?: string; role?: NodeRole; address?: string; is_active?: boolean }) => void
+  onDeleteNode: () => void
+  onToggleDrive: (d: DriveSummary) => void
+  onDeleteDrive: (d: DriveSummary) => void
+  onSyncCapacity: (d: DriveSummary) => void
+}) {
+  const { node, drives } = group
+  const [editing, setEditing] = useState(false)
+  const [hostname, setHostname] = useState(node.hostname)
+  const [role, setRole] = useState<NodeRole>(node.role)
+  const [address, setAddress] = useState(node.address)
+
+  function saveEdit(e: React.FormEvent) {
+    e.preventDefault()
+    if (!hostname.trim()) return
+    onUpdateNode({ hostname: hostname.trim(), role, address: address.trim() })
+    setEditing(false)
+  }
+
+  return (
+    <div className="border border-gray-100 rounded-lg px-3 py-3 bg-gray-50/60">
+      <div className="flex items-center justify-between mb-2 gap-2">
+        {editing ? (
+          <form onSubmit={saveEdit} className="flex flex-wrap items-center gap-1.5">
+            <input autoFocus value={hostname} onChange={e => setHostname(e.target.value)} placeholder="hostname" className="w-32 border border-blue-400 rounded px-2 py-0.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500" />
+            <select value={role} onChange={e => setRole(e.target.value as NodeRole)} className="border border-gray-200 rounded px-1.5 py-0.5 text-xs bg-white">
+              {NODE_ROLES.map(r => <option key={r} value={r}>{r}</option>)}
+            </select>
+            <input value={address} onChange={e => setAddress(e.target.value)} placeholder="address (optional)" className="w-36 border border-gray-200 rounded px-2 py-0.5 text-xs" />
+            <button type="submit" className="text-xs text-blue-600 hover:text-blue-800 cursor-pointer bg-transparent border-0">Save</button>
+            <button type="button" onClick={() => { setEditing(false); setHostname(node.hostname); setRole(node.role); setAddress(node.address) }} className="text-xs text-gray-400 hover:text-gray-700 cursor-pointer bg-transparent border-0">Cancel</button>
+          </form>
+        ) : (
+          <div className="flex items-center gap-2 min-w-0">
+            <span className={`w-2 h-2 rounded-full shrink-0 ${node.is_active ? 'bg-green-500' : 'bg-gray-300'}`} />
+            <span className="font-medium text-gray-800 text-sm truncate">{node.hostname}</span>
+            <span className={`text-xs font-semibold px-1.5 py-0.5 rounded uppercase tracking-wide shrink-0 ${roleBadgeClass(node.role)}`}>{node.role}</span>
+            {node.address && <span className="text-xs text-gray-400 truncate">{node.address}</span>}
+            <span className="text-xs text-gray-400 shrink-0">{drives.length} drive{drives.length !== 1 ? 's' : ''}</span>
+            <button onClick={() => setEditing(true)} className="text-xs text-gray-400 hover:text-gray-600 cursor-pointer bg-transparent border-0 shrink-0" title="Edit node">✎</button>
+            {!node.is_active && <span className="text-xs text-gray-400 shrink-0">(inactive)</span>}
+          </div>
+        )}
+        <div className="flex items-center gap-2 shrink-0">
+          <AddDriveForm onSubmit={onAddDrive} pending={addDrivePending} />
+          <button
+            onClick={() => onUpdateNode({ is_active: !node.is_active })}
+            className="text-xs text-gray-500 hover:text-gray-800 cursor-pointer bg-transparent border border-gray-200 hover:border-gray-400 rounded px-2 py-1 transition-colors"
+          >
+            {node.is_active ? 'Deactivate' : 'Activate'}
+          </button>
+          <button
+            onClick={onDeleteNode}
+            className="text-xs text-red-400 hover:text-red-600 cursor-pointer bg-transparent border border-red-200 hover:border-red-400 rounded px-2 py-1 transition-colors"
+          >
+            Remove
+          </button>
+        </div>
+      </div>
+      {drives.length === 0 ? (
+        <p className="text-xs text-gray-400 m-0 pl-4">No drives mounted on this node.</p>
+      ) : (
+        <div className="flex flex-col gap-3 pl-4">
+          {drives.map((d) => (
+            <DriveBar
+              key={d.drive_id}
+              drive={d}
+              stat={driveStats[d.drive_id]}
+              onToggle={() => onToggleDrive(d)}
+              onDelete={() => onDeleteDrive(d)}
+              onSyncCapacity={() => onSyncCapacity(d)}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function AddNodeForm({ onSubmit, pending }: {
+  onSubmit: (p: { hostname: string; role: NodeRole; address?: string }) => void
+  pending: boolean
+}) {
+  const [open, setOpen] = useState(false)
+  const [hostname, setHostname] = useState('')
+  const [role, setRole] = useState<NodeRole>('worker')
+  const [address, setAddress] = useState('')
+
+  function submit(e: React.FormEvent) {
+    e.preventDefault()
+    onSubmit({ hostname, role, address: address.trim() || undefined })
+    setOpen(false)
+    setHostname(''); setRole('worker'); setAddress('')
+  }
+
+  if (!open) {
+    return (
+      <button onClick={() => setOpen(true)} className="text-xs text-blue-600 hover:text-blue-800 cursor-pointer bg-transparent border border-blue-200 hover:border-blue-400 rounded px-2 py-1 transition-colors">
+        + Add node
+      </button>
+    )
+  }
+
+  return (
+    <form onSubmit={submit} className="flex flex-wrap gap-2 items-center">
+      <input value={hostname} onChange={e => setHostname(e.target.value)} placeholder="hostname (apollo-sfs-1)" required className="w-40 border border-gray-200 rounded px-2 py-1 text-xs" />
+      <select value={role} onChange={e => setRole(e.target.value as NodeRole)} className="border border-gray-200 rounded px-1.5 py-1 text-xs bg-white">
+        {NODE_ROLES.map(r => <option key={r} value={r}>{r}</option>)}
+      </select>
+      <input value={address} onChange={e => setAddress(e.target.value)} placeholder="address (optional)" className="w-36 border border-gray-200 rounded px-2 py-1 text-xs" />
       <button type="submit" disabled={pending} className="text-xs bg-blue-600 text-white rounded px-2 py-1 disabled:opacity-50 cursor-pointer">
         {pending ? 'Adding…' : 'Add'}
       </button>

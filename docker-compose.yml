@@ -3,13 +3,14 @@ name: apollo-sfs
 # All services run on app-network (internal Docker bridge).
 # Only the API port is bound to 127.0.0.1 so Nginx on the host can proxy to it.
 #
-# MinIO is the only service whose data is bind-mounted to the NVMe drive.
-# Create that directory before running `docker compose up` for the first time:
-#
-#   sudo mkdir -p /minio/nvme-1/data
+# MinIO is the only service whose data is bind-mounted to NVMe storage. Its data
+# lives on the mergerfs pool that unions nvme-01 + nvme-02 into one JBOD volume
+# (capacity, no redundancy). The pool must be mounted before the first
+# `docker compose up` — it is mounted at boot via /etc/fstab. Full drive + pool
+# setup is documented in docs/nvme_capacity_expansion.md.
 #
 # All other persistent data (PostgreSQL) uses standard named Docker volumes
-# managed under the Docker data root (/minio/nvme-1/docker if you've moved it there).
+# managed under the Docker data root.
 #
 # Place the Keycloak realm import JSON at ./keycloak/import/realm-export.json
 # before first boot — Keycloak imports it once, then skips on subsequent starts.
@@ -141,7 +142,7 @@ services:
       SENDGRID_WEBHOOK_SECRET: ${SENDGRID_WEBHOOK_SECRET:-}
       QUOTA_WARNING_THRESHOLD_PERCENT: ${QUOTA_WARNING_THRESHOLD_PERCENT:-80}
       DISK_STATS_PATH: /data
-      DISK_STATS_DRIVE_LABEL: nvme-01
+      DISK_STATS_DRIVE_LABEL: nvme-pool
       # Cloudflare Turnstile — bot protection for the interest form
       CLOUDFLARE_TURNSTILE_SECRET_KEY: ${CLOUDFLARE_TURNSTILE_SECRET_KEY}
       CLOUDFLARE_TURNSTILE_SITE_KEY: ${CLOUDFLARE_TURNSTILE_SITE_KEY}
@@ -170,7 +171,9 @@ services:
       FRONTEND_TEST_URL: http://frontend-tests:9229/run-tests
       FRONTEND_E2E_URL: http://frontend-tests:9229/run-e2e
     volumes:
-      - /home/apollo/apollo-sfs/minio/nvme-01:/data:ro
+      # Read-only mount of the mergerfs pool (nvme-01 + nvme-02) so the API's
+      # disk-stats reader reports COMBINED capacity. See docs/nvme_capacity_expansion.md.
+      - /home/apollo/apollo-sfs/minio/pool:/data:ro
       - /var/lib/GeoIP:/var/lib/GeoIP:ro
       - /var/run/docker.sock:/var/run/docker.sock
       # Inbound email store — host dir persists messages across container rebuilds.
@@ -197,8 +200,10 @@ services:
         max-file: "3"
 
   # ── MinIO object storage ───────────────────────────────────────────────────
-  # Encrypted file blobs are stored here. Data is bind-mounted directly to the
-  # NVMe drive at /minio/nvme-1/data so uploaded files land on fast storage.
+  # Encrypted file blobs are stored here. Data is bind-mounted to the mergerfs
+  # pool at /home/apollo/apollo-sfs/minio/pool, which unions nvme-01 + nvme-02
+  # into one JBOD volume (capacity, no redundancy). See
+  # docs/nvme_capacity_expansion.md for the drive/pool setup.
   # Port 9000 is internal only — accessed by the API on the Docker network.
   # Port 9001 (MinIO console) is NOT exposed to the host; access via SSH tunnel
   # during setup if needed: ssh -L 9001:localhost:9001 <pi>
@@ -407,13 +412,13 @@ networks:
     driver: bridge
 
 volumes:
-  # Bind-mounted to the NVMe drive — this is where uploaded file blobs live.
-  # The host directory must exist before `docker compose up`:
-  #   sudo mkdir -p /minio/nvme-1/data
+  # Bind-mounted to the mergerfs pool (nvme-01 + nvme-02) — this is where
+  # uploaded file blobs live. The pool must be mounted before `docker compose up`
+  # (it is mounted at boot via /etc/fstab). See docs/nvme_capacity_expansion.md.
   minio-data:
     driver: local
     driver_opts:
       type: none
       o: bind
-      device: /home/apollo/apollo-sfs/minio/nvme-01/data
+      device: /home/apollo/apollo-sfs/minio/pool
 

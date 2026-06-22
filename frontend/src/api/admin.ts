@@ -134,10 +134,29 @@ export async function pingServer(): Promise<number> {
 
 // ── Infrastructure ─────────────────────────────────────────────────────────────
 
+export type NodeRole = 'manager' | 'worker' | 'storage'
+
+export interface NodeSummary {
+  node_id: string
+  server_id: string
+  server_name: string
+  server_state: string
+  server_is_active: boolean
+  hostname: string
+  role: NodeRole
+  address: string
+  is_active: boolean
+  created_at: string
+}
+
 export interface DriveSummary {
   drive_id: string
   server_id: string
   server_name: string
+  node_id: string | null
+  node_hostname: string
+  node_role: string
+  node_is_active: boolean
   drive_label: string
   drive_type: 'nvme' | 'hdd'
   capacity_bytes: number
@@ -153,7 +172,32 @@ export interface CapacitySummary {
 }
 
 export function listInfrastructure() {
-  return get<{ drives: DriveSummary[] }>('/admin/system/infrastructure')
+  return get<{ nodes: NodeSummary[]; drives: DriveSummary[] }>('/admin/system/infrastructure')
+}
+
+// Live, per-drive view discovered from each drive's filesystem mount (keyed by
+// drive_id). online=false means the mount couldn't be found (offline node or a
+// mount not visible to the API), in which case the UI falls back to DB capacity.
+export interface DriveStat {
+  label: string
+  mount_path: string
+  device: string
+  total_bytes: number
+  used_bytes: number
+  free_bytes: number
+  temp_celsius: number | null
+  online: boolean
+}
+
+export function getDriveStats() {
+  return get<{ stats: Record<string, DriveStat> }>('/admin/system/drive-stats')
+}
+
+export const driveStatsQueryOptions = {
+  queryKey: ['admin', 'drive-stats'] as const,
+  queryFn: getDriveStats,
+  staleTime: 10_000,
+  refetchInterval: 10_000,
 }
 
 export function getCapacity() {
@@ -174,9 +218,31 @@ export function updateServer(serverId: string, params: { is_active?: boolean; na
   return patch<{ message: string }>(`/admin/system/servers/${serverId}`, params)
 }
 
+export function createNode(
+  serverId: string,
+  params: { hostname: string; role?: NodeRole; address?: string },
+) {
+  return post<{ id: string; hostname: string }>(`/admin/system/servers/${serverId}/nodes`, params)
+}
+
+export function updateNode(
+  serverId: string,
+  nodeId: string,
+  params: { hostname?: string; role?: NodeRole; address?: string; is_active?: boolean },
+) {
+  return patch<{ id: string; hostname: string }>(
+    `/admin/system/servers/${serverId}/nodes/${nodeId}`,
+    params,
+  )
+}
+
+export function deleteNode(serverId: string, nodeId: string) {
+  return del<{ message: string }>(`/admin/system/servers/${serverId}/nodes/${nodeId}`)
+}
+
 export function addDrive(
   serverId: string,
-  params: { label: string; minio_bucket: string },
+  params: { label: string; minio_bucket: string; node_id?: string },
 ) {
   return post<DriveSummary>(`/admin/system/servers/${serverId}/drives`, params)
 }
@@ -184,7 +250,7 @@ export function addDrive(
 export function updateDrive(
   serverId: string,
   driveId: string,
-  params: { label?: string; is_active?: boolean },
+  params: { label?: string; is_active?: boolean; node_id?: string | null },
 ) {
   return patch<DriveSummary>(
     `/admin/system/servers/${serverId}/drives/${driveId}`,

@@ -18,11 +18,11 @@ var ErrNoCapacity = errors.New("no drive has sufficient capacity for the request
 // ── Drives ────────────────────────────────────────────────────────────────────
 
 const driveColumns = `
-	id, server_id, label, capacity_bytes, minio_bucket, is_active, created_at`
+	id, server_id, node_id, label, capacity_bytes, minio_bucket, is_active, created_at`
 
 func scanDrive(row *sql.Row) (*models.Drive, error) {
 	var d models.Drive
-	err := row.Scan(&d.ID, &d.ServerID, &d.Label, &d.CapacityBytes,
+	err := row.Scan(&d.ID, &d.ServerID, &d.NodeID, &d.Label, &d.CapacityBytes,
 		&d.MinioBucket, &d.IsActive, &d.CreatedAt)
 	if err != nil {
 		return nil, err
@@ -32,7 +32,7 @@ func scanDrive(row *sql.Row) (*models.Drive, error) {
 
 func scanDriveRow(rows *sql.Rows) (*models.Drive, error) {
 	var d models.Drive
-	err := rows.Scan(&d.ID, &d.ServerID, &d.Label, &d.CapacityBytes,
+	err := rows.Scan(&d.ID, &d.ServerID, &d.NodeID, &d.Label, &d.CapacityBytes,
 		&d.MinioBucket, &d.IsActive, &d.CreatedAt)
 	if err != nil {
 		return nil, err
@@ -78,8 +78,10 @@ func (q *Queries) GetDrive(ctx context.Context, id uuid.UUID) (*models.Drive, er
 }
 
 // CreateDriveParams carries all fields needed to insert a new drive row.
+// NodeID is optional — nil leaves the drive unassigned to a node.
 type CreateDriveParams struct {
 	ServerID      uuid.UUID
+	NodeID        *uuid.UUID
 	Label         string
 	CapacityBytes int64
 	MinioBucket   string
@@ -88,10 +90,10 @@ type CreateDriveParams struct {
 // CreateDrive inserts a new drive and returns the created row.
 func (q *Queries) CreateDrive(ctx context.Context, p CreateDriveParams) (*models.Drive, error) {
 	row := q.db.QueryRowContext(ctx, `
-		INSERT INTO drives (server_id, label, capacity_bytes, minio_bucket)
-		VALUES ($1, $2, $3, $4)
+		INSERT INTO drives (server_id, node_id, label, capacity_bytes, minio_bucket)
+		VALUES ($1, $2, $3, $4, $5)
 		RETURNING`+driveColumns,
-		p.ServerID, p.Label, p.CapacityBytes, p.MinioBucket,
+		p.ServerID, p.NodeID, p.Label, p.CapacityBytes, p.MinioBucket,
 	)
 	d, err := scanDrive(row)
 	if err != nil {
@@ -259,7 +261,7 @@ func (q *Queries) GetUserDrive(ctx context.Context, username string) (*models.Us
 	err := q.db.QueryRowContext(ctx, `
 		SELECT
 			uda.user_id, uda.drive_id, uda.allocated_at,
-			d.id, d.server_id, d.label, d.capacity_bytes, d.minio_bucket, d.is_active, d.created_at,
+			d.id, d.server_id, d.node_id, d.label, d.capacity_bytes, d.minio_bucket, d.is_active, d.created_at,
 			s.id, s.name, s.state, s.minio_endpoint, s.minio_use_ssl,
 			s.minio_access_key_enc, s.minio_access_key_nonce,
 			s.minio_secret_key_enc, s.minio_secret_key_nonce,
@@ -270,7 +272,7 @@ func (q *Queries) GetUserDrive(ctx context.Context, username string) (*models.Us
 		WHERE uda.user_id = $1
 	`, username).Scan(
 		&a.UserID, &a.DriveID, &a.AllocatedAt,
-		&a.Drive.ID, &a.Drive.ServerID, &a.Drive.Label, &a.Drive.CapacityBytes,
+		&a.Drive.ID, &a.Drive.ServerID, &a.Drive.NodeID, &a.Drive.Label, &a.Drive.CapacityBytes,
 		&a.Drive.MinioBucket, &a.Drive.IsActive, &a.Drive.CreatedAt,
 		&a.Server.ID, &a.Server.Name, &a.Server.State, &a.Server.MinioEndpoint,
 		&a.Server.MinioUseSSL,
@@ -304,7 +306,9 @@ func (q *Queries) AllocateUserToDrive(ctx context.Context, username string, driv
 func (q *Queries) GetDriveSummaries(ctx context.Context) ([]models.DriveSummary, error) {
 	rows, err := q.db.QueryContext(ctx, `
 		SELECT
-			d.id, d.server_id, s.name, d.label,
+			d.id, d.server_id, s.name,
+			d.node_id, COALESCE(n.hostname, ''), COALESCE(n.role, ''), COALESCE(n.is_active, false),
+			d.label,
 			CASE WHEN lower(d.label) LIKE '%nvme%' THEN 'nvme' ELSE 'hdd' END AS drive_type,
 			d.capacity_bytes, d.minio_bucket,
 			COALESCE(SUM(u.storage_quota_bytes), 0) AS allocated_quota_bytes,
@@ -312,10 +316,11 @@ func (q *Queries) GetDriveSummaries(ctx context.Context) ([]models.DriveSummary,
 			d.is_active, s.is_active
 		FROM drives d
 		JOIN servers s ON s.id = d.server_id
+		LEFT JOIN nodes n ON n.id = d.node_id
 		LEFT JOIN user_drive_allocations uda ON uda.drive_id = d.id
 		LEFT JOIN users u ON u.username = uda.user_id
-		GROUP BY d.id, s.id
-		ORDER BY s.name ASC, d.label ASC
+		GROUP BY d.id, s.id, n.id
+		ORDER BY s.name ASC, n.hostname ASC, d.label ASC
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("GetDriveSummaries: %w", err)
@@ -326,7 +331,9 @@ func (q *Queries) GetDriveSummaries(ctx context.Context) ([]models.DriveSummary,
 	for rows.Next() {
 		var ds models.DriveSummary
 		if err := rows.Scan(
-			&ds.DriveID, &ds.ServerID, &ds.ServerName, &ds.DriveLabel, &ds.DriveType,
+			&ds.DriveID, &ds.ServerID, &ds.ServerName,
+			&ds.NodeID, &ds.NodeHostname, &ds.NodeRole, &ds.NodeIsActive,
+			&ds.DriveLabel, &ds.DriveType,
 			&ds.CapacityBytes, &ds.MinioBucket,
 			&ds.AllocatedQuotaBytes, &ds.UsedBytes,
 			&ds.DriveIsActive, &ds.ServerIsActive,

@@ -24,6 +24,7 @@ jest.mock('../../../context/NotificationContext', () => ({
 
 jest.mock('../../../api/admin', () => ({
   infrastructureQueryOptions: { queryKey: ['admin', 'infrastructure'],  queryFn: jest.fn() },
+  driveStatsQueryOptions:     { queryKey: ['admin', 'drive-stats'],     queryFn: jest.fn() },
   driveTempsQueryOptions:     { queryKey: ['admin', 'drive-temps'],     queryFn: jest.fn() },
   speedTestQueryOptions:      { queryKey: ['admin', 'speed-test'],      queryFn: jest.fn() },
   getMetricsHistoryByHours: jest.fn(),
@@ -34,6 +35,9 @@ jest.mock('../../../api/admin', () => ({
   triggerSpeedTest: jest.fn(),
   createServer:     jest.fn(),
   updateServer:     jest.fn(),
+  createNode:       jest.fn(),
+  updateNode:       jest.fn(),
+  deleteNode:       jest.fn(),
   addDrive:         jest.fn(),
   updateDrive:      jest.fn(),
 }))

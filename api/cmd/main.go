@@ -249,7 +249,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	routes.SetAPIKeyService(h, apiKeySvc)
 	routes.SetMathGameService(h, services.NewMathGameService(queries))
 	authHandler := auth.NewHandler(authSvc)
-	adminHandler := admin.NewHandler(queries, inviteSvc, metricsSvc, authSvc, fileSvc, registry, geoReader, cfg.DiskStatsPath, cfg.BackendTestURL, cfg.AppDir, cfg.FrontendTestURL, cfg.FrontendE2EURL, shutdownCh)
+	adminHandler := admin.NewHandler(queries, inviteSvc, metricsSvc, authSvc, fileSvc, registry, geoReader, cfg.DiskStatsPath, cfg.DiskStatsDriveLabel, cfg.BackendTestURL, cfg.AppDir, cfg.FrontendTestURL, cfg.FrontendE2EURL, shutdownCh)
 	sfsHandler := sfs.NewHandler(queries, fileSvc, presignSvc, apiKeySvc)
 	inboundEmailHandler := admin.NewInboundEmailHandler(inboundEmailSvc, cfg.SendgridWebhookSecret)
 
@@ -494,8 +494,12 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 
 			adminGroup.GET("/system/infrastructure", adminHandler.GetInfrastructure)
 			adminGroup.GET("/system/capacity", adminHandler.GetCapacity)
+			adminGroup.GET("/system/drive-stats", adminHandler.GetDriveStats)
 			adminGroup.POST("/system/servers", adminHandler.CreateServer)
 			adminGroup.PATCH("/system/servers/:server_id", adminHandler.UpdateServer)
+			adminGroup.POST("/system/servers/:server_id/nodes", adminHandler.CreateNode)
+			adminGroup.PATCH("/system/servers/:server_id/nodes/:node_id", adminHandler.UpdateNode)
+			adminGroup.DELETE("/system/servers/:server_id/nodes/:node_id", adminHandler.DeleteNode)
 			adminGroup.POST("/system/servers/:server_id/drives", adminHandler.AddDrive)
 			adminGroup.PATCH("/system/servers/:server_id/drives/:drive_id", adminHandler.UpdateDrive)
 			adminGroup.DELETE("/system/servers/:server_id/drives/:drive_id", adminHandler.DeleteDrive)
@@ -587,12 +591,24 @@ func seedDefaultServer(ctx context.Context, queries *db.Queries, cfg Config, kek
 		return fmt.Errorf("create server: %w", err)
 	}
 
+	// Every server owns at least one node (the manager host itself). Drives are
+	// mounted on a node, so create a default node and attach the seeded drive.
+	node, err := queries.CreateNode(ctx, db.CreateNodeParams{
+		ServerID: server.ID,
+		Hostname: server.Name + "-node-1",
+		Role:     "manager",
+	})
+	if err != nil {
+		return fmt.Errorf("create node: %w", err)
+	}
+
 	label := driveLabel
 	if label == "" {
 		label = "nvme-01"
 	}
 	drive, err := queries.CreateDrive(ctx, db.CreateDriveParams{
 		ServerID:      server.ID,
+		NodeID:        &node.ID,
 		Label:         label,
 		CapacityBytes: capacityBytes,
 		MinioBucket:   cfg.MinIOBucketName,

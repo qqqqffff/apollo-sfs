@@ -25,6 +25,11 @@ type Handler struct {
 	// diskStatsPath is the filesystem path used to auto-detect drive capacity
 	// for the sync-capacity endpoint (e.g. "/data" inside the container).
 	diskStatsPath string
+	// diskStatsLabel is the filesystem label of the volume mounted at
+	// diskStatsPath (DISK_STATS_DRIVE_LABEL). The live drive-stats endpoint maps
+	// the drive carrying this label to diskStatsPath, which the container can
+	// always read, instead of relying on host mount discovery.
+	diskStatsLabel string
 	// backendTestURL is the POST endpoint of the api-tests sidecar container.
 	// e.g. "http://api-tests:9228/run-tests". Takes precedence over apiDir.
 	backendTestURL string
@@ -51,11 +56,12 @@ type Handler struct {
 
 // NewHandler constructs an admin Handler.
 // diskStatsPath:   filesystem path to auto-detect drive capacity (DISK_STATS_PATH env var, e.g. "/data").
+// diskStatsLabel:  filesystem label of the volume at diskStatsPath (DISK_STATS_DRIVE_LABEL env var).
 // backendTestURL:  internal URL of the api-tests sidecar (BACKEND_TEST_URL env var). Takes precedence over apiDir.
 // apiDir:          absolute path to the api/ source directory (APP_DIR env var). Used for local dev when backendTestURL is unset.
 // frontendTestURL: internal URL of the Jest sidecar (FRONTEND_TEST_URL env var). "" disables unit tests.
 // frontendE2EURL:  internal URL of the Playwright sidecar (FRONTEND_E2E_URL env var). "" disables E2E tests.
 // shutdownCh:      channel closed by the Shutdown endpoint to trigger graceful server exit. nil disables the endpoint.
-func NewHandler(queries AdminQuerier, inviteSvc AdminInviteService, metricsSvc MetricsServicer, authSvc *services.AuthService, fileSvc routes.FileServicer, registry *services.MinIORegistry, geoReader *geoip2.Reader, diskStatsPath, backendTestURL, apiDir, frontendTestURL, frontendE2EURL string, shutdownCh chan struct{}) *Handler {
-	return &Handler{queries: queries, invites: inviteSvc, metrics: metricsSvc, auth: authSvc, files: fileSvc, registry: registry, geo: geoReader, diskStatsPath: diskStatsPath, backendTestURL: backendTestURL, apiDir: apiDir, frontendTestURL: frontendTestURL, frontendE2EURL: frontendE2EURL, shutdownCh: shutdownCh}
+func NewHandler(queries AdminQuerier, inviteSvc AdminInviteService, metricsSvc MetricsServicer, authSvc *services.AuthService, fileSvc routes.FileServicer, registry *services.MinIORegistry, geoReader *geoip2.Reader, diskStatsPath, diskStatsLabel, backendTestURL, apiDir, frontendTestURL, frontendE2EURL string, shutdownCh chan struct{}) *Handler {
+	return &Handler{queries: queries, invites: inviteSvc, metrics: metricsSvc, auth: authSvc, files: fileSvc, registry: registry, geo: geoReader, diskStatsPath: diskStatsPath, diskStatsLabel: diskStatsLabel, backendTestURL: backendTestURL, apiDir: apiDir, frontendTestURL: frontendTestURL, frontendE2EURL: frontendE2EURL, shutdownCh: shutdownCh}
 }

@@ -87,17 +87,23 @@ export default function RegisterScreen({
   };
 
   const handleGoogle = async () => {
+    if (!inviteToken.trim()) {
+      Alert.alert('Invitation required', 'Enter your invitation code before signing up with Google.');
+      return;
+    }
     try {
-      // Keycloak identity-provider brokering — same flow as sign-in. New Google
-      // users are created in Keycloak via its first-broker-login flow (gating is
-      // configured Keycloak-side, not here).
-      await loginWithIdp('google');
+      // Brokered sign-up: after Keycloak login the backend validates the invite
+      // token and rolls back the auto-created account if it is not valid.
+      await loginWithIdp('google', inviteToken.trim());
       await refreshProfile();
     } catch (e: any) {
       const cancelled = String(e?.message ?? '').toLowerCase().includes('cancel');
-      if (!cancelled) {
-        Alert.alert('Google sign-in failed', e?.message ?? 'Could not sign in with Google.');
-      }
+      if (cancelled) return;
+      const msg =
+        e?.response?.status === 403
+          ? 'That invitation is invalid, expired, or for a different email.'
+          : e?.response?.data?.error ?? e?.message ?? 'Could not sign up with Google.';
+      Alert.alert('Sign-up failed', msg);
     }
   };
 

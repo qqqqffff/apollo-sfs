@@ -61,9 +61,12 @@ export default function LoginScreen({ navigation }: { navigation: any }) {
     } catch (e: any) {
       // react-native-app-auth throws when the user dismisses the browser.
       const cancelled = String(e?.message ?? '').toLowerCase().includes('cancel');
-      if (!cancelled) {
-        Alert.alert('Google sign-in failed', e?.message ?? 'Could not sign in with Google.');
+      if (cancelled) return;
+      if (e?.response?.status === 403) {
+        Alert.alert('No account yet', 'Sign up with your invitation code first, then sign in with Google.');
+        return;
       }
+      Alert.alert('Google sign-in failed', e?.message ?? 'Could not sign in with Google.');
     }
   };
 

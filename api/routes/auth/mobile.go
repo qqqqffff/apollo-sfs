@@ -1,10 +1,13 @@
 package auth
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
+
+	"apollo-sfs.com/api/routes/services"
 )
 
 type mobileLoginRequest struct {
@@ -116,20 +119,34 @@ func (h *Handler) MobileGoogleLogin(c *gin.Context) {
 	})
 }
 
+type mobileSessionRequest struct {
+	// InviteToken is required only for first-time (registration) social logins;
+	// existing users omit it.
+	InviteToken string `json:"invite_token"`
+}
+
 // MobileSession handles POST /api/v1/mobile/auth/session.
 //
 // Called by the app immediately after a brokered (Keycloak identity-provider)
-// login to ensure the app-side user record (encryption key, quota) exists.
-// Brokered logins receive tokens directly from Keycloak, bypassing the backend
-// login path where provisioning normally runs. RequireAuth has already validated
-// the bearer token by the time this handler executes.
+// login. For existing users it ensures the app-side record exists; for new users
+// it requires a valid invitation (otherwise the auto-created Keycloak account is
+// rolled back). Brokered logins receive tokens directly from Keycloak, bypassing
+// the backend login path where provisioning normally runs. RequireAuth has
+// already validated the bearer token by the time this handler executes.
 func (h *Handler) MobileSession(c *gin.Context) {
 	token := strings.TrimSpace(strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer "))
 	if token == "" {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing bearer token"})
 		return
 	}
-	if err := h.svc.EnsureProvisioned(c.Request.Context(), token); err != nil {
+	var req mobileSessionRequest
+	_ = c.ShouldBindJSON(&req) // body is optional — ordinary logins send none
+
+	if err := h.svc.ProvisionBrokeredUser(c.Request.Context(), token, req.InviteToken); err != nil {
+		if errors.Is(err, services.ErrInvitationRequired) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "a valid invitation is required to register"})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "session provisioning failed"})
 		return
 	}

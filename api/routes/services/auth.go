@@ -416,61 +416,52 @@ func (s *AuthService) ensureUserProvisioned(ctx context.Context, accessToken str
 	})
 }
 
-// EnsureProvisioned is the exported entry point for ensureUserProvisioned. It is
-// called by the mobile session endpoint after a brokered (Keycloak
-// identity-provider) login, which obtains tokens directly from Keycloak and so
-// bypasses the backend login path where provisioning normally runs.
-func (s *AuthService) EnsureProvisioned(ctx context.Context, accessToken string) error {
-	if s.ProvisionUserKey == nil {
-		return nil
-	}
-	return s.ensureUserProvisioned(ctx, accessToken)
-}
+// ErrInvitationRequired is returned by ProvisionBrokeredUser when a new (social)
+// user has no valid invitation. The handler maps it to 403 so the app can prompt
+// for an invite, distinct from a 500 on an internal failure.
+var ErrInvitationRequired = errors.New("a valid invitation is required")
 
-// Register creates a user in Keycloak via the Admin API, provisions an app DB
-// record, validates and marks the invitation token used, then logs the user in.
-//
-// The invitation token must correspond to a pending, non-expired invitation for
-// the given email address.
-func (s *AuthService) Register(ctx context.Context, username, email, password, inviteToken string) (*TokenPair, error) {
-	// 1. Validate invitation.
-	inv, err := s.queries.GetInvitationByToken(ctx, inviteToken)
+// validateInvitation looks up a pending invitation by token and verifies it
+// matches the email and has not expired. Shared by password registration and
+// brokered (social) first-login.
+func (s *AuthService) validateInvitation(ctx context.Context, token, email string) (*models.Invitation, error) {
+	inv, err := s.queries.GetInvitationByToken(ctx, token)
 	if err != nil {
-		return nil, fmt.Errorf("register: invalid or expired invitation")
+		return nil, fmt.Errorf("invalid or expired invitation")
 	}
 	if inv.Email != email {
-		return nil, fmt.Errorf("register: email does not match invitation")
+		return nil, fmt.Errorf("email does not match invitation")
 	}
 	if time.Now().After(inv.TokenExpiresAt) {
-		return nil, fmt.Errorf("register: invitation has expired")
+		return nil, fmt.Errorf("invitation has expired")
 	}
+	return inv, nil
+}
 
-	// 2. Create user in Keycloak.
-	adminToken, err := s.adminToken(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("register: get admin token: %w", err)
-	}
-	kcUserID, err := s.kcCreateUser(ctx, adminToken, username, email, password)
-	if err != nil {
-		return nil, fmt.Errorf("register: create keycloak user: %w", err)
-	}
-
-	// 2a. Grant realm roles if the invitation requests them.
-	// Non-fatal — account is still usable; admin can grant roles manually.
+// provisionInvitedAppUser performs the app-side provisioning shared by password
+// registration and brokered first-login, for a user whose invitation has already
+// been validated and whose Keycloak account (kcUserID) already exists. It grants
+// the invitation's realm roles, provisions the encryption key, selects and
+// allocates a drive, creates the app DB record, and marks the invitation accepted.
+func (s *AuthService) provisionInvitedAppUser(
+	ctx context.Context,
+	adminToken, kcUserID, username, email, inviteToken string,
+	inv *models.Invitation,
+) error {
+	// Grant realm roles requested by the invitation. Non-fatal — the account is
+	// still usable and an admin can grant roles manually.
 	if inv.GrantAdmin || inv.GrantPremium {
+		var names []string
+		if inv.GrantAdmin {
+			names = append(names, "admin")
+		}
+		if inv.GrantPremium || inv.GrantAdmin {
+			// admins implicitly receive premium at the app layer, but we also
+			// grant it explicitly so the Keycloak JWT carries the role.
+			names = append(names, "premium")
+		}
 		var rolesToGrant []kcRoleRef
-		for _, roleName := range func() []string {
-			var names []string
-			if inv.GrantAdmin {
-				names = append(names, "admin")
-			}
-			if inv.GrantPremium || inv.GrantAdmin {
-				// admins implicitly receive premium at the app layer, but we
-				// also grant it explicitly so the Keycloak JWT carries the role.
-				names = append(names, "premium")
-			}
-			return names
-		}() {
+		for _, roleName := range names {
 			role, roleErr := s.kcGetRealmRole(ctx, adminToken, roleName)
 			if roleErr != nil {
 				continue
@@ -479,43 +470,39 @@ func (s *AuthService) Register(ctx context.Context, username, email, password, i
 		}
 		if len(rolesToGrant) > 0 {
 			if grantErr := s.kcGrantRealmRoles(ctx, adminToken, kcUserID, rolesToGrant); grantErr != nil {
-				// Log but do not fail registration.
-				_ = grantErr
+				_ = grantErr // non-fatal
 			}
 		}
 	}
 
-	// 3. Provision encryption key.
+	// Provision encryption key.
 	if s.ProvisionUserKey == nil {
-		return nil, fmt.Errorf("register: encryption service not wired")
+		return fmt.Errorf("encryption service not wired")
 	}
 	encKey, nonce, masterKeyVer, err := s.ProvisionUserKey(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("register: provision key: %w", err)
+		return fmt.Errorf("provision key: %w", err)
 	}
 
-	// 4. Create app DB record. Use the quota set on the invitation, falling back
-	// to the server default if the invitation pre-dates the quota field.
+	// Quota + drive from the invitation; fall back to the server default quota
+	// for invitations that pre-date the quota field.
 	quotaBytes := inv.InitialQuotaBytes
 	if quotaBytes <= 0 {
 		quotaBytes = defaultQuotaBytes
 	}
-
-	// Select the drive. Use the admin-pinned drive if one was specified on the
-	// invitation; otherwise fall back to auto-selection by available capacity.
 	var drive *models.Drive
 	if inv.InitialDriveID != nil {
 		drive, err = s.queries.GetDrive(ctx, *inv.InitialDriveID)
 		if err != nil || drive == nil {
-			return nil, fmt.Errorf("register: pinned drive not found")
+			return fmt.Errorf("pinned drive not found")
 		}
 	} else {
 		drive, err = s.queries.SelectDriveForQuota(ctx, quotaBytes)
 		if err != nil {
 			if errors.Is(err, db.ErrNoCapacity) {
-				return nil, fmt.Errorf("register: no drive has sufficient capacity for the requested quota")
+				return fmt.Errorf("no drive has sufficient capacity for the requested quota")
 			}
-			return nil, fmt.Errorf("register: select drive: %w", err)
+			return fmt.Errorf("select drive: %w", err)
 		}
 	}
 
@@ -528,20 +515,101 @@ func (s *AuthService) Register(ctx context.Context, username, email, password, i
 		StorageUsedBytes:  0,
 		StorageQuotaBytes: quotaBytes,
 	}); err != nil {
-		return nil, fmt.Errorf("register: create db user: %w", err)
+		return fmt.Errorf("create db user: %w", err)
 	}
-
 	if err := s.queries.AllocateUserToDrive(ctx, username, drive.ID); err != nil {
-		return nil, fmt.Errorf("register: allocate drive: %w", err)
+		return fmt.Errorf("allocate drive: %w", err)
 	}
 
-	// 5. Accept invitation.
+	// Accept invitation. Non-fatal: the account already exists.
 	if err := s.queries.AcceptInvitation(ctx, inviteToken); err != nil {
-		// Non-fatal: user and Keycloak account already created; log and continue.
 		_ = err
 	}
+	return nil
+}
 
-	// 6. Auto-login.
+// ProvisionBrokeredUser handles app-side provisioning after a brokered (Keycloak
+// identity-provider) first login. Existing users — those that already have an app
+// DB record — are ordinary logins and need no invitation. A new user must present
+// a valid invitation; since Keycloak's first-broker-login flow already created the
+// Keycloak account, that account is rolled back (deleted) when the invitation is
+// missing or invalid, so social login cannot bypass the invite gate.
+func (s *AuthService) ProvisionBrokeredUser(ctx context.Context, accessToken, inviteToken string) error {
+	if s.ProvisionUserKey == nil {
+		return nil
+	}
+	claims, err := decodeTokenClaims(accessToken)
+	if err != nil {
+		return fmt.Errorf("decode token claims: %w", err)
+	}
+
+	// Existing user → ordinary login, no invitation required.
+	if _, err := s.queries.GetUserByUsername(ctx, claims.PreferredUsername); err == nil {
+		return nil
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("check user: %w", err)
+	}
+
+	adminToken, err := s.adminToken(ctx)
+	if err != nil {
+		return fmt.Errorf("get admin token: %w", err)
+	}
+
+	// New user → require a valid invitation. Validation happens before any app DB
+	// writes, so on failure we delete the just-created Keycloak account cleanly.
+	inv, err := s.validateInvitation(ctx, inviteToken, claims.Email)
+	if err != nil {
+		s.rollbackBrokeredUser(ctx, adminToken, claims.Sub)
+		return fmt.Errorf("%w: %v", ErrInvitationRequired, err)
+	}
+
+	// Past this point the invitation is accepted and partial app state may be
+	// created; on failure we leave the Keycloak account in place (matching
+	// Register) rather than risk orphaning an app DB record.
+	if err := s.provisionInvitedAppUser(ctx, adminToken, claims.Sub, claims.PreferredUsername, claims.Email, inviteToken, inv); err != nil {
+		return err
+	}
+	return nil
+}
+
+// rollbackBrokeredUser deletes a Keycloak account that first-broker-login created
+// for an un-invited social login. Best-effort.
+func (s *AuthService) rollbackBrokeredUser(ctx context.Context, adminToken, kcUserID string) {
+	if kcUserID == "" {
+		return
+	}
+	_ = s.kcDeleteUser(ctx, adminToken, kcUserID)
+}
+
+// Register creates a user in Keycloak via the Admin API, provisions an app DB
+// record, validates and marks the invitation token used, then logs the user in.
+//
+// The invitation token must correspond to a pending, non-expired invitation for
+// the given email address.
+func (s *AuthService) Register(ctx context.Context, username, email, password, inviteToken string) (*TokenPair, error) {
+	// 1. Validate invitation.
+	inv, err := s.validateInvitation(ctx, inviteToken, email)
+	if err != nil {
+		return nil, fmt.Errorf("register: %w", err)
+	}
+
+	// 2. Create user in Keycloak.
+	adminToken, err := s.adminToken(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("register: get admin token: %w", err)
+	}
+	kcUserID, err := s.kcCreateUser(ctx, adminToken, username, email, password)
+	if err != nil {
+		return nil, fmt.Errorf("register: create keycloak user: %w", err)
+	}
+
+	// 3. Provision the app-side account: invitation roles, encryption key, drive
+	// selection/allocation, DB record, and invitation accept.
+	if err := s.provisionInvitedAppUser(ctx, adminToken, kcUserID, username, email, inviteToken, inv); err != nil {
+		return nil, fmt.Errorf("register: %w", err)
+	}
+
+	// 4. Auto-login.
 	tokens, err := s.Login(ctx, username, password)
 	if err != nil {
 		return nil, fmt.Errorf("register: auto-login: %w", err)

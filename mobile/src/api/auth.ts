@@ -25,13 +25,20 @@ export async function loginWithApple(identityToken: string): Promise<TokenRespon
 // Social login via Keycloak identity-provider brokering. Opens the system
 // browser, runs the OIDC Authorization Code + PKCE flow against Keycloak
 // (jumping straight to the chosen provider via kc_idp_hint), stores the returned
-// realm tokens, and provisions the app-side user record for first-time users.
-export async function loginWithIdp(idp: IdpHint): Promise<void> {
+// realm tokens, and provisions the app-side user record. A first-time (new) user
+// must supply inviteToken; existing users omit it. The backend rejects an
+// un-invited new user with 403, in which case we roll back the stored tokens so
+// the app is not left half-logged-in.
+export async function loginWithIdp(idp: IdpHint, inviteToken?: string): Promise<void> {
   const result = await brokerAuthorize(idp);
   await storeTokens(result.accessToken, result.refreshToken, 'broker');
-  // Brokered logins bypass the backend login path where provisioning runs, so
-  // trigger it explicitly. The request interceptor attaches the stored token.
-  await api.post('/api/v1/mobile/auth/session');
+  try {
+    // The request interceptor attaches the freshly stored token.
+    await api.post('/api/v1/mobile/auth/session', inviteToken ? { invite_token: inviteToken } : {});
+  } catch (e) {
+    await clearTokens();
+    throw e;
+  }
 }
 
 export async function logout(): Promise<void> {

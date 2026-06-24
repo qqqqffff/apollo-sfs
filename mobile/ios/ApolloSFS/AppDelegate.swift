@@ -3,10 +3,15 @@ import React
 import React_RCTAppDelegate
 import ReactAppDependencyProvider
 import GoogleSignIn
+import RNAppAuth
 
 @main
-class AppDelegate: UIResponder, UIApplicationDelegate {
+class AppDelegate: UIResponder, UIApplicationDelegate, RNAppAuthAuthorizationFlowManager {
   var window: UIWindow?
+
+  // react-native-app-auth sets this while a browser-based login is in progress
+  // so the redirect back from Keycloak can resume the flow.
+  public weak var authorizationFlowManagerDelegate: RNAppAuthAuthorizationFlowManagerDelegate?
 
   var reactNativeDelegate: ReactNativeDelegate?
   var reactNativeFactory: RCTReactNativeFactory?
@@ -38,6 +43,13 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     open url: URL,
     options: [UIApplication.OpenURLOptionsKey: Any] = [:]
   ) -> Bool {
+    // Let an in-flight react-native-app-auth login (Keycloak redirect) consume
+    // the URL first; otherwise hand it to Google Sign-In (used by the backup
+    // feature). They use distinct URL schemes, so there is no ambiguity.
+    if let delegate = authorizationFlowManagerDelegate,
+       delegate.resumeExternalUserAgentFlow(with: url) {
+      return true
+    }
     return GIDSignIn.sharedInstance.handle(url)
   }
 }

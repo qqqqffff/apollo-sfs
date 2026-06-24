@@ -416,6 +416,17 @@ func (s *AuthService) ensureUserProvisioned(ctx context.Context, accessToken str
 	})
 }
 
+// EnsureProvisioned is the exported entry point for ensureUserProvisioned. It is
+// called by the mobile session endpoint after a brokered (Keycloak
+// identity-provider) login, which obtains tokens directly from Keycloak and so
+// bypasses the backend login path where provisioning normally runs.
+func (s *AuthService) EnsureProvisioned(ctx context.Context, accessToken string) error {
+	if s.ProvisionUserKey == nil {
+		return nil
+	}
+	return s.ensureUserProvisioned(ctx, accessToken)
+}
+
 // Register creates a user in Keycloak via the Admin API, provisions an app DB
 // record, validates and marks the invitation token used, then logs the user in.
 //

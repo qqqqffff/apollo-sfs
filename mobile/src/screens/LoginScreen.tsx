@@ -11,9 +11,8 @@ import {
   View,
 } from 'react-native';
 import appleAuth, { AppleButton } from '@invertase/react-native-apple-authentication';
-import { GoogleSignin, statusCodes } from '@react-native-google-signin/google-signin';
 import Svg, { Path } from 'react-native-svg';
-import { login, loginWithApple, loginWithGoogle } from '../api/auth';
+import { login, loginWithApple, loginWithIdp } from '../api/auth';
 import { useAuth } from '../context/AuthContext';
 import { colors, radius, spacing } from '../theme';
 
@@ -54,17 +53,16 @@ export default function LoginScreen({ navigation }: { navigation: any }) {
 
   const handleGoogle = async () => {
     try {
-      await GoogleSignin.hasPlayServices();
-      const response = await GoogleSignin.signIn();
-      const data = (response as any).data ?? response;
-      const serverAuthCode: string | null = data?.serverAuthCode ?? null;
-      const idToken: string | null = data?.idToken ?? null;
-      if (!serverAuthCode && !idToken) throw new Error('No credentials from Google sign-in');
-      await loginWithGoogle(serverAuthCode, idToken);
+      // Keycloak identity-provider brokering: opens the system browser, lets the
+      // user sign in with Google, and returns realm tokens. No native Google
+      // Sign-In and no backend token exchange.
+      await loginWithIdp('google');
       await refreshProfile();
     } catch (e: any) {
-      if (e.code !== statusCodes.SIGN_IN_CANCELLED) {
-        Alert.alert('Google sign-in failed', e.message);
+      // react-native-app-auth throws when the user dismisses the browser.
+      const cancelled = String(e?.message ?? '').toLowerCase().includes('cancel');
+      if (!cancelled) {
+        Alert.alert('Google sign-in failed', e?.message ?? 'Could not sign in with Google.');
       }
     }
   };

@@ -358,6 +358,10 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	})
 	{
 		protected.GET("/me", h.Me)
+		// Provisions the app-side user record after a brokered (Keycloak IdP)
+		// login. Lives here (not in mobileAuthGroup) because it requires a valid
+		// brokered access token, which RequireAuth validates.
+		protected.POST("/mobile/auth/session", authHandler.MobileSession)
 		protected.POST("/me/password", h.ChangePassword)
 		protected.GET("/me/preferences", h.GetPreferences)
 		// PUT /me/preferences is premium-only (media auto-upload); registered below.

@@ -12,9 +12,8 @@ import {
   View,
 } from 'react-native';
 import appleAuth, { AppleButton } from '@invertase/react-native-apple-authentication';
-import { GoogleSignin, statusCodes } from '@react-native-google-signin/google-signin';
-import api from '../api/client';
-import { loginWithApple, loginWithGoogle, storeTokens } from '../api/auth';
+import api, { storeTokens } from '../api/client';
+import { loginWithApple, loginWithIdp } from '../api/auth';
 import { useAuth } from '../context/AuthContext';
 import { colors, radius, spacing } from '../theme';
 
@@ -64,7 +63,7 @@ export default function RegisterScreen({
         username: username.trim(),
         password,
       });
-      await storeTokens(res.data.access_token, res.data.refresh_token);
+      await storeTokens(res.data.access_token, res.data.refresh_token, 'password');
       await refreshProfile();
     } catch (e: any) {
       Alert.alert('Registration failed', e?.response?.data?.error ?? e.message);
@@ -89,17 +88,15 @@ export default function RegisterScreen({
 
   const handleGoogle = async () => {
     try {
-      await GoogleSignin.hasPlayServices();
-      const response = await GoogleSignin.signIn();
-      const data = (response as any).data ?? response;
-      const serverAuthCode: string | null = data?.serverAuthCode ?? null;
-      const idToken: string | null = data?.idToken ?? null;
-      if (!serverAuthCode && !idToken) throw new Error('No credentials from Google sign-in');
-      await loginWithGoogle(serverAuthCode, idToken);
+      // Keycloak identity-provider brokering — same flow as sign-in. New Google
+      // users are created in Keycloak via its first-broker-login flow (gating is
+      // configured Keycloak-side, not here).
+      await loginWithIdp('google');
       await refreshProfile();
     } catch (e: any) {
-      if (e.code !== statusCodes.SIGN_IN_CANCELLED) {
-        Alert.alert('Google sign-in failed', e.message);
+      const cancelled = String(e?.message ?? '').toLowerCase().includes('cancel');
+      if (!cancelled) {
+        Alert.alert('Google sign-in failed', e?.message ?? 'Could not sign in with Google.');
       }
     }
   };

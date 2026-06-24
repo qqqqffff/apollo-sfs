@@ -84,6 +84,9 @@ android {
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 1
         versionName "1.0"
+        // react-native-app-auth: scheme Keycloak redirects back to after the
+        // browser-based Authorization Code + PKCE login (OAUTH_REDIRECT_URL).
+        manifestPlaceholders = [appAuthRedirectScheme: 'apollosfs']
     }
     signingConfigs {
         debug {

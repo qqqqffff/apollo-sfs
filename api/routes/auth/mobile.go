@@ -20,15 +20,6 @@ type mobileAppleRequest struct {
 	IdentityToken string `json:"identity_token" binding:"required"`
 }
 
-type mobileGoogleRequest struct {
-	// ServerAuthCode is preferred: the one-time OAuth code from GoogleSignin.signIn()
-	// on iOS. The backend exchanges it with Google to get an id_token whose audience
-	// is the web client ID, which Keycloak's Google IdP accepts.
-	// IDToken is the fallback for flows where only the raw token is available.
-	ServerAuthCode string `json:"server_auth_code"`
-	IDToken        string `json:"id_token"`
-}
-
 // tokenResponse is the JSON shape returned by all mobile auth endpoints.
 type tokenResponse struct {
 	AccessToken      string `json:"access_token"`
@@ -112,40 +103,35 @@ func (h *Handler) MobileAppleLogin(c *gin.Context) {
 }
 
 // MobileGoogleLogin handles POST /api/v1/mobile/auth/google.
-// Prefers server_auth_code: exchanges it with Google to get an id_token whose
-// audience matches the Keycloak Google IdP client ID (web client). Falls back to
-// using id_token directly when server_auth_code is absent.
+//
+// DEPRECATED: Google login moved to Keycloak identity-provider brokering. The
+// app now obtains realm tokens directly from Keycloak via a browser-based
+// Authorization Code + PKCE flow (kc_idp_hint=google), then calls
+// POST /mobile/auth/session to provision. This endpoint relied on Keycloak's
+// external token exchange, which Standard Token Exchange v2 no longer supports.
+// Kept registered so stale app builds receive a clear signal instead of a 404.
 func (h *Handler) MobileGoogleLogin(c *gin.Context) {
-	var req mobileGoogleRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "request body required"})
-		return
-	}
-	if req.ServerAuthCode == "" && req.IDToken == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "server_auth_code or id_token is required"})
-		return
-	}
-
-	idToken := req.IDToken
-	if req.ServerAuthCode != "" {
-		exchanged, err := h.svc.ExchangeGoogleServerAuthCode(c.Request.Context(), req.ServerAuthCode)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "google auth code exchange failed: " + err.Error()})
-			return
-		}
-		idToken = exchanged
-	}
-
-	tokens, err := h.svc.SocialLogin(c.Request.Context(), "google", idToken)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "google authentication failed: " + err.Error()})
-		return
-	}
-
-	c.JSON(http.StatusOK, tokenResponse{
-		AccessToken:      tokens.AccessToken,
-		RefreshToken:     tokens.RefreshToken,
-		ExpiresIn:        tokens.ExpiresIn,
-		RefreshExpiresIn: tokens.RefreshExpiresIn,
+	c.JSON(http.StatusGone, gin.H{
+		"error": "google login moved to identity-provider brokering; please update the app",
 	})
+}
+
+// MobileSession handles POST /api/v1/mobile/auth/session.
+//
+// Called by the app immediately after a brokered (Keycloak identity-provider)
+// login to ensure the app-side user record (encryption key, quota) exists.
+// Brokered logins receive tokens directly from Keycloak, bypassing the backend
+// login path where provisioning normally runs. RequireAuth has already validated
+// the bearer token by the time this handler executes.
+func (h *Handler) MobileSession(c *gin.Context) {
+	token := strings.TrimSpace(strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer "))
+	if token == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing bearer token"})
+		return
+	}
+	if err := h.svc.EnsureProvisioned(c.Request.Context(), token); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "session provisioning failed"})
+		return
+	}
+	c.Status(http.StatusNoContent)
 }

@@ -174,6 +174,28 @@ services:
       # Read-only mount of the mergerfs pool (nvme-01 + nvme-02) so the API's
       # disk-stats reader reports COMBINED capacity. See docs/nvme_capacity_expansion.md.
       - /home/apollo/apollo-sfs/minio/pool:/data:ro
+      # Per-drive live stats (metrics page → Infrastructure). The drive-stats
+      # endpoint auto-discovers each drive's mount by its filesystem label and
+      # reads live capacity/used/free. For that to work for drives OTHER than the
+      # pool, the API must see the host's individual drive mounts and the
+      # /dev/disk/by-label symlinks the discovery resolves labels through.
+      #
+      # 1) Storage tree mounted read-only at the SAME host path so each drive's
+      #    mount point exists in the container and statfs works. rslave
+      #    propagation lets the container observe drives mounted/unmounted on the
+      #    host after start (otherwise only mounts present at container start are
+      #    visible — fine for boot-time fstab mounts).
+      - type: bind
+        source: /home/apollo/apollo-sfs/minio
+        target: /home/apollo/apollo-sfs/minio
+        read_only: true
+        bind:
+          propagation: rslave
+      # 2) Filesystem-label symlinks (label → block device) used to map a drive's
+      #    label to its mount. The block-device targets resolve via the host /dev
+      #    that `privileged: true` already exposes. Drives whose label/mount can't
+      #    be resolved simply report online=false and fall back to stored capacity.
+      - /dev/disk/by-label:/dev/disk/by-label:ro
       - /var/lib/GeoIP:/var/lib/GeoIP:ro
       - /var/run/docker.sock:/var/run/docker.sock
       # Inbound email store — host dir persists messages across container rebuilds.
@@ -264,10 +286,12 @@ services:
       KC_HOSTNAME_STRICT: "true"
       # Trust X-Forwarded-* headers set by Nginx
       KC_PROXY_HEADERS: xforwarded
-      # Enable external→internal token exchange (preview feature). Required by
-      # SocialLogin/WebSocialLogin, which exchange the provider id_token for KC
-      # tokens via grant_type=urn:ietf:params:oauth:grant-type:token-exchange.
-      # Without it, the token endpoint returns "unsupported_grant_type".
+      # Legacy external→internal token exchange. Google login no longer uses it
+      # (it now goes through identity-provider brokering — the apollo-sfs-mobile
+      # public client + kc_idp_hint). Still enabled only for the Apple paths
+      # (MobileAppleLogin / WebSocialLogin) until those are migrated to brokering
+      # too; on Keycloak 26.2+ this is deprecated and external exchange is not
+      # supported by Standard Token Exchange v2. See TODO: migrate Apple.
       KC_FEATURES: token-exchange
       # Bootstrap admin credentials (Keycloak 26+)
       KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN}

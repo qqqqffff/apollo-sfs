@@ -34,14 +34,19 @@ type Drive struct {
 	Label         string     `json:"label"`
 	CapacityBytes int64      `json:"capacity_bytes"`
 	MinioBucket   string     `json:"minio_bucket"`
-	IsActive      bool       `json:"is_active"`
-	CreatedAt     time.Time  `json:"created_at"`
+	// DriveType is the storage tier: "nvme" (fast) or "hdd" (standard). Set at
+	// creation; the single source of truth for tier classification.
+	DriveType string    `json:"drive_type"`
+	IsActive  bool      `json:"is_active"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
-// UserDriveAllocation records which drive a user's quota and files live on.
+// UserDriveAllocation records a drive a user is allocated to. A user may have
+// several; exactly one is the primary upload target.
 type UserDriveAllocation struct {
 	UserID      string    `json:"user_id"`
 	DriveID     uuid.UUID `json:"drive_id"`
+	IsPrimary   bool      `json:"is_primary"`
 	AllocatedAt time.Time `json:"allocated_at"`
 
 	// Populated by GetUserDrive — not stored directly in the table.

@@ -14,9 +14,10 @@ import {
 } from 'react-native';
 import appleAuth from '@invertase/react-native-apple-authentication';
 import { GoogleSignin, statusCodes } from '@react-native-google-signin/google-signin';
-import { Bug, Cpu, HardDrive, Key, LogOut, Rocket, Server, Thermometer, Upload, Wifi, Zap } from 'lucide-react-native';
+import { Bug, Check, ChevronRight, Cpu, GalleryHorizontalEnd, HardDrive, Key, LogOut, Rocket, Server, Thermometer, Upload, Wifi, Zap } from 'lucide-react-native';
 import { linkSocial, linkSocialGoogle, unlinkSocial } from '../api/auth';
 import { ALARM_TYPES, type AlarmSettings, getAlarmSettings, toggleAlarmSubscription } from '../api/alarms';
+import { getPreferences, listRoot, updatePreferences, type ApiFolder } from '../api/files';
 import { useAuth } from '../context/AuthContext';
 import { colors, radius, shadow, spacing } from '../theme';
 
@@ -42,6 +43,42 @@ export default function ProfileScreen() {
   const [alarmSettings, setAlarmSettings] = useState<AlarmSettings | null>(null);
   const [alarmLoading, setAlarmLoading] = useState(false);
   const [upgradeVisible, setUpgradeVisible] = useState(false);
+
+  // Media auto-upload (redirect) folder preference.
+  const [autouploadFolderID, setAutouploadFolderID] = useState<string | null>(null);
+  const [mediaFolders, setMediaFolders] = useState<ApiFolder[]>([]);
+  const [mediaPickerVisible, setMediaPickerVisible] = useState(false);
+  const [mediaSaving, setMediaSaving] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const [prefs, root] = await Promise.all([getPreferences(), listRoot()]);
+        setAutouploadFolderID(prefs.media_autoupload_folder_id);
+        setMediaFolders((root.subfolders?.items ?? []).filter((f) => f.kind === 'media'));
+      } catch {
+        // best-effort
+      }
+    })();
+  }, []);
+
+  const selectMediaFolder = async (folderID: string | null) => {
+    setMediaSaving(true);
+    try {
+      await updatePreferences({ media_autoupload_folder_id: folderID });
+      setAutouploadFolderID(folderID);
+      setMediaPickerVisible(false);
+    } catch (e: any) {
+      Alert.alert('Failed to update', e.message);
+    } finally {
+      setMediaSaving(false);
+    }
+  };
+
+  const mediaFolderLabel =
+    autouploadFolderID == null
+      ? '/ (root)'
+      : (mediaFolders.find((f) => f.id === autouploadFolderID)?.name ?? '/ (root)');
 
   const loadAlarms = useCallback(async () => {
     if (!profile?.is_admin) return;
@@ -152,6 +189,61 @@ export default function ProfileScreen() {
           <Text style={styles.infoValue}>{usedPct}%</Text>
         </View>
       </View>
+
+      {/* Media auto-upload destination */}
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>Media</Text>
+        <TouchableOpacity style={styles.infoRow} onPress={() => setMediaPickerVisible(true)} activeOpacity={0.7}>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.infoLabel}>Auto-upload folder</Text>
+            <Text style={styles.mediaRowMeta}>Photos &amp; videos are saved here automatically</Text>
+          </View>
+          <View style={styles.mediaRowRight}>
+            <Text style={styles.mediaRowValue} numberOfLines={1}>{mediaFolderLabel}</Text>
+            <ChevronRight size={16} color={colors.primary} />
+          </View>
+        </TouchableOpacity>
+      </View>
+
+      {/* Media folder picker */}
+      <Modal
+        visible={mediaPickerVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setMediaPickerVisible(false)}
+      >
+        <Pressable style={styles.overlay} onPress={() => !mediaSaving && setMediaPickerVisible(false)}>
+          <Pressable style={styles.mediaSheet} onPress={(e) => e.stopPropagation()}>
+            <Text style={styles.mediaSheetTitle}>Auto-upload destination</Text>
+
+            <TouchableOpacity style={styles.mediaSheetRow} onPress={() => selectMediaFolder(null)} disabled={mediaSaving}>
+              <View style={styles.mediaSheetIcon}>
+                <GalleryHorizontalEnd size={18} color={colors.textSecondary} strokeWidth={1.5} />
+              </View>
+              <Text style={styles.mediaSheetRowText}>/  (root)</Text>
+              {autouploadFolderID == null && <Check size={18} color={colors.primary} strokeWidth={2.5} />}
+            </TouchableOpacity>
+
+            {mediaFolders.map((folder) => (
+              <TouchableOpacity key={folder.id} style={styles.mediaSheetRow} onPress={() => selectMediaFolder(folder.id)} disabled={mediaSaving}>
+                <View style={[styles.mediaSheetIcon, styles.mediaSheetIconMedia]}>
+                  <GalleryHorizontalEnd size={18} color={colors.mediaAccent} strokeWidth={1.5} />
+                </View>
+                <Text style={styles.mediaSheetRowText} numberOfLines={1}>{folder.name}</Text>
+                {autouploadFolderID === folder.id && <Check size={18} color={colors.primary} strokeWidth={2.5} />}
+              </TouchableOpacity>
+            ))}
+
+            {mediaFolders.length === 0 && (
+              <Text style={styles.mediaSheetEmpty}>
+                No media collections yet. Create one in Files to organize your uploads.
+              </Text>
+            )}
+
+            {mediaSaving && <ActivityIndicator style={{ marginTop: spacing.sm }} color={colors.primary} />}
+          </Pressable>
+        </Pressable>
+      </Modal>
 
       {/* Premium upgrade card (non-premium, non-admin only) */}
       {!profile?.is_premium && !profile?.is_admin && (
@@ -326,6 +418,33 @@ const styles = StyleSheet.create({
   infoRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 10 },
   infoLabel: { fontSize: 15, color: colors.textSecondary },
   infoValue: { fontSize: 15, fontWeight: '500', color: colors.textPrimary, flexShrink: 1, marginLeft: spacing.sm, textAlign: 'right' },
+
+  mediaRowMeta: { fontSize: 12, color: colors.textMuted, marginTop: 2 },
+  mediaRowRight: { flexDirection: 'row', alignItems: 'center', marginLeft: spacing.sm, flexShrink: 1 },
+  mediaRowValue: { fontSize: 14, fontWeight: '600', color: colors.primary, flexShrink: 1, marginRight: 2 },
+  mediaSheet: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    padding: spacing.md,
+    width: '100%',
+    maxWidth: 420,
+  },
+  mediaSheetTitle: {
+    fontSize: 13, fontWeight: '600', color: colors.textMuted,
+    textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: spacing.sm,
+  },
+  mediaSheetRow: {
+    flexDirection: 'row', alignItems: 'center',
+    paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: colors.divider,
+  },
+  mediaSheetIcon: {
+    width: 32, height: 32, borderRadius: radius.sm,
+    backgroundColor: colors.divider, alignItems: 'center', justifyContent: 'center',
+    marginRight: spacing.sm,
+  },
+  mediaSheetIconMedia: { backgroundColor: colors.mediaAccentLighter },
+  mediaSheetRowText: { flex: 1, fontSize: 15, color: colors.textPrimary },
+  mediaSheetEmpty: { fontSize: 13, color: colors.textMuted, lineHeight: 19, paddingVertical: spacing.md, textAlign: 'center' },
 
   divider: { height: 1, backgroundColor: colors.divider },
 

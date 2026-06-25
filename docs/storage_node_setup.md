@@ -1,358 +1,333 @@
-# Storage Node + Cluster Setup — Debian (Ryzen) Manager + Raspberry Pi Worker
+# Storage Cluster Setup — Two-Node Swarm with Tiered MinIO
 
-This guide covers adding a second server node — a headless, command-line-only Debian
-box built on a **Ryzen 5 7500X3D (x86_64 / amd64)** — and reorganising the Apollo SFS
-deployment as a two-node **Docker Swarm** cluster.
+This guide sets up Apollo SFS as a **two-node Docker Swarm** with **two storage tiers**,
+and migrates the running deployment off the single Raspberry Pi onto the new node.
 
-Because the Ryzen box is far more powerful than the Pi 5, it becomes the **cluster
-manager and app/compute host**, and the **Raspberry Pi 5 is demoted to a worker /
-storage node**. A new **8TB SATA HDD** in the Ryzen box is set up as a **"standard"
-storage tier**.
+| Node | Hostname | Arch | Swarm role | Runs | Storage tier |
+|------|----------|------|-----------|------|--------------|
+| **Ryzen 5 7500X3D box** | `apollo-sfs-1` | amd64 | **manager** | `api`, `frontend`, `keycloak`, `postfix`, `ddns`, `db-app`, `db-keycloak`, `minio-standard`, **host nginx + Cloudflare TLS** | **8TB HDD → `hdd` / standard** |
+| **Raspberry Pi 5** | `apollo-sfs` | arm64 | **worker** | `minio-fast` only | **4TB NVMe → `nvme` / fast** |
 
-> **Read this first — two honest caveats:**
->
-> 1. **Docker Swarm does not add storage by itself.** Swarm is a scheduler/management
->    layer that decides which node runs which container. The capacity gain comes from
->    how **MinIO** and the underlying drives are configured (Parts B and D).
->
-> 2. **The current MinIO cannot be expanded in place.** It runs as *single-node,
->    single-drive* (`server /data`). MinIO does **not** support expanding that mode.
->    To put data on the new drive / a clustered store you redeploy MinIO and
->    **migrate the existing blobs** with `mc mirror` (Part B). There is no live
->    "just attach the new drive" path for a single-node-single-drive deployment.
+The Ryzen runs the OS + the whole Docker stack from its **own NVMe**; its **8TB SATA HDD**
+is dedicated entirely to standard-tier object storage. The Pi keeps its existing NVMe
+blobs in place and serves them as the fast tier.
+
+> **The app is built for this.** The API models a `server → node → drive` topology with a
+> `DriveType` of `nvme` / `hdd` and a MinIO endpoint per server (see `models/server.go`,
+> `routes/admin/infrastructure.go`, `routes/admin/nodes.go`). So two tiers is a
+> **configuration** task (Part 6), not a code change. Clients are allocated to drives;
+> each drive belongs to a node on a server that points at one MinIO instance.
 
 ---
 
-## Target topology
+## Honest caveats about running this on Swarm
 
-| Role | Node | Arch | Holds |
-|------|------|------|-------|
-| **Swarm manager + app/compute host** | Ryzen Debian box | amd64 | host nginx + Cloudflare TLS, `api`, `frontend`, `keycloak`, `postfix`, `ddns`, Postgres ×2, **8TB HDD = "standard" storage tier (SATA)** |
-| **Swarm worker + fast-tier storage** | Raspberry Pi 5 | arm64 | existing **NVMe = "fast" storage tier**, MinIO (fast tier) |
+Swarm fits the node-management and overlay-DNS needs well, but three things differ from
+plain `docker compose` — all are handled in this guide and in `docker-stack.yml`:
 
-Two consequences of the Ryzen being the app host:
+1. **No `build:`** — Swarm deploys pre-built images. We build the `api`/`frontend` images
+   on the manager and deploy with `--resolve-image never` (Part 1, Part 3). No registry
+   needed because those images run only on the manager.
+2. **No `privileged:` / host namespaces** — the API's remote **kill switch** can't run as
+   a Swarm service. Either accept it's inert, or run the API as a standalone privileged
+   container attached to the (attachable) overlay. See the `api` comment in
+   `docker-stack.yml`.
+3. **Published ports use `mode: host`** — they bind only on the pinned node, so the host
+   firewall must block `3000`/`8080`/`8180` from outside (Part 4). The blobs themselves
+   never leave the overlay.
 
-- The **public entry point moves to the Ryzen** — host nginx, the Cloudflare Origin
-  cert, and your router's 80/443 port-forward all move with it (see Part A).
-- The app images (`frontend`, `api`) are currently **`platform: linux/arm64` only** and
-  must be rebuilt for **amd64** (see Part C). Building natively on the Ryzen makes this
-  trivial.
-- Storing the 8TB "standard" tier **on the same box as the API** means file I/O to that
-  tier is local (no network hop). The Pi's NVMe "fast" tier is now one LAN hop away
-  from the API (~110 MB/s on gigabit) — fine for hot/small objects; consider 2.5G/10G
-  networking later if that tier gets heavy.
+No `mc mirror` blob migration is needed: **MinIO stays on the Pi**, so the only data that
+moves is the two (small) Postgres databases.
 
 ---
 
-## Part 0 — Install and prepare command-line Debian on the Ryzen node
+## Part 0 — Install command-line Debian on the Ryzen node
 
-Do this on the Ryzen box *before* touching the cluster. Target: a headless Debian 12
-("bookworm") with no desktop environment.
+Target: headless Debian (no desktop), **OS on the NVMe**, the **8TB HDD as one XFS blob
+volume**.
 
-### 0.1 Install Debian (netinst, no GUI)
-1. Download the **netinst** image from <https://www.debian.org/distrib/> and write it to
-   a USB stick (`dd if=debian-*.iso of=/dev/sdX bs=4M status=progress && sync`).
-2. Boot the installer; proceed through locale / keyboard / network.
-3. Set the hostname to `apollo-sfs-1` (matching the Pi's `apollo-sfs`). **Leave the
-   "Domain name" prompt blank** — the `.local` suffix is mDNS (avahi), not a DNS domain.
-4. Create your user account (this guide assumes `apollo`, i.e. `apollo@apollo-sfs-1.local`).
-5. Partitioning — this deployment uses the **8TB HDD split into two partitions** (a
-   dedicated OS SSD would be better long-term, but this works for now):
-   - **p2 (~10%, ~800 GB, ext4)** → the **root filesystem** (`/`): OS, the cloned repo,
-     and the PostgreSQL data dirs (kept here until a dedicated DB drive is added).
-   - **p1 (~90%, ~7.3 TB)** → left for **blob/object storage**, formatted in Part 0.4.
+### 0.1 Avoid the EFI trap — isolate the HDD during install
+The Debian installer likes to reuse an **existing EFI partition** it finds. If it writes
+GRUB to the **HDD's** ESP while installing the OS to the NVMe, wiping the HDD later breaks
+boot. Prevent this:
 
-     Note: both partitions share one physical spindle, so heavy blob I/O contends with
-     the DB — another reason to move Postgres to its own drive later.
-6. At the **Software selection** (tasksel) screen, **deselect "Debian desktop
-   environment"** and all desktop options. Select only:
-   - **SSH server**
-   - **standard system utilities**
-7. Finish, install GRUB, reboot, remove the USB stick.
+- **Best:** physically **disconnect the 8TB HDD** (SATA data or power) during install, so
+  the installer is forced to put EFI + GRUB on the NVMe. Reconnect it afterward (0.4).
+- **Alternative:** during installer partitioning, **delete all partitions on the HDD**
+  (especially any old ESP) before configuring the NVMe.
 
-### 0.2 First login and base setup
-SSH in (`ssh apollo@<RYZEN_IP>`), then:
+### 0.2 Install (netinst, no GUI)
+1. Write the **netinst** image to USB (`dd if=debian-*.iso of=/dev/sdX bs=4M status=progress && sync`).
+2. Locale / keyboard / network.
+3. Hostname `apollo-sfs-1`; **leave "Domain name" blank** (`.local` is mDNS/avahi).
+4. **Leave the root password BLANK** → Debian then adds your first user to `sudo`
+   automatically. (Setting a root password is what causes the "not in the sudoers file"
+   problem and leaves you doing `usermod -aG sudo` by hand.)
+5. Create user `apollo`.
+6. Partitioning → **Guided – use entire disk**, and **select the NVMe** (`nvme0n1`). Scheme
+   "All files in one partition" (creates EFI + root + swap on the NVMe). At the summary,
+   confirm **only `nvme0n1` is modified** — `sda` (HDD) must be untouched.
+7. **Software selection:** deselect **Debian desktop environment**; select only
+   **SSH server** + **standard system utilities**.
+8. Install GRUB to the **NVMe**; reboot; remove USB. In BIOS, set the **NVMe first** in the
+   boot order.
 
+> Already installed a desktop by mistake? You don't need to reinstall — over SSH:
+> `sudo systemctl set-default multi-user.target` (boot to text), then
+> `sudo apt purge -y task-gnome-desktop task-desktop gnome-shell gdm3 && sudo apt autoremove --purge`.
+> Watch the autoremove list — `sudo` can get caught; reinstall it from `su -` if so.
+
+### 0.3 Base setup
 ```bash
+ssh apollo@apollo-sfs-1.local
 sudo apt update && sudo apt full-upgrade -y
-sudo apt install -y curl ca-certificates gnupg ufw vim htop parted smartmontools xfsprogs avahi-daemon
-```
-
-Set up SSH key auth, then harden (optional but recommended):
-
-```bash
-# From your workstation
-ssh-copy-id apollo@<RYZEN_IP>
-```
-```bash
-# On the Ryzen box
+sudo apt install -y curl ca-certificates gnupg ufw vim htop parted gdisk \
+  smartmontools xfsprogs avahi-daemon
+sudo timedatectl set-ntp true        # Swarm + TLS are clock-sensitive
+# optional SSH hardening once key auth works:
+ssh-copy-id apollo@apollo-sfs-1.local
 sudo sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
 sudo systemctl restart ssh
 ```
+Set a **static IP** (router DHCP reservation or on the box) — the port-forward and Swarm
+advertise address point here. Use the static IP for Swarm, not `.local`.
 
-### 0.3 Static address, hostname, time sync
-A manager/app host needs a stable address (Cloudflare/port-forward point here).
-
-```bash
-sudo hostnamectl set-hostname apollo-sfs-1      # reachable as apollo-sfs-1.local via avahi
-# set a static DHCP lease on your router, or a static IP on the box
-sudo timedatectl set-ntp true      # Swarm + TLS are clock-sensitive
-timedatectl status
-```
-> Use the node's **static IP** (not `apollo-sfs-1.local`) for the Swarm
-> `--advertise-addr` and worker join in Part A — keep mDNS for convenience SSH only.
-
-### 0.4 Format the blob-storage partition (p1) as the "standard" storage tier
-The 8TB HDD is split into two partitions (see Part 0.1):
-
-| Partition | Size | Filesystem | Mount | Holds |
-|-----------|------|-----------|-------|-------|
-| **p2** | ~10% (~800 GB) | ext4 | `/` (root) | OS, repo, Postgres data — set up by the installer, **leave as-is** |
-| **p1** | ~90% (~7.3 TB) | **XFS** | `/srv/storage/standard-01` | blob/object storage (MinIO) |
-
-The `standard-01` label mirrors the existing `nvme-01` convention
-(`DISK_STATS_DRIVE_LABEL` in `docker-compose.yml`) so the server classifies and reports
-it as **standard** storage.
-
-> **If p1 was created as NTFS, it must be reformatted.** NTFS-on-Linux has no real POSIX
-> ownership, so MinIO can't `chown` its data dir to uid/gid 1000. XFS is required.
-
-**1. Identify the partitions and confirm roles before doing anything destructive:**
+### 0.4 Set up the 8TB HDD as one XFS blob volume
+Reconnect the HDD if you disconnected it. **Confirm device identity before wiping —
+destructive.**
 ```bash
 lsblk -f
 ```
-Verify:
-- the **large (~7.3T)** partition is **p1**, with an **empty mountpoint** (NOT `/`,
-  `/boot`, or `/boot/efi`) — this is the one to format;
-- the **small (~800G)** ext4 partition is **p2**, mounted at **`/`** — leave it alone.
-
-If the sizes look swapped or p1 shows a mountpoint, **stop** and recheck before formatting.
-Substitute the real partition for `/dev/sda` (p1) below. **mkfs erases it.**
-
-**2. (Recommended) health check on the physical disk before trusting it with data:**
+Expect `nvme0n1` carrying `/`, `/boot/efi`, `[SWAP]` (leave it), and `sda` = the 8TB HDD.
+Then:
 ```bash
-sudo smartctl -H /dev/sda                        # overall health (whole disk, not p1)
-sudo smartctl -t short /dev/sda                  # ~2 min self-test
-sudo smartctl -t long /dev/sda                  # ~2 min self-test
+sudo smartctl -H /dev/sda            # health verdict (run the long test later, 0.6)
+
+sudo wipefs -a /dev/sda              # clear any old signatures/partition table
+sudo sgdisk --zap-all /dev/sda
+sudo parted /dev/sda --script mklabel gpt
+sudo parted /dev/sda --script mkpart primary 0% 100%
+sudo parted /dev/sda --script align-check optimal 1     # expect "1 aligned"
+sudo mkfs.xfs -L hdd-01 /dev/sda1    # XFS = MinIO's recommended FS
 ```
-
-**3. Reformat p1 from NTFS to XFS (MinIO's recommended filesystem) with a tier label:**
+Mount by UUID, persistently, and create the MinIO data dir:
 ```bash
-sudo umount /dev/sda 2>/dev/null
-sudo wipefs -a /dev/sda                          # clear the NTFS signature
-sudo mkfs.xfs -L standard-01 /dev/sda
-```
-XFS handles 4K-sector (Advanced Format) HDDs automatically — no manual alignment needed.
-
-**4. Mount p1 by UUID, persistently:**
-```bash
-sudo mkdir -p /srv/storage/standard-01
-UUID=$(sudo blkid -s UUID -o value /dev/sda)
-echo "UUID=$UUID  /srv/storage/standard-01  xfs  defaults,noatime,nofail,x-systemd.device-timeout=10  0  2" \
+sudo mkdir -p /srv/minio/hdd-01
+UUID=$(sudo blkid -s UUID -o value /dev/sda1)
+echo "UUID=$UUID  /srv/minio/hdd-01  xfs  defaults,noatime,nofail,x-systemd.device-timeout=10  0  2" \
   | sudo tee -a /etc/fstab
-sudo systemctl daemon-reload
-sudo mount -a
-df -hT /srv/storage/standard-01                  # expect ~7.3T, xfs
+sudo systemctl daemon-reload && sudo mount -a
+sudo mkdir -p /srv/minio/hdd-01/data
+sudo chown -R 1000:1000 /srv/minio/hdd-01/data    # MinIO container runs as uid/gid 1000
+df -hT /srv/minio/hdd-01             # expect ~7.3T, xfs
 ```
-- `noatime` — fewer metadata writes (HDD-friendly).
-- `nofail` + `x-systemd.device-timeout` — the box still boots if the drive is absent.
+- `noatime` reduces writes; `nofail` + `x-systemd.device-timeout` keep the box bootable if
+  the drive ever drops.
 
-**5. Create the data dir and set ownership** (the MinIO container runs as uid/gid 1000):
+### 0.5 Clone the repo and bring over secrets
 ```bash
-sudo mkdir -p /srv/storage/standard-01/data
-sudo chown -R 1000:1000 /srv/storage/standard-01/data
+git clone <repo-url> /home/apollo/apollo-sfs
+cd /home/apollo/apollo-sfs
+scp apollo@apollo-sfs.local:/home/apollo/apollo-sfs/.env ./.env   # review paths/secrets
+mkdir -p /home/apollo/service-worker-email docker/postfix \
+         docker/postgresql-app docker/postgresql-keycloak
+sudo apt install -y geoipupdate    # provides /var/lib/GeoIP for the api mount (or remove that mount)
 ```
 
-**6. Enable ongoing SMART monitoring** (HDDs fail more than NVMe — watch them):
+### 0.6 SMART monitoring + long test
 ```bash
 sudo systemctl enable --now smartd
-# optionally edit /etc/smartd.conf to add: /dev/sdX -a -m you@example.com
+sudo smartctl -t long /dev/sda       # full surface scan (~12–15h on 8TB); check with:
+sudo smartctl -l selftest /dev/sda
 ```
-
-**p2 needs no setup here** — it's the installer-made ext4 root. The repo and the
-PostgreSQL data dirs (`./docker/postgresql-app`, `./docker/postgresql-keycloak`) live on
-it normally. Move Postgres to a dedicated drive when you can: a single spinning HDD is
-slow for DB random I/O, and p1/p2 share one spindle so blob I/O contends with the DB.
-
-> **Redundancy note:** a single 8TB HDD has **no built-in redundancy** (and p2 holds your
-> OS + DB on that same disk). If durability matters, back it up off-box, or pair with a
-> second drive as a **ZFS/mdadm mirror**, or use **MinIO distributed mode** with 2+ drives
-> (Part B, Option 1). App-layer AES-256-GCM protects confidentiality, not against drive
-> failure.
+A single 8TB HDD has **no redundancy** — back the standard tier up off-box, or add a
+second drive as a ZFS/mdadm mirror later. App-layer AES-256-GCM protects confidentiality,
+not against drive failure.
 
 ---
 
-## Part A — Swarm cluster with the Ryzen as manager
-
-### A1. Network prerequisites
-Both nodes must reach each other on a private network (same LAN, or a WireGuard tunnel
-if remote — use the tunnel IPs everywhere). Open these ports **between the two nodes
-only**, never public:
-
-- `2377/tcp` — cluster management
-- `7946/tcp` + `7946/udp` — node-to-node gossip
-- `4789/udp` — overlay network (VXLAN)
-
-With `ufw` on the Ryzen box (adjust `<PI_IP>`):
+## Part 1 — Build the amd64 images on the manager
+Swarm deploys images, it doesn't build. The custom images run only on the manager, so
+build locally — no registry required:
 ```bash
-sudo ufw allow from <PI_IP> to any port 2377 proto tcp
-sudo ufw allow from <PI_IP> to any port 7946
-sudo ufw allow from <PI_IP> to any port 4789 proto udp
+cd /home/apollo/apollo-sfs
+docker build -t apollo-sfs-api:amd64 ./api
+docker build -t apollo-sfs-frontend:amd64 ./frontend
+```
+(MinIO / Postgres / Keycloak / Postfix are public multi-arch images, pulled per node.)
+
+---
+
+## Part 2 — Form the Swarm and label the nodes
+
+### 2.1 Firewall (between the two nodes only — never public)
+On the manager (`ufw`, adjust `<PI_IP>`):
+```bash
+sudo ufw allow from <PI_IP> to any port 2377 proto tcp   # cluster mgmt
+sudo ufw allow from <PI_IP> to any port 7946              # gossip (tcp+udp)
+sudo ufw allow from <PI_IP> to any port 4789 proto udp    # overlay VXLAN
 sudo ufw allow OpenSSH
+# keep app ports off the public side:
+sudo ufw deny 3000 ; sudo ufw deny 8080 ; sudo ufw deny 8180
 sudo ufw enable
 ```
 
-### A2. Install Docker on the Ryzen node
+### 2.2 Install Docker (if not already) and init the swarm
 ```bash
-curl -fsSL https://get.docker.com | sudo sh
-sudo usermod -aG docker $USER     # log out/in afterward
-docker --version
+# manager
+curl -fsSL https://get.docker.com | sudo sh && sudo usermod -aG docker $USER  # re-login
+docker swarm init --advertise-addr <MANAGER_LAN_IP>
+docker swarm join-token worker        # copy the printed command
 ```
-
-### A3a. Greenfield — initialise the swarm on the Ryzen (recommended if nothing is deployed yet)
 ```bash
-# On the Ryzen box (the manager)
-docker swarm init --advertise-addr <RYZEN_IP>
+# Pi
+docker swarm join --token SWMTKN-... <MANAGER_LAN_IP>:2377
 ```
-It prints a `docker swarm join --token ...` command — run it on the Pi:
+> Already have a swarm with the **Pi as manager**? Promote then demote instead: join the
+> Ryzen with the *manager* token (`docker swarm join-token manager`), then from the Ryzen
+> `docker node demote apollo-sfs`. Keep a single manager (2 managers = no fault tolerance).
+
+### 2.3 Label nodes for placement
 ```bash
-# On the Pi (joins as a worker)
-docker swarm join --token SWMTKN-... <RYZEN_IP>:2377
-```
-
-### A3b. Migration — if the Pi is ALREADY the swarm manager (from an earlier setup)
-With only two nodes, run **a single manager** (the Ryzen). Two managers give *no* fault
-tolerance and add risk, so the plan is: promote the Ryzen, then demote the Pi.
-
-```bash
-# 1. Add the Ryzen to the swarm first. On the current manager (Pi), get the MANAGER token:
-docker swarm join-token manager        # copy the printed command
-#    Run that command on the Ryzen box so it joins as a manager.
-
-# 2. On the Ryzen, confirm it sees both nodes:
+# on the manager
+docker node update --label-add tier=standard apollo-sfs-1   # 8TB HDD
+docker node update --label-add tier=fast     apollo-sfs      # Pi NVMe
 docker node ls
-
-# 3. From the Ryzen, demote the Pi to a worker:
-docker node demote <pi-hostname>
-
-# 4. Verify leadership moved to the Ryzen:
-docker node ls     # Ryzen: MANAGER STATUS = "Leader";  Pi: blank (worker)
 ```
-Notes:
-- Never demote the last/only manager — promote the new one **first** (steps 1–2).
-- After step 3 the Ryzen holds the raft state and is the sole control plane.
-- If the Pi previously advertised the swarm on its own IP, that's fine — workers don't
-  advertise; only the manager's `--advertise-addr` matters going forward.
 
-### A4. Label the nodes
+---
+
+## Part 3 — Deploy the stack
+`docker-stack.yml` (repo root) defines everything: `minio-fast` pinned to the Pi (reusing
+its existing data dir), `minio-standard` on the manager's HDD, and the rest of the stack
+pinned to the manager.
+
 ```bash
-# Run on the Ryzen (manager)
-docker node update --label-add role=app      <ryzen-hostname>
-docker node update --label-add role=storage  <pi-hostname>
-docker node update --label-add tier=standard <ryzen-hostname>   # 8TB HDD lives here
-docker node update --label-add tier=fast     <pi-hostname>      # NVMe lives here
+cd /home/apollo/apollo-sfs
+set -a && . ./.env && set +a          # stack deploy does NOT auto-read .env
+docker stack deploy -c docker-stack.yml --resolve-image never apollo-sfs
+docker stack services apollo-sfs      # watch replicas reach 1/1
+docker stack ps apollo-sfs            # confirm each task landed on the right node
 ```
-Use these labels in `placement.constraints` so each service lands on the right node.
-
-### A5. Move the app stack + public entry point to the Ryzen
-Because the manager/app host moved, the front door moves too:
-1. Copy the repo and `.env` to the Ryzen.
-2. Build images natively on amd64 (Part C).
-3. **Migrate Postgres** (both DBs) Pi → Ryzen: either `pg_dump`/`pg_restore`, or stop the
-   containers and copy the `./docker/postgresql-app` and `./docker/postgresql-keycloak`
-   data dirs across.
-4. **Migrate MinIO blobs** per Part B (`mc mirror`).
-5. Install **nginx on the Ryzen**, move the Cloudflare **Origin certificate** + server
-   block over, and **repoint your router's 80/443 port-forward (and any Cloudflare
-   DNS/DDNS target) to the Ryzen's IP**.
-6. The `api` kill switch (`privileged` + `nsenter` + `docker.sock`) now acts on the
-   Ryzen host — expected, since the `api` container moved here.
+Don't deploy `minio-fast` against the Pi while the Pi's old `docker compose` MinIO is still
+running on the same data dir — bring the old stack down first (Part 5, cutover).
 
 ---
 
-## Part B — MinIO storage layout (what actually serves the bytes)
+## Part 4 — nginx + Cloudflare on the manager
+TLS termination moves to the manager with the app:
+1. `sudo apt install -y nginx`.
+2. Copy the Pi's server block and the **Cloudflare Origin cert + key** to the manager
+   (`/etc/nginx/...`, `/etc/ssl/...`). Keep Cloudflare in **Full (Strict)**.
+3. Point upstreams at the manager's host-published ports: `127.0.0.1:3000` (frontend) and
+   `127.0.0.1:8080` (api). (`mode: host` binds them on the manager.)
+4. **Repoint the router's 80/443 port-forward to the manager's LAN IP.** The `ddns`
+   service keeps updating the same public A record; only the internal target changes.
 
-Pick **one** shape. They have very different tradeoffs.
+---
 
-### Option 1 — Distributed MinIO (single namespace, redundant)
-A single bucket namespace with erasure coding so a drive/node loss doesn't lose data.
+## Part 5 — Migrate from the Pi
 
-- **Minimum 4 drives total** (e.g. 2 per node). Usable capacity ≈ **half of raw** — the
-  rest is parity. Buys resilience + a unified namespace, not maximum raw GB.
-- **Do not run distributed MinIO over the Swarm overlay network** — it needs stable
-  hostnames and low latency. Pin one MinIO task per node (constraint on the `role`/`tier`
-  labels) with published ports / host networking.
+**No blob copy** — only the two Postgres DBs and the configs move. Do everything except the
+cutover live; the cutover is a short maintenance window.
 
-### Option 2 — Single drive per tier (simplest; max raw capacity, no redundancy)
-Run MinIO on the Ryzen using the **8TB HDD** (`/srv/storage/standard-01/data`) as the
-**standard** tier, local to the API. Optionally keep the Pi's NVMe as a separate **fast**
-tier (second MinIO instance/bucket, or a MinIO ILM transition target). No erasure
-overhead — you keep ~all raw capacity, but back up separately.
-
-In `docker-compose.yml`, the standard-tier MinIO bind-mount and the API's disk-stats
-reader point at the new drive and carry the `standard-01` label:
-```yaml
-# minio (standard tier) — pinned to the Ryzen
-volumes:
-  - /srv/storage/standard-01/data:/data
-# api
-environment:
-  DISK_STATS_DRIVE_LABEL: standard-01
-volumes:
-  - /srv/storage/standard-01:/data:ro
-```
-
-### Migration (required for BOTH options — single-drive can't expand in place)
+### 5.1 Dump the databases on the Pi (logical dump — safe across arm64 → amd64)
+Do **not** copy raw `PGDATA` between architectures; use `pg_dump`.
 ```bash
-mc alias set old http://<old-minio>:9000 $MINIO_ROOT_USER $MINIO_ROOT_PASSWORD
-mc alias set new http://<new-minio>:9000 $MINIO_ROOT_USER $MINIO_ROOT_PASSWORD
-mc mirror --preserve old/<bucket> new/<bucket>
+# on the Pi
+docker exec apollo-sfs-postgresql-app      pg_dump -U "$POSTGRES_APP_USER" -Fc "$POSTGRES_APP_DB" > app.dump
+docker exec apollo-sfs-postgresql-keycloak pg_dump -U "$POSTGRES_KC_USER"  -Fc "$POSTGRES_KC_DB"  > kc.dump
+scp app.dump kc.dump apollo@apollo-sfs-1.local:/home/apollo/apollo-sfs/
 ```
-Verify object counts/sizes match, repoint the API, then decommission the old volume.
-Because blobs are app-layer encrypted, `mc mirror` just moves opaque ciphertext — no key
-handling during migration.
+Migrating `db-keycloak` carries the **whole Keycloak realm + users** — no separate realm
+export needed.
 
----
-
-## Part C — Building the app images for amd64 (now required)
-
-The app host is now amd64, so the `frontend` and `api` images must run on amd64:
-
-- **Simplest:** build them natively on the Ryzen and set `platform: linux/amd64` on those
-  services (or remove the hardcoded `platform: linux/arm64` lines).
-- **If you ever schedule them on the Pi too:** build **multi-arch** images and push to a
-  registry:
-  ```bash
-  docker buildx build --platform linux/amd64,linux/arm64 -t <registry>/apollo-sfs-api --push ./api
-  ```
-- MinIO / Postgres / Keycloak / Postfix images are already multi-arch — no change.
-
-Pin services with placement constraints so nothing lands on the wrong arch/role:
-```yaml
-deploy:
-  placement:
-    constraints: [node.labels.role == app]      # api, frontend, keycloak, postgres, ...
+### 5.2 Restore into the manager's DB containers
+After the stack is up (Part 3) and the DB containers are healthy:
+```bash
+APPDB=$(docker ps -qf name=apollo-sfs_db-app)
+KCDB=$(docker ps -qf name=apollo-sfs_db-keycloak)
+docker exec -i "$APPDB" pg_restore -U "$POSTGRES_APP_USER" -d "$POSTGRES_APP_DB" --clean --if-exists < app.dump
+docker exec -i "$KCDB"  pg_restore -U "$POSTGRES_KC_USER"  -d "$POSTGRES_KC_DB"  --clean --if-exists < kc.dump
 ```
 
+### 5.3 Cutover (⏱ maintenance window)
+1. Stop writes on the Pi (maintenance page / stop the old app containers' inbound traffic).
+2. Re-run **5.1 → 5.2** for the final delta (catches changes since the first dump).
+3. On the Pi, `docker compose down` the **old full stack** so its MinIO releases the NVMe
+   data dir, then let Swarm's `minio-fast` task start on the Pi (it reuses that dir).
+4. Flip the **port-forward** to the manager (Part 4).
+5. Verify (Part 7).
+
 ---
 
-## What runs where (summary)
+## Part 6 — Register the two-tier topology in the app
 
-- **Ryzen (manager / app host):** host nginx + Cloudflare TLS, `api` (+ kill switch),
-  `frontend`, `keycloak`, `postfix`, `ddns`, both Postgres instances, and the **8TB HDD
-  standard tier**.
-- **Pi (worker / fast storage):** the existing **NVMe fast tier** and its MinIO instance.
+> **Two facts confirmed from the code that shape this section:**
+> 1. **`PATCH /servers/:id` (`UpdateServer`) only accepts `is_active` and `name`** — it
+>    **cannot change `minio_endpoint`** (the endpoint is set only at `CreateServer`). So
+>    re-pointing the existing server via the API is not possible.
+> 2. **`drive_type` (`nvme`/`hdd`) is now a persisted column on `drives`**, set
+>    explicitly at `AddDrive` (migration `db/migrations/020_drive_type.sql`). Pass it in
+>    the request; if omitted it's inferred from the label (`nvme` substring → `nvme`,
+>    else `hdd`) for backward compatibility. Apply the migration before deploying:
+>    `docker exec -i <db-app> psql -U $POSTGRES_APP_USER -d $POSTGRES_APP_DB -f /docker-entrypoint-initdb.d/migrations/020_drive_type.sql`
+
+**The existing (fast) server — no endpoint change needed.** Because the fast MinIO service
+is named **`minio`** in `docker-stack.yml`, it resolves at the same `minio:9000` the
+existing DB record almost certainly already holds — so the record keeps working untouched.
+Confirm first:
+```sql
+-- on the manager: docker exec -i <db-app> psql -U $POSTGRES_APP_USER -d $POSTGRES_APP_DB
+SELECT id, name, minio_endpoint FROM servers;
+```
+- If `minio_endpoint` is `minio:9000` → nothing to do; just register its node (below).
+- If it's something else (an IP, a different name) → either rename the `minio` service in
+  the stack to match it, or update the row directly (`UPDATE servers SET minio_endpoint='minio:9000' WHERE id=...`),
+  since the API can't change it. **Keep the same bucket** — user→drive allocations depend on it.
+
+Register the Pi as the fast server's node (admin API, `/api/v1/admin/system/...`):
+```
+POST /servers/<fast_server_id>/nodes   { "hostname": "apollo-sfs", "role": "worker", "address": "<pi-ip>" }
+```
+
+**Create the standard server + node + drive (the 8TB HDD):**
+```
+POST /servers                          { "state": "XX", "minio_endpoint": "minio-standard:9000",
+                                         "minio_use_ssl": false, "access_key": "...", "secret_key": "..." }
+POST /servers/<std_server_id>/nodes    { "hostname": "apollo-sfs-1", "role": "manager", "address": "<mgr-ip>" }
+POST /servers/<std_server_id>/drives   { "label": "hdd-01", "minio_bucket": "<std-bucket>",
+                                         "drive_type": "hdd", "node_id": "<node-id>" }
+```
+`CreateServer` test-connects to MinIO and encrypts the credentials with the KEK;
+`AddDrive` auto-creates the bucket and persists `drive_type` (here `hdd` → standard tier).
+Run `POST /drives/<id>/sync-capacity` to populate capacity from the disk-stats path.
+
+> Endpoints resolve over the Swarm **overlay** by service name (`minio:9000`,
+> `minio-standard:9000`) from the `api` container — no host ports for MinIO.
+
+> ⚠ **Remaining limitation.** `sync-capacity` still reads the single `DISK_STATS_PATH`
+> (`/data`) regardless of which drive you sync — so capacity auto-detect is only correct
+> for the drive on the API's own node. Tier classification, however, is now a persisted
+> `drive_type` column (overhaul done), not a label heuristic.
 
 ---
 
-## Decisions still open before editing the stack
+## Part 7 — Verify & clean up
+- `docker stack ps apollo-sfs` — all tasks `Running` on the expected nodes.
+- Log in (Keycloak), **download an existing file** (proves the fast tier + bucket survived),
+  **upload to fast** and **upload to standard**.
+- Admin → infrastructure shows both nodes and both drives (fast `nvme`, standard `hdd`)
+  with capacities.
+- Once confirmed, remove the Pi's **old Postgres data dirs** — but **keep its MinIO data
+  dir** (`/home/apollo/apollo-sfs/minio/nvme-01/data`).
 
-1. **MinIO shape** — Option 1 (distributed/redundant, ~half usable) or Option 2
-   (single drive per tier, max raw GB)?
-2. **Fast tier** — keep the Pi's NVMe as a separate MinIO instance/bucket, or collapse
-   everything onto the Ryzen's 8TB tier?
-3. **Redundancy for the 8TB drive** — single drive + off-box backup, or add a second
-   drive for a ZFS/mdadm mirror?
-
-Tell me your picks and I'll generate the concrete `docker-compose.yml` swarm-stack edits
-(`deploy.placement`, the standard-tier MinIO service, `.env` additions) for the repo.
+### Operational notes
+- **Downtime** is only the 5.3 window (final DB delta + port-forward flip) — minutes.
+- **Kill switch:** inert under Swarm (caveat #2). If you need it, run `api` as a standalone
+  privileged container on the overlay (see `docker-stack.yml`).
+- **Secrets:** `.env` works via shell sourcing; consider Docker **secrets** for the KEK and
+  DB passwords later.
+- **Redundancy:** none by design ("for now"). The standard tier is a single HDD — back it
+  up. If a tier's MinIO is down, the app surfaces capacity/expansion handling per
+  `models/expansion_request.go`.

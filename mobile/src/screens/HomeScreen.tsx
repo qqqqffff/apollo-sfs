@@ -17,14 +17,19 @@ import { CameraRoll } from '@react-native-camera-roll/camera-roll';
 import SyncPreviewModal from '../components/SyncPreviewModal';
 import StorageUpgradeModal from '../components/StorageUpgradeModal';
 import GoogleBackupModal from '../components/GoogleBackupModal';
+import GoogleServiceSelectModal, { type GoogleServiceSelection } from '../components/GoogleServiceSelectModal';
 import {
   listGoogleDriveFiles,
   createPhotosPickerSession,
   getPhotosPickerSession,
   listPickedPhotos,
   deletePhotosPickerSession,
+  trashGoogleDriveFiles,
+  uploadGoogleEntries,
+  type BackupEntry,
   type GoogleBackupItem,
 } from '../services/GoogleBackupService';
+import { notifyBackupComplete } from '../services/notifications';
 import { type PreviewItem } from '../services/SyncService';
 import { GoogleSignin, statusCodes } from '@react-native-google-signin/google-signin';
 import {
@@ -124,6 +129,19 @@ export default function HomeScreen() {
   const [googleBackupItems, setGoogleBackupItems]   = useState<GoogleBackupItem[] | null>(null);
   const [googleAccessToken, setGoogleAccessToken]   = useState('');
   const [googleBackupLoading, setGoogleBackupLoading] = useState(false);
+  const [serviceSelectVisible, setServiceSelectVisible] = useState(false);
+
+  // Background backup progress shown on the Google Backup card. running=false
+  // with a non-null state means the run has finished (summary + cleanup shown).
+  const [backupState, setBackupState] = useState<{
+    running: boolean;
+    done: number;
+    total: number;
+    uploaded: number;
+    duplicates: number;
+    errors: number;
+    driveIds: string[];
+  } | null>(null);
 
   // In-app Photos Picker WebView state
   const [photosPickerVisible, setPhotosPickerVisible] = useState(false);
@@ -311,7 +329,11 @@ export default function HomeScreen() {
       }
     });
 
-  const handleGoogleBackup = async () => {
+  // Fetch step, run after the user has chosen which services to back up. Only
+  // the picked services are touched: no Photos picker if Photos is off, no Drive
+  // listing if Drive is off.
+  const handleServiceContinue = async (selection: GoogleServiceSelection) => {
+    setServiceSelectVisible(false);
     setGoogleBackupLoading(true);
     try {
       await GoogleSignin.hasPlayServices();
@@ -325,8 +347,12 @@ export default function HomeScreen() {
       const tokens = await GoogleSignin.getTokens();
       setGoogleAccessToken(tokens.accessToken);
 
-      const driveItems = await listGoogleDriveFiles(tokens.accessToken);
-      const photoItems = await pickGooglePhotos(tokens.accessToken);
+      const driveItems = selection.drive ? await listGoogleDriveFiles(tokens.accessToken) : [];
+      const photoItems = selection.photos ? await pickGooglePhotos(tokens.accessToken) : [];
+      if (driveItems.length + photoItems.length === 0) {
+        Alert.alert('Nothing to back up', 'No files were found or selected.');
+        return;
+      }
       setGoogleBackupItems([...driveItems, ...photoItems]);
     } catch (e: any) {
       if (e.code !== statusCodes.SIGN_IN_CANCELLED) {
@@ -336,6 +362,49 @@ export default function HomeScreen() {
     } finally {
       setGoogleBackupLoading(false);
     }
+  };
+
+  // Runs a backup off-modal: closes the picker and uploads while progress shows
+  // on the Google Backup card. Posts an OS notification on completion when the
+  // user has that setting enabled.
+  const startBackgroundBackup = (entries: BackupEntry[], token: string, notify: boolean) => {
+    setGoogleBackupItems(null);
+    const driveIds = entries
+      .filter((e) => e.googleItem.source === 'drive')
+      .map((e) => e.googleItem.id);
+    setBackupState({ running: true, done: 0, total: entries.length, uploaded: 0, duplicates: 0, errors: 0, driveIds });
+
+    uploadGoogleEntries(entries, token, (done, total) =>
+      setBackupState((s) => (s ? { ...s, done, total } : s)),
+    ).then(({ uploaded, duplicates, errors }) => {
+      setBackupState((s) => (s ? { ...s, running: false, uploaded, duplicates, errors } : s));
+      refreshProfile().catch(() => {});
+      if (notify) notifyBackupComplete(uploaded, duplicates, errors);
+    });
+  };
+
+  const handleBackupCleanup = (driveIds: string[]) => {
+    const n = driveIds.length;
+    Alert.alert(
+      'Delete from Google Drive?',
+      `Move ${n} Drive file${n !== 1 ? 's' : ''} to your Google Drive trash? They are safely backed up in Apollo SFS.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Trash',
+          style: 'destructive',
+          onPress: async () => {
+            const { failed } = await trashGoogleDriveFiles(driveIds, googleAccessToken);
+            Alert.alert(
+              'Done',
+              failed === 0
+                ? `${n} file${n !== 1 ? 's' : ''} moved to Google Drive trash.`
+                : `${n - failed} of ${n} moved to trash. ${failed} failed.`,
+            );
+          },
+        },
+      ],
+    );
   };
 
   const handleFilesAppSync = async () => {
@@ -381,6 +450,13 @@ export default function HomeScreen() {
     autouploadFolderID == null
       ? '/'
       : (mediaFolders.find((f) => f.id === autouploadFolderID)?.name ?? '/');
+
+  // Non-null only when a media auto-upload folder is configured: photos/videos
+  // are redirected there server-side, so the backup modal surfaces it.
+  const redirectFolderName =
+    autouploadFolderID == null
+      ? null
+      : (mediaFolders.find((f) => f.id === autouploadFolderID)?.name ?? 'Root');
 
   const filesDestLabel =
     !filesDestFolderID
@@ -565,10 +641,58 @@ export default function HomeScreen() {
             Back up files from Google Drive and Google Photos to your SFS account.
           </Text>
 
+          {backupState?.running && (
+            <>
+              <View style={styles.progressRow}>
+                <View style={styles.progressTrack}>
+                  <View
+                    style={[
+                      styles.progressFill,
+                      { width: `${backupState.total > 0 ? Math.round((backupState.done / backupState.total) * 100) : 0}%` as any },
+                    ]}
+                  />
+                </View>
+                <Text style={styles.progressLabel}>{backupState.done} / {backupState.total}</Text>
+              </View>
+              <View style={styles.statusRow}>
+                <ActivityIndicator size="small" color={colors.success} style={{ marginRight: 8 }} />
+                <Text style={styles.statusText}>Backing up in the background…</Text>
+              </View>
+            </>
+          )}
+
+          {backupState && !backupState.running && (
+            <>
+              <View style={styles.syncSummaryRow}>
+                <View style={styles.syncSummaryLeft}>
+                  <CheckCircle2 size={13} color={backupState.errors > 0 ? colors.warning : colors.success} style={{ marginRight: 5 }} />
+                  <Text style={[styles.syncSummaryCount, backupState.errors > 0 && { color: colors.warning }]}>
+                    {[
+                      `${backupState.uploaded} backed up`,
+                      backupState.duplicates > 0 ? `${backupState.duplicates} duplicate${backupState.duplicates !== 1 ? 's' : ''}` : null,
+                      backupState.errors > 0 ? `${backupState.errors} failed` : null,
+                    ].filter(Boolean).join(' · ')}
+                  </Text>
+                </View>
+                <TouchableOpacity onPress={() => setBackupState(null)} hitSlop={8}>
+                  <Text style={styles.destinationValue}>Dismiss</Text>
+                </TouchableOpacity>
+              </View>
+              {backupState.driveIds.length > 0 && (
+                <TouchableOpacity style={styles.cleanupButton} onPress={() => handleBackupCleanup(backupState.driveIds)}>
+                  <Trash2 size={15} color={colors.error} strokeWidth={1.5} style={{ marginRight: 6 }} />
+                  <Text style={styles.cleanupButtonText}>
+                    Delete {backupState.driveIds.length} Drive file{backupState.driveIds.length !== 1 ? 's' : ''} from Google
+                  </Text>
+                </TouchableOpacity>
+              )}
+            </>
+          )}
+
           <TouchableOpacity
-            style={[styles.syncButton, styles.googleButton, googleBackupLoading && styles.syncButtonDisabled]}
-            onPress={handleGoogleBackup}
-            disabled={googleBackupLoading}
+            style={[styles.syncButton, styles.googleButton, (googleBackupLoading || backupState?.running) && styles.syncButtonDisabled]}
+            onPress={() => setServiceSelectVisible(true)}
+            disabled={googleBackupLoading || backupState?.running}
           >
             {googleBackupLoading ? (
               <ActivityIndicator color={colors.surface} size="small" />
@@ -692,17 +816,25 @@ export default function HomeScreen() {
         }}
       />
 
+      <GoogleServiceSelectModal
+        visible={serviceSelectVisible}
+        onCancel={() => setServiceSelectVisible(false)}
+        onContinue={handleServiceContinue}
+      />
+
       <GoogleBackupModal
         visible={googleBackupItems !== null}
         items={googleBackupItems ?? []}
         accessToken={googleAccessToken}
         quotaBytes={quotaBytes}
         usedBytes={usedBytes}
+        redirectFolderName={redirectFolderName}
         onClose={() => setGoogleBackupItems(null)}
         onDone={() => {
           setGoogleBackupItems(null);
           refreshProfile().catch(() => {});
         }}
+        onStartBackground={startBackgroundBackup}
         onStoragePurchased={(newQuota) => {
           setLocalQuotaBytes(newQuota);
           refreshProfile().catch(() => {});

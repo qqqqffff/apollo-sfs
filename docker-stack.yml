@@ -1,0 +1,333 @@
+name: apollo-sfs
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Docker Swarm stack — two-node, two-tier deployment.
+#
+#   manager  apollo-sfs-1 (Ryzen, amd64, node.labels.tier=standard)
+#            → api, frontend, keycloak, postfix, ddns, db-app, db-keycloak,
+#              minio-standard (8TB HDD).  Host nginx terminates TLS in front.
+#   worker   apollo-sfs   (Pi 5, arm64,  node.labels.tier=fast)
+#            → minio-fast (existing 4TB NVMe blobs — reused in place).
+#
+# Deploy:
+#   set -a && . ./.env && set +a      # stack deploy does NOT auto-read .env
+#   docker build -t apollo-sfs-api:amd64 ./api
+#   docker build -t apollo-sfs-frontend:amd64 ./frontend
+#   docker stack deploy -c docker-stack.yml --resolve-image never apollo-sfs
+#
+# NOTE — three Swarm differences vs docker-compose, all called out below:
+#   * `build:` is unsupported → images are pre-built (Part 1 of the doc).
+#   * `privileged:`/`pid: host` are unsupported → the API kill switch cannot run
+#     as a Swarm service (see the api service comment).
+#   * published ports use `mode: host` so they bind only on the pinned node; the
+#     host firewall must block 3000/8080/8180 from outside (see the doc, Part 4).
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── Frontend (React/Vite, served by nginx:alpine) ───────────────────────────
+  frontend:
+    image: apollo-sfs-frontend:amd64
+    ports:
+      - target: 80
+        published: 3000
+        protocol: tcp
+        mode: host          # binds 3000 on the manager only; host nginx proxies here
+    networks: [app-network]
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.labels.tier == standard]
+      restart_policy:
+        condition: any
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  # ── App API (Go/Gin) ─────────────────────────────────────────────────────────
+  # ⚠ The remote kill switch needs `privileged` + host namespaces, which Swarm
+  #   services do NOT support. Options:
+  #     (a) accept that the kill switch is inert here (everything else works), or
+  #     (b) run the API as a standalone privileged container attached to the
+  #         attachable overlay instead of in this stack:
+  #           docker run -d --name apollo-sfs-api --privileged --user root \
+  #             --network app-network --env-file .env ... apollo-sfs-api:amd64
+  api:
+    image: apollo-sfs-api:amd64
+    user: root
+    ports:
+      - target: 8080
+        published: 8080
+        protocol: tcp
+        mode: host          # binds 8080 on the manager only
+    environment:
+      COMPOSE_PROJECT_NAME: apollo-sfs
+      # PostgreSQL — app DB
+      POSTGRES_APP_HOST: db-app
+      POSTGRES_APP_PORT: 5432
+      POSTGRES_APP_USER: ${POSTGRES_APP_USER}
+      POSTGRES_APP_PASSWORD: ${POSTGRES_APP_PASSWORD}
+      POSTGRES_APP_DB: ${POSTGRES_APP_DB}
+      # Encryption / session
+      KEY_ENCRYPTION_KEY: ${KEY_ENCRYPTION_KEY}
+      SESSION_KEY: ${SESSION_KEY}
+      GIN_MODE: release
+      # MinIO — REQUIRED by the API (cmd/config.go requireEnv). This is the
+      # bootstrap/default endpoint; per-server creds for additional tiers are
+      # stored encrypted in the DB. Points at the fast-tier service named `minio`
+      # (matches the existing server record — see doc Part 6).
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_BUCKET_NAME: ${MINIO_BUCKET_NAME}
+      MINIO_USE_SSL: "false"
+      # Keycloak
+      KEYCLOAK_REALM: ${KEYCLOAK_REALM}
+      KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID}
+      KEYCLOAK_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET}
+      KEYCLOAK_INTERNAL_URL: http://keycloak:8180
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+      # Cookies & base URL
+      COOKIE_DOMAIN: ${COOKIE_DOMAIN}
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      APP_BASE_URL: ${APP_BASE_URL}
+      # Email
+      POSTFIX_INTERNAL_HOST: postfix:587
+      MAIL_FROM: ${MAIL_FROM}
+      MAIL_DOMAIN: ${MAIL_DOMAIN}
+      EMAIL_STORAGE_PATH: /home/app/service-worker-email
+      SENDGRID_WEBHOOK_SECRET: ${SENDGRID_WEBHOOK_SECRET:-}
+      QUOTA_WARNING_THRESHOLD_PERCENT: ${QUOTA_WARNING_THRESHOLD_PERCENT:-80}
+      # Local drive stats — the standard (HDD) tier is on this node.
+      # Per-server/per-drive topology is stored in the DB (admin API); see the doc.
+      DISK_STATS_PATH: /data
+      DISK_STATS_DRIVE_LABEL: hdd-01
+      # Cloudflare Turnstile
+      CLOUDFLARE_TURNSTILE_SECRET_KEY: ${CLOUDFLARE_TURNSTILE_SECRET_KEY}
+      CLOUDFLARE_TURNSTILE_SITE_KEY: ${CLOUDFLARE_TURNSTILE_SITE_KEY}
+      # Premium tier / SFS API / PayPal
+      SFS_API_KEY_PEPPER: ${SFS_API_KEY_PEPPER}
+      PAYPAL_CLIENT_ID: ${PAYPAL_CLIENT_ID:-}
+      PAYPAL_CLIENT_SECRET: ${PAYPAL_CLIENT_SECRET:-}
+      PAYPAL_WEBHOOK_ID: ${PAYPAL_WEBHOOK_ID:-}
+      PAYPAL_ENV: ${PAYPAL_ENV:-sandbox}
+      GOOGLE_WEB_CLIENT_ID: ${GOOGLE_WEB_CLIENT_ID:-}
+      GOOGLE_WEB_CLIENT_SECRET: ${GOOGLE_WEB_OAUTH_CLIENT_SECRET:-}
+      PREMIUM_TIER_PRICE_CENTS: ${PREMIUM_TIER_PRICE_CENTS:-999}
+      PREMIUM_TIER_CURRENCY: ${PREMIUM_TIER_CURRENCY:-USD}
+    volumes:
+      # Local HDD (standard tier) for disk-stats reads
+      - /srv/minio/hdd-01:/data:ro
+      - /var/lib/GeoIP:/var/lib/GeoIP:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /home/apollo/service-worker-email:/home/app/service-worker-email
+    networks: [app-network]
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.labels.tier == standard]
+      restart_policy:
+        condition: any
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  # ── MinIO — FAST tier (Pi NVMe, existing blobs reused in place) ──────────────
+  # Named `minio` (not `minio-fast`) on purpose: it matches the API's required
+  # MINIO_ENDPOINT and the existing DB server record's endpoint (`minio:9000`),
+  # so no DB edit is needed. The label `nvme-01` is what classifies it as the
+  # `nvme`/fast tier (drive_type derives from the label — see doc Part 6).
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      # The Pi's EXISTING data dir — do NOT wipe; existing buckets/objects live here.
+      - /home/apollo/apollo-sfs/minio/nvme-01/data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    networks: [app-network]
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.labels.tier == fast]     # → the Pi
+      restart_policy:
+        condition: any
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  # ── MinIO — STANDARD tier (manager 8TB HDD) ──────────────────────────────────
+  minio-standard:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - /srv/minio/hdd-01/data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    networks: [app-network]
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.labels.tier == standard]   # → the manager
+      restart_policy:
+        condition: any
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  # ── Keycloak ─────────────────────────────────────────────────────────────────
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0.7
+    command: start --import-realm
+    ports:
+      - target: 8180
+        published: 8180
+        protocol: tcp
+        mode: host
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://db-keycloak:5432/${POSTGRES_KC_DB}
+      KC_DB_USERNAME: ${POSTGRES_KC_USER}
+      KC_DB_PASSWORD: ${POSTGRES_KC_PASSWORD}
+      KC_HTTP_ENABLED: "true"
+      KC_HTTP_PORT: 8180
+      KC_HTTPS_ENABLED: "false"
+      KC_HEALTH_ENABLED: "true"
+      KC_HOSTNAME: ${APP_BASE_URL}
+      KC_HOSTNAME_STRICT: "true"
+      KC_HOSTNAME_ADMIN: ${APP_BASE_URL}
+      KC_PROXY_HEADERS: xforwarded
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+      # The Ryzen has plenty of RAM — raise the JVM heap vs the Pi's old limit.
+      JAVA_OPTS_APPEND: -Xms512m -Xmx1024m
+    volumes:
+      - /home/apollo/apollo-sfs/keycloak/import:/opt/keycloak/data/import:ro
+      - /home/apollo/apollo-sfs/keycloak/providers:/opt/keycloak/providers:ro
+    networks: [app-network]
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.labels.tier == standard]
+      restart_policy:
+        condition: any
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  # ── Postfix SMTP relay ───────────────────────────────────────────────────────
+  postfix:
+    image: boky/postfix:latest
+    environment:
+      ALLOWED_SENDER_DOMAINS: ${MAIL_DOMAIN}
+      RELAYHOST: smtp.sendgrid.net:587
+      RELAYHOST_USERNAME: apikey
+      RELAYHOST_PASSWORD: ${SENDGRID_SMTP_PASSWORD}
+      POSTFIX_myhostname: ${MAIL_DOMAIN}
+    volumes:
+      - /home/apollo/apollo-sfs/docker/postfix:/var/spool/postfix
+    networks: [app-network]
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.labels.tier == standard]
+      restart_policy:
+        condition: any
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  # ── Cloudflare DDNS ──────────────────────────────────────────────────────────
+  ddns:
+    image: favonia/cloudflare-ddns:latest
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      CF_API_TOKEN: ${CLOUDFLARE_API_TOKEN}
+      DOMAINS: ${CLOUDFLARE_RECORD_NAME}
+      PROXIED: "true"
+      IP6_PROVIDER: "none"
+    networks: [app-network]
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.labels.tier == standard]
+      restart_policy:
+        condition: any
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  # ── PostgreSQL — app metadata DB ─────────────────────────────────────────────
+  db-app:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_APP_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_APP_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_APP_DB}
+    volumes:
+      - /home/apollo/apollo-sfs/docker/postgresql-app:/var/lib/postgresql/data
+      - /home/apollo/apollo-sfs/db:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_APP_USER} -d ${POSTGRES_APP_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks: [app-network]
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.labels.tier == standard]
+      restart_policy:
+        condition: any
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  # ── PostgreSQL — Keycloak DB ─────────────────────────────────────────────────
+  db-keycloak:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_KC_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_KC_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_KC_DB}
+    volumes:
+      - /home/apollo/apollo-sfs/docker/postgresql-keycloak:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_KC_USER} -d ${POSTGRES_KC_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks: [app-network]
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.labels.tier == standard]
+      restart_policy:
+        condition: any
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+networks:
+  app-network:
+    driver: overlay
+    attachable: true      # lets a standalone privileged `api` container join, if needed

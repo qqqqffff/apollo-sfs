@@ -3,10 +3,13 @@ import {
   ActivityIndicator,
   Alert,
   FlatList,
+  Image as RNImage,
   Modal,
   Pressable,
+  ScrollView,
   SectionList,
   StyleSheet,
+  Switch,
   Text,
   TouchableOpacity,
   View,
@@ -14,6 +17,7 @@ import {
 import {
   Check,
   ChevronDown,
+  ChevronRight,
   Cloud,
   FileText,
   Folder,
@@ -21,18 +25,24 @@ import {
   Image,
   Info,
   Music,
+  Settings,
   Trash2,
   Video,
   X,
   Zap,
 } from 'lucide-react-native';
-import RNBlobUtil from 'react-native-blob-util';
-import { listRoot, uploadFile, type ApiFolder } from '../api/files';
+import { listRoot, type ApiFolder } from '../api/files';
 import {
-  downloadGoogleFile,
   deleteGoogleDriveFile,
+  googlePreviewSource,
+  uploadGoogleEntries,
+  type BackupEntry,
+  type BackupItemStatus,
+  type BackupResult,
   type GoogleBackupItem,
 } from '../services/GoogleBackupService';
+import { loadBackupSettings, setBackupSetting } from '../services/backupSettings';
+import { requestNotificationPermission } from '../services/notifications';
 import { colors, radius, shadow, spacing } from '../theme';
 import StorageUpgradeModal from './StorageUpgradeModal';
 
@@ -49,9 +59,10 @@ interface FileEntry {
 
 type SortMode = 'type' | 'size' | 'name';
 type Category = 'Photos' | 'Images' | 'Videos' | 'Audio' | 'Documents' | 'Other';
+type DestTarget = { kind: 'file'; index: number } | { kind: 'category'; category: Category };
 
 interface ListItem    { entry: FileEntry; index: number }
-interface TypeSection { title: Category; data: ListItem[] }
+interface TypeSection { title: Category; data: ListItem[]; allItems: ListItem[] }
 
 interface Props {
   visible: boolean;
@@ -59,8 +70,10 @@ interface Props {
   accessToken: string;
   quotaBytes: number;
   usedBytes: number;
+  redirectFolderName: string | null;
   onClose: () => void;
   onDone: () => void;
+  onStartBackground: (entries: BackupEntry[], accessToken: string, notify: boolean) => void;
   onStoragePurchased?: (newQuota: number) => void;
 }
 
@@ -86,6 +99,12 @@ function fileIcon(entry: FileEntry) {
   return FileText;
 }
 
+// Images/videos are force-routed to the media auto-upload folder by the backend,
+// so the per-file destination control is locked for them when a redirect is set.
+function isMediaEntry(entry: FileEntry): boolean {
+  return entry.type.startsWith('image/') || entry.type.startsWith('video/');
+}
+
 function fmt(bytes: number): string {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
   if (bytes < 1024 ** 3)   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
@@ -95,21 +114,28 @@ function fmt(bytes: number): string {
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function GoogleBackupModal({
-  visible, items, accessToken, quotaBytes, usedBytes, onClose, onDone, onStoragePurchased,
+  visible, items, accessToken, quotaBytes, usedBytes, redirectFolderName,
+  onClose, onDone, onStartBackground, onStoragePurchased,
 }: Props) {
   const [entries, setEntries]         = useState<FileEntry[]>([]);
   const [selected, setSelected]       = useState<Set<number>>(new Set());
   const [sort, setSort]               = useState<SortMode>('type');
+  const [tab, setTab]                 = useState<'files' | 'settings'>('files');
+  const [collapsed, setCollapsed]     = useState<Set<Category>>(new Set());
   const [folders, setFolders]         = useState<ApiFolder[]>([]);
   const [foldersLoading, setFoldersLoading] = useState(false);
-  const [destPickerFor, setDestPickerFor]   = useState<number | null>(null);
+  const [destTarget, setDestTarget]   = useState<DestTarget | null>(null);
+  const [previewEntry, setPreviewEntry]     = useState<FileEntry | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
   const [uploading, setUploading]     = useState(false);
   const [progress, setProgress]       = useState<{ done: number; total: number } | null>(null);
-  const [uploadedCount, setUploadedCount]   = useState(0);
-  const [uploadErrors, setUploadErrors]     = useState(0);
+  const [result, setResult]           = useState<BackupResult | null>(null);
+  const [statusMap, setStatusMap]     = useState<Record<number, BackupItemStatus>>({});
   const [finished, setFinished]       = useState(false);
   const [cleanupLoading, setCleanupLoading] = useState(false);
   const [upgradeVisible, setUpgradeVisible] = useState(false);
+  const [bgEnabled, setBgEnabled]     = useState(true);
+  const [notifyEnabled, setNotifyEnabled]   = useState(true);
 
   // Reset when modal opens
   useEffect(() => {
@@ -125,10 +151,14 @@ export default function GoogleBackupModal({
     setEntries(mapped);
     setSelected(new Set(mapped.map((_, i) => i)));
     setSort('type');
+    setTab('files');
+    setCollapsed(new Set());
+    setDestTarget(null);
+    setPreviewEntry(null);
     setUploading(false);
     setProgress(null);
-    setUploadedCount(0);
-    setUploadErrors(0);
+    setResult(null);
+    setStatusMap({});
     setFinished(false);
     setCleanupLoading(false);
   }, [visible, items]);
@@ -140,7 +170,17 @@ export default function GoogleBackupModal({
       .then((root) => setFolders(root.subfolders?.items ?? []))
       .catch(() => setFolders([]))
       .finally(() => setFoldersLoading(false));
+    loadBackupSettings().then((s) => { setBgEnabled(s.background); setNotifyEnabled(s.notify); });
   }, [visible]);
+
+  // ── Settings ────────────────────────────────────────────────────────────────
+
+  const toggleBackground = (v: boolean) => { setBgEnabled(v); setBackupSetting('background', v); };
+  const toggleNotify = (v: boolean) => {
+    setNotifyEnabled(v);
+    setBackupSetting('notify', v);
+    if (v) requestNotificationPermission();
+  };
 
   // ── Selection ─────────────────────────────────────────────────────────────
 
@@ -156,13 +196,23 @@ export default function GoogleBackupModal({
     });
   };
 
+  const toggleCollapse = (cat: Category) =>
+    setCollapsed((prev) => { const s = new Set(prev); s.has(cat) ? s.delete(cat) : s.add(cat); return s; });
+
   const allSelected = selected.size === entries.length;
 
   // ── Destinations ──────────────────────────────────────────────────────────
 
-  const setDest = (i: number, folderId: string | null) => {
-    setEntries((prev) => prev.map((e, j) => (j === i ? { ...e, destFolderId: folderId } : e)));
-    setDestPickerFor(null);
+  const applyDest = (folderId: string | null) => {
+    if (!destTarget) return;
+    if (destTarget.kind === 'file') {
+      const idx = destTarget.index;
+      setEntries((prev) => prev.map((e, j) => (j === idx ? { ...e, destFolderId: folderId } : e)));
+    } else {
+      const cat = destTarget.category;
+      setEntries((prev) => prev.map((e) => (getCategory(e) === cat ? { ...e, destFolderId: folderId } : e)));
+    }
+    setDestTarget(null);
   };
 
   const folderLabel = (id: string | null) =>
@@ -192,8 +242,11 @@ export default function GoogleBackupModal({
     entries.forEach((entry, index) => map.get(getCategory(entry))!.push({ entry, index }));
     return CATEGORY_ORDER
       .filter((c) => map.get(c)!.length > 0)
-      .map((c) => ({ title: c, data: map.get(c)! }));
-  }, [entries]);
+      .map((c) => {
+        const allItems = map.get(c)!;
+        return { title: c, allItems, data: collapsed.has(c) ? [] : allItems };
+      });
+  }, [entries, collapsed]);
 
   const flatData: ListItem[] = useMemo(() => {
     const indexed = entries.map((entry, index) => ({ entry, index }));
@@ -207,30 +260,27 @@ export default function GoogleBackupModal({
   const handleBackUp = async () => {
     const toUpload = entries.filter((_, i) => selected.has(i));
     if (toUpload.length === 0) return;
-    setUploadedCount(toUpload.length);
-    setUploading(true);
-    setProgress({ done: 0, total: toUpload.length });
-    let errors = 0;
 
-    for (let i = 0; i < toUpload.length; i++) {
-      const e = toUpload[i];
-      let localUri: string | null = null;
-      try {
-        localUri = await downloadGoogleFile(e.googleItem, accessToken);
-        await uploadFile(localUri, e.name, e.type, e.destFolderId ?? undefined);
-      } catch {
-        errors++;
-      } finally {
-        // Clean up the temp file regardless of upload success
-        if (localUri) {
-          try { await RNBlobUtil.fs.unlink(localUri.replace(/^file:\/\//, '')); }
-          catch {}
-        }
-      }
-      setProgress({ done: i + 1, total: toUpload.length });
+    // Background mode: hand off to the parent and close, progress shows in the card.
+    if (bgEnabled) {
+      onStartBackground(toUpload, accessToken, notifyEnabled);
+      return;
     }
 
-    setUploadErrors(errors);
+    // Foreground mode: upload in place, marking each row, then show the finished screen.
+    setUploading(true);
+    setStatusMap({});
+    setProgress({ done: 0, total: toUpload.length });
+    const res = await uploadGoogleEntries(
+      toUpload, accessToken, (done, total, done2) => {
+        setProgress({ done, total });
+        if (done2) {
+          const idx = entries.indexOf(done2.entry as FileEntry);
+          if (idx >= 0) setStatusMap((m) => ({ ...m, [idx]: done2.status }));
+        }
+      },
+    );
+    setResult(res);
     setUploading(false);
     setFinished(true);
   };
@@ -286,9 +336,12 @@ export default function GoogleBackupModal({
   // ── Row renderer ──────────────────────────────────────────────────────────
 
   const renderRow = ({ entry, index }: ListItem) => {
-    const checked = selected.has(index);
-    const Icon    = fileIcon(entry);
-    const isDrive = entry.source === 'drive';
+    const checked    = selected.has(index);
+    const Icon       = fileIcon(entry);
+    const isDrive    = entry.source === 'drive';
+    const locked     = redirectFolderName !== null && isMediaEntry(entry);
+    const previewable = !finished && googlePreviewSource(entry.googleItem, accessToken) !== null;
+    const status     = statusMap[index];
 
     return (
       <TouchableOpacity
@@ -300,9 +353,19 @@ export default function GoogleBackupModal({
         <View style={[styles.checkbox, checked && styles.checkboxOn]}>
           {checked && <Check size={11} color={colors.surface} strokeWidth={3} />}
         </View>
-        <View style={[styles.fileIconWrap, isDrive ? styles.fileIconDrive : styles.fileIconPhotos]}>
-          <Icon size={18} color={isDrive ? colors.primary : colors.error} strokeWidth={1.5} />
-        </View>
+        {previewable ? (
+          <TouchableOpacity
+            style={[styles.fileIconWrap, isDrive ? styles.fileIconDrive : styles.fileIconPhotos]}
+            onPress={() => setPreviewEntry(entry)}
+            hitSlop={6}
+          >
+            <Icon size={18} color={isDrive ? colors.primary : colors.error} strokeWidth={1.5} />
+          </TouchableOpacity>
+        ) : (
+          <View style={[styles.fileIconWrap, isDrive ? styles.fileIconDrive : styles.fileIconPhotos]}>
+            <Icon size={18} color={isDrive ? colors.primary : colors.error} strokeWidth={1.5} />
+          </View>
+        )}
         <View style={styles.fileInfo}>
           <Text style={[styles.fileName, !checked && styles.textDimmed]} numberOfLines={1}>{entry.name}</Text>
           <View style={styles.fileMeta}>
@@ -312,14 +375,37 @@ export default function GoogleBackupModal({
             <Text style={styles.fileSize}>{entry.size > 0 ? fmt(entry.size) : '—'}</Text>
           </View>
         </View>
-        <TouchableOpacity
-          style={[styles.destBtn, (!checked || uploading || finished) && styles.destBtnDisabled]}
-          onPress={() => checked && !uploading && !finished && setDestPickerFor(index)}
-          hitSlop={4}
-        >
-          <Text style={styles.destBtnText} numberOfLines={1}>{folderLabel(entry.destFolderId)}</Text>
-          <ChevronDown size={12} color={colors.primary} />
-        </TouchableOpacity>
+        {status ? (
+          <View style={[
+            styles.statusBadge,
+            status === 'duplicate' ? styles.statusBadgeDuplicate
+              : status === 'error' ? styles.statusBadgeError
+              : styles.statusBadgeDone,
+          ]}>
+            <Text style={[
+              styles.statusBadgeText,
+              status === 'duplicate' ? styles.statusBadgeTextDuplicate
+                : status === 'error' ? styles.statusBadgeTextError
+                : styles.statusBadgeTextDone,
+            ]}>
+              {status === 'duplicate' ? 'Duplicate' : status === 'error' ? 'Failed' : 'Backed up'}
+            </Text>
+          </View>
+        ) : locked ? (
+          <View style={[styles.destBtn, styles.destBtnLocked]}>
+            <GalleryHorizontalEnd size={11} color={colors.mediaAccent} strokeWidth={1.5} />
+            <Text style={[styles.destBtnText, styles.destBtnTextLocked]} numberOfLines={1}>{redirectFolderName}</Text>
+          </View>
+        ) : (
+          <TouchableOpacity
+            style={[styles.destBtn, (!checked || uploading || finished) && styles.destBtnDisabled]}
+            onPress={() => checked && !uploading && !finished && setDestTarget({ kind: 'file', index })}
+            hitSlop={4}
+          >
+            <Text style={styles.destBtnText} numberOfLines={1}>{folderLabel(entry.destFolderId)}</Text>
+            <ChevronDown size={12} color={colors.primary} />
+          </TouchableOpacity>
+        )}
       </TouchableOpacity>
     );
   };
@@ -327,24 +413,47 @@ export default function GoogleBackupModal({
   // ── Section header renderer ───────────────────────────────────────────────
 
   const renderSectionHeader = ({ section }: { section: TypeSection }) => {
-    const indices    = section.data.map((d) => d.index);
+    const items      = section.allItems;
+    const indices    = items.map((d) => d.index);
     const selCount   = indices.filter((i) => selected.has(i)).length;
-    const allGroupOn = selCount === section.data.length;
+    const allGroupOn = items.length > 0 && selCount === items.length;
+    const isCollapsed = collapsed.has(section.title);
+    const catRedirected = redirectFolderName !== null && items.every((d) => isMediaEntry(d.entry));
+
     return (
-      <Pressable style={styles.sectionHeader} onPress={() => !finished && toggleGroup(indices)}>
-        <Text style={styles.sectionTitle}>{section.title}</Text>
-        <Text style={styles.sectionToggle}>
-          {selCount}/{section.data.length}{'  '}
-          {!finished && (allGroupOn ? 'Deselect all' : 'Select all')}
-        </Text>
-      </Pressable>
+      <View style={styles.sectionHeader}>
+        <TouchableOpacity style={styles.sectionHeaderLeft} onPress={() => toggleCollapse(section.title)} hitSlop={6}>
+          {isCollapsed
+            ? <ChevronRight size={15} color={colors.textSecondary} strokeWidth={2} />
+            : <ChevronDown  size={15} color={colors.textSecondary} strokeWidth={2} />}
+          <Text style={styles.sectionTitle}>{section.title}</Text>
+        </TouchableOpacity>
+        <View style={styles.sectionHeaderRight}>
+          {!finished && (
+            <TouchableOpacity
+              style={[styles.sectionDestBtn, catRedirected && styles.sectionDestBtnDisabled]}
+              onPress={() => !catRedirected && setDestTarget({ kind: 'category', category: section.title })}
+              disabled={catRedirected}
+              hitSlop={6}
+            >
+              <Folder size={12} color={colors.primary} strokeWidth={1.5} />
+              <Text style={styles.sectionDestBtnText}>Folder</Text>
+            </TouchableOpacity>
+          )}
+          <TouchableOpacity onPress={() => !finished && toggleGroup(indices)} hitSlop={6}>
+            <Text style={styles.sectionToggle}>
+              {selCount}/{items.length}{'  '}
+              {!finished && (allGroupOn ? 'Deselect all' : 'Select all')}
+            </Text>
+          </TouchableOpacity>
+        </View>
+      </View>
     );
   };
 
   // ── Derived UI state ──────────────────────────────────────────────────────
 
   const canBackUp    = selected.size > 0 && !isOverQuota && !uploading;
-  const activeDest   = destPickerFor !== null ? entries[destPickerFor]?.destFolderId : undefined;
   const showSections = sort === 'type' && !finished;
   const listData     = finished
     ? entries.map((entry, index) => ({ entry, index }))
@@ -356,6 +465,17 @@ export default function GoogleBackupModal({
   const cleanupLabel = driveCount > 0
     ? `Delete ${driveCount} Drive file${driveCount !== 1 ? 's' : ''} from Google Drive`
     : `${photoCount} photo${photoCount !== 1 ? 's' : ''} — delete manually in Google Photos`;
+
+  const activeDest = (() => {
+    if (!destTarget) return undefined;
+    if (destTarget.kind === 'file') return entries[destTarget.index]?.destFolderId;
+    const catEntries = entries.filter((e) => getCategory(e) === destTarget.category);
+    const first = catEntries[0]?.destFolderId ?? null;
+    return catEntries.every((e) => (e.destFolderId ?? null) === first) ? first : undefined;
+  })();
+
+  const previewSource = previewEntry ? googlePreviewSource(previewEntry.googleItem, accessToken) : null;
+  const showTabs = !finished && !uploading;
 
   return (
     <>
@@ -383,99 +503,156 @@ export default function GoogleBackupModal({
           ) : <View style={styles.allBtn} />}
         </View>
 
-        {/* Quota impact card */}
-        {quotaBytes > 0 && (
-          <View style={styles.summaryCard}>
-            <View style={styles.summaryRow}>
-              <Text style={styles.summaryCount}>
-                {selected.size} of {entries.length} file{entries.length !== 1 ? 's' : ''} selected
-              </Text>
-              <Text style={[styles.summarySize, isOverQuota && styles.textError]}>
-                {fmt(selectedSize)}
-              </Text>
-            </View>
-
-            {/* Quota impact bar */}
-            <View style={styles.barTrack}>
-              <View style={[styles.barFill, { width: `${usedPct}%` as any, backgroundColor: colors.primary, opacity: 0.3 }]} />
-              <View style={[styles.barFill, {
-                left: `${usedPct}%` as any,
-                width: `${fitsPct}%` as any,
-                backgroundColor: isOverQuota ? colors.error : colors.primary,
-              }]} />
-              {isOverQuota && overflowPct > 0 && (
-                <View style={[styles.barFill, {
-                  left: `${usedPct + fitsPct}%` as any,
-                  width: `${overflowPct}%` as any,
-                  backgroundColor: colors.error,
-                  opacity: 0.45,
-                }]} />
-              )}
-            </View>
-
-            <View style={styles.barLabels}>
-              <Text style={[styles.barLabel, isOverQuota && styles.textError]}>
-                {fmt(usedBytes)} before  →  {fmt(projectedUsed)} after
-              </Text>
-              <Text style={styles.barLabel}>{fmt(quotaBytes)} quota</Text>
-            </View>
-
-            {photoCount > 0 && (
-              <Text style={styles.photoSizeNote}>
-                * Google Photos sizes are not reported by the API and are excluded from the estimate.
-              </Text>
-            )}
-          </View>
-        )}
-
-        {/* Over-quota strip */}
-        {isOverQuota && (
-          <TouchableOpacity style={styles.overQuotaStrip} onPress={() => setUpgradeVisible(true)} activeOpacity={0.85}>
-            <Zap size={14} color={colors.surface} strokeWidth={2.5} style={{ marginRight: 6 }} />
-            <Text style={styles.overQuotaText}>{fmt(overflowBytes)} over quota</Text>
-            <Text style={styles.overQuotaAction}>Get more storage →</Text>
-          </TouchableOpacity>
-        )}
-
-        {/* Sort bar */}
-        {!finished && (
-          <View style={styles.sortBar}>
-            <Text style={styles.sortLabel}>Sort by</Text>
-            {(['type', 'size', 'name'] as SortMode[]).map((s) => (
+        {/* Tab bar */}
+        {showTabs && (
+          <View style={styles.tabBar}>
+            {(['files', 'settings'] as const).map((t) => (
               <TouchableOpacity
-                key={s}
-                style={[styles.sortPill, sort === s && styles.sortPillActive]}
-                onPress={() => setSort(s)}
+                key={t}
+                style={[styles.tabPill, tab === t && styles.tabPillActive]}
+                onPress={() => setTab(t)}
               >
-                <Text style={[styles.sortPillText, sort === s && styles.sortPillTextActive]}>
-                  {s.charAt(0).toUpperCase() + s.slice(1)}
+                {t === 'settings' && (
+                  <Settings size={13} color={tab === t ? colors.primary : colors.textSecondary} strokeWidth={2} style={{ marginRight: 5 }} />
+                )}
+                <Text style={[styles.tabPillText, tab === t && styles.tabPillTextActive]}>
+                  {t === 'files' ? 'Files' : 'Settings'}
                 </Text>
               </TouchableOpacity>
             ))}
           </View>
         )}
 
-        {/* File list */}
-        {showSections ? (
-          <SectionList<ListItem, TypeSection>
-            style={styles.list}
-            contentContainerStyle={styles.listContent}
-            sections={typeSections}
-            keyExtractor={(item) => String(item.index)}
-            stickySectionHeadersEnabled={false}
-            renderSectionHeader={renderSectionHeader}
-            renderItem={({ item }) => renderRow(item)}
-            ItemSeparatorComponent={() => <View style={styles.separator} />}
-          />
+        {tab === 'settings' ? (
+          // ── Settings tab ──────────────────────────────────────────────────
+          <ScrollView style={styles.list} contentContainerStyle={styles.settingsContent}>
+            <View style={styles.settingRow}>
+              <View style={styles.settingInfo}>
+                <Text style={styles.settingLabel}>Back up in the background</Text>
+                <Text style={styles.settingDesc}>
+                  Close this window when you start a backup and keep uploading, with progress shown on the Google Backup card.
+                </Text>
+              </View>
+              <Switch value={bgEnabled} onValueChange={toggleBackground} />
+            </View>
+            <View style={styles.settingRow}>
+              <View style={styles.settingInfo}>
+                <Text style={styles.settingLabel}>Notify when complete</Text>
+                <Text style={styles.settingDesc}>
+                  Send a notification when the backup finishes.
+                </Text>
+              </View>
+              <Switch value={notifyEnabled} onValueChange={toggleNotify} />
+            </View>
+          </ScrollView>
         ) : (
-          <FlatList<ListItem>
-            style={styles.list}
-            contentContainerStyle={styles.listContent}
-            data={listData}
-            keyExtractor={(item) => String(item.index)}
-            renderItem={({ item }) => renderRow(item)}
-            ItemSeparatorComponent={() => <View style={styles.separator} />}
-          />
+          // ── Files tab ─────────────────────────────────────────────────────
+          <>
+            {/* Quota impact card */}
+            {quotaBytes > 0 && (
+              <View style={styles.summaryCard}>
+                <View style={styles.summaryRow}>
+                  <Text style={styles.summaryCount}>
+                    {selected.size} of {entries.length} file{entries.length !== 1 ? 's' : ''} selected
+                  </Text>
+                  <Text style={[styles.summarySize, isOverQuota && styles.textError]}>
+                    {fmt(selectedSize)}
+                  </Text>
+                </View>
+
+                {/* Quota impact bar */}
+                <View style={styles.barTrack}>
+                  <View style={[styles.barFill, { width: `${usedPct}%` as any, backgroundColor: colors.primary, opacity: 0.3 }]} />
+                  <View style={[styles.barFill, {
+                    left: `${usedPct}%` as any,
+                    width: `${fitsPct}%` as any,
+                    backgroundColor: isOverQuota ? colors.error : colors.primary,
+                  }]} />
+                  {isOverQuota && overflowPct > 0 && (
+                    <View style={[styles.barFill, {
+                      left: `${usedPct + fitsPct}%` as any,
+                      width: `${overflowPct}%` as any,
+                      backgroundColor: colors.error,
+                      opacity: 0.45,
+                    }]} />
+                  )}
+                </View>
+
+                <View style={styles.barLabels}>
+                  <Text style={[styles.barLabel, isOverQuota && styles.textError]}>
+                    {fmt(usedBytes)} before  →  {fmt(projectedUsed)} after
+                  </Text>
+                  <Text style={styles.barLabel}>{fmt(quotaBytes)} quota</Text>
+                </View>
+
+                {photoCount > 0 && (
+                  <Text style={styles.photoSizeNote}>
+                    * Google Photos sizes are not reported by the API and are excluded from the estimate.
+                  </Text>
+                )}
+              </View>
+            )}
+
+            {/* Over-quota strip */}
+            {isOverQuota && (
+              <TouchableOpacity style={styles.overQuotaStrip} onPress={() => setUpgradeVisible(true)} activeOpacity={0.85}>
+                <Zap size={14} color={colors.surface} strokeWidth={2.5} style={{ marginRight: 6 }} />
+                <Text style={styles.overQuotaText}>{fmt(overflowBytes)} over quota</Text>
+                <Text style={styles.overQuotaAction}>Get more storage →</Text>
+              </TouchableOpacity>
+            )}
+
+            {/* Photo redirect notice */}
+            {redirectFolderName !== null && (
+              <View style={styles.redirectStrip}>
+                <GalleryHorizontalEnd size={14} color={colors.mediaAccent} strokeWidth={1.5} style={{ marginRight: 6 }} />
+                <Text style={styles.redirectText} numberOfLines={2}>
+                  Photos &amp; videos will be saved to “{redirectFolderName}” (auto-upload)
+                </Text>
+              </View>
+            )}
+
+            {/* Sort bar */}
+            {!finished && (
+              <View style={styles.sortBar}>
+                <Text style={styles.sortLabel}>Sort by</Text>
+                {(['type', 'size', 'name'] as SortMode[]).map((s) => (
+                  <TouchableOpacity
+                    key={s}
+                    style={[styles.sortPill, sort === s && styles.sortPillActive]}
+                    onPress={() => setSort(s)}
+                  >
+                    <Text style={[styles.sortPillText, sort === s && styles.sortPillTextActive]}>
+                      {s.charAt(0).toUpperCase() + s.slice(1)}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            )}
+
+            {/* File list */}
+            {showSections ? (
+              <SectionList<ListItem, TypeSection>
+                style={styles.list}
+                contentContainerStyle={styles.listContent}
+                sections={typeSections}
+                keyExtractor={(item) => String(item.index)}
+                stickySectionHeadersEnabled={false}
+                renderSectionHeader={renderSectionHeader}
+                renderItem={({ item }) => renderRow(item)}
+                ItemSeparatorComponent={() => <View style={styles.separator} />}
+              />
+            ) : (
+              <FlatList<ListItem>
+                style={styles.list}
+                contentContainerStyle={styles.listContent}
+                data={listData}
+                keyExtractor={(item) => String(item.index)}
+                renderItem={({ item }) => renderRow(item)}
+                ItemSeparatorComponent={() => <View style={styles.separator} />}
+              />
+            )}
+          </>
         )}
 
         {/* Footer */}
@@ -489,11 +666,13 @@ export default function GoogleBackupModal({
             </View>
           )}
 
-          {finished && (
-            <Text style={[styles.resultText, uploadErrors > 0 ? styles.textWarning : styles.textSuccess]}>
-              {uploadErrors === 0
-                ? `All ${uploadedCount} file${uploadedCount !== 1 ? 's' : ''} backed up successfully.`
-                : `${uploadedCount - uploadErrors} of ${uploadedCount} backed up · ${uploadErrors} failed.`}
+          {finished && result && (
+            <Text style={[styles.resultText, result.errors > 0 ? styles.textWarning : styles.textSuccess]}>
+              {[
+                `${result.uploaded} backed up`,
+                result.duplicates > 0 ? `${result.duplicates} duplicate${result.duplicates !== 1 ? 's' : ''}` : null,
+                result.errors > 0 ? `${result.errors} failed` : null,
+              ].filter(Boolean).join(' · ')}
             </Text>
           )}
 
@@ -549,12 +728,14 @@ export default function GoogleBackupModal({
 
       </View>
 
-      {/* Per-file destination picker */}
-      <Modal visible={destPickerFor !== null} transparent animationType="fade" onRequestClose={() => setDestPickerFor(null)}>
-        <Pressable style={styles.overlay} onPress={() => setDestPickerFor(null)}>
+      {/* Destination picker (single file or whole category) */}
+      <Modal visible={destTarget !== null} transparent animationType="fade" onRequestClose={() => setDestTarget(null)}>
+        <Pressable style={styles.overlay} onPress={() => setDestTarget(null)}>
           <Pressable style={styles.sheet} onPress={(e) => e.stopPropagation()}>
-            <Text style={styles.sheetTitle}>Choose destination</Text>
-            <TouchableOpacity style={styles.sheetRow} onPress={() => setDest(destPickerFor!, null)}>
+            <Text style={styles.sheetTitle}>
+              {destTarget?.kind === 'category' ? `Destination for all ${destTarget.category}` : 'Choose destination'}
+            </Text>
+            <TouchableOpacity style={styles.sheetRow} onPress={() => applyDest(null)}>
               <View style={styles.sheetIconWrap}>
                 <Folder size={18} color={colors.textSecondary} strokeWidth={1.5} />
               </View>
@@ -565,7 +746,7 @@ export default function GoogleBackupModal({
               <ActivityIndicator color={colors.primary} style={{ marginVertical: spacing.md }} />
             ) : (
               folders.map((folder) => (
-                <TouchableOpacity key={folder.id} style={styles.sheetRow} onPress={() => setDest(destPickerFor!, folder.id)}>
+                <TouchableOpacity key={folder.id} style={styles.sheetRow} onPress={() => applyDest(folder.id)}>
                   <View style={[styles.sheetIconWrap, folder.kind === 'media' && styles.sheetMediaIconWrap]}>
                     {folder.kind === 'media'
                       ? <GalleryHorizontalEnd size={18} color={colors.mediaAccent} strokeWidth={1.5} />
@@ -581,6 +762,28 @@ export default function GoogleBackupModal({
             )}
           </Pressable>
         </Pressable>
+      </Modal>
+
+      {/* Picture preview */}
+      <Modal visible={previewEntry !== null} transparent animationType="fade" onRequestClose={() => setPreviewEntry(null)}>
+        <View style={styles.previewBackdrop}>
+          <TouchableOpacity style={styles.previewClose} onPress={() => setPreviewEntry(null)} hitSlop={12}>
+            <X size={26} color="#fff" strokeWidth={2} />
+          </TouchableOpacity>
+          {previewSource && (
+            <RNImage
+              source={{ uri: previewSource.uri, headers: previewSource.headers }}
+              style={styles.previewImage}
+              resizeMode="contain"
+              onLoadStart={() => setPreviewLoading(true)}
+              onLoadEnd={() => setPreviewLoading(false)}
+            />
+          )}
+          {previewLoading && <ActivityIndicator size="large" color="#fff" style={styles.previewSpinner} />}
+          {previewEntry && (
+            <Text style={styles.previewName} numberOfLines={1}>{previewEntry.name}</Text>
+          )}
+        </View>
       </Modal>
     </Modal>
 
@@ -617,6 +820,44 @@ const styles = StyleSheet.create({
   headerTitle: { fontSize: 17, fontWeight: '600', color: colors.textPrimary },
   allBtn: { width: 36, alignItems: 'flex-end' },
   allBtnText: { fontSize: 14, fontWeight: '600', color: colors.primary },
+
+  tabBar: {
+    flexDirection: 'row',
+    gap: spacing.xs,
+    paddingHorizontal: spacing.md,
+    paddingTop: spacing.sm,
+    backgroundColor: colors.surface,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+    paddingBottom: spacing.sm,
+  },
+  tabPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flex: 1,
+    paddingVertical: 8,
+    borderRadius: radius.md,
+    backgroundColor: colors.divider,
+  },
+  tabPillActive: { backgroundColor: colors.primaryLighter },
+  tabPillText: { fontSize: 14, fontWeight: '600', color: colors.textSecondary },
+  tabPillTextActive: { color: colors.primary },
+
+  settingsContent: { padding: spacing.md, paddingBottom: 200 },
+  settingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    padding: spacing.md,
+    marginBottom: spacing.md,
+    ...shadow.sm,
+  },
+  settingInfo: { flex: 1, marginRight: spacing.md },
+  settingLabel: { fontSize: 15, fontWeight: '600', color: colors.textPrimary },
+  settingDesc: { fontSize: 12, color: colors.textSecondary, marginTop: 3, lineHeight: 17 },
 
   summaryCard: {
     backgroundColor: colors.surface,
@@ -666,6 +907,18 @@ const styles = StyleSheet.create({
   overQuotaText:   { flex: 1, fontSize: 13, color: colors.surface, fontWeight: '500' },
   overQuotaAction: { fontSize: 13, fontWeight: '700', color: colors.surface },
 
+  redirectStrip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.mediaAccentLighter,
+    marginHorizontal: spacing.md,
+    marginTop: spacing.sm,
+    borderRadius: radius.md,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 10,
+  },
+  redirectText: { flex: 1, fontSize: 12, color: colors.mediaAccent, fontWeight: '500', lineHeight: 16 },
+
   sortBar: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -687,8 +940,21 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.sm,
     marginTop: spacing.xs,
   },
+  sectionHeaderLeft: { flexDirection: 'row', alignItems: 'center', gap: 4, flexShrink: 1 },
+  sectionHeaderRight: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
   sectionTitle:  { fontSize: 13, fontWeight: '600', color: colors.textSecondary, textTransform: 'uppercase', letterSpacing: 0.5 },
   sectionToggle: { fontSize: 12, color: colors.primary, fontWeight: '500' },
+  sectionDestBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: radius.sm,
+    backgroundColor: colors.primaryLighter,
+  },
+  sectionDestBtnDisabled: { opacity: 0.4 },
+  sectionDestBtnText: { fontSize: 11, color: colors.primary, fontWeight: '600' },
 
   list: { flex: 1 },
   listContent: { paddingBottom: 240 },
@@ -740,7 +1006,18 @@ const styles = StyleSheet.create({
     maxWidth: 110,
   },
   destBtnDisabled: { opacity: 0.35 },
+  destBtnLocked: { backgroundColor: colors.mediaAccentLighter },
   destBtnText: { fontSize: 12, color: colors.primary, fontWeight: '500', flexShrink: 1 },
+  destBtnTextLocked: { color: colors.mediaAccent },
+
+  statusBadge: { paddingHorizontal: spacing.sm, paddingVertical: spacing.xs, borderRadius: radius.sm },
+  statusBadgeDuplicate: { backgroundColor: colors.warningBg },
+  statusBadgeDone:      { backgroundColor: colors.successBg },
+  statusBadgeError:     { backgroundColor: colors.errorBg },
+  statusBadgeText:          { fontSize: 11, fontWeight: '600' },
+  statusBadgeTextDuplicate: { color: colors.warning },
+  statusBadgeTextDone:      { color: colors.success },
+  statusBadgeTextError:     { color: colors.error },
 
   footer: {
     position: 'absolute',
@@ -818,4 +1095,10 @@ const styles = StyleSheet.create({
     fontSize: 13, color: colors.textMuted, lineHeight: 19,
     paddingVertical: spacing.md, textAlign: 'center',
   },
+
+  previewBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.92)', alignItems: 'center', justifyContent: 'center' },
+  previewClose: { position: 'absolute', top: 50, right: 20, zIndex: 2 },
+  previewImage: { width: '100%', height: '80%' },
+  previewSpinner: { position: 'absolute' },
+  previewName: { position: 'absolute', bottom: 50, left: 20, right: 20, color: '#fff', fontSize: 14, textAlign: 'center' },
 });

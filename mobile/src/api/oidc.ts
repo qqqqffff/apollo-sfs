@@ -23,10 +23,18 @@ const config: AuthConfiguration = {
 // Runs the login flow against Keycloak, jumping straight to the given identity
 // provider via kc_idp_hint so the user lands on Google/Apple instead of the
 // Keycloak username/password page.
+//
+// prompt=login forces Keycloak to re-authenticate rather than silently reusing an
+// existing SSO session, and iosPrefersEphemeralSession stops the system browser
+// from carrying over Keycloak/Google/Apple cookies between runs. Without these,
+// "Sign in with X" reuses Keycloak's session and skips the provider entirely —
+// even after the app has signed out or the account was unlinked.
 export function brokerAuthorize(idp: IdpHint): Promise<AuthorizeResult> {
   return authorize({
     ...config,
-    additionalParameters: { kc_idp_hint: idp },
+    additionalParameters: { kc_idp_hint: idp, prompt: 'login' },
+    iosPrefersEphemeralSession: true,
+    androidPrefersEphemeralSession: true,
   });
 }
 

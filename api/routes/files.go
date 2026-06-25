@@ -68,6 +68,9 @@ func (h *Handler) UploadFile(c *gin.Context) {
 		}
 	}
 
+	// Upload origin tag (defaults to "web" in the service when blank).
+	source := c.PostForm("source")
+
 	name := sanitize.Name(c.PostForm("name"), 255)
 	if name == "" {
 		name = sanitize.Name(fileHeader.Filename, 255)
@@ -93,6 +96,7 @@ func (h *Handler) UploadFile(c *gin.Context) {
 		UserID:   userID,
 		FolderID: folderID,
 		DeviceID: deviceID,
+		Source:   source,
 		Name:     name,
 		MimeType: fileHeader.Header.Get("Content-Type"),
 		Reader:   src,

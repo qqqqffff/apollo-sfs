@@ -138,6 +138,104 @@ func (h *Handler) GetBreakdown(c *gin.Context) {
 	c.JSON(http.StatusOK, resp)
 }
 
+// ── GET /api/v1/storage/my-servers ───────────────────────────────────────────
+
+type myServerResponse struct {
+	ServerID      string `json:"server_id"`
+	DriveID       string `json:"drive_id"`
+	Name          string `json:"name"`
+	State         string `json:"state"`
+	DriveType     string `json:"drive_type"` // "nvme" | "hdd"
+	CapacityBytes int64  `json:"capacity_bytes"`
+	UsedBytes     int64  `json:"used_bytes"`       // this user's bytes on the server
+	DriveUsedPct  int    `json:"drive_used_pct"`   // physical fullness across all users
+	IsPrimary     bool   `json:"is_primary"`
+	PingURL       string `json:"ping_url"`
+}
+
+// ListMyServers returns the servers the user is allocated to, with this user's
+// usage and the drive's overall fullness, primary first. Backs the per-server
+// storage bars and the primary selector.
+func (h *Handler) ListMyServers(c *gin.Context) {
+	username := c.GetString("username")
+	drives, err := h.queries.GetUserDrives(c.Request.Context(), username)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "list servers"})
+		return
+	}
+
+	resp := make([]myServerResponse, len(drives))
+	for i, d := range drives {
+		pct := 0
+		if d.CapacityBytes > 0 {
+			pct = int(d.DriveUsedBytes * 100 / d.CapacityBytes)
+		}
+		resp[i] = myServerResponse{
+			ServerID:      d.ServerID.String(),
+			DriveID:       d.DriveID.String(),
+			Name:          d.ServerName,
+			State:         d.ServerState,
+			DriveType:     d.DriveType,
+			CapacityBytes: d.CapacityBytes,
+			UsedBytes:     d.UserUsedBytes,
+			DriveUsedPct:  pct,
+			IsPrimary:     d.IsPrimary,
+			PingURL:       fmt.Sprintf("/api/v1/storage/servers/%s/ping", d.ServerID),
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"servers": resp})
+}
+
+// ── PUT /api/v1/storage/primary-server ───────────────────────────────────────
+
+type setPrimaryRequest struct {
+	ServerID string `json:"server_id" binding:"required"`
+}
+
+// SetPrimaryServer makes the user's allocated drive on the given server their
+// primary upload target. 404 when the user owns no drive on that server.
+func (h *Handler) SetPrimaryServer(c *gin.Context) {
+	username := c.GetString("username")
+
+	var req setPrimaryRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "server_id is required"})
+		return
+	}
+	serverID, err := uuid.Parse(req.ServerID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "server_id must be a valid UUID"})
+		return
+	}
+
+	drives, err := h.queries.GetUserDrives(c.Request.Context(), username)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "load servers"})
+		return
+	}
+	var driveID uuid.UUID
+	for _, d := range drives {
+		if d.ServerID == serverID {
+			driveID = d.DriveID
+			break
+		}
+	}
+	if driveID == uuid.Nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "you have no storage on that server"})
+		return
+	}
+
+	if err := h.queries.SetPrimaryDrive(c.Request.Context(), username, driveID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "you have no storage on that server"})
+			return
+		}
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "set primary"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"server_id": req.ServerID})
+}
+
 // ── GET /api/v1/storage/speed/download ───────────────────────────────────────
 
 const speedTestSize = 1 << 20 // 1 MiB

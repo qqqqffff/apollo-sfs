@@ -286,13 +286,10 @@ services:
       KC_HOSTNAME_STRICT: "true"
       # Trust X-Forwarded-* headers set by Nginx
       KC_PROXY_HEADERS: xforwarded
-      # Legacy external→internal token exchange. Google login no longer uses it
-      # (it now goes through identity-provider brokering — the apollo-sfs-mobile
-      # public client + kc_idp_hint). Still enabled only for the Apple paths
-      # (MobileAppleLogin / WebSocialLogin) until those are migrated to brokering
-      # too; on Keycloak 26.2+ this is deprecated and external exchange is not
-      # supported by Standard Token Exchange v2. See TODO: migrate Apple.
-      KC_FEATURES: token-exchange
+      # No KC_FEATURES needed: all social login (web + mobile, Google + Apple) uses
+      # identity-provider brokering (standard OIDC Authorization Code flow), not the
+      # deprecated token-exchange grant. Re-add KC_FEATURES only if a future feature
+      # requires it.
       # Bootstrap admin credentials (Keycloak 26+)
       KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN}
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
@@ -303,6 +300,9 @@ services:
       - ./keycloak/import:/opt/keycloak/data/import:ro
       # Third-party identity provider JARs — mounted into Keycloak's providers dir
       - ./keycloak/providers:/opt/keycloak/providers:ro
+      # Custom login + email theme (apollo-sfs). Read at runtime; restart Keycloak
+      # to pick up changes (themes are cached in the start/production profile).
+      - ./keycloak/themes:/opt/keycloak/themes:ro
     depends_on:
       db-keycloak:
         condition: service_healthy

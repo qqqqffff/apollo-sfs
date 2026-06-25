@@ -18,12 +18,12 @@ var ErrNoCapacity = errors.New("no drive has sufficient capacity for the request
 // ── Drives ────────────────────────────────────────────────────────────────────
 
 const driveColumns = `
-	id, server_id, node_id, label, capacity_bytes, minio_bucket, is_active, created_at`
+	id, server_id, node_id, label, capacity_bytes, minio_bucket, drive_type, is_active, created_at`
 
 func scanDrive(row *sql.Row) (*models.Drive, error) {
 	var d models.Drive
 	err := row.Scan(&d.ID, &d.ServerID, &d.NodeID, &d.Label, &d.CapacityBytes,
-		&d.MinioBucket, &d.IsActive, &d.CreatedAt)
+		&d.MinioBucket, &d.DriveType, &d.IsActive, &d.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -33,7 +33,7 @@ func scanDrive(row *sql.Row) (*models.Drive, error) {
 func scanDriveRow(rows *sql.Rows) (*models.Drive, error) {
 	var d models.Drive
 	err := rows.Scan(&d.ID, &d.ServerID, &d.NodeID, &d.Label, &d.CapacityBytes,
-		&d.MinioBucket, &d.IsActive, &d.CreatedAt)
+		&d.MinioBucket, &d.DriveType, &d.IsActive, &d.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -85,15 +85,16 @@ type CreateDriveParams struct {
 	Label         string
 	CapacityBytes int64
 	MinioBucket   string
+	DriveType     string // "nvme" (fast) or "hdd" (standard)
 }
 
 // CreateDrive inserts a new drive and returns the created row.
 func (q *Queries) CreateDrive(ctx context.Context, p CreateDriveParams) (*models.Drive, error) {
 	row := q.db.QueryRowContext(ctx, `
-		INSERT INTO drives (server_id, node_id, label, capacity_bytes, minio_bucket)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO drives (server_id, node_id, label, capacity_bytes, minio_bucket, drive_type)
+		VALUES ($1, $2, $3, $4, $5, $6)
 		RETURNING`+driveColumns,
-		p.ServerID, p.NodeID, p.Label, p.CapacityBytes, p.MinioBucket,
+		p.ServerID, p.NodeID, p.Label, p.CapacityBytes, p.MinioBucket, p.DriveType,
 	)
 	d, err := scanDrive(row)
 	if err != nil {
@@ -254,14 +255,16 @@ func (q *Queries) GetMaxAvailableQuota(ctx context.Context) (int64, error) {
 
 // ── User drive allocations ────────────────────────────────────────────────────
 
-// GetUserDrive returns the drive allocation for a user with the drive and
-// server details populated. Returns nil if the user has no allocation.
+// GetUserDrive returns a user's PRIMARY drive allocation with the drive and
+// server details populated. When a user has multiple allocations the primary
+// one wins; with none marked it falls back to the oldest. Returns nil if the
+// user has no allocation.
 func (q *Queries) GetUserDrive(ctx context.Context, username string) (*models.UserDriveAllocation, error) {
 	var a models.UserDriveAllocation
 	err := q.db.QueryRowContext(ctx, `
 		SELECT
-			uda.user_id, uda.drive_id, uda.allocated_at,
-			d.id, d.server_id, d.node_id, d.label, d.capacity_bytes, d.minio_bucket, d.is_active, d.created_at,
+			uda.user_id, uda.drive_id, uda.is_primary, uda.allocated_at,
+			d.id, d.server_id, d.node_id, d.label, d.capacity_bytes, d.minio_bucket, d.drive_type, d.is_active, d.created_at,
 			s.id, s.name, s.state, s.minio_endpoint, s.minio_use_ssl,
 			s.minio_access_key_enc, s.minio_access_key_nonce,
 			s.minio_secret_key_enc, s.minio_secret_key_nonce,
@@ -270,10 +273,12 @@ func (q *Queries) GetUserDrive(ctx context.Context, username string) (*models.Us
 		JOIN drives d ON d.id = uda.drive_id
 		JOIN servers s ON s.id = d.server_id
 		WHERE uda.user_id = $1
+		ORDER BY uda.is_primary DESC, uda.allocated_at ASC
+		LIMIT 1
 	`, username).Scan(
-		&a.UserID, &a.DriveID, &a.AllocatedAt,
+		&a.UserID, &a.DriveID, &a.IsPrimary, &a.AllocatedAt,
 		&a.Drive.ID, &a.Drive.ServerID, &a.Drive.NodeID, &a.Drive.Label, &a.Drive.CapacityBytes,
-		&a.Drive.MinioBucket, &a.Drive.IsActive, &a.Drive.CreatedAt,
+		&a.Drive.MinioBucket, &a.Drive.DriveType, &a.Drive.IsActive, &a.Drive.CreatedAt,
 		&a.Server.ID, &a.Server.Name, &a.Server.State, &a.Server.MinioEndpoint,
 		&a.Server.MinioUseSSL,
 		&a.Server.MinioAccessKeyEnc, &a.Server.MinioAccessKeyNonce,
@@ -289,17 +294,165 @@ func (q *Queries) GetUserDrive(ctx context.Context, username string) (*models.Us
 	return &a, nil
 }
 
-// AllocateUserToDrive inserts (or replaces on conflict) a user's drive mapping.
+// GetDriveWithServer returns a single drive and its server, for resolving the
+// MinIO client of the drive a given file lives on.
+func (q *Queries) GetDriveWithServer(ctx context.Context, driveID uuid.UUID) (*models.UserDriveAllocation, error) {
+	var a models.UserDriveAllocation
+	err := q.db.QueryRowContext(ctx, `
+		SELECT
+			d.id, d.server_id, d.node_id, d.label, d.capacity_bytes, d.minio_bucket, d.drive_type, d.is_active, d.created_at,
+			s.id, s.name, s.state, s.minio_endpoint, s.minio_use_ssl,
+			s.minio_access_key_enc, s.minio_access_key_nonce,
+			s.minio_secret_key_enc, s.minio_secret_key_nonce,
+			s.is_active, s.created_at
+		FROM drives d
+		JOIN servers s ON s.id = d.server_id
+		WHERE d.id = $1
+	`, driveID).Scan(
+		&a.Drive.ID, &a.Drive.ServerID, &a.Drive.NodeID, &a.Drive.Label, &a.Drive.CapacityBytes,
+		&a.Drive.MinioBucket, &a.Drive.DriveType, &a.Drive.IsActive, &a.Drive.CreatedAt,
+		&a.Server.ID, &a.Server.Name, &a.Server.State, &a.Server.MinioEndpoint,
+		&a.Server.MinioUseSSL,
+		&a.Server.MinioAccessKeyEnc, &a.Server.MinioAccessKeyNonce,
+		&a.Server.MinioSecretKeyEnc, &a.Server.MinioSecretKeyNonce,
+		&a.Server.IsActive, &a.Server.CreatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("GetDriveWithServer: %w", err)
+	}
+	a.DriveID = a.Drive.ID
+	return &a, nil
+}
+
+// UserDriveInfo summarizes one of a user's drive allocations: physical fullness
+// (across all users on the drive) for routing/availability, and this user's own
+// used bytes for the per-server UI bar.
+type UserDriveInfo struct {
+	DriveID        uuid.UUID
+	ServerID       uuid.UUID
+	ServerName     string
+	ServerState    string
+	ServerIsActive bool
+	DriveLabel     string
+	DriveType      string // "nvme" | "hdd"
+	CapacityBytes  int64
+	DriveUsedBytes int64 // sum across all users on the drive
+	UserUsedBytes  int64 // this user's files on the drive
+	IsPrimary      bool
+	DriveIsActive  bool
+}
+
+// GetUserDrives returns all of a user's drive allocations with usage stats,
+// primary first. Used for upload routing (primary + least-%-used fallback) and
+// the per-server storage UI.
+func (q *Queries) GetUserDrives(ctx context.Context, username string) ([]UserDriveInfo, error) {
+	rows, err := q.db.QueryContext(ctx, `
+		SELECT
+			d.id, d.server_id, s.name, s.state, s.is_active,
+			d.label,
+			d.drive_type,
+			d.capacity_bytes,
+			COALESCE(du.bytes, 0) AS drive_used,
+			COALESCE(uu.bytes, 0) AS user_used,
+			uda.is_primary, d.is_active
+		FROM user_drive_allocations uda
+		JOIN drives d ON d.id = uda.drive_id
+		JOIN servers s ON s.id = d.server_id
+		LEFT JOIN (SELECT drive_id, SUM(size_bytes) AS bytes FROM files GROUP BY drive_id) du ON du.drive_id = d.id
+		LEFT JOIN (SELECT drive_id, SUM(size_bytes) AS bytes FROM files WHERE user_id = $1::uuid GROUP BY drive_id) uu ON uu.drive_id = d.id
+		WHERE uda.user_id = $1
+		ORDER BY uda.is_primary DESC, s.name ASC
+	`, username)
+	if err != nil {
+		return nil, fmt.Errorf("GetUserDrives: %w", err)
+	}
+	defer rows.Close()
+
+	var out []UserDriveInfo
+	for rows.Next() {
+		var d UserDriveInfo
+		if err := rows.Scan(
+			&d.DriveID, &d.ServerID, &d.ServerName, &d.ServerState, &d.ServerIsActive,
+			&d.DriveLabel, &d.DriveType, &d.CapacityBytes,
+			&d.DriveUsedBytes, &d.UserUsedBytes, &d.IsPrimary, &d.DriveIsActive,
+		); err != nil {
+			return nil, fmt.Errorf("GetUserDrives scan: %w", err)
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// AllocateUserToDrive sets a user's PRIMARY drive (used at registration and when
+// switching the primary). It clears any existing primary first, then upserts the
+// target as primary, all in one transaction to satisfy the one-primary index.
 func (q *Queries) AllocateUserToDrive(ctx context.Context, username string, driveID uuid.UUID) error {
+	tx, err := q.pool.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("AllocateUserToDrive: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE user_drive_allocations SET is_primary = false WHERE user_id = $1 AND is_primary`,
+		username,
+	); err != nil {
+		return fmt.Errorf("AllocateUserToDrive: clear primary: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO user_drive_allocations (user_id, drive_id, is_primary)
+		VALUES ($1, $2, true)
+		ON CONFLICT (user_id, drive_id) DO UPDATE SET is_primary = true, allocated_at = NOW()
+	`, username, driveID); err != nil {
+		return fmt.Errorf("AllocateUserToDrive: upsert: %w", err)
+	}
+	return tx.Commit()
+}
+
+// AddUserDrive grants a user an additional (non-primary) drive allocation,
+// leaving the existing primary intact. No-op on conflict.
+func (q *Queries) AddUserDrive(ctx context.Context, username string, driveID uuid.UUID) error {
 	_, err := q.db.ExecContext(ctx, `
-		INSERT INTO user_drive_allocations (user_id, drive_id)
-		VALUES ($1, $2)
-		ON CONFLICT (user_id) DO UPDATE SET drive_id = EXCLUDED.drive_id, allocated_at = NOW()
+		INSERT INTO user_drive_allocations (user_id, drive_id, is_primary)
+		VALUES ($1, $2, false)
+		ON CONFLICT (user_id, drive_id) DO NOTHING
 	`, username, driveID)
 	if err != nil {
-		return fmt.Errorf("AllocateUserToDrive: %w", err)
+		return fmt.Errorf("AddUserDrive: %w", err)
 	}
 	return nil
+}
+
+// SetPrimaryDrive makes driveID the user's primary, but only if the user is
+// already allocated to it. Returns sql.ErrNoRows when they are not.
+func (q *Queries) SetPrimaryDrive(ctx context.Context, username string, driveID uuid.UUID) error {
+	tx, err := q.pool.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("SetPrimaryDrive: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var exists bool
+	if err := tx.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM user_drive_allocations WHERE user_id = $1 AND drive_id = $2)`,
+		username, driveID,
+	).Scan(&exists); err != nil {
+		return fmt.Errorf("SetPrimaryDrive: check: %w", err)
+	}
+	if !exists {
+		return sql.ErrNoRows
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE user_drive_allocations SET is_primary = (drive_id = $2) WHERE user_id = $1`,
+		username, driveID,
+	); err != nil {
+		return fmt.Errorf("SetPrimaryDrive: update: %w", err)
+	}
+	return tx.Commit()
 }
 
 // GetDriveSummaries returns per-drive usage stats for the infrastructure view.
@@ -309,7 +462,7 @@ func (q *Queries) GetDriveSummaries(ctx context.Context) ([]models.DriveSummary,
 			d.id, d.server_id, s.name,
 			d.node_id, COALESCE(n.hostname, ''), COALESCE(n.role, ''), COALESCE(n.is_active, false),
 			d.label,
-			CASE WHEN lower(d.label) LIKE '%nvme%' THEN 'nvme' ELSE 'hdd' END AS drive_type,
+			d.drive_type,
 			d.capacity_bytes, d.minio_bucket,
 			COALESCE(SUM(u.storage_quota_bytes), 0) AS allocated_quota_bytes,
 			COALESCE(SUM(u.storage_used_bytes), 0)  AS used_bytes,

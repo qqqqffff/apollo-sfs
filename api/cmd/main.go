@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -335,7 +336,6 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		authGroup.POST("/reset_password", authHandler.ResetPassword)
 		authGroup.GET("/social/callback", authHandler.SocialCallback)
 		authGroup.POST("/social/link", authHandler.SocialLinkConfirm)
-		authGroup.POST("/social/apple", authHandler.AppleWebLogin)
 	}
 
 	// ── Mobile auth — token-based (no session cookie) ─────────────────────
@@ -435,6 +435,8 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		protected.GET("/storage/servers", storageHandler.ListServers)
 		protected.GET("/storage/servers/:server_id/ping", storageHandler.PingServer)
 		protected.GET("/storage/breakdown", storageHandler.GetBreakdown)
+		protected.GET("/storage/my-servers", storageHandler.ListMyServers)
+		protected.PUT("/storage/primary-server", storageHandler.SetPrimaryServer)
 		protected.GET("/storage/speed/download", storageHandler.SpeedTestDownload)
 		protected.POST("/storage/speed/upload", storageHandler.SpeedTestUpload)
 
@@ -610,12 +612,19 @@ func seedDefaultServer(ctx context.Context, queries *db.Queries, cfg Config, kek
 	if label == "" {
 		label = "nvme-01"
 	}
+	// The bootstrap drive is the primary NVMe/fast tier; infer the tier from the
+	// label to match AddDrive's classification.
+	driveType := "hdd"
+	if strings.Contains(strings.ToLower(label), "nvme") {
+		driveType = "nvme"
+	}
 	drive, err := queries.CreateDrive(ctx, db.CreateDriveParams{
 		ServerID:      server.ID,
 		NodeID:        &node.ID,
 		Label:         label,
 		CapacityBytes: capacityBytes,
 		MinioBucket:   cfg.MinIOBucketName,
+		DriveType:     driveType,
 	})
 	if err != nil {
 		return fmt.Errorf("create drive: %w", err)

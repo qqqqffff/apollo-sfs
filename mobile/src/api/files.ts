@@ -16,6 +16,8 @@ export interface ApiFile {
   latitude?: number;
   longitude?: number;
   hidden: boolean;
+  // Origin of the upload: "web" | "device" | "google_drive" | "google_photos".
+  source?: string;
   created_at: string;
   updated_at: string;
 }
@@ -53,11 +55,13 @@ export async function uploadFile(
   folderID?: string,
   onProgress?: (pct: number) => void,
   deviceID?: string,
+  source?: string,
 ): Promise<ApiFile> {
   const form = new FormData();
   form.append('file', { uri, name, type: mimeType } as unknown as Blob);
   if (folderID) form.append('folder_id', folderID);
   if (deviceID) form.append('device_id', deviceID);
+  if (source) form.append('source', source);
 
   const res = await api.post<ApiFile>('/api/v1/files/upload', form, {
     headers: { 'Content-Type': 'multipart/form-data' },

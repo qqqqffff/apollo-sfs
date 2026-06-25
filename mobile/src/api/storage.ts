@@ -34,6 +34,31 @@ export interface SpeedMetrics {
   upload_mbps: number | null;
 }
 
+// A server the authenticated user is allocated storage on.
+export interface MyServer {
+  server_id: string;
+  drive_id: string;
+  name: string;
+  state: string;
+  drive_type: 'nvme' | 'hdd';
+  capacity_bytes: number;
+  used_bytes: number;      // this user's bytes on the server
+  drive_used_pct: number;  // physical fullness across all users
+  is_primary: boolean;
+  ping_url: string;
+}
+
+// Backend: GET /api/v1/storage/my-servers
+export async function listMyServers(): Promise<MyServer[]> {
+  const res = await api.get<{ servers: MyServer[] }>('/api/v1/storage/my-servers');
+  return res.data.servers ?? [];
+}
+
+// Backend: PUT /api/v1/storage/primary-server — sets the user's primary upload target.
+export async function setPrimaryServer(serverId: string): Promise<void> {
+  await api.put('/api/v1/storage/primary-server', { server_id: serverId });
+}
+
 // Backend: GET /api/v1/storage/servers
 export async function listServers(): Promise<ServerInfo[]> {
   const res = await api.get<{ servers: ServerInfo[] }>('/api/v1/storage/servers');

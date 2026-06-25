@@ -652,13 +652,15 @@ export default function MediaGallery({ files, currentFolderID, isSubcollection, 
                   />
                 )}
                 <InfoRow
-                  label="Device Sync"
+                  label="Source"
                   value={
                     infoFile.device_id
                       ? infoFile.device_id === thisDeviceID
                         ? '✓ Synced from this device'
                         : 'Synced from another device'
-                      : 'Uploaded from web'
+                      : infoFile.source?.startsWith('google')
+                        ? 'Backed up from Google'
+                        : 'Uploaded from web'
                   }
                 />
               </>

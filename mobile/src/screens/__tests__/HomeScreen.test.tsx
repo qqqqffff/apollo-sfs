@@ -147,8 +147,9 @@ describe('camera roll backup card', () => {
   });
 
   it('shows destination label', async () => {
-    const { findByText } = renderHome();
-    await findByText('Destination');
+    // "Destination" appears on both the Camera Roll and Files cards.
+    const { findAllByText } = renderHome();
+    expect((await findAllByText('Destination')).length).toBeGreaterThan(0);
   });
 
   it('shows "/" when no destination is set', async () => {
@@ -227,11 +228,11 @@ describe('Sync Now', () => {
 
   it('disables Sync Now button while isSyncing', async () => {
     setupMocks({ isSyncing: true });
-    const { findByText, UNSAFE_getByType } = renderHome();
+    const { findByText, UNSAFE_getAllByType } = renderHome();
     await findByText('Camera Roll Backup');
-    // When isSyncing is true, the button shows ActivityIndicator instead of text
+    // When isSyncing is true, the status bar and the Sync Now button both show a spinner.
     const { ActivityIndicator } = require('react-native');
-    expect(UNSAFE_getByType(ActivityIndicator)).toBeTruthy();
+    expect(UNSAFE_getAllByType(ActivityIndicator).length).toBeGreaterThan(0);
   });
 });
 

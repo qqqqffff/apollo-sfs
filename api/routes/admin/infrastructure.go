@@ -158,6 +158,10 @@ func (h *Handler) UpdateServer(c *gin.Context) {
 type addDriveRequest struct {
 	Label       string `json:"label" binding:"required"`
 	MinioBucket string `json:"minio_bucket" binding:"required"`
+	// DriveType is the storage tier: "nvme" (fast) or "hdd" (standard). Optional
+	// for backward compatibility — when omitted it is inferred from the label
+	// (a label containing "nvme" → nvme, otherwise hdd).
+	DriveType string `json:"drive_type" binding:"omitempty,oneof=nvme hdd"`
 	// NodeID, when set, mounts the new drive on a specific node of this server.
 	// Omit to leave the drive unassigned.
 	NodeID string `json:"node_id"`
@@ -211,12 +215,24 @@ func (h *Handler) AddDrive(c *gin.Context) {
 		nodeID = &nid
 	}
 
+	// Tier: use the explicit drive_type, else infer from the label for backward
+	// compatibility (callers that predate the field still classify correctly).
+	driveType := strings.ToLower(sanitize.String(req.DriveType))
+	if driveType == "" {
+		if strings.Contains(strings.ToLower(req.Label), "nvme") {
+			driveType = "nvme"
+		} else {
+			driveType = "hdd"
+		}
+	}
+
 	drive, err := h.queries.CreateDrive(ctx, db.CreateDriveParams{
 		ServerID:      serverID,
 		NodeID:        nodeID,
 		Label:         sanitize.String(req.Label),
 		CapacityBytes: 0, // set by Sync once the drive is online
 		MinioBucket:   req.MinioBucket,
+		DriveType:     driveType,
 	})
 	if err != nil {
 		if strings.Contains(err.Error(), "unique") {

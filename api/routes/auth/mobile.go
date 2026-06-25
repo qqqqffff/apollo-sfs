@@ -19,10 +19,6 @@ type mobileRefreshRequest struct {
 	RefreshToken string `json:"refresh_token" binding:"required"`
 }
 
-type mobileAppleRequest struct {
-	IdentityToken string `json:"identity_token" binding:"required"`
-}
-
 // tokenResponse is the JSON shape returned by all mobile auth endpoints.
 type tokenResponse struct {
 	AccessToken      string `json:"access_token"`
@@ -83,25 +79,14 @@ func (h *Handler) MobileRefresh(c *gin.Context) {
 }
 
 // MobileAppleLogin handles POST /api/v1/mobile/auth/apple.
-// Exchanges an Apple identity token for Apollo SFS tokens via Keycloak Token Exchange.
+//
+// DEPRECATED: like Google, Apple login moved to Keycloak identity-provider
+// brokering (kc_idp_hint=apple) followed by POST /mobile/auth/session. It relied
+// on Keycloak's external token exchange, which Standard Token Exchange v2 no
+// longer supports. Kept registered so stale app builds get a clear signal.
 func (h *Handler) MobileAppleLogin(c *gin.Context) {
-	var req mobileAppleRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "identity_token is required"})
-		return
-	}
-
-	tokens, err := h.svc.SocialLogin(c.Request.Context(), "apple", req.IdentityToken)
-	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "apple authentication failed: " + err.Error()})
-		return
-	}
-
-	c.JSON(http.StatusOK, tokenResponse{
-		AccessToken:      tokens.AccessToken,
-		RefreshToken:     tokens.RefreshToken,
-		ExpiresIn:        tokens.ExpiresIn,
-		RefreshExpiresIn: tokens.RefreshExpiresIn,
+	c.JSON(http.StatusGone, gin.H{
+		"error": "apple login moved to identity-provider brokering; please update the app",
 	})
 }
 

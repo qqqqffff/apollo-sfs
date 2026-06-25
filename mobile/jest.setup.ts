@@ -2,20 +2,20 @@ import '@testing-library/jest-native/extend-expect';
 
 // ─── AsyncStorage ─────────────────────────────────────────────────────────────
 
-const asyncStore = new Map<string, string>();
+const mockAsyncStore = new Map<string, string>();
 
 jest.mock('@react-native-async-storage/async-storage', () => ({
-  getItem: jest.fn((key: string) => Promise.resolve(asyncStore.get(key) ?? null)),
+  getItem: jest.fn((key: string) => Promise.resolve(mockAsyncStore.get(key) ?? null)),
   setItem: jest.fn((key: string, value: string) => {
-    asyncStore.set(key, value);
+    mockAsyncStore.set(key, value);
     return Promise.resolve();
   }),
   removeItem: jest.fn((key: string) => {
-    asyncStore.delete(key);
+    mockAsyncStore.delete(key);
     return Promise.resolve();
   }),
   clear: jest.fn(() => {
-    asyncStore.clear();
+    mockAsyncStore.clear();
     return Promise.resolve();
   }),
 }));
@@ -62,6 +62,35 @@ jest.mock('react-native-blob-util', () => ({
   },
 }));
 
+// ─── App Auth (OIDC) ──────────────────────────────────────────────────────────
+
+jest.mock('react-native-app-auth', () => ({
+  authorize: jest.fn(() => Promise.resolve({})),
+  refresh: jest.fn(() => Promise.resolve({})),
+  logout: jest.fn(() => Promise.resolve()),
+}));
+
+// ─── WebView ──────────────────────────────────────────────────────────────────
+
+jest.mock('react-native-webview', () => ({
+  __esModule: true,
+  default: () => null,
+  WebView: () => null,
+}));
+
+// ─── Notifee (local notifications) ────────────────────────────────────────────
+
+jest.mock('@notifee/react-native', () => ({
+  __esModule: true,
+  default: {
+    requestPermission: jest.fn(() => Promise.resolve({ authorizationStatus: 1 })),
+    createChannel: jest.fn(() => Promise.resolve('google-backup')),
+    displayNotification: jest.fn(() => Promise.resolve()),
+  },
+  AndroidImportance: { DEFAULT: 3 },
+  AuthorizationStatus: { NOT_DETERMINED: -1, DENIED: 0, AUTHORIZED: 1, PROVISIONAL: 2 },
+}));
+
 // ─── Background fetch ─────────────────────────────────────────────────────────
 
 jest.mock('react-native-background-fetch', () => ({
@@ -84,15 +113,15 @@ jest.mock('react-native-document-picker', () => ({
 
 // ─── Encrypted storage ────────────────────────────────────────────────────────
 
-const encStore = new Map<string, string>();
+const mockEncStore = new Map<string, string>();
 jest.mock('react-native-encrypted-storage', () => ({
   setItem: jest.fn((key: string, value: string) => {
-    encStore.set(key, value);
+    mockEncStore.set(key, value);
     return Promise.resolve();
   }),
-  getItem: jest.fn((key: string) => Promise.resolve(encStore.get(key) ?? null)),
+  getItem: jest.fn((key: string) => Promise.resolve(mockEncStore.get(key) ?? null)),
   removeItem: jest.fn((key: string) => {
-    encStore.delete(key);
+    mockEncStore.delete(key);
     return Promise.resolve();
   }),
 }));

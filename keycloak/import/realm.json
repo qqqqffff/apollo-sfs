@@ -1,6 +1,8 @@
 {
   "realm": "apollo-sfs-realm",
   "displayName": "Apollo SFS",
+  "loginTheme": "apollo-sfs",
+  "emailTheme": "apollo-sfs",
   "enabled": true,
   "sslRequired": "external",
   "loginWithEmailAllowed": true,
@@ -39,7 +41,7 @@
     "replyTo": "",
     "replyToDisplayName": "",
     "envelopeFrom": "",
-    "starttls": "true",
+    "starttls": "false",
     "ssl": "false",
     "auth": "false"
   },

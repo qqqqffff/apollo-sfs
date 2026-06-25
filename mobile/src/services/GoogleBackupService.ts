@@ -1,4 +1,6 @@
 import RNBlobUtil from 'react-native-blob-util';
+import { uploadFile } from '../api/files';
+import { checkHash } from '../api/sync';
 
 const DRIVE_API         = 'https://www.googleapis.com/drive/v3';
 const PHOTOS_PICKER_API = 'https://photospicker.googleapis.com/v1';
@@ -196,4 +198,118 @@ export async function deleteGoogleDriveFile(fileId: string, accessToken: string)
   if (!res.ok && res.status !== 204) {
     throw new Error(`Delete failed: ${res.status}`);
   }
+}
+
+// Trashes several Drive files, tolerating individual failures. Returns the
+// number that could not be trashed.
+export async function trashGoogleDriveFiles(
+  fileIds: string[],
+  accessToken: string,
+): Promise<{ failed: number }> {
+  let failed = 0;
+  for (const id of fileIds) {
+    try { await deleteGoogleDriveFile(id, accessToken); }
+    catch { failed++; }
+  }
+  return { failed };
+}
+
+// ── Backup loop ─────────────────────────────────────────────────────────────
+
+// One file queued for backup: the Google source plus the resolved upload name,
+// mime type, and destination folder (null = root).
+export interface BackupEntry {
+  googleItem:   GoogleBackupItem;
+  name:         string;
+  type:         string;
+  destFolderId: string | null;
+}
+
+// Terminal outcome for one queued file.
+export type BackupItemStatus = 'done' | 'duplicate' | 'error';
+
+export interface BackupResult {
+  uploaded:   number; // newly stored
+  duplicates: number; // already in SFS, skipped
+  errors:     number; // failed to download/hash/upload
+}
+
+// The Apollo SFS source tag recorded on files backed up from Google.
+function sourceFor(item: GoogleBackupItem): string {
+  return item.source === 'photos' ? 'google_photos' : 'google_drive';
+}
+
+// Downloads each Google file to a temp path and uploads it to Apollo SFS,
+// skipping any file whose content already exists (SHA-256 dedup, matching the
+// camera-roll sync). Temp files are cleaned up afterwards; individual failures
+// are counted, not thrown. Shared by the modal's in-place flow and HomeScreen's
+// background runner. onProgress reports each file's terminal status so callers
+// can mark rows live.
+export async function uploadGoogleEntries(
+  entries: BackupEntry[],
+  accessToken: string,
+  onProgress?: (done: number, total: number, finished?: { entry: BackupEntry; status: BackupItemStatus }) => void,
+): Promise<BackupResult> {
+  const total = entries.length;
+  let uploaded = 0;
+  let duplicates = 0;
+  let errors = 0;
+
+  for (let i = 0; i < total; i++) {
+    const e = entries[i];
+    let localUri: string | null = null;
+    let status: BackupItemStatus = 'error';
+    try {
+      localUri = await downloadGoogleFile(e.googleItem, accessToken);
+
+      // Dedup: skip when SFS already holds identical content.
+      let isDuplicate = false;
+      try {
+        const hash = await RNBlobUtil.fs.hash(localUri.replace(/^file:\/\//, ''), 'sha256');
+        if (hash) isDuplicate = (await checkHash(hash)).exists;
+      } catch {
+        // hashing / check failure is non-fatal — fall through and upload
+      }
+
+      if (isDuplicate) {
+        duplicates++;
+        status = 'duplicate';
+      } else {
+        await uploadFile(localUri, e.name, e.type, e.destFolderId ?? undefined, undefined, undefined, sourceFor(e.googleItem));
+        uploaded++;
+        status = 'done';
+      }
+    } catch {
+      errors++;
+      status = 'error';
+    } finally {
+      // Clean up the temp file regardless of outcome.
+      if (localUri) {
+        try { await RNBlobUtil.fs.unlink(localUri.replace(/^file:\/\//, '')); }
+        catch {}
+      }
+    }
+    onProgress?.(i + 1, total, { entry: e, status });
+  }
+
+  return { uploaded, duplicates, errors };
+}
+
+// ── Preview ─────────────────────────────────────────────────────────────────
+
+export interface PreviewSource { uri: string; headers: Record<string, string> }
+
+// Returns an authenticated image source for previewing a picture, or null for
+// non-image items (videos, documents, Workspace files). Photos use the Picker
+// base URL sized down; Drive images stream the original via alt=media.
+export function googlePreviewSource(
+  item: GoogleBackupItem,
+  accessToken: string,
+): PreviewSource | null {
+  if (!item.mimeType.startsWith('image/')) return null;
+  const headers = { Authorization: `Bearer ${accessToken}` };
+  if (item.source === 'photos') {
+    return item.baseUrl ? { uri: `${item.baseUrl}=w1024-h1024`, headers } : null;
+  }
+  return { uri: `${DRIVE_API}/files/${item.id}?alt=media`, headers };
 }

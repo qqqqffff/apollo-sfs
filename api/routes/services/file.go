@@ -49,6 +49,9 @@ type UploadInput struct {
 	// DeviceID identifies the mobile device that triggered this upload. Nil for
 	// web uploads. Stored on the file row for "synced from this device" display.
 	DeviceID *uuid.UUID
+	// Source is the upload origin: "web" | "device" | "google_drive" |
+	// "google_photos". Blank is normalized to "web" when stored.
+	Source string
 	// Reader is the raw plaintext byte stream (multipart file reader).
 	// The service reads it fully into memory before encrypting; this is required
 	// for single-blob AES-256-GCM and for MIME detection. Video files use chunked
@@ -103,6 +106,11 @@ type cachedAlloc struct {
 	expiresAt time.Time
 }
 
+type cachedDrive struct {
+	storage   *MinIOService
+	expiresAt time.Time
+}
+
 // FileService handles encrypted file upload, download, metadata retrieval,
 // rename, and deletion. All blobs are AES-256-GCM encrypted before being
 // written to MinIO; plaintext never leaves the service boundary.
@@ -121,6 +129,9 @@ type FileService struct {
 	allocCacheMu sync.RWMutex
 	allocCache   map[string]cachedAlloc
 
+	driveCacheMu sync.RWMutex
+	driveCache   map[uuid.UUID]cachedDrive
+
 	raMu       sync.Mutex
 	raCache    map[raKey]*raEntry
 	raInflight map[raKey]struct{} // keys with an active prefetch goroutine
@@ -138,6 +149,7 @@ func NewFileService(q *db.Queries, registry *MinIORegistry, enc *EncryptionServi
 		quotaWarnPct: cfg.QuotaWarnPct,
 		userCache:    make(map[string]cachedUser),
 		allocCache:   make(map[string]cachedAlloc),
+		driveCache:   make(map[uuid.UUID]cachedDrive),
 		raCache:      make(map[raKey]*raEntry),
 		raInflight:   make(map[raKey]struct{}),
 	}
@@ -175,6 +187,107 @@ func (s *FileService) storageFor(ctx context.Context, username string) (*MinIOSe
 	s.allocCacheMu.Unlock()
 
 	return svc, alloc.DriveID, nil
+}
+
+// storageForDrive returns the MinIOService for a specific drive, cached by drive
+// ID. Used to read a file from whichever drive it was stored on, regardless of
+// the user's current primary.
+func (s *FileService) storageForDrive(ctx context.Context, driveID uuid.UUID) (*MinIOService, error) {
+	s.driveCacheMu.RLock()
+	entry, ok := s.driveCache[driveID]
+	s.driveCacheMu.RUnlock()
+	if ok && time.Now().Before(entry.expiresAt) {
+		return entry.storage, nil
+	}
+
+	alloc, err := s.queries.GetDriveWithServer(ctx, driveID)
+	if err != nil {
+		return nil, fmt.Errorf("drive lookup %s: %w", driveID, err)
+	}
+	if alloc == nil {
+		return nil, fmt.Errorf("drive lookup %s: not found", driveID)
+	}
+	client, ok := s.registry.Client(alloc.Server.ID)
+	if !ok {
+		return nil, fmt.Errorf("drive lookup %s: no MinIO client for server %s", driveID, alloc.Server.Name)
+	}
+	svc := NewMinIOService(client, alloc.Drive.MinioBucket)
+
+	s.driveCacheMu.Lock()
+	s.driveCache[driveID] = cachedDrive{storage: svc, expiresAt: time.Now().Add(userCacheTTL)}
+	s.driveCacheMu.Unlock()
+
+	return svc, nil
+}
+
+// storageForFile resolves the MinIOService for the drive a file lives on. Files
+// record their drive at upload; legacy rows without one fall back to the user's
+// primary drive.
+func (s *FileService) storageForFile(ctx context.Context, username string, file *models.File) (*MinIOService, error) {
+	if file.DriveID != nil {
+		if svc, err := s.storageForDrive(ctx, *file.DriveID); err == nil {
+			return svc, nil
+		}
+	}
+	svc, _, err := s.storageFor(ctx, username)
+	return svc, err
+}
+
+// resolveUploadDrive chooses the drive a new upload of fileSize bytes should land
+// on. The user's primary drive wins when it has room; otherwise the owned drive
+// with the lowest physical used-percentage that can fit the file is used. Falls
+// back to the user's primary allocation when no usage data is available.
+func (s *FileService) resolveUploadDrive(ctx context.Context, username string, fileSize int64) (*MinIOService, uuid.UUID, error) {
+	drives, err := s.queries.GetUserDrives(ctx, username)
+	if err != nil {
+		return nil, uuid.Nil, fmt.Errorf("resolve upload drive: %w", err)
+	}
+	// No multi-drive info (or single drive): use the existing primary path.
+	if len(drives) <= 1 {
+		return s.storageFor(ctx, username)
+	}
+
+	driveID, ok := pickUploadDrive(drives, fileSize)
+	if !ok {
+		// Nothing has room — let the primary path run so the caller surfaces a
+		// normal quota/space error instead of a routing failure.
+		return s.storageFor(ctx, username)
+	}
+
+	svc, err := s.storageForDrive(ctx, driveID)
+	if err != nil {
+		return nil, uuid.Nil, fmt.Errorf("resolve upload drive: %w", err)
+	}
+	return svc, driveID, nil
+}
+
+// pickUploadDrive selects the drive a new upload of fileSize bytes should land
+// on: the primary when it has room, otherwise the active owned drive with the
+// lowest physical used-percentage that can still fit the file. ok is false when
+// no owned drive has room. Pure function — no I/O — so it is unit-tested directly.
+func pickUploadDrive(drives []db.UserDriveInfo, fileSize int64) (uuid.UUID, bool) {
+	var bestID uuid.UUID
+	var bestPct float64
+	found := false
+	for _, d := range drives {
+		if !d.DriveIsActive || !d.ServerIsActive {
+			continue
+		}
+		if d.CapacityBytes-d.DriveUsedBytes < fileSize {
+			continue // no room for this file
+		}
+		if d.IsPrimary {
+			return d.DriveID, true // primary wins outright when it fits
+		}
+		var pct float64
+		if d.CapacityBytes > 0 {
+			pct = float64(d.DriveUsedBytes) / float64(d.CapacityBytes)
+		}
+		if !found || pct < bestPct {
+			bestID, bestPct, found = d.DriveID, pct, true
+		}
+	}
+	return bestID, found
 }
 
 // ── Public operations ─────────────────────────────────────────────────────────
@@ -249,8 +362,9 @@ func (s *FileService) Upload(ctx context.Context, in UploadInput) (*models.File,
 		}
 	}
 
-	// 6. Resolve the user's storage drive.
-	storage, driveID, err := s.storageFor(ctx, in.Username)
+	// 6. Resolve the destination drive: the user's primary, or the least-full
+	// owned drive when the primary can't fit the file.
+	storage, driveID, err := s.resolveUploadDrive(ctx, in.Username, fileSize)
 	if err != nil {
 		return nil, fmt.Errorf("upload: %w", err)
 	}
@@ -287,6 +401,7 @@ func (s *FileService) Upload(ctx context.Context, in UploadInput) (*models.File,
 		TakenAt:        takenAt,
 		SHA256Hash:     &hashHex,
 		DeviceID:       in.DeviceID,
+		Source:         in.Source,
 		Latitude:       latitude,
 		Longitude:      longitude,
 	})
@@ -559,7 +674,7 @@ func (s *FileService) Delete(ctx context.Context, fileID, userID uuid.UUID, user
 		return fmt.Errorf("delete: get file: %w", err)
 	}
 
-	storage, _, err := s.storageFor(ctx, username)
+	storage, err := s.storageForFile(ctx, username, file)
 	if err != nil {
 		return fmt.Errorf("delete: %w", err)
 	}
@@ -591,17 +706,19 @@ func (s *FileService) Delete(ctx context.Context, fileID, userID uuid.UUID, user
 // database, then resets the user's storage counters to zero. Intended for the
 // permanent-ban flow where all content must be purged immediately.
 func (s *FileService) AdminDeleteAllFiles(ctx context.Context, username string) error {
-	storage, _, err := s.storageFor(ctx, username)
-	if err != nil {
-		return fmt.Errorf("AdminDeleteAllFiles: %w", err)
-	}
-
 	files, err := s.queries.GetAllUserFiles(ctx, username)
 	if err != nil {
 		return fmt.Errorf("AdminDeleteAllFiles list: %w", err)
 	}
 
 	for _, f := range files {
+		// Each file may live on a different drive — resolve per file.
+		f := f
+		storage, err := s.storageForFile(ctx, username, &f)
+		if err != nil {
+			log.Printf("AdminDeleteAllFiles: storage for %s: %v", f.ID, err)
+			continue
+		}
 		// Remove video variant blobs first (DB rows cascade-delete with parent).
 		if variants, err := s.queries.ListVideoVariants(ctx, f.ID); err == nil {
 			for _, v := range variants {
@@ -656,7 +773,7 @@ func (s *FileService) createVariant(file *models.File, username string) {
 	ctx := context.Background()
 	variantKey := objectKeyFor(file.UserID, uuid.New())
 
-	storage, _, storErr := s.storageFor(ctx, username)
+	storage, storErr := s.storageForFile(ctx, username, file)
 	if storErr != nil {
 		log.Printf("transcode: storage lookup for %s: %v", file.ID, storErr)
 		return
@@ -796,7 +913,7 @@ func (s *FileService) DownloadChunked(ctx context.Context, file *models.File, us
 	}
 	defer zeroBytes(userKey)
 
-	storage, _, err := s.storageFor(ctx, username)
+	storage, err := s.storageForFile(ctx, username, file)
 	if err != nil {
 		return nil, fmt.Errorf("download chunked: %w", err)
 	}
@@ -861,7 +978,7 @@ func (s *FileService) fetchRange(ctx context.Context, storage *MinIOService, fil
 // response from RAM; on a miss, fetchRange is called and a prefetch goroutine
 // is scheduled for the next segment to hide the latency of the following request.
 func (s *FileService) DownloadRange(ctx context.Context, file *models.File, username string, rangeStart, rangeEnd int64) ([]byte, error) {
-	storage, _, err := s.storageFor(ctx, username)
+	storage, err := s.storageForFile(ctx, username, file)
 	if err != nil {
 		return nil, fmt.Errorf("download range: %w", err)
 	}
@@ -980,9 +1097,9 @@ func (s *FileService) decryptBlob(ctx context.Context, username string, file *mo
 	}
 	defer zeroBytes(userKey)
 
-	storage, _, err := s.storageFor(ctx, username)
+	storage, err := s.storageForFile(ctx, username, file)
 	if err != nil {
-		log.Printf("decryptBlob: storageFor(%s) file=%s: %v", username, file.ID, err)
+		log.Printf("decryptBlob: storageForFile(%s) file=%s: %v", username, file.ID, err)
 		return nil, fmt.Errorf("decrypt blob: %w", err)
 	}
 
@@ -1083,7 +1200,7 @@ func (s *FileService) BeginChunkedUpload(ctx context.Context, sess *UploadSessio
 	if err != nil {
 		return fmt.Errorf("begin chunked upload: decrypt user key: %w", err)
 	}
-	storage, driveID, err := s.storageFor(ctx, sess.Username)
+	storage, driveID, err := s.resolveUploadDrive(ctx, sess.Username, sess.TotalSize)
 	if err != nil {
 		zeroBytes(userKey)
 		return fmt.Errorf("begin chunked upload: %w", err)

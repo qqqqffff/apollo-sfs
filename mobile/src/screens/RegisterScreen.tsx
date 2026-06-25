@@ -11,9 +11,9 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import appleAuth, { AppleButton } from '@invertase/react-native-apple-authentication';
+import { AppleButton } from '@invertase/react-native-apple-authentication';
 import api, { storeTokens } from '../api/client';
-import { loginWithApple, loginWithIdp } from '../api/auth';
+import { loginWithIdp } from '../api/auth';
 import { useAuth } from '../context/AuthContext';
 import { colors, radius, spacing } from '../theme';
 
@@ -73,16 +73,23 @@ export default function RegisterScreen({
   };
 
   const handleApple = async () => {
+    if (!inviteToken.trim()) {
+      Alert.alert('Invitation required', 'Enter your invitation code before signing up with Apple.');
+      return;
+    }
     try {
-      const credential = await appleAuth.performRequest({
-        requestedOperation: appleAuth.Operation.LOGIN,
-        requestedScopes: [appleAuth.Scope.FULL_NAME, appleAuth.Scope.EMAIL],
-      });
-      if (!credential.identityToken) throw new Error('No identity token');
-      await loginWithApple(credential.identityToken);
+      // Brokered sign-up (kc_idp_hint=apple): the backend validates the invite
+      // token after Keycloak login and rolls back the account if it is not valid.
+      await loginWithIdp('apple', inviteToken.trim());
       await refreshProfile();
     } catch (e: any) {
-      if (e.code !== appleAuth.Error.CANCELED) Alert.alert('Apple sign-in failed', e.message);
+      const cancelled = String(e?.message ?? '').toLowerCase().includes('cancel');
+      if (cancelled) return;
+      const msg =
+        e?.response?.status === 403
+          ? 'That invitation is invalid, expired, or for a different email.'
+          : e?.response?.data?.error ?? e?.message ?? 'Could not sign up with Apple.';
+      Alert.alert('Sign-up failed', msg);
     }
   };
 

@@ -10,9 +10,9 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import appleAuth, { AppleButton } from '@invertase/react-native-apple-authentication';
+import { AppleButton } from '@invertase/react-native-apple-authentication';
 import Svg, { Path } from 'react-native-svg';
-import { login, loginWithApple, loginWithIdp } from '../api/auth';
+import { login, loginWithIdp } from '../api/auth';
 import { useAuth } from '../context/AuthContext';
 import { colors, radius, spacing } from '../theme';
 
@@ -37,17 +37,19 @@ export default function LoginScreen({ navigation }: { navigation: any }) {
 
   const handleApple = async () => {
     try {
-      const credential = await appleAuth.performRequest({
-        requestedOperation: appleAuth.Operation.LOGIN,
-        requestedScopes: [appleAuth.Scope.FULL_NAME, appleAuth.Scope.EMAIL],
-      });
-      if (!credential.identityToken) throw new Error('No identity token');
-      await loginWithApple(credential.identityToken);
+      // Keycloak identity-provider brokering (kc_idp_hint=apple), same as Google.
+      // Native Apple Sign-In can't mint Keycloak tokens on this server, so the
+      // browser flow is used instead.
+      await loginWithIdp('apple');
       await refreshProfile();
     } catch (e: any) {
-      if (e.code !== appleAuth.Error.CANCELED) {
-        Alert.alert('Apple sign-in failed', e.message);
+      const cancelled = String(e?.message ?? '').toLowerCase().includes('cancel');
+      if (cancelled) return;
+      if (e?.response?.status === 403) {
+        Alert.alert('No account yet', 'Sign up with your invitation code first, then sign in with Apple.');
+        return;
       }
+      Alert.alert('Apple sign-in failed', e?.message ?? 'Could not sign in with Apple.');
     }
   };
 

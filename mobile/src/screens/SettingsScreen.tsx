@@ -12,7 +12,7 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import { ChevronRight, Clock, HardDrive, Moon, RefreshCw, Server, Wifi, Zap } from 'lucide-react-native';
+import { Check, ChevronRight, Clock, HardDrive, Moon, RefreshCw, Wifi, Zap } from 'lucide-react-native';
 import {
   NIGHTSYNC_DEFAULT_HOUR,
   NIGHTSYNC_HOUR_KEY,
@@ -20,7 +20,11 @@ import {
 } from '../tasks/backgroundSync';
 import {
   getStorageBreakdown,
+  listMyServers,
+  pingServer,
   runSpeedTest,
+  setPrimaryServer,
+  type MyServer,
   type SpeedMetrics,
   type StorageBreakdown,
 } from '../api/storage';
@@ -61,6 +65,12 @@ export default function SettingsScreen() {
   const [breakdown, setBreakdown] = useState<StorageBreakdown | null>(null);
   const [breakdownLoading, setBreakdownLoading] = useState(true);
 
+  // Owned servers (multi-drive) + primary selection
+  const [myServers, setMyServers] = useState<MyServer[]>([]);
+  const [settingPrimary, setSettingPrimary] = useState<string | null>(null); // server_id in flight
+  const [primaryPingMs, setPrimaryPingMs] = useState<number | null>(null);
+  const [primaryTesting, setPrimaryTesting] = useState(false);
+
   // Speed metrics
   const [speed, setSpeed] = useState<SpeedMetrics | null>(null);
   const [speedLoading, setSpeedLoading] = useState(false);
@@ -81,16 +91,50 @@ export default function SettingsScreen() {
     setSpeedRemaining(remainingSpeedTests());
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Pings the user's primary server and records the latency, surfacing a
+  // "testing connection" state while in flight.
+  const testPrimaryConnection = useCallback(async (servers: MyServer[]) => {
+    const primary = servers.find((s) => s.is_primary);
+    if (!primary) { setPrimaryPingMs(null); return; }
+    setPrimaryTesting(true);
+    try {
+      setPrimaryPingMs(await pingServer(primary.ping_url));
+    } catch {
+      setPrimaryPingMs(null);
+    } finally {
+      setPrimaryTesting(false);
+    }
+  }, []);
+
   const loadBreakdown = useCallback(async () => {
     setBreakdownLoading(true);
     try {
-      setBreakdown(await getStorageBreakdown());
+      const [bd, servers] = await Promise.all([getStorageBreakdown(), listMyServers().catch(() => [])]);
+      setBreakdown(bd);
+      setMyServers(servers);
+      testPrimaryConnection(servers);
     } catch {
       // leave stale data if any
     } finally {
       setBreakdownLoading(false);
     }
-  }, []);
+  }, [testPrimaryConnection]);
+
+  const handleSelectPrimary = useCallback(async (server: MyServer) => {
+    if (server.is_primary || settingPrimary) return;
+    setSettingPrimary(server.server_id);
+    setPrimaryTesting(true);
+    try {
+      await setPrimaryServer(server.server_id);
+      const servers = await listMyServers();
+      setMyServers(servers);
+      await testPrimaryConnection(servers);
+    } catch {
+      // keep previous selection on failure
+    } finally {
+      setSettingPrimary(null);
+    }
+  }, [settingPrimary, testPrimaryConnection]);
 
   const runSpeed = useCallback(async () => {
     if (speedLoading) return;
@@ -168,6 +212,12 @@ export default function SettingsScreen() {
       ? Math.min((breakdown.hdd_bytes / breakdown.quota_bytes) * 100, 100)
       : 0
     : 0;
+
+  // Only show the storage types the user actually owns. When the server list
+  // hasn't loaded yet (or is empty) fall back to showing both, as before.
+  const ownedTypes = new Set(myServers.map((s) => s.drive_type));
+  const showNvme = ownedTypes.size === 0 || ownedTypes.has('nvme');
+  const showHdd = ownedTypes.size === 0 || ownedTypes.has('hdd');
 
   return (
     <ScrollView
@@ -249,52 +299,40 @@ export default function SettingsScreen() {
               </Text>
             </View>
 
-            <View style={styles.separator} />
-
-            {/* NVMe */}
-            <View style={styles.storageTypeRow}>
-              <View style={[styles.iconWrap, styles.iconWrapNvme]}>
-                <Zap size={16} color={colors.primary} strokeWidth={1.5} />
-              </View>
-              <View style={styles.rowText}>
-                <Text style={styles.rowLabel}>Fast storage (NVMe)</Text>
-                <View style={styles.miniBarTrack}>
-                  <View style={[styles.miniBarFill, styles.miniBarFillNvme, { width: `${nvmePct}%` as any }]} />
-                </View>
-              </View>
-              <Text style={styles.storageTypeBytes}>{formatBytes(breakdown.nvme_bytes)}</Text>
-            </View>
-
-            <View style={styles.separator} />
-
-            {/* HDD */}
-            <View style={styles.storageTypeRow}>
-              <View style={[styles.iconWrap, styles.iconWrapHdd]}>
-                <HardDrive size={16} color={colors.mediaAccent} strokeWidth={1.5} />
-              </View>
-              <View style={styles.rowText}>
-                <Text style={styles.rowLabel}>Standard storage (HDD)</Text>
-                <View style={styles.miniBarTrack}>
-                  <View style={[styles.miniBarFill, styles.miniBarFillHdd, { width: `${hddPct}%` as any }]} />
-                </View>
-              </View>
-              <Text style={styles.storageTypeBytes}>{formatBytes(breakdown.hdd_bytes)}</Text>
-            </View>
-
-            {/* Server location */}
-            {breakdown.server && (
+            {/* NVMe — only when the user owns fast storage */}
+            {showNvme && (
               <>
                 <View style={styles.separator} />
-                <View style={styles.row}>
-                  <View style={[styles.iconWrap, styles.iconWrapServer]}>
-                    <Server size={16} color={colors.textSecondary} strokeWidth={1.5} />
+                <View style={styles.storageTypeRow}>
+                  <View style={[styles.iconWrap, styles.iconWrapNvme]}>
+                    <Zap size={16} color={colors.primary} strokeWidth={1.5} />
                   </View>
                   <View style={styles.rowText}>
-                    <Text style={styles.rowLabel}>{breakdown.server.name}</Text>
-                    <Text style={styles.rowMeta}>
-                      {breakdown.server.state} · {breakdown.server.drive_label}
-                    </Text>
+                    <Text style={styles.rowLabel}>Fast storage (NVMe)</Text>
+                    <View style={styles.miniBarTrack}>
+                      <View style={[styles.miniBarFill, styles.miniBarFillNvme, { width: `${nvmePct}%` as any }]} />
+                    </View>
                   </View>
+                  <Text style={styles.storageTypeBytes}>{formatBytes(breakdown.nvme_bytes)}</Text>
+                </View>
+              </>
+            )}
+
+            {/* HDD — only when the user owns standard storage */}
+            {showHdd && (
+              <>
+                <View style={styles.separator} />
+                <View style={styles.storageTypeRow}>
+                  <View style={[styles.iconWrap, styles.iconWrapHdd]}>
+                    <HardDrive size={16} color={colors.mediaAccent} strokeWidth={1.5} />
+                  </View>
+                  <View style={styles.rowText}>
+                    <Text style={styles.rowLabel}>Standard storage (HDD)</Text>
+                    <View style={styles.miniBarTrack}>
+                      <View style={[styles.miniBarFill, styles.miniBarFillHdd, { width: `${hddPct}%` as any }]} />
+                    </View>
+                  </View>
+                  <Text style={styles.storageTypeBytes}>{formatBytes(breakdown.hdd_bytes)}</Text>
                 </View>
               </>
             )}
@@ -303,6 +341,59 @@ export default function SettingsScreen() {
           <Text style={styles.errorText}>Could not load storage info.</Text>
         )}
       </View>
+
+      {/* ── Servers (storage you own across servers) ── */}
+      {myServers.length > 0 && (
+        <View style={[styles.section, { marginTop: spacing.md }]}>
+          <Text style={styles.sectionTitle}>Servers</Text>
+          {myServers.length > 1 && (
+            <Text style={styles.serversHint}>
+              Uploads go to your primary server, falling back to the least-full one when it's full.
+            </Text>
+          )}
+          {myServers.map((srv, i) => (
+            <TouchableOpacity
+              key={srv.server_id}
+              style={[styles.serverRow, i > 0 && styles.serverRowBorder]}
+              onPress={() => handleSelectPrimary(srv)}
+              disabled={srv.is_primary || settingPrimary !== null}
+              activeOpacity={0.7}
+            >
+              <View style={[styles.iconWrap, srv.drive_type === 'nvme' ? styles.iconWrapNvme : styles.iconWrapHdd]}>
+                {srv.drive_type === 'nvme'
+                  ? <Zap size={16} color={colors.primary} strokeWidth={1.5} />
+                  : <HardDrive size={16} color={colors.mediaAccent} strokeWidth={1.5} />}
+              </View>
+              <View style={styles.rowText}>
+                <View style={styles.serverNameRow}>
+                  <Text style={styles.rowLabel}>{srv.name}</Text>
+                  {srv.is_primary && (
+                    <View style={styles.primaryBadge}><Text style={styles.primaryBadgeText}>PRIMARY</Text></View>
+                  )}
+                </View>
+                <View style={styles.miniBarTrack}>
+                  <View style={[
+                    styles.miniBarFill,
+                    srv.drive_type === 'nvme' ? styles.miniBarFillNvme : styles.miniBarFillHdd,
+                    { width: `${Math.min(srv.drive_used_pct, 100)}%` as any },
+                  ]} />
+                </View>
+                <Text style={styles.serverMeta}>
+                  {formatBytes(srv.used_bytes)} stored · {srv.drive_used_pct}% full
+                  {srv.is_primary && (primaryTesting ? '  ·  Testing connection…' : primaryPingMs != null ? `  ·  ${primaryPingMs} ms` : '')}
+                </Text>
+              </View>
+              {settingPrimary === srv.server_id ? (
+                <ActivityIndicator size="small" color={colors.primary} />
+              ) : srv.is_primary ? (
+                <Check size={18} color={colors.primary} strokeWidth={2.5} />
+              ) : (
+                <View style={styles.radioOuter} />
+              )}
+            </TouchableOpacity>
+          ))}
+        </View>
+      )}
 
       {/* ── Connection speed ── */}
       {breakdown?.server && (
@@ -457,7 +548,6 @@ const styles = StyleSheet.create({
   iconWrapNight: { backgroundColor: colors.mediaAccentLighter },
   iconWrapNvme: { backgroundColor: colors.primaryLighter },
   iconWrapHdd: { backgroundColor: colors.mediaAccentLighter },
-  iconWrapServer: { backgroundColor: colors.divider },
   rowText: { flex: 1 },
   rowLabel: { fontSize: 15, fontWeight: '500', color: colors.textPrimary },
   rowMeta: { fontSize: 12, color: colors.textSecondary, marginTop: 2 },
@@ -490,6 +580,16 @@ const styles = StyleSheet.create({
   miniBarFill: { height: '100%', borderRadius: 2 },
   miniBarFillNvme: { backgroundColor: colors.primary },
   miniBarFillHdd: { backgroundColor: colors.mediaAccent },
+
+  // Servers (multi-drive)
+  serversHint: { fontSize: 12, color: colors.textMuted, marginTop: -spacing.xs, marginBottom: spacing.sm, lineHeight: 16 },
+  serverRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: spacing.sm },
+  serverRowBorder: { borderTopWidth: 1, borderTopColor: colors.divider },
+  serverNameRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: 5 },
+  serverMeta: { fontSize: 11, color: colors.textMuted, marginTop: 5 },
+  primaryBadge: { backgroundColor: colors.primaryLighter, paddingHorizontal: 6, paddingVertical: 1, borderRadius: radius.sm },
+  primaryBadgeText: { fontSize: 9, fontWeight: '700', color: colors.primary, letterSpacing: 0.5 },
+  radioOuter: { width: 18, height: 18, borderRadius: 9, borderWidth: 2, borderColor: colors.border },
 
   errorText: { fontSize: 13, color: colors.error, paddingVertical: spacing.xs },
 

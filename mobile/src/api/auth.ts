@@ -14,14 +14,6 @@ export async function login(email: string, password: string): Promise<TokenRespo
   return res.data;
 }
 
-export async function loginWithApple(identityToken: string): Promise<TokenResponse> {
-  const res = await api.post<TokenResponse>('/api/v1/mobile/auth/apple', {
-    identity_token: identityToken,
-  });
-  await storeTokens(res.data.access_token, res.data.refresh_token, 'password');
-  return res.data;
-}
-
 // Social login via Keycloak identity-provider brokering. Opens the system
 // browser, runs the OIDC Authorization Code + PKCE flow against Keycloak
 // (jumping straight to the chosen provider via kc_idp_hint), stores the returned

@@ -1,12 +1,18 @@
 # Keycloak Social IdP Setup
 
-Configures Sign in with Apple and Sign in with Google on the `apollo-sfs-realm` realm. The mobile app's `/api/v1/mobile/auth/apple` and `/api/v1/mobile/auth/google` endpoints use Keycloak Token Exchange: the client presents an Apple/Google `id_token` and Keycloak returns a Keycloak `access_token` + `refresh_token`.
+Configures Sign in with Apple and Sign in with Google on the `apollo-sfs-realm` realm.
+
+The **mobile app** authenticates via **identity-provider brokering**: it runs a browser-based OIDC Authorization Code + PKCE flow against Keycloak using the public `apollo-sfs-mobile` client with `kc_idp_hint=google`/`apple`, and Keycloak returns realm tokens directly. New users are invite-gated by the backend's `POST /api/v1/mobile/auth/session`. The mobile app no longer uses Token Exchange — the old `/api/v1/mobile/auth/{apple,google}` endpoints now return 410.
+
+> The **web** app's Apple login still uses Keycloak Token Exchange (§1).
 
 There are three concerns:
 
-1. **Token exchange** — must be enabled on the realm before either IdP will work.
-2. **Apple Identity Provider** — requires a Services ID, Key, and Team ID from Apple Developer.
+1. **Token exchange** — needed only for the *web* Apple login (§1); the mobile app does not use it.
+2. **Apple Identity Provider** — requires a Services ID, Key, and Team ID from Apple Developer. Used by both mobile brokering and the web Token Exchange.
 3. **Google Identity Provider** — requires an OAuth 2.0 Client ID and secret from Google Cloud Console.
+
+> **Broker redirect host:** the Apple/Google "Return URL"s below were written for the original `apollo-sfs.com` deployment. Keycloak now has its own hostname (`auth.apollo-sfs.com`); use whichever broker host your working Google login uses, e.g. `https://auth.apollo-sfs.com/realms/apollo-sfs-realm/broker/<alias>/endpoint`.
 
 ---
 
@@ -24,16 +30,13 @@ docker exec apollo-sfs-keycloak /opt/keycloak/bin/kcadm.sh config credentials \
 
 ---
 
-## 1. Enable token exchange
+## 1. Token exchange — no longer required
 
-Required for both Apple and Google. Keycloak 26+ exposes this as a realm attribute:
-
-```bash
-docker exec apollo-sfs-keycloak /opt/keycloak/bin/kcadm.sh update realms/apollo-sfs-realm \
-  -s 'attributes.token-exchange-standard-flow-enabled=true'
-```
-
-> On Keycloak 21–25, token exchange requires a fine-grained authorization grant on the API client instead. See the [Keycloak docs](https://www.keycloak.org/docs/latest/securing_apps/#_token-exchange).
+All social login (web and mobile, Google and Apple) now uses **identity-provider
+brokering**: a standard OIDC Authorization Code flow against Keycloak with
+`kc_idp_hint`. Token exchange is no longer used by any client, so `KC_FEATURES`
+needs no `token-exchange`, and the `token-exchange-standard-flow-enabled` realm
+attribute is not needed. The IdP setup below (§2–§3) is still required.
 
 ---
 
@@ -148,3 +151,63 @@ docker exec apollo-sfs-keycloak /opt/keycloak/bin/kcadm.sh create \
   -s 'config.attribute=lastName' \
   -s 'config.syncMode=INHERIT'
 ```
+
+---
+
+## 4. Automatic account linking (skip the "link account" page + email)
+
+By default, when a social login's email matches an existing account, Keycloak's
+**first broker login** flow shows a "Confirm Link Existing Account" page and then
+verifies ownership by emailing the user (or asking them to re-enter their
+password). To link automatically instead, replace those steps with the
+**Automatically set existing user** authenticator.
+
+> Safe because Google and Apple both return verified emails. Only enable this for
+> identity providers you trust to verify email ownership.
+
+**a. Duplicate the flow.** Admin console → **Authentication → Flows** →
+`first broker login` → **Duplicate** → name it `first broker login - auto link`.
+Set the executions to:
+
+```
+first broker login - auto link
+├── Review Profile                          DISABLED
+└── User creation or linking                REQUIRED
+    ├── Create User If Unique               ALTERNATIVE
+    └── Handle Existing Account             ALTERNATIVE
+        ├── Automatically set existing user REQUIRED   ← add this
+        ├── Confirm link existing account   DISABLED
+        └── Account verification options    DISABLED
+```
+
+> **Automatically set existing user** must live *inside* **Handle Existing
+> Account** — placed at the root it errors with "no existing duplicated user in
+> ClientSession".
+
+**b. Bind it to each IdP.** Identity Providers → `google` / `apple` →
+**Advanced** (or the provider settings):
+- **First login flow** → `first broker login - auto link`
+- **Trust email** → On
+- **Sync mode** → Force
+
+After this, a social login whose email matches an existing account links silently
+and proceeds straight to the app — no confirmation page and no email.
+
+---
+
+## 5. Email (SMTP)
+
+The realm sends mail through the internal `postfix` service (which relays onward to
+SendGrid over TLS). Postfix presents a **self-signed certificate** on the Docker
+network, so the realm SMTP config uses **StartTLS = off** — Keycloak has no
+"trust all certs" option and would otherwise reject the self-signed cert, failing
+every send (account-link verification, password reset, etc.). The API talks to the
+same postfix with `InsecureSkipVerify` for the same reason. The Keycloak→postfix
+hop is plaintext but stays inside the Docker bridge; the postfix→SendGrid hop is
+TLS-authenticated, so mail still leaves the host encrypted.
+
+Realm Settings → Email: `postfix:587`, From `noreply@apollo-sfs.com`, **Enable
+StartTLS off**, Enable SSL off, Authentication off. Use **Test connection** to
+verify. If it ever fails with "must issue STARTTLS first", postfix is mandating
+TLS — either relax `smtpd_tls_security_level` to `may`, or add postfix's cert to
+`KC_TRUSTSTORE_PATHS` and turn StartTLS back on.

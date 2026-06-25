@@ -88,21 +88,26 @@ func (q *Queries) AddUserQuota(ctx context.Context, username string, bytesAdded 
 	return newQuota, nil
 }
 
-// UserStorageBreakdown holds the sum of captured storage add-ons by type.
+// UserStorageBreakdown holds the user's actual used bytes split by drive type.
 type UserStorageBreakdown struct {
 	NVMEBytes int64
 	HDDBytes  int64
 }
 
-// GetUserStorageBreakdown sums captured storage orders by type for a user.
+// GetUserStorageBreakdown sums the user's actual used bytes by the type of drive
+// each file lives on (NVMe "fast" vs HDD "standard"). Earlier this summed
+// purchased add-on quota from storage_orders, which read 0 whenever the quota
+// came from the initial allocation; joining files→drives reports real usage.
+// username is the Keycloak subject, stored verbatim as files.user_id (UUID).
 func (q *Queries) GetUserStorageBreakdown(ctx context.Context, username string) (UserStorageBreakdown, error) {
 	var b UserStorageBreakdown
 	err := q.db.QueryRowContext(ctx, `
 		SELECT
-			COALESCE(SUM(bytes_added) FILTER (WHERE storage_type = 'nvme'), 0),
-			COALESCE(SUM(bytes_added) FILTER (WHERE storage_type = 'hdd'),  0)
-		FROM storage_orders
-		WHERE username = $1 AND status = 'captured'
+			COALESCE(SUM(f.size_bytes) FILTER (WHERE d.drive_type = 'nvme'), 0),
+			COALESCE(SUM(f.size_bytes) FILTER (WHERE d.drive_type = 'hdd'), 0)
+		FROM files f
+		JOIN drives d ON d.id = f.drive_id
+		WHERE f.user_id = $1::uuid
 	`, username).Scan(&b.NVMEBytes, &b.HDDBytes)
 	if err != nil {
 		return b, fmt.Errorf("GetUserStorageBreakdown: %w", err)

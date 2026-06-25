@@ -154,37 +154,6 @@ func (s *AuthService) AuthCodeExchange(ctx context.Context, code, redirectURI, p
 	return tokens, nil
 }
 
-// WebSocialLogin exchanges a provider identity token (Apple or Google) for
-// Apollo SFS tokens via Keycloak's Token Exchange grant, then runs the same
-// email-conflict check as AuthCodeExchange before provisioning. Intended for
-// browser-initiated social sign-in where the provider token is obtained directly
-// (e.g. Sign in with Apple JS SDK) rather than via a Keycloak redirect.
-func (s *AuthService) WebSocialLogin(ctx context.Context, provider, providerToken string) (*TokenPair, error) {
-	body := url.Values{
-		"grant_type":           {"urn:ietf:params:oauth:grant-type:token-exchange"},
-		"client_id":            {s.kcClientID},
-		"client_secret":        {s.kcSecret},
-		"subject_token":        {providerToken},
-		"subject_token_type":   {"urn:ietf:params:oauth:token-type:id_token"},
-		"subject_issuer":       {provider},
-		"requested_token_type": {"urn:ietf:params:oauth:token-type:access_token"},
-		"scope":                {"openid"},
-	}
-	tokens, err := s.tokenRequest(ctx, body)
-	if err != nil {
-		return nil, fmt.Errorf("web social login (%s): %w", provider, err)
-	}
-	if err := s.checkEmailConflict(ctx, tokens.AccessToken, provider); err != nil {
-		return nil, err
-	}
-	if s.ProvisionUserKey != nil {
-		if err := s.ensureUserProvisioned(ctx, tokens.AccessToken); err != nil {
-			return nil, fmt.Errorf("web social login (%s): provision user: %w", provider, err)
-		}
-	}
-	return tokens, nil
-}
-
 // checkEmailConflict decodes the KC access token, and if the token's email
 // already belongs to an existing app account that would not be found by the
 // KC preferred_username, returns an *ErrEmailConflict. Email is the sole
@@ -1211,35 +1180,6 @@ func (s *AuthService) ExchangeGoogleServerAuthCode(ctx context.Context, serverAu
 		return "", fmt.Errorf("google token exchange: status %s, no id_token", resp.Status)
 	}
 	return gr.IDToken, nil
-}
-
-// SocialLogin exchanges a provider identity token (Apple or Google) for Apollo
-// SFS tokens using Keycloak's Token Exchange grant. Keycloak must have the
-// corresponding Identity Provider configured (apple / google).
-//
-// providerToken is the raw JWT issued by the provider (Apple identityToken or
-// Google id_token). provider must be "apple" or "google".
-func (s *AuthService) SocialLogin(ctx context.Context, provider, providerToken string) (*TokenPair, error) {
-	body := url.Values{
-		"grant_type":           {"urn:ietf:params:oauth:grant-type:token-exchange"},
-		"client_id":            {s.kcClientID},
-		"client_secret":        {s.kcSecret},
-		"subject_token":        {providerToken},
-		"subject_token_type":   {"urn:ietf:params:oauth:token-type:id_token"},
-		"subject_issuer":       {provider},
-		"requested_token_type": {"urn:ietf:params:oauth:token-type:access_token"},
-		"scope":                {"openid"},
-	}
-	tokens, err := s.tokenRequest(ctx, body)
-	if err != nil {
-		return nil, fmt.Errorf("social login (%s): %w", provider, err)
-	}
-	if s.ProvisionUserKey != nil {
-		if err := s.ensureUserProvisioned(ctx, tokens.AccessToken); err != nil {
-			return nil, fmt.Errorf("social login (%s): provision user: %w", provider, err)
-		}
-	}
-	return tokens, nil
 }
 
 // LinkSocialIdentity links a provider identity to the Keycloak account identified

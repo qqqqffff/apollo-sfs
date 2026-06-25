@@ -13,21 +13,12 @@ import (
 
 const fileColumns = `
 	id, user_id, folder_id, drive_id, name, mime_type,
-	size_bytes, minio_object_key, nonce, taken_at, sha256_hash, hidden, created_at, updated_at`
+	size_bytes, minio_object_key, nonce, taken_at, sha256_hash, hidden, created_at, updated_at,
+	device_id, latitude, longitude, source`
 
-func scanFile(row *sql.Row) (*models.File, error) {
-	var f models.File
-	var folderID uuid.NullUUID
-	var driveID uuid.NullUUID
-	var takenAt sql.NullTime
-	var sha256Hash sql.NullString
-	err := row.Scan(
-		&f.ID, &f.UserID, &folderID, &driveID, &f.Name, &f.MimeType,
-		&f.SizeBytes, &f.MinIOObjectKey, &f.Nonce, &takenAt, &sha256Hash, &f.Hidden, &f.CreatedAt, &f.UpdatedAt,
-	)
-	if err != nil {
-		return nil, err
-	}
+// assignFileScan copies the nullable scan targets onto f. Shared by scanFile
+// and scanFileRow so the column order stays identical to fileColumns.
+func assignFileScan(f *models.File, folderID, driveID, deviceID uuid.NullUUID, takenAt sql.NullTime, sha256Hash sql.NullString, latitude, longitude sql.NullFloat64) {
 	if folderID.Valid {
 		f.FolderID = &folderID.UUID
 	}
@@ -40,34 +31,52 @@ func scanFile(row *sql.Row) (*models.File, error) {
 	if sha256Hash.Valid {
 		f.SHA256Hash = &sha256Hash.String
 	}
+	if deviceID.Valid {
+		f.DeviceID = &deviceID.UUID
+	}
+	if latitude.Valid {
+		v := latitude.Float64
+		f.Latitude = &v
+	}
+	if longitude.Valid {
+		v := longitude.Float64
+		f.Longitude = &v
+	}
+}
+
+func scanFile(row *sql.Row) (*models.File, error) {
+	var f models.File
+	var folderID, driveID, deviceID uuid.NullUUID
+	var takenAt sql.NullTime
+	var sha256Hash sql.NullString
+	var latitude, longitude sql.NullFloat64
+	err := row.Scan(
+		&f.ID, &f.UserID, &folderID, &driveID, &f.Name, &f.MimeType,
+		&f.SizeBytes, &f.MinIOObjectKey, &f.Nonce, &takenAt, &sha256Hash, &f.Hidden, &f.CreatedAt, &f.UpdatedAt,
+		&deviceID, &latitude, &longitude, &f.Source,
+	)
+	if err != nil {
+		return nil, err
+	}
+	assignFileScan(&f, folderID, driveID, deviceID, takenAt, sha256Hash, latitude, longitude)
 	return &f, nil
 }
 
 func scanFileRow(rows *sql.Rows) (*models.File, error) {
 	var f models.File
-	var folderID uuid.NullUUID
-	var driveID uuid.NullUUID
+	var folderID, driveID, deviceID uuid.NullUUID
 	var takenAt sql.NullTime
 	var sha256Hash sql.NullString
+	var latitude, longitude sql.NullFloat64
 	err := rows.Scan(
 		&f.ID, &f.UserID, &folderID, &driveID, &f.Name, &f.MimeType,
 		&f.SizeBytes, &f.MinIOObjectKey, &f.Nonce, &takenAt, &sha256Hash, &f.Hidden, &f.CreatedAt, &f.UpdatedAt,
+		&deviceID, &latitude, &longitude, &f.Source,
 	)
 	if err != nil {
 		return nil, err
 	}
-	if folderID.Valid {
-		f.FolderID = &folderID.UUID
-	}
-	if driveID.Valid {
-		f.DriveID = &driveID.UUID
-	}
-	if takenAt.Valid {
-		f.TakenAt = &takenAt.Time
-	}
-	if sha256Hash.Valid {
-		f.SHA256Hash = &sha256Hash.String
-	}
+	assignFileScan(&f, folderID, driveID, deviceID, takenAt, sha256Hash, latitude, longitude)
 	return &f, nil
 }
 
@@ -91,14 +100,31 @@ func (q *Queries) CreateFile(ctx context.Context, f *models.File) (*models.File,
 	if f.SHA256Hash != nil {
 		sha256Hash = sql.NullString{String: *f.SHA256Hash, Valid: true}
 	}
+	var deviceID uuid.NullUUID
+	if f.DeviceID != nil {
+		deviceID = uuid.NullUUID{UUID: *f.DeviceID, Valid: true}
+	}
+	var latitude, longitude sql.NullFloat64
+	if f.Latitude != nil {
+		latitude = sql.NullFloat64{Float64: *f.Latitude, Valid: true}
+	}
+	if f.Longitude != nil {
+		longitude = sql.NullFloat64{Float64: *f.Longitude, Valid: true}
+	}
+	source := f.Source
+	if source == "" {
+		source = "web"
+	}
 	row := q.db.QueryRowContext(ctx, `
 		INSERT INTO files (
 			id, user_id, folder_id, drive_id, name, mime_type,
-			size_bytes, minio_object_key, nonce, taken_at, sha256_hash, created_at, updated_at
-		) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
+			size_bytes, minio_object_key, nonce, taken_at, sha256_hash,
+			device_id, latitude, longitude, source, created_at, updated_at
+		) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW(), NOW())
 		RETURNING`+fileColumns,
 		f.UserID, folderID, driveID, f.Name, f.MimeType,
 		f.SizeBytes, f.MinIOObjectKey, f.Nonce, takenAt, sha256Hash,
+		deviceID, latitude, longitude, source,
 	)
 	out, err := scanFile(row)
 	if err != nil {

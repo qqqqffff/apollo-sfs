@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"log"
 	"net/http"
 	"strings"
 
@@ -47,9 +48,9 @@ func (h *Handler) Register(c *gin.Context) {
 	}
 
 	session := sessions.DefaultMany(c, middleware.SessionName)
-	session.Set("access_token", tokens.AccessToken)
-	session.Set("refresh_token", tokens.RefreshToken)
+	session.Set("refresh_token", tokens.RefreshToken) // access token minted on demand; see middleware.RequireAuth
 	if err := session.Save(); err != nil {
+		log.Printf("register: session save failed: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not save session"})
 		return
 	}

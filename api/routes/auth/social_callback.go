@@ -2,6 +2,7 @@ package auth
 
 import (
 	"errors"
+	"log"
 	"net/http"
 
 	"github.com/gin-contrib/sessions"
@@ -57,9 +58,9 @@ func (h *Handler) SocialCallback(c *gin.Context) {
 	}
 
 	session := sessions.DefaultMany(c, middleware.SessionName)
-	session.Set("access_token", tokens.AccessToken)
-	session.Set("refresh_token", tokens.RefreshToken)
+	session.Set("refresh_token", tokens.RefreshToken) // access token minted on demand; see middleware.RequireAuth
 	if err := session.Save(); err != nil {
+		log.Printf("social_callback: session save failed: %v", err)
 		c.Redirect(http.StatusFound, "/login?social_error=session_failed")
 		return
 	}

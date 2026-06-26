@@ -77,7 +77,7 @@
       "publicClient": false,
       "clientAuthenticatorType": "client-secret",
       "secret": "<secret>",
-      "standardFlowEnabled": false,
+      "standardFlowEnabled": true,
       "implicitFlowEnabled": false,
       "directAccessGrantsEnabled": true,
       "serviceAccountsEnabled": true,

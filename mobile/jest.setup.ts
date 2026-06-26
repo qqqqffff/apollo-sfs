@@ -70,6 +70,17 @@ jest.mock('react-native-app-auth', () => ({
   logout: jest.fn(() => Promise.resolve()),
 }));
 
+// ─── React Navigation ─────────────────────────────────────────────────────────
+
+jest.mock('@react-navigation/native', () => ({
+  useNavigation: () => ({ navigate: jest.fn(), goBack: jest.fn() }),
+  useRoute: () => ({ params: {} }),
+  useFocusEffect: (cb: () => void | (() => void)) => {
+    const ReactModule = require('react');
+    ReactModule.useEffect(() => cb(), []);
+  },
+}));
+
 // ─── WebView ──────────────────────────────────────────────────────────────────
 
 jest.mock('react-native-webview', () => ({

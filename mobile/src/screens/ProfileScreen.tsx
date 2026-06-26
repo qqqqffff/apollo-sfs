@@ -1,3 +1,4 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import React, { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
@@ -18,6 +19,9 @@ import { Bug, Check, ChevronRight, Cpu, GalleryHorizontalEnd, HardDrive, Key, Lo
 import { linkSocial, linkSocialGoogle, unlinkSocial } from '../api/auth';
 import { ALARM_TYPES, type AlarmSettings, getAlarmSettings, toggleAlarmSubscription } from '../api/alarms';
 import { getPreferences, listRoot, updatePreferences, type ApiFolder } from '../api/files';
+
+// Remembers the reroute folder while the policy is toggled off, so re-enabling restores it.
+const REROUTE_LAST_KEY = 'apollo_media_reroute_last';
 import { useAuth } from '../context/AuthContext';
 import { colors, radius, shadow, spacing } from '../theme';
 
@@ -68,6 +72,34 @@ export default function ProfileScreen() {
       await updatePreferences({ media_autoupload_folder_id: folderID });
       setAutouploadFolderID(folderID);
       setMediaPickerVisible(false);
+    } catch (e: any) {
+      Alert.alert('Failed to update', e.message);
+    } finally {
+      setMediaSaving(false);
+    }
+  };
+
+  // The reroute policy is active whenever a folder is set. Disabling remembers
+  // the folder so re-enabling restores it.
+  const rerouteEnabled = autouploadFolderID != null;
+
+  const toggleReroute = async (enabled: boolean) => {
+    setMediaSaving(true);
+    try {
+      if (!enabled) {
+        if (autouploadFolderID) await AsyncStorage.setItem(REROUTE_LAST_KEY, autouploadFolderID);
+        await updatePreferences({ media_autoupload_folder_id: null });
+        setAutouploadFolderID(null);
+      } else {
+        const last = await AsyncStorage.getItem(REROUTE_LAST_KEY);
+        const target = last && mediaFolders.some((f) => f.id === last) ? last : mediaFolders[0]?.id ?? null;
+        if (target == null) {
+          Alert.alert('No media collections', 'Create a media collection in Files first, then enable reroute.');
+          return;
+        }
+        await updatePreferences({ media_autoupload_folder_id: target });
+        setAutouploadFolderID(target);
+      }
     } catch (e: any) {
       Alert.alert('Failed to update', e.message);
     } finally {
@@ -193,16 +225,31 @@ export default function ProfileScreen() {
       {/* Media auto-upload destination */}
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>Media</Text>
-        <TouchableOpacity style={styles.infoRow} onPress={() => setMediaPickerVisible(true)} activeOpacity={0.7}>
+
+        {/* Reroute on/off — when off, photos & videos upload to their requested folder. */}
+        <View style={styles.infoRow}>
           <View style={{ flex: 1 }}>
-            <Text style={styles.infoLabel}>Auto-upload folder</Text>
-            <Text style={styles.mediaRowMeta}>Photos &amp; videos are saved here automatically</Text>
+            <Text style={styles.infoLabel}>Auto-upload reroute</Text>
+            <Text style={styles.mediaRowMeta}>Send photos &amp; videos to a chosen collection</Text>
           </View>
-          <View style={styles.mediaRowRight}>
-            <Text style={styles.mediaRowValue} numberOfLines={1}>{mediaFolderLabel}</Text>
-            <ChevronRight size={16} color={colors.primary} />
-          </View>
-        </TouchableOpacity>
+          <Switch value={rerouteEnabled} onValueChange={toggleReroute} disabled={mediaSaving} />
+        </View>
+
+        {rerouteEnabled && (
+          <>
+            <View style={styles.divider} />
+            <TouchableOpacity style={styles.infoRow} onPress={() => setMediaPickerVisible(true)} activeOpacity={0.7} disabled={mediaSaving}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.infoLabel}>Auto-upload folder</Text>
+                <Text style={styles.mediaRowMeta}>Photos &amp; videos are saved here automatically</Text>
+              </View>
+              <View style={styles.mediaRowRight}>
+                <Text style={styles.mediaRowValue} numberOfLines={1}>{mediaFolderLabel}</Text>
+                <ChevronRight size={16} color={colors.primary} />
+              </View>
+            </TouchableOpacity>
+          </>
+        )}
       </View>
 
       {/* Media folder picker */}

@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"log"
 	"net/http"
 
 	"github.com/gin-contrib/sessions"
@@ -43,9 +44,9 @@ func (h *Handler) SocialLinkConfirm(c *gin.Context) {
 	// Clear the pending link keys and store the real session tokens.
 	session.Delete("pending_link_provider")
 	session.Delete("pending_link_kc_user_id")
-	session.Set("access_token", tokens.AccessToken)
-	session.Set("refresh_token", tokens.RefreshToken)
+	session.Set("refresh_token", tokens.RefreshToken) // access token minted on demand; see middleware.RequireAuth
 	if err := session.Save(); err != nil {
+		log.Printf("social_link: session save failed: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not save session"})
 		return
 	}

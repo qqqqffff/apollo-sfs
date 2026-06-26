@@ -32,6 +32,7 @@ import {
 import { notifyBackupComplete } from '../services/notifications';
 import { type PreviewItem } from '../services/SyncService';
 import { GoogleSignin, statusCodes } from '@react-native-google-signin/google-signin';
+import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import {
   Check,
   CheckCircle2,
@@ -42,6 +43,7 @@ import {
   FolderUp,
   GalleryHorizontalEnd,
   Image,
+  Lock,
   Music,
   Plus,
   Star,
@@ -109,6 +111,7 @@ function fileMimeIcon(mimeType: string) {
 }
 
 export default function HomeScreen() {
+  const navigation = useNavigation<any>();
   const { profile, refreshProfile } = useAuth();
   const { pendingCount, syncedCount, inProgressFiles, lastSyncedAt, isSyncing, lastError, etaSeconds, scanForPreview, confirmSync } = useSync();
   const [favorites, setFavorites] = useState<FavoriteFile[]>([]);
@@ -191,23 +194,26 @@ export default function HomeScreen() {
     })();
   }, []);
 
-  // Load preferences + media folder list + files destination on mount
-  useEffect(() => {
-    (async () => {
-      try {
-        const [prefs, root, savedFilesDest] = await Promise.all([
-          getPreferences(),
-          listRoot(),
-          AsyncStorage.getItem(FILES_DEST_KEY),
-        ]);
-        setAutouploadFolderID(prefs.media_autoupload_folder_id);
-        setMediaFolders((root.subfolders?.items ?? []).filter((f) => f.kind === 'media'));
-        setFilesDestFolderID(savedFilesDest);
-      } catch {
-        // best-effort
-      }
-    })();
-  }, []);
+  // Load preferences + media folder list + files destination. Runs on every
+  // focus so the reroute lock reflects changes made on the Profile screen.
+  useFocusEffect(
+    useCallback(() => {
+      (async () => {
+        try {
+          const [prefs, root, savedFilesDest] = await Promise.all([
+            getPreferences(),
+            listRoot(),
+            AsyncStorage.getItem(FILES_DEST_KEY),
+          ]);
+          setAutouploadFolderID(prefs.media_autoupload_folder_id);
+          setMediaFolders((root.subfolders?.items ?? []).filter((f) => f.kind === 'media'));
+          setFilesDestFolderID(savedFilesDest);
+        } catch {
+          // best-effort
+        }
+      })();
+    }, []),
+  );
 
   const loadFavorites = useCallback(async () => {
     setFavLoading(true);
@@ -525,7 +531,20 @@ export default function HomeScreen() {
 
       {/* Camera Roll Backup card */}
       <View style={styles.card}>
-        <Text style={styles.cardLabel}>Camera Roll Backup</Text>
+        <View style={styles.cardHeader}>
+          <Text style={[styles.cardLabel, { marginBottom: 0 }]}>Camera Roll Backup</Text>
+          {/* Reroute lock — visible while a media reroute policy is active. Taps
+              jump to Profile to update or disable the reroute. */}
+          {autouploadFolderID != null && (
+            <TouchableOpacity
+              style={styles.lockBtn}
+              onPress={() => navigation.navigate('Profile')}
+              hitSlop={8}
+            >
+              <Lock size={13} color={colors.mediaAccent} strokeWidth={2} />
+            </TouchableOpacity>
+          )}
+        </View>
 
         <TouchableOpacity style={styles.destinationRow} onPress={() => setPickerMode('camera')} activeOpacity={0.7}>
           <Text style={styles.destinationLabel}>Destination</Text>
@@ -600,6 +619,16 @@ export default function HomeScreen() {
             <ChevronDown size={14} color={colors.primary} style={styles.destinationChevron} />
           </View>
         </TouchableOpacity>
+
+        {/* Reroute notice — image/video uploads are redirected by the media policy. */}
+        {autouploadFolderID != null && (
+          <View style={styles.rerouteNote}>
+            <GalleryHorizontalEnd size={13} color={colors.mediaAccent} strokeWidth={1.5} style={{ marginRight: 6 }} />
+            <Text style={styles.rerouteNoteText} numberOfLines={2}>
+              Photos &amp; videos reroute to “{redirectFolderName}”
+            </Text>
+          </View>
+        )}
 
         {filesUploadProgress && (
           <View style={styles.progressRow}>
@@ -940,6 +969,22 @@ const styles = StyleSheet.create({
   destinationRight: { flexDirection: 'row', alignItems: 'center' },
   destinationValue: { fontSize: 13, fontWeight: '600', color: colors.primary },
   destinationChevron: { marginLeft: 4 },
+
+  lockBtn: {
+    width: 26, height: 26, borderRadius: radius.sm,
+    backgroundColor: colors.mediaAccentLighter,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  rerouteNote: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.mediaAccentLighter,
+    borderRadius: radius.md,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 8,
+    marginBottom: spacing.sm,
+  },
+  rerouteNoteText: { flex: 1, fontSize: 12, color: colors.mediaAccent, fontWeight: '500', lineHeight: 16 },
 
   storageRow: { flexDirection: 'row', alignItems: 'baseline', marginBottom: spacing.sm },
   storageValue: { fontSize: 28, fontWeight: '700', color: colors.textPrimary },

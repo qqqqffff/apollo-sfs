@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"log"
 	"net/http"
 
 	"github.com/gin-contrib/sessions"
@@ -32,9 +33,9 @@ func (h *Handler) Refresh(c *gin.Context) {
 		return
 	}
 
-	session.Set("access_token", tokens.AccessToken)
-	session.Set("refresh_token", tokens.RefreshToken)
+	session.Set("refresh_token", tokens.RefreshToken) // access token minted on demand; see middleware.RequireAuth
 	if err := session.Save(); err != nil {
+		log.Printf("refresh: session save failed: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not save session"})
 		return
 	}

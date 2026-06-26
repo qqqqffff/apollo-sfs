@@ -40,10 +40,13 @@ func (h *Handler) Login(c *gin.Context) {
 		return
 	}
 
+	// Web sessions store only the refresh token; the access token is minted from
+	// it and cached server-side (middleware.RequireAuth) to keep the cookie under
+	// the 4 KB browser limit.
 	session := sessions.DefaultMany(c, middleware.SessionName)
-	session.Set("access_token", tokens.AccessToken)
 	session.Set("refresh_token", tokens.RefreshToken)
 	if err := session.Save(); err != nil {
+		log.Printf("login: session save failed for %q: %v", req.Username, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not save session"})
 		return
 	}

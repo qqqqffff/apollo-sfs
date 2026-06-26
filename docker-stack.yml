@@ -209,9 +209,11 @@ services:
       KC_HTTP_PORT: 8180
       KC_HTTPS_ENABLED: "false"
       KC_HEALTH_ENABLED: "true"
-      KC_HOSTNAME: ${APP_BASE_URL}
+      # Keycloak's OWN public hostname (https://auth.apollo-sfs.com), NOT the app's.
+      # Using APP_BASE_URL here makes KC redirect auth.apollo-sfs.com → apollo-sfs.com/admin.
+      KC_HOSTNAME: ${KEYCLOAK_PUBLIC_URL}
       KC_HOSTNAME_STRICT: "true"
-      KC_HOSTNAME_ADMIN: ${APP_BASE_URL}
+      KC_HOSTNAME_ADMIN: ${KEYCLOAK_PUBLIC_URL}
       KC_PROXY_HEADERS: xforwarded
       KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN}
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
@@ -220,6 +222,9 @@ services:
     volumes:
       - /home/apollo/apollo-sfs/keycloak/import:/opt/keycloak/data/import:ro
       - /home/apollo/apollo-sfs/keycloak/providers:/opt/keycloak/providers:ro
+      # Custom login/email theme (realm.json sets "loginTheme": "apollo-sfs").
+      # Themes load at runtime — no kc.sh build needed (unlike providers).
+      - /home/apollo/apollo-sfs/keycloak/themes:/opt/keycloak/themes:ro
     networks: [app-network]
     deploy:
       replicas: 1
@@ -261,7 +266,8 @@ services:
     security_opt: ["no-new-privileges:true"]
     environment:
       CF_API_TOKEN: ${CLOUDFLARE_API_TOKEN}
-      DOMAINS: ${CLOUDFLARE_RECORD_NAME}
+      # Keep BOTH the apex and the Keycloak subdomain's A records pointed at us.
+      DOMAINS: ${CLOUDFLARE_RECORD_NAME},${KEYCLOAK_PUBLIC_HOST}
       PROXIED: "true"
       IP6_PROVIDER: "none"
     networks: [app-network]

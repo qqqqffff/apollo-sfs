@@ -1,7 +1,8 @@
-name: apollo-sfs
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Docker Swarm stack — two-node, two-tier deployment.
+# NOTE: no top-level `name:` here — `docker stack deploy` uses the legacy Compose
+# v3 schema which rejects it ("Additional property name is not allowed"). The
+# stack name comes from the CLI arg: `docker stack deploy ... apollo-sfs`.
 #
 #   manager  apollo-sfs-1 (Ryzen, amd64, node.labels.tier=standard)
 #            → api, frontend, keycloak, postfix, ddns, db-app, db-keycloak,

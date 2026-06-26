@@ -12,7 +12,7 @@ CREATE TABLE drives (
     minio_bucket   TEXT        NOT NULL,
     is_active      BOOLEAN     NOT NULL DEFAULT true,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-
+    drive_type     TEXT        NOT NULL DEFAULT 'hdd',
     UNIQUE (server_id, label),
     UNIQUE (server_id, minio_bucket)
 );

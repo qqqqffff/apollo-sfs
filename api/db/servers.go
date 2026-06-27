@@ -177,6 +177,24 @@ func (q *Queries) ListServerCapacities(ctx context.Context) ([]ServerCapacity, e
 	return out, rows.Err()
 }
 
+// GetServerByEndpoint fetches a server by its MinIO endpoint. Returns nil if no
+// server is registered for that endpoint. Used by the infrastructure sync to
+// upsert servers keyed by their MinIO endpoint.
+func (q *Queries) GetServerByEndpoint(ctx context.Context, endpoint string) (*models.Server, error) {
+	row := q.db.QueryRowContext(ctx, `
+		SELECT`+serverColumns+`
+		FROM servers WHERE minio_endpoint = $1
+	`, endpoint)
+	s, err := scanServer(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("GetServerByEndpoint: %w", err)
+	}
+	return s, nil
+}
+
 // SetServerActive toggles a server's is_active flag.
 func (q *Queries) SetServerActive(ctx context.Context, id uuid.UUID, active bool) error {
 	_, err := q.db.ExecContext(ctx,

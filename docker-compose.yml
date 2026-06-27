@@ -141,6 +141,8 @@ services:
       EMAIL_STORAGE_PATH: /home/app/service-worker-email
       SENDGRID_WEBHOOK_SECRET: ${SENDGRID_WEBHOOK_SECRET:-}
       QUOTA_WARNING_THRESHOLD_PERCENT: ${QUOTA_WARNING_THRESHOLD_PERCENT:-80}
+      # Shared secret authenticating the node-agent's pushes to /api/v1/internal/*.
+      NODE_AGENT_TOKEN: ${NODE_AGENT_TOKEN:-dev-node-agent-token}
       DISK_STATS_PATH: /data
       DISK_STATS_DRIVE_LABEL: nvme-pool
       # Cloudflare Turnstile — bot protection for the interest form
@@ -212,6 +214,41 @@ services:
       api-tests:
         condition: service_started
       frontend-tests:
+        condition: service_started
+    networks:
+      - app-network
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ── Node metrics agent ─────────────────────────────────────────────────────
+  # Single-node dev equivalent of the Swarm "global" node-agent. Reads this
+  # host's CPU/memory/network/drive sensors and pushes them to the API so the
+  # admin metrics page shows a populated per-node view in local development.
+  node-agent:
+    build:
+      context: ./api
+      dockerfile: Dockerfile.node-agent
+    platform: linux/arm64
+    container_name: apollo-sfs-node-agent
+    restart: unless-stopped
+    environment:
+      NODE_HOSTNAME: ${NODE_HOSTNAME:-apollo-sfs-dev-node-1}
+      API_INTERNAL_URL: http://api:8080
+      NODE_AGENT_TOKEN: ${NODE_AGENT_TOKEN:-dev-node-agent-token}
+    volumes:
+      - /sys:/sys:ro
+      - /dev/disk/by-label:/dev/disk/by-label:ro
+      - type: bind
+        source: /home/apollo/apollo-sfs/minio
+        target: /home/apollo/apollo-sfs/minio
+        read_only: true
+        bind:
+          propagation: rslave
+    depends_on:
+      api:
         condition: service_started
     networks:
       - app-network

@@ -14,6 +14,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"apollo-sfs.com/api/db"
+	"apollo-sfs.com/api/models"
 )
 
 var wsUpgrader = websocket.Upgrader{
@@ -101,11 +102,14 @@ func (h *Handler) StreamMetrics(c *gin.Context) {
 	}
 	defer conn.Close()
 
-	// Seed: send recent history so the graph is populated immediately on connect.
+	// Seed: send recent cluster history so the graph is populated immediately on
+	// connect. Each row is wrapped in a MetricsFrame (with no node breakdown — the
+	// per-node hardware only exists in live frames) so the client parses one shape.
 	seed, err := h.metrics.GetHistory(c.Request.Context(), db.PageInput{Limit: wsSeedLimit})
 	if err == nil && len(seed.Items) > 0 {
 		for i := len(seed.Items) - 1; i >= 0; i-- {
-			if err := wsWriteJSON(conn, seed.Items[i]); err != nil {
+			item := seed.Items[i]
+			if err := wsWriteJSON(conn, models.MetricsFrame{Cluster: &item}); err != nil {
 				return
 			}
 		}

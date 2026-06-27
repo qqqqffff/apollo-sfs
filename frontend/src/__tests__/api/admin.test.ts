@@ -12,10 +12,7 @@ import {
   pingServer,
   listInfrastructure,
   getCapacity,
-  createServer,
-  updateServer,
-  addDrive,
-  updateDrive,
+  syncInfrastructure,
   listBannedIPs,
   unbanIP,
   extendBan,
@@ -35,8 +32,6 @@ import {
   getAlarmSettings,
   toggleAlarmSubscription,
   alarmSettingsQueryOptions,
-  getDriveTemps,
-  driveTempsQueryOptions,
 } from '../../api/admin'
 import type { InterestSubmission, PageResult } from '../../types/api'
 
@@ -217,49 +212,13 @@ describe('getCapacity', () => {
   })
 })
 
-describe('createServer', () => {
-  it('POSTs to /admin/system/servers', async () => {
-    mockFetch(200, { id: 'srv-1', name: 'NH-1' })
-    await createServer({
-      state: 'NH',
-      minio_endpoint: 'minio:9000',
-      minio_use_ssl: false,
-      access_key: 'key',
-      secret_key: 'secret',
-    })
-    expect(lastUrl()).toBe('/api/v1/admin/system/servers')
+describe('syncInfrastructure', () => {
+  it('POSTs to /admin/system/sync and returns the summary', async () => {
+    mockFetch(200, { servers: 2, nodes: 2, drives: 2, pruned: 0 })
+    const summary = await syncInfrastructure()
+    expect(lastUrl()).toBe('/api/v1/admin/system/sync')
     expect(lastInit().method).toBe('POST')
-    expect(lastBody()).toMatchObject({ state: 'NH', minio_use_ssl: false })
-  })
-})
-
-describe('updateServer', () => {
-  it('PATCHes /admin/system/servers/:id', async () => {
-    mockFetch(200, { message: 'updated' })
-    await updateServer('srv-1', { is_active: false })
-    expect(lastUrl()).toBe('/api/v1/admin/system/servers/srv-1')
-    expect(lastInit().method).toBe('PATCH')
-    expect(lastBody()).toEqual({ is_active: false })
-  })
-})
-
-describe('addDrive', () => {
-  it('POSTs to /admin/system/servers/:id/drives', async () => {
-    mockFetch(200, { drive_id: 'd1' })
-    await addDrive('srv-1', { label: 'nvme-02', minio_bucket: 'bucket2' })
-    expect(lastUrl()).toBe('/api/v1/admin/system/servers/srv-1/drives')
-    expect(lastInit().method).toBe('POST')
-    expect(lastBody()).toEqual({ label: 'nvme-02', minio_bucket: 'bucket2' })
-  })
-})
-
-describe('updateDrive', () => {
-  it('PATCHes /admin/system/servers/:id/drives/:driveId', async () => {
-    mockFetch(200, { drive_id: 'd1' })
-    await updateDrive('srv-1', 'd1', { is_active: false })
-    expect(lastUrl()).toBe('/api/v1/admin/system/servers/srv-1/drives/d1')
-    expect(lastInit().method).toBe('PATCH')
-    expect(lastBody()).toEqual({ is_active: false })
+    expect(summary).toEqual({ servers: 2, nodes: 2, drives: 2, pruned: 0 })
   })
 })
 
@@ -531,53 +490,5 @@ describe('alarmSettingsQueryOptions', () => {
     mockFetch(200, ALARM_DEFAULTS)
     alarmSettingsQueryOptions.queryFn()
     expect(lastUrl()).toBe('/api/v1/admin/system/alarm/settings')
-  })
-})
-
-// ── Drive temperatures ─────────────────────────────────────────────────────────
-
-const DRIVE_TEMPS = [
-  { name: 'nvme-pci-0100 Composite', temp_celsius: 38.5 },
-  { name: 'nvme-pci-0200 Composite', temp_celsius: 52.0 },
-]
-
-describe('getDriveTemps', () => {
-  it('GETs /admin/system/drive-temps', async () => {
-    mockFetch(200, DRIVE_TEMPS)
-    await getDriveTemps()
-    expect(lastUrl()).toBe('/api/v1/admin/system/drive-temps')
-    expect(lastInit().method).toBeUndefined()
-  })
-
-  it('returns the array of drive temps', async () => {
-    mockFetch(200, DRIVE_TEMPS)
-    const result = await getDriveTemps()
-    expect(result).toEqual(DRIVE_TEMPS)
-  })
-
-  it('returns an empty array when no sensors are available', async () => {
-    mockFetch(200, [])
-    const result = await getDriveTemps()
-    expect(result).toEqual([])
-  })
-})
-
-describe('driveTempsQueryOptions', () => {
-  it('has correct queryKey', () => {
-    expect(driveTempsQueryOptions.queryKey).toEqual(['admin', 'drive-temps'])
-  })
-
-  it('has staleTime of 10 seconds', () => {
-    expect(driveTempsQueryOptions.staleTime).toBe(10_000)
-  })
-
-  it('has refetchInterval of 10 seconds', () => {
-    expect(driveTempsQueryOptions.refetchInterval).toBe(10_000)
-  })
-
-  it('queryFn calls getDriveTemps', () => {
-    mockFetch(200, DRIVE_TEMPS)
-    driveTempsQueryOptions.queryFn()
-    expect(lastUrl()).toBe('/api/v1/admin/system/drive-temps')
   })
 })

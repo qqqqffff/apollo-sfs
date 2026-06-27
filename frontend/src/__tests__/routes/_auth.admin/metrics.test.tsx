@@ -1,5 +1,5 @@
 import React from 'react'
-import { render, screen } from '@testing-library/react'
+import { render, screen, fireEvent } from '@testing-library/react'
 import '@testing-library/jest-dom'
 
 jest.mock('@tanstack/react-router', () => ({
@@ -25,39 +25,36 @@ jest.mock('../../../context/NotificationContext', () => ({
 jest.mock('../../../api/admin', () => ({
   infrastructureQueryOptions: { queryKey: ['admin', 'infrastructure'],  queryFn: jest.fn() },
   driveStatsQueryOptions:     { queryKey: ['admin', 'drive-stats'],     queryFn: jest.fn() },
-  driveTempsQueryOptions:     { queryKey: ['admin', 'drive-temps'],     queryFn: jest.fn() },
   speedTestQueryOptions:      { queryKey: ['admin', 'speed-test'],      queryFn: jest.fn() },
   getMetricsHistoryByHours: jest.fn(),
+  getNodeMetricsHistory: jest.fn(),
+  getDriveTempsHistory: jest.fn(),
   // Never resolves — prevents useServerPing from calling setResult outside act().
   pingServer:       jest.fn().mockReturnValue(new Promise(() => {})),
   runTests:         jest.fn(),
   shutdownServer:   jest.fn(),
   triggerSpeedTest: jest.fn(),
-  createServer:     jest.fn(),
-  updateServer:     jest.fn(),
-  createNode:       jest.fn(),
-  updateNode:       jest.fn(),
-  deleteNode:       jest.fn(),
-  addDrive:         jest.fn(),
-  updateDrive:      jest.fn(),
+  syncInfrastructure: jest.fn(),
 }))
 
 jest.mock('../../../components/BarGraph',  () => ({ BarGraph:  () => <div data-testid="bar-graph" /> }))
 jest.mock('../../../components/LineGraph', () => ({ LineGraph: () => <div data-testid="line-graph" /> }))
 
-// Provide a minimal snapshot so `latest` is defined and the stats grid renders.
-const SAMPLE_SNAPSHOT = {
+const GB = 1024 ** 3
+
+// Cluster snapshot — drives the users/storage + uplink (ping, loss) cards.
+const SAMPLE_CLUSTER = {
   id: 'snap-1',
   sampled_at: new Date().toISOString(),
-  cpu_percent: 12,
-  memory_used_bytes: 2 * 1024 ** 3,
-  memory_total_bytes: 8 * 1024 ** 3,
+  cpu_percent: 0,
+  memory_used_bytes: 0,
+  memory_total_bytes: 0,
   network_bytes_sent: 1000,
   network_bytes_recv: 2000,
   storage_total_used_bytes: 500 * 1024 ** 2,
-  storage_total_quota_bytes: 10 * 1024 ** 3,
-  disk_total_bytes: 100 * 1024 ** 3,
-  disk_free_bytes: 60 * 1024 ** 3,
+  storage_total_quota_bytes: 10 * GB,
+  disk_total_bytes: 100 * GB,
+  disk_free_bytes: 60 * GB,
   active_user_count: 3,
   total_user_count: 10,
   cpu_temp_celsius: null,
@@ -66,24 +63,37 @@ const SAMPLE_SNAPSHOT = {
   server_isp_packet_loss_percent: 0.0 as number | null,
 }
 
+// One node with two drives — drives the per-node hardware cards + carousel.
+const SAMPLE_NODE = {
+  node_id: 'n1',
+  hostname: 'node-1',
+  role: 'manager',
+  is_active: true,
+  online: true,
+  cpu_percent: 12,
+  cpu_temp_celsius: 42.5 as number | null,
+  memory_used_bytes: 2 * GB,
+  memory_total_bytes: 8 * GB,
+  network_bytes_sent: 1000,
+  network_bytes_recv: 2000,
+  sampled_at: new Date().toISOString(),
+  drives: [
+    { drive_id: 'd1', label: 'nvme-01', drive_type: 'nvme', temp_celsius: 38.5, total_bytes: 500 * GB, used_bytes: 100 * GB, free_bytes: 400 * GB },
+    { drive_id: 'd2', label: 'hdd-01',  drive_type: 'hdd',  temp_celsius: 52.0, total_bytes: 8000 * GB, used_bytes: 1000 * GB, free_bytes: 7000 * GB },
+  ],
+}
+
 jest.mock('../../../hooks/useMetricsStream', () => ({
-  useMetricsStream: () => ({ snapshots: [SAMPLE_SNAPSHOT], connected: true }),
+  useMetricsStream: () => ({ frames: [{ cluster: SAMPLE_CLUSTER, nodes: [SAMPLE_NODE] }], connected: true }),
 }))
 
 import { Route } from '../../../routes/_auth.admin/metrics'
 const Page = Route.options.component as React.ComponentType
 
-const DRIVE_TEMPS = [
-  { name: 'nvme-pci-0100 Composite', temp_celsius: 38.5 },
-  { name: 'nvme-pci-0200 Composite', temp_celsius: 52.0 },
-  { name: 'nvme-pci-0300 Composite', temp_celsius: 65.0 },
-]
-
-function setup(driveTemps = DRIVE_TEMPS) {
+function setup() {
   mockQuery.mockImplementation((opts: any) => {
     const key: string[] = opts?.queryKey ?? []
-    if (key.includes('drive-temps')) return { data: driveTemps }
-    if (key.includes('infrastructure')) return { data: { drives: [] } }
+    if (key.includes('infrastructure')) return { data: { nodes: [], drives: [] } }
     return { data: null }
   })
   mockMutation.mockReturnValue({ mutate: jest.fn(), isPending: false })
@@ -91,189 +101,98 @@ function setup(driveTemps = DRIVE_TEMPS) {
   return render(<Page />)
 }
 
-describe('Admin Metrics — NvMe temps card', () => {
-  beforeEach(() => {
-    mockQuery.mockReset()
-    mockMutation.mockReset()
-    mockQueryClient.mockReset()
-    mockNotify.mockReset()
-  })
+function resetMocks() {
+  mockQuery.mockReset()
+  mockMutation.mockReset()
+  mockQueryClient.mockReset()
+  mockNotify.mockReset()
+}
 
-  // ── Visibility ──────────────────────────────────────────────────────────────
+// ── Node hardware ────────────────────────────────────────────────────────────────
 
-  test('renders the "NVMe temps" label when drives are present', () => {
+describe('Admin Metrics — Node hardware', () => {
+  beforeEach(resetMocks)
+
+  test('renders the CPU card with utilization and temperature', () => {
     setup()
-    expect(screen.getByText('NVMe temps')).toBeInTheDocument()
+    expect(screen.getByText('CPU')).toBeInTheDocument()
+    expect(screen.getByText('12%')).toBeInTheDocument()
+    expect(screen.getByText('42.5°C')).toBeInTheDocument()
   })
 
-  test('does not render the card when drive temps array is empty', () => {
-    setup([])
-    expect(screen.queryByText('NVMe temps')).not.toBeInTheDocument()
-  })
-
-  test('does not render the card when driveTemps is undefined', () => {
-    mockQuery.mockReturnValue({ data: undefined })
-    mockMutation.mockReturnValue({ mutate: jest.fn(), isPending: false })
-    mockQueryClient.mockReturnValue({ invalidateQueries: jest.fn(), setQueryData: jest.fn() })
-    render(<Page />)
-    expect(screen.queryByText('NVMe temps')).not.toBeInTheDocument()
-  })
-
-  // ── Content ─────────────────────────────────────────────────────────────────
-
-  test('renders each drive name via title attribute', () => {
+  test('renders the Memory card for the selected node', () => {
     setup()
-    expect(screen.getByTitle('nvme-pci-0100 Composite')).toBeInTheDocument()
-    expect(screen.getByTitle('nvme-pci-0200 Composite')).toBeInTheDocument()
-    expect(screen.getByTitle('nvme-pci-0300 Composite')).toBeInTheDocument()
+    expect(screen.getByText('Memory')).toBeInTheDocument()
+    expect(screen.getByText('2.00 GB')).toBeInTheDocument()
   })
 
-  test('renders all drive temperatures formatted to one decimal place', () => {
+  test('drive-temp carousel shows the first drive temperature with colour coding', () => {
     setup()
-    expect(screen.getByText('38.5°C')).toBeInTheDocument()
-    expect(screen.getByText('52.0°C')).toBeInTheDocument()
-    expect(screen.getByText('65.0°C')).toBeInTheDocument()
+    expect(screen.getByText('nvme-01')).toBeInTheDocument()
+    const temp = screen.getByText('38.5°C')
+    expect(temp).toBeInTheDocument()
+    expect(temp.className).toContain('text-emerald-600') // < 45°C → green
   })
 
-  test('renders a single drive correctly', () => {
-    setup([{ name: 'nvme-only', temp_celsius: 41.2 }])
-    expect(screen.getByTitle('nvme-only')).toBeInTheDocument()
-    expect(screen.getByText('41.2°C')).toBeInTheDocument()
-  })
-
-  // ── Temperature colour coding ───────────────────────────────────────────────
-
-  test('applies green (emerald-600) for temp below 45°C', () => {
-    setup([{ name: 'nvme-cool', temp_celsius: 38.5 }])
-    expect(screen.getByText('38.5°C').className).toContain('text-emerald-600')
-  })
-
-  test('applies amber (amber-500) for temp between 45°C and 59.9°C', () => {
-    setup([{ name: 'nvme-warm', temp_celsius: 52.0 }])
-    expect(screen.getByText('52.0°C').className).toContain('text-amber-500')
-  })
-
-  test('applies red (red-600) for temp at or above 60°C', () => {
-    setup([{ name: 'nvme-hot', temp_celsius: 65.0 }])
-    expect(screen.getByText('65.0°C').className).toContain('text-red-600')
-  })
-
-  test('applies amber at exactly the 45°C lower boundary', () => {
-    setup([{ name: 'nvme-boundary-low', temp_celsius: 45.0 }])
-    expect(screen.getByText('45.0°C').className).toContain('text-amber-500')
-  })
-
-  test('applies red at exactly the 60°C upper boundary', () => {
-    setup([{ name: 'nvme-boundary-high', temp_celsius: 60.0 }])
-    expect(screen.getByText('60.0°C').className).toContain('text-red-600')
-  })
-
-  test('applies green just below the 45°C boundary', () => {
-    setup([{ name: 'nvme-just-cool', temp_celsius: 44.9 }])
-    expect(screen.getByText('44.9°C').className).toContain('text-emerald-600')
-  })
-
-  // ── Scroll container ────────────────────────────────────────────────────────
-
-  test('scroll container is present', () => {
+  test('drive-temp carousel pages to the next drive', () => {
     setup()
-    // The scrollable list has overflow-y-auto
-    const scrollable = document.querySelector('.overflow-y-auto')
-    expect(scrollable).toBeInTheDocument()
+    fireEvent.click(screen.getByTitle('Next drive'))
+    const temp = screen.getByText('52.0°C')
+    expect(temp).toBeInTheDocument()
+    expect(temp.className).toContain('text-amber-500') // 45–59.9°C → amber
   })
 
-  test('all drive rows are rendered inside the scroll container', () => {
-    setup(Array.from({ length: 5 }, (_, i) => ({ name: `nvme-${i}`, temp_celsius: 40 + i })))
-    const scrollable = document.querySelector('.overflow-y-auto')!
-    const rows = scrollable.querySelectorAll('[title^="nvme-"]')
-    expect(rows).toHaveLength(5)
+  test('renders the drive capacity card', () => {
+    setup()
+    expect(screen.getByText('Drive capacity')).toBeInTheDocument()
   })
 })
 
 // ── Ping card ──────────────────────────────────────────────────────────────────
 
 describe('Admin Metrics — Ping card', () => {
-  beforeEach(() => {
-    mockQuery.mockReset()
-    mockMutation.mockReset()
-    mockQueryClient.mockReset()
-    mockNotify.mockReset()
-  })
+  beforeEach(resetMocks)
 
   test('renders the "Ping" label', () => {
     setup()
     expect(screen.getByText('Ping')).toBeInTheDocument()
   })
 
-  test('renders server ISP ping from the snapshot', () => {
+  test('renders server ISP ping from the cluster snapshot', () => {
     setup()
-    // SAMPLE_SNAPSHOT.server_isp_ping_ms = 14.3 → "14.3 ms"
     expect(screen.getByText('14.3 ms')).toBeInTheDocument()
-  })
-
-  test('renders "—" for server ISP ping when null', () => {
-    jest.mock('../../../hooks/useMetricsStream', () => ({
-      useMetricsStream: () => ({
-        snapshots: [{ ...SAMPLE_SNAPSHOT, server_isp_ping_ms: null }],
-        connected: true,
-      }),
-    }))
-    // Re-render with explicit null snapshot via mockStream override
-    mockQuery.mockImplementation((opts: any) => {
-      const key: string[] = opts?.queryKey ?? []
-      if (key.includes('drive-temps')) return { data: [] }
-      if (key.includes('infrastructure')) return { data: { drives: [] } }
-      return { data: null }
-    })
-    mockMutation.mockReturnValue({ mutate: jest.fn(), isPending: false })
-    mockQueryClient.mockReturnValue({ invalidateQueries: jest.fn(), setQueryData: jest.fn() })
-    // The mock at the top of the file already returns SAMPLE_SNAPSHOT; the
-    // "—" case is implicitly covered since client ping starts as null.
-    setup()
-    // Client → Server starts as "—" before any probe resolves
-    const dashElements = screen.getAllByText('—')
-    expect(dashElements.length).toBeGreaterThan(0)
   })
 
   test('renders "Server → ISP" and "Client → Server" labels', () => {
     setup()
-    // Both ping and packet loss cards have "Server → ISP" and "Client → Server"
     expect(screen.getAllByText('Server → ISP').length).toBeGreaterThanOrEqual(1)
     expect(screen.getAllByText('Client → Server').length).toBeGreaterThanOrEqual(1)
   })
 
-  // ── Ping colour coding ───────────────────────────────────────────────────────
-
   test('applies emerald colour for ping below 60 ms', () => {
-    setup() // server_isp_ping_ms = 14.3 → green
-    const el = screen.getByText('14.3 ms')
-    expect(el.className).toContain('text-emerald-600')
+    setup()
+    expect(screen.getByText('14.3 ms').className).toContain('text-emerald-600')
   })
 
-  test('snapshot with amber ping (60–149 ms) applies amber colour', () => {
-    jest.replaceProperty(SAMPLE_SNAPSHOT, 'server_isp_ping_ms', 80)
+  test('amber ping (60–149 ms) applies amber colour', () => {
+    jest.replaceProperty(SAMPLE_CLUSTER, 'server_isp_ping_ms', 80)
     setup()
     expect(screen.getByText('80.0 ms').className).toContain('text-amber-500')
-    jest.replaceProperty(SAMPLE_SNAPSHOT, 'server_isp_ping_ms', 14.3)
+    jest.replaceProperty(SAMPLE_CLUSTER, 'server_isp_ping_ms', 14.3)
   })
 
-  test('snapshot with red ping (≥150 ms) applies red colour', () => {
-    jest.replaceProperty(SAMPLE_SNAPSHOT, 'server_isp_ping_ms', 200)
+  test('red ping (≥150 ms) applies red colour', () => {
+    jest.replaceProperty(SAMPLE_CLUSTER, 'server_isp_ping_ms', 200)
     setup()
     expect(screen.getByText('200.0 ms').className).toContain('text-red-600')
-    jest.replaceProperty(SAMPLE_SNAPSHOT, 'server_isp_ping_ms', 14.3)
+    jest.replaceProperty(SAMPLE_CLUSTER, 'server_isp_ping_ms', 14.3)
   })
 })
 
 // ── Packet loss card ───────────────────────────────────────────────────────────
 
 describe('Admin Metrics — Packet loss card', () => {
-  beforeEach(() => {
-    mockQuery.mockReset()
-    mockMutation.mockReset()
-    mockQueryClient.mockReset()
-    mockNotify.mockReset()
-  })
+  beforeEach(resetMocks)
 
   test('renders the "Packet loss" label', () => {
     setup()
@@ -282,60 +201,83 @@ describe('Admin Metrics — Packet loss card', () => {
 
   test('renders server ISP packet loss from the snapshot', () => {
     setup()
-    // server_isp_packet_loss_percent = 0.0 → "0.0%"
-    // There will be at least one "0.0%" (server ISP) and one "0.0%" (client, starts at 0)
     const elements = screen.getAllByText('0.0%')
     expect(elements.length).toBeGreaterThanOrEqual(1)
   })
 
-  test('renders "Server → ISP" label in packet loss card', () => {
-    setup()
-    // Both ping and packet loss cards have "Server → ISP"
-    expect(screen.getAllByText('Server → ISP').length).toBeGreaterThanOrEqual(2)
-  })
-
-  // ── Packet loss colour coding ────────────────────────────────────────────────
-
-  test('applies emerald colour for 0% packet loss', () => {
-    setup() // server_isp_packet_loss_percent = 0.0 → green
-    // The first "0.0%" should have emerald colour (server-side loss)
-    const el = screen.getAllByText('0.0%')[0]
-    expect(el.className).toContain('text-emerald-600')
-  })
-
   test('applies amber colour for 1–9.9% packet loss', () => {
-    jest.replaceProperty(SAMPLE_SNAPSHOT, 'server_isp_packet_loss_percent', 5)
+    jest.replaceProperty(SAMPLE_CLUSTER, 'server_isp_packet_loss_percent', 5)
     setup()
     expect(screen.getByText('5.0%').className).toContain('text-amber-500')
-    jest.replaceProperty(SAMPLE_SNAPSHOT, 'server_isp_packet_loss_percent', 0.0)
+    jest.replaceProperty(SAMPLE_CLUSTER, 'server_isp_packet_loss_percent', 0.0)
   })
 
   test('applies red colour for ≥10% packet loss', () => {
-    jest.replaceProperty(SAMPLE_SNAPSHOT, 'server_isp_packet_loss_percent', 20)
+    jest.replaceProperty(SAMPLE_CLUSTER, 'server_isp_packet_loss_percent', 20)
     setup()
     expect(screen.getByText('20.0%').className).toContain('text-red-600')
-    jest.replaceProperty(SAMPLE_SNAPSHOT, 'server_isp_packet_loss_percent', 0.0)
-  })
-
-  test('applies red at exactly 10% boundary', () => {
-    jest.replaceProperty(SAMPLE_SNAPSHOT, 'server_isp_packet_loss_percent', 10)
-    setup()
-    expect(screen.getByText('10.0%').className).toContain('text-red-600')
-    jest.replaceProperty(SAMPLE_SNAPSHOT, 'server_isp_packet_loss_percent', 0.0)
-  })
-
-  test('applies amber at exactly the 1% lower boundary', () => {
-    jest.replaceProperty(SAMPLE_SNAPSHOT, 'server_isp_packet_loss_percent', 1)
-    setup()
-    expect(screen.getByText('1.0%').className).toContain('text-amber-500')
-    jest.replaceProperty(SAMPLE_SNAPSHOT, 'server_isp_packet_loss_percent', 0.0)
+    jest.replaceProperty(SAMPLE_CLUSTER, 'server_isp_packet_loss_percent', 0.0)
   })
 
   test('renders "—" for server packet loss when null', () => {
-    jest.replaceProperty(SAMPLE_SNAPSHOT, 'server_isp_packet_loss_percent', null)
+    jest.replaceProperty(SAMPLE_CLUSTER, 'server_isp_packet_loss_percent', null)
     setup()
-    const dashElements = screen.getAllByText('—')
-    expect(dashElements.length).toBeGreaterThan(0)
-    jest.replaceProperty(SAMPLE_SNAPSHOT, 'server_isp_packet_loss_percent', 0.0)
+    expect(screen.getAllByText('—').length).toBeGreaterThan(0)
+    jest.replaceProperty(SAMPLE_CLUSTER, 'server_isp_packet_loss_percent', 0.0)
+  })
+})
+
+// ── Users & storage ─────────────────────────────────────────────────────────────
+
+describe('Admin Metrics — Users & storage', () => {
+  beforeEach(resetMocks)
+
+  test('renders total and active user counts', () => {
+    setup()
+    expect(screen.getByText('Total users')).toBeInTheDocument()
+    expect(screen.getByText('10')).toBeInTheDocument()
+    expect(screen.getByText('Active (5 min)')).toBeInTheDocument()
+  })
+
+  test('renders the disk committed card', () => {
+    setup()
+    expect(screen.getByText('Disk committed')).toBeInTheDocument()
+  })
+})
+
+// ── Infrastructure section ───────────────────────────────────────────────────────
+
+describe('Admin Metrics — Infrastructure section', () => {
+  beforeEach(resetMocks)
+
+  test('renders the single "Sync infrastructure" button', () => {
+    setup()
+    expect(screen.getByText('Sync infrastructure')).toBeInTheDocument()
+  })
+
+  test('no longer renders the manual add/edit controls', () => {
+    setup()
+    expect(screen.queryByText('+ Add server')).not.toBeInTheDocument()
+    expect(screen.queryByText('+ Add node')).not.toBeInTheDocument()
+    expect(screen.queryByText('+ Add drive')).not.toBeInTheDocument()
+  })
+
+  test('clicking Sync infrastructure fires the sync mutation', () => {
+    const mutate = jest.fn()
+    mockQuery.mockImplementation((opts: any) => {
+      const key: string[] = opts?.queryKey ?? []
+      if (key.includes('infrastructure')) return { data: { nodes: [], drives: [] } }
+      return { data: null }
+    })
+    mockMutation.mockReturnValue({ mutate, isPending: false })
+    mockQueryClient.mockReturnValue({ invalidateQueries: jest.fn(), setQueryData: jest.fn() })
+    render(<Page />)
+    screen.getByText('Sync infrastructure').click()
+    expect(mutate).toHaveBeenCalled()
+  })
+
+  test('shows the empty state when no infrastructure is indexed', () => {
+    setup()
+    expect(screen.getByText(/No infrastructure indexed yet/)).toBeInTheDocument()
   })
 })

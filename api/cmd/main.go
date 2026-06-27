@@ -23,6 +23,7 @@ import (
 	"apollo-sfs.com/api/routes/middleware"
 	"apollo-sfs.com/api/routes/billing"
 	"apollo-sfs.com/api/routes/expansion"
+	"apollo-sfs.com/api/routes/nodeagent"
 	"apollo-sfs.com/api/routes/payments"
 	"apollo-sfs.com/api/routes/services"
 	"apollo-sfs.com/api/routes/sfs"
@@ -249,8 +250,19 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	h := routes.NewHandler(queries, fileSvc, folderSvc, inviteSvc, favSvc, authSvc, uploadStore, emailSvc, presignSvc, cfg.TurnstileSecretKey)
 	routes.SetAPIKeyService(h, apiKeySvc)
 	routes.SetMathGameService(h, services.NewMathGameService(queries))
-	authHandler := auth.NewHandler(authSvc)
+	authHandler := auth.NewHandler(authSvc, cfg.CookieDomain, cfg.CookieSecure)
 	adminHandler := admin.NewHandler(queries, inviteSvc, metricsSvc, authSvc, fileSvc, registry, geoReader, cfg.DiskStatsPath, cfg.DiskStatsDriveLabel, cfg.BackendTestURL, cfg.AppDir, cfg.FrontendTestURL, cfg.FrontendE2EURL, shutdownCh)
+	// Configure the on-demand infrastructure sync (POST /system/sync): discover
+	// swarm nodes via the Docker socket and drives/capacity via the MinIO admin API.
+	adminHandler.ConfigureInfraSync(admin.InfraSyncConfig{
+		Swarm:            services.NewSwarmInspector(),
+		Storage:          services.NewStorageInspector(),
+		MinIOEndpoint:    cfg.MinIOEndpoint,
+		MinIOAccessKey:   cfg.MinIOAccessKey,
+		MinIOSecretKey:   cfg.MinIOSecretKey,
+		MinIOUseSSL:      cfg.MinIOUseSSL,
+		StandardEndpoint: cfg.MinIOStandardEndpoint,
+	})
 	sfsHandler := sfs.NewHandler(queries, fileSvc, presignSvc, apiKeySvc)
 	inboundEmailHandler := admin.NewInboundEmailHandler(inboundEmailSvc, cfg.SendgridWebhookSecret)
 
@@ -300,6 +312,11 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 
 	// ── SendGrid Inbound Parse webhook (no auth — guarded by ?token= secret) ──
 	v1.POST("/webhooks/email-inbound", inboundEmailHandler.InboundEmailWebhook)
+
+	// ── Internal node-agent ingest (no session auth — guarded by shared token) ──
+	// Reachable only on the overlay network; nginx returns 404 for /api/v1/internal/*.
+	nodeAgentHandler := nodeagent.NewHandler(metricsSvc, cfg.NodeAgentToken)
+	v1.POST("/internal/node-metrics", nodeAgentHandler.IngestNodeMetrics)
 
 	// ── Presigned file endpoints (token auth, no session cookie required) ────
 	v1.GET("/files/:file_id/download/p", h.DownloadFilePresigned)
@@ -499,8 +516,11 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 			adminGroup.GET("/system/ping", adminHandler.PingServer)
 
 			adminGroup.GET("/system/infrastructure", adminHandler.GetInfrastructure)
+			adminGroup.POST("/system/sync", adminHandler.SyncInfrastructure)
 			adminGroup.GET("/system/capacity", adminHandler.GetCapacity)
 			adminGroup.GET("/system/drive-stats", adminHandler.GetDriveStats)
+			adminGroup.GET("/system/nodes/:node_id/metrics/history", adminHandler.GetNodeMetricsHistory)
+			adminGroup.GET("/system/drives/:drive_id/temps/history", adminHandler.GetDriveTempsHistory)
 			adminGroup.POST("/system/servers", adminHandler.CreateServer)
 			adminGroup.PATCH("/system/servers/:server_id", adminHandler.UpdateServer)
 			adminGroup.POST("/system/servers/:server_id/nodes", adminHandler.CreateNode)
@@ -534,8 +554,6 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 
 			adminGroup.GET("/system/speed-test", adminHandler.GetSpeedTest)
 			adminGroup.POST("/system/speed-test", adminHandler.TriggerSpeedTest)
-
-			adminGroup.GET("/system/drive-temps", adminHandler.GetDriveTemps)
 
 			adminGroup.GET("/system/alarm/settings", adminHandler.GetAlarmSettings)
 			adminGroup.POST("/system/alarm/subscribe", adminHandler.ToggleAlarmSubscription)

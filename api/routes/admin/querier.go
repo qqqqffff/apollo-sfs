@@ -42,10 +42,13 @@ type AdminQuerier interface {
 	SetServerActive(ctx context.Context, id uuid.UUID, active bool) error
 	RenameServer(ctx context.Context, id uuid.UUID, name string) error
 	GetServer(ctx context.Context, id uuid.UUID) (*models.Server, error)
+	GetServerByEndpoint(ctx context.Context, endpoint string) (*models.Server, error)
 	GetDrive(ctx context.Context, id uuid.UUID) (*models.Drive, error)
 	CreateDrive(ctx context.Context, p db.CreateDriveParams) (*models.Drive, error)
 	UpdateDrive(ctx context.Context, id uuid.UUID, p db.UpdateDriveParams) (*models.Drive, error)
+	UpsertDrive(ctx context.Context, p db.UpsertDriveParams) (*models.Drive, error)
 	DeleteDrive(ctx context.Context, id uuid.UUID) error
+	DeactivateMissingDrives(ctx context.Context, serverID uuid.UUID, keepIDs []uuid.UUID) error
 	UpdateDriveCapacity(ctx context.Context, id uuid.UUID, capacityBytes int64) (*models.Drive, error)
 	AutoSyncDriveCapacities(ctx context.Context, capacityBytes int64) error
 
@@ -54,7 +57,9 @@ type AdminQuerier interface {
 	GetNode(ctx context.Context, id uuid.UUID) (*models.Node, error)
 	CreateNode(ctx context.Context, p db.CreateNodeParams) (*models.Node, error)
 	UpdateNode(ctx context.Context, id uuid.UUID, p db.UpdateNodeParams) (*models.Node, error)
+	UpsertNode(ctx context.Context, p db.CreateNodeParams, isActive bool) (*models.Node, error)
 	DeleteNode(ctx context.Context, id uuid.UUID) error
+	DeactivateMissingNodes(ctx context.Context, serverID uuid.UUID, keepIDs []uuid.UUID) error
 	AssignDriveToNode(ctx context.Context, driveID uuid.UUID, nodeID *uuid.UUID) error
 
 	// Alarm settings
@@ -87,6 +92,9 @@ type MetricsServicer interface {
 	GetHistory(ctx context.Context, page db.PageInput) (*db.PageResult[models.ServerMetricSnapshot], error)
 	GetHistoryByHours(ctx context.Context, hours int) ([]models.ServerMetricSnapshot, error)
 	GetHistoryByDate(ctx context.Context, date string, page db.PageInput) (*db.PageResult[models.ServerMetricSnapshot], error)
+	GetNodeHistoryByHours(ctx context.Context, nodeID uuid.UUID, hours int) ([]models.NodeMetricSnapshot, error)
+	GetDriveTempHistoryByHours(ctx context.Context, driveID uuid.UUID, hours int) ([]models.DriveTempSnapshot, error)
+	NodeStates() []models.NodeFrame
 	Hub() *services.Hub
 }
 

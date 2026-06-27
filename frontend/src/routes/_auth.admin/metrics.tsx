@@ -2,26 +2,19 @@ import { createFileRoute } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
-  addDrive,
-  createNode,
-  createServer,
-  deleteDrive,
-  deleteNode,
   driveStatsQueryOptions,
-  driveTempsQueryOptions,
+  getDriveTempsHistory,
   getMetricsHistoryByHours,
+  getNodeMetricsHistory,
   infrastructureQueryOptions,
   pingServer,
   runTests,
   shutdownServer,
   speedTestQueryOptions,
-  syncDriveCapacity,
+  syncInfrastructure,
   triggerSpeedTest,
-  updateDrive,
-  updateNode,
-  updateServer,
 } from '../../api/admin'
-import type { DriveTemp, DriveStat, DriveSummary, NodeRole, NodeSummary, TestRunResponse } from '../../api/admin'
+import type { DriveFrame, DriveStat, DriveSummary, MetricsFrame, NodeFrame, NodeSummary, TestRunResponse } from '../../api/admin'
 import { useMetricsStream } from '../../hooks/useMetricsStream'
 import { LineGraph } from '../../components/LineGraph'
 import type { LinePoint } from '../../components/LineGraph'
@@ -46,7 +39,11 @@ type ServerGroup = {
 type HourWindow = 1 | 12 | 24 | 48 | 72
 const HOUR_OPTIONS: HourWindow[] = [1, 12, 24, 48, 72]
 
-type MetricKey = 'total_users' | 'active_users' | 'disk' | 'memory' | 'traffic' | 'speed' | 'ping' | 'loss' | 'cpu_temp' | 'drive_temp'
+// Per-node metrics (cpu, memory, traffic, drive_temp) graph the selected node;
+// cluster metrics (users, disk, speed, ping, loss) are cluster-wide (manager uplink).
+type MetricKey = 'total_users' | 'active_users' | 'disk' | 'memory' | 'traffic' | 'speed' | 'ping' | 'loss' | 'cpu' | 'drive_temp'
+
+const NODE_METRICS: ReadonlySet<MetricKey> = new Set<MetricKey>(['cpu', 'memory', 'traffic', 'drive_temp'])
 
 const METRIC_LABELS: Record<MetricKey, string> = {
   total_users:  'Total users',
@@ -57,7 +54,7 @@ const METRIC_LABELS: Record<MetricKey, string> = {
   speed:        'Network speed',
   ping:         'Ping',
   loss:         'Packet loss',
-  cpu_temp:     'CPU temperature',
+  cpu:          'CPU utilization',
   drive_temp:   'Drive temperature',
 }
 
@@ -96,9 +93,12 @@ function RouteComponent() {
 
   const resume = useCallback(() => resetTimerRef.current?.(), [])
 
-  const { snapshots, connected } = useMetricsStream(inactive)
+  const { frames, connected } = useMetricsStream(inactive)
+  const snapshots = frames.map(f => f.cluster) // cluster (uplink + app) series
   const [hours, setHours] = useState<HourWindow>(12)
   const [selectedMetric, setSelectedMetric] = useState<MetricKey>('traffic')
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
+  const [driveIdx, setDriveIdx] = useState(0)
 
   const { data: infraData } = useQuery({ ...infrastructureQueryOptions, enabled: !inactive })
   const { data: driveStatsData } = useQuery({ ...driveStatsQueryOptions, enabled: !inactive })
@@ -133,112 +133,45 @@ function RouteComponent() {
   }
   const servers = Array.from(serverMap.values())
 
-  const [renamingServerId, setRenamingServerId] = useState<string | null>(null)
-  const [renameValue, setRenameValue] = useState('')
+  // ── Node selection (drives the per-node hardware + traffic cards) ──────────────
+  const latestFrame = frames[frames.length - 1]
+  const liveNodes: NodeFrame[] = latestFrame?.nodes ?? []
+  // Tabs come from registered nodes so a node with no live data still appears;
+  // fall back to the live stream before infrastructure has loaded.
+  const nodeTabs = nodes.length
+    ? nodes.map(n => ({ id: n.node_id, hostname: n.hostname, role: n.role as string }))
+    : liveNodes.map(n => ({ id: n.node_id, hostname: n.hostname, role: n.role }))
+  useEffect(() => {
+    if (nodeTabs.length === 0) return
+    if (!selectedNodeId || !nodeTabs.some(t => t.id === selectedNodeId)) {
+      setSelectedNodeId(nodeTabs[0].id)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nodeTabs.map(t => t.id).join(','), selectedNodeId])
+  const selectedNode = liveNodes.find(n => n.node_id === selectedNodeId)
+  const nodeDrives: DriveFrame[] = selectedNode?.drives ?? []
+  const safeDriveIdx = nodeDrives.length ? Math.min(driveIdx, nodeDrives.length - 1) : 0
+  const selectedDrive = nodeDrives[safeDriveIdx]
 
-  const toggleServerMutation = useMutation({
-    mutationFn: ({ serverId, active }: { serverId: string; active: boolean }) =>
-      updateServer(serverId, { is_active: active }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['admin', 'infrastructure'] }),
-    onError: () => notify('error', 'Failed to update server'),
-  })
-
-  const renameServerMutation = useMutation({
-    mutationFn: ({ serverId, name }: { serverId: string; name: string }) =>
-      updateServer(serverId, { name }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['admin', 'infrastructure'] })
-      setRenamingServerId(null)
-      notify('success', 'Server renamed')
-    },
-    onError: () => notify('error', 'Failed to rename server'),
-  })
-
-  const toggleDriveMutation = useMutation({
-    mutationFn: ({ serverId, driveId, active }: { serverId: string; driveId: string; active: boolean }) =>
-      updateDrive(serverId, driveId, { is_active: active }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['admin', 'infrastructure'] }),
-    onError: () => notify('error', 'Failed to update drive'),
-  })
-
-  const addServerMutation = useMutation({
-    mutationFn: createServer,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['admin', 'infrastructure'] })
-      notify('success', 'Server added')
-    },
-    onError: () => notify('error', 'Failed to add server'),
-  })
-
-  const addNodeMutation = useMutation({
-    mutationFn: ({ serverId, params }: { serverId: string; params: Parameters<typeof createNode>[1] }) =>
-      createNode(serverId, params),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['admin', 'infrastructure'] })
-      notify('success', 'Node added')
-    },
-    onError: () => notify('error', 'Failed to add node'),
-  })
-
-  const updateNodeMutation = useMutation({
-    mutationFn: ({ serverId, nodeId, params }: { serverId: string; nodeId: string; params: Parameters<typeof updateNode>[2] }) =>
-      updateNode(serverId, nodeId, params),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['admin', 'infrastructure'] }),
-    onError: () => notify('error', 'Failed to update node'),
-  })
-
-  const deleteNodeMutation = useMutation({
-    mutationFn: ({ serverId, nodeId }: { serverId: string; nodeId: string }) =>
-      deleteNode(serverId, nodeId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['admin', 'infrastructure'] })
-      notify('success', 'Node removed')
-    },
-    onError: () => notify('error', 'Failed to remove node'),
-  })
-
-  const addDriveMutation = useMutation({
-    mutationFn: ({ serverId, params }: { serverId: string; params: Parameters<typeof addDrive>[1] }) =>
-      addDrive(serverId, params),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['admin', 'infrastructure'] })
-      notify('success', 'Drive added')
-    },
-    onError: () => notify('error', 'Failed to add drive'),
-  })
-
-  const deleteDriveMutation = useMutation({
-    mutationFn: ({ serverId, driveId }: { serverId: string; driveId: string }) =>
-      deleteDrive(serverId, driveId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['admin', 'infrastructure'] })
-      notify('success', 'Drive removed')
-    },
-    onError: (err: unknown) => {
-      const msg = err instanceof Error ? err.message : 'Failed to remove drive'
-      notify('error', msg)
-    },
-  })
-
-  const syncCapacityMutation = useMutation({
-    mutationFn: (driveId: string) => syncDriveCapacity(driveId),
-    onSuccess: () => {
+  // The metrics page no longer edits infrastructure by hand. A single sync
+  // indexes the live swarm + MinIO and reconciles the server → node → drive tree.
+  const syncInfraMutation = useMutation({
+    mutationFn: syncInfrastructure,
+    onSuccess: (summary) => {
       queryClient.invalidateQueries({ queryKey: ['admin', 'infrastructure'] })
       queryClient.invalidateQueries({ queryKey: ['admin', 'capacity'] })
-      notify('success', 'Drive capacity synced from disk')
+      notify(
+        'success',
+        `Synced ${summary.nodes} node${summary.nodes !== 1 ? 's' : ''} and ${summary.drives} drive${summary.drives !== 1 ? 's' : ''} across ${summary.servers} server${summary.servers !== 1 ? 's' : ''}`,
+      )
     },
-    onError: () => notify('error', 'Failed to sync drive capacity'),
+    onError: () => notify('error', 'Infrastructure sync failed'),
   })
 
 
   const latest = snapshots[snapshots.length - 1]
 
-  const memPct =
-    latest && latest.memory_total_bytes > 0
-      ? (latest.memory_used_bytes / latest.memory_total_bytes) * 100
-      : 0
-
-  // Committed disk = physically used + quota reserved but not yet uploaded
+  // Committed disk = physically used + quota reserved but not yet uploaded (cluster).
   const diskUsedBytes = latest ? latest.disk_total_bytes - latest.disk_free_bytes : 0
   const quotaOverheadBytes = latest
     ? Math.max(0, latest.storage_total_quota_bytes - latest.storage_total_used_bytes)
@@ -249,17 +182,17 @@ function RouteComponent() {
       ? (diskCommittedBytes / latest.disk_total_bytes) * 100
       : 0
 
+  // Selected node memory (live latest frame).
+  const nodeMemPct =
+    selectedNode && selectedNode.memory_total_bytes > 0
+      ? (selectedNode.memory_used_bytes / selectedNode.memory_total_bytes) * 100
+      : 0
+
   const nowMs = Date.now()
+  const HOUR_MS = 60 * 60 * 1000
+  const tMs = (iso: string) => new Date(iso).getTime()
 
-  // Temperature line points (live)
-  const wsCpuTempPoints: LinePoint[] = snapshots
-    .filter(s => s.cpu_temp_celsius != null && new Date(s.sampled_at).getTime() >= nowMs - 60 * 60 * 1000)
-    .map(s => ({ x: new Date(s.sampled_at).getTime(), y: s.cpu_temp_celsius! }))
-
-  const wsDriveTempPoints: LinePoint[] = snapshots
-    .filter(s => s.drive_temp_celsius != null && new Date(s.sampled_at).getTime() >= nowMs - 60 * 60 * 1000)
-    .map(s => ({ x: new Date(s.sampled_at).getTime(), y: s.drive_temp_celsius! }))
-
+  // ── Cluster history (users, disk, speed, ping, loss) ──────────────────────────
   const { data: historySnaps, error: historyError } = useQuery({
     queryKey: ['admin', 'metrics', 'history', hours],
     queryFn: () => getMetricsHistoryByHours(hours),
@@ -267,124 +200,158 @@ function RouteComponent() {
     enabled: hours > 1 && !inactive,
     retry: 1,
   })
-
   useEffect(() => {
     if (historyError) notify('error', 'Failed to load metrics history')
   }, [historyError, notify])
+  const histSnaps = historySnaps ?? []
 
-  const historyCpuTempPoints: LinePoint[] = (historySnaps ?? [])
-    .filter(s => s.cpu_temp_celsius != null)
-    .map(s => ({ x: new Date(s.sampled_at).getTime(), y: s.cpu_temp_celsius! }))
+  // ── Per-node history (cpu, memory, traffic) for the selected node ─────────────
+  const { data: nodeHistory, error: nodeHistoryError } = useQuery({
+    queryKey: ['admin', 'node-metrics', selectedNodeId, hours],
+    queryFn: () => getNodeMetricsHistory(selectedNodeId!, hours),
+    staleTime: 60_000,
+    enabled: !!selectedNodeId && hours > 1 && !inactive,
+    retry: 1,
+  })
+  useEffect(() => {
+    if (nodeHistoryError) notify('error', 'Failed to load node metrics history')
+  }, [nodeHistoryError, notify])
+  const nHist = nodeHistory ?? []
 
-  const historyDriveTempPoints: LinePoint[] = (historySnaps ?? [])
-    .filter(s => s.drive_temp_celsius != null)
-    .map(s => ({ x: new Date(s.sampled_at).getTime(), y: s.drive_temp_celsius! }))
-
-  const cpuTempPoints = hours === 1 ? wsCpuTempPoints : historyCpuTempPoints
-  const driveTempPoints = hours === 1 ? wsDriveTempPoints : historyDriveTempPoints
+  // ── Per-drive temperature history (carousel) for the selected drive ───────────
+  const selectedDriveId = selectedDrive?.drive_id
+  const { data: driveTempHistory } = useQuery({
+    queryKey: ['admin', 'drive-temps', selectedDriveId, hours],
+    queryFn: () => getDriveTempsHistory(selectedDriveId!, hours),
+    staleTime: 60_000,
+    enabled: !!selectedDriveId && hours > 1 && !inactive,
+    retry: 1,
+  })
 
   const { pingMs: clientPingMs, packetLossPercent: clientPacketLoss, history: clientPingHistory } = useServerPing(inactive)
 
-  // Network rate line points (live — derived from consecutive snapshot diffs)
+  // Cluster snapshots / frames within the last hour, for live series.
+  const recentSnaps = snapshots.filter(s => tMs(s.sampled_at) >= nowMs - HOUR_MS)
+  const recentFrames = frames.filter(f => tMs(f.cluster.sampled_at) >= nowMs - HOUR_MS)
+  const nodeIn = (f: MetricsFrame) => f.nodes.find(n => n.node_id === selectedNodeId)
+
+  // ── CPU utilisation (per node) ──
+  const wsCpuPoints: LinePoint[] = recentFrames.flatMap(f => {
+    const n = nodeIn(f); return n ? [{ x: tMs(f.cluster.sampled_at), y: n.cpu_percent }] : []
+  })
+  const histCpuPoints: LinePoint[] = nHist.map(s => ({ x: tMs(s.sampled_at), y: s.cpu_percent }))
+  const cpuPoints = hours === 1 ? wsCpuPoints : histCpuPoints
+
+  // ── Memory (per node) ──
+  const wsMemoryPoints: LinePoint[] = recentFrames.flatMap(f => {
+    const n = nodeIn(f); return n ? [{ x: tMs(f.cluster.sampled_at), y: n.memory_used_bytes }] : []
+  })
+  const histMemoryPoints: LinePoint[] = nHist.map(s => ({ x: tMs(s.sampled_at), y: s.memory_used_bytes }))
+  const memoryPoints = hours === 1 ? wsMemoryPoints : histMemoryPoints
+
+  // ── Network traffic (per node — derived from consecutive counter diffs) ──
   const wsNetUploadPoints: LinePoint[] = []
   const wsNetDownloadPoints: LinePoint[] = []
-  const recentSnapsForNet = snapshots.filter(s => new Date(s.sampled_at).getTime() >= nowMs - 60 * 60 * 1000)
-  for (let i = 1; i < recentSnapsForNet.length; i++) {
-    const prev = recentSnapsForNet[i - 1]
-    const curr = recentSnapsForNet[i]
-    const dtMs = new Date(curr.sampled_at).getTime() - new Date(prev.sampled_at).getTime()
+  for (let i = 1; i < recentFrames.length; i++) {
+    const prevN = nodeIn(recentFrames[i - 1]); const currN = nodeIn(recentFrames[i])
+    if (!prevN || !currN) continue
+    const dtMs = tMs(recentFrames[i].cluster.sampled_at) - tMs(recentFrames[i - 1].cluster.sampled_at)
     if (dtMs <= 0) continue
-    const sentBps = ((curr.network_bytes_sent - prev.network_bytes_sent) / dtMs) * 1000
-    const recvBps = ((curr.network_bytes_recv - prev.network_bytes_recv) / dtMs) * 1000
+    const sentBps = ((currN.network_bytes_sent - prevN.network_bytes_sent) / dtMs) * 1000
+    const recvBps = ((currN.network_bytes_recv - prevN.network_bytes_recv) / dtMs) * 1000
     if (sentBps < 0 || recvBps < 0) continue
-    wsNetUploadPoints.push({ x: new Date(curr.sampled_at).getTime(), y: sentBps })
-    wsNetDownloadPoints.push({ x: new Date(curr.sampled_at).getTime(), y: recvBps })
+    wsNetUploadPoints.push({ x: tMs(recentFrames[i].cluster.sampled_at), y: sentBps })
+    wsNetDownloadPoints.push({ x: tMs(recentFrames[i].cluster.sampled_at), y: recvBps })
   }
-  const wsPingPoints: LinePoint[] = recentSnapsForNet
-    .filter(s => s.server_isp_ping_ms != null)
-    .map(s => ({ x: new Date(s.sampled_at).getTime(), y: s.server_isp_ping_ms! }))
-  const wsLossPoints: LinePoint[] = recentSnapsForNet
-    .filter(s => s.server_isp_packet_loss_percent != null)
-    .map(s => ({ x: new Date(s.sampled_at).getTime(), y: s.server_isp_packet_loss_percent! }))
-
-  // Network rate line points (history)
   const histNetUploadPoints: LinePoint[] = []
   const histNetDownloadPoints: LinePoint[] = []
-  const histSnaps = historySnaps ?? []
-  for (let i = 1; i < histSnaps.length; i++) {
-    const prev = histSnaps[i - 1]
-    const curr = histSnaps[i]
-    const dtMs = new Date(curr.sampled_at).getTime() - new Date(prev.sampled_at).getTime()
+  for (let i = 1; i < nHist.length; i++) {
+    const prev = nHist[i - 1]; const curr = nHist[i]
+    const dtMs = tMs(curr.sampled_at) - tMs(prev.sampled_at)
     if (dtMs <= 0) continue
     const sentBps = ((curr.network_bytes_sent - prev.network_bytes_sent) / dtMs) * 1000
     const recvBps = ((curr.network_bytes_recv - prev.network_bytes_recv) / dtMs) * 1000
     if (sentBps < 0 || recvBps < 0) continue
-    histNetUploadPoints.push({ x: new Date(curr.sampled_at).getTime(), y: sentBps })
-    histNetDownloadPoints.push({ x: new Date(curr.sampled_at).getTime(), y: recvBps })
+    histNetUploadPoints.push({ x: tMs(curr.sampled_at), y: sentBps })
+    histNetDownloadPoints.push({ x: tMs(curr.sampled_at), y: recvBps })
   }
-  const histPingPoints: LinePoint[] = histSnaps
-    .filter(s => s.server_isp_ping_ms != null)
-    .map(s => ({ x: new Date(s.sampled_at).getTime(), y: s.server_isp_ping_ms! }))
-  const histLossPoints: LinePoint[] = histSnaps
-    .filter(s => s.server_isp_packet_loss_percent != null)
-    .map(s => ({ x: new Date(s.sampled_at).getTime(), y: s.server_isp_packet_loss_percent! }))
-
   const netUploadPoints = hours === 1 ? wsNetUploadPoints : histNetUploadPoints
   const netDownloadPoints = hours === 1 ? wsNetDownloadPoints : histNetDownloadPoints
+
+  // Live traffic rate text for the selected node's card (last two frames).
+  let netSentRate: string | null = null
+  let netRecvRate: string | null = null
+  if (frames.length >= 2) {
+    const prevN = nodeIn(frames[frames.length - 2]); const currN = nodeIn(frames[frames.length - 1])
+    if (prevN && currN) {
+      const dtMs = tMs(frames[frames.length - 1].cluster.sampled_at) - tMs(frames[frames.length - 2].cluster.sampled_at)
+      if (dtMs > 0) {
+        netSentRate = formatBytesPerSec(((currN.network_bytes_sent - prevN.network_bytes_sent) / dtMs) * 1000)
+        netRecvRate = formatBytesPerSec(((currN.network_bytes_recv - prevN.network_bytes_recv) / dtMs) * 1000)
+      }
+    }
+  }
+
+  // ── Drive temperature (selected node's selected drive) ──
+  const wsDriveTempPoints: LinePoint[] = selectedDriveId
+    ? recentFrames.flatMap(f => {
+        const d = nodeIn(f)?.drives.find(dr => dr.drive_id === selectedDriveId)
+        return d && d.temp_celsius != null ? [{ x: tMs(f.cluster.sampled_at), y: d.temp_celsius }] : []
+      })
+    : []
+  const histDriveTempPoints: LinePoint[] = (driveTempHistory ?? []).map(s => ({ x: tMs(s.sampled_at), y: s.temp_celsius }))
+  const driveTempPoints = hours === 1 ? wsDriveTempPoints : histDriveTempPoints
+
+  // ── Cluster-level series: ping, loss, speed, users, disk ──
+  const wsPingPoints: LinePoint[] = recentSnaps
+    .filter(s => s.server_isp_ping_ms != null)
+    .map(s => ({ x: tMs(s.sampled_at), y: s.server_isp_ping_ms! }))
+  const wsLossPoints: LinePoint[] = recentSnaps
+    .filter(s => s.server_isp_packet_loss_percent != null)
+    .map(s => ({ x: tMs(s.sampled_at), y: s.server_isp_packet_loss_percent! }))
+  const histPingPoints: LinePoint[] = histSnaps
+    .filter(s => s.server_isp_ping_ms != null)
+    .map(s => ({ x: tMs(s.sampled_at), y: s.server_isp_ping_ms! }))
+  const histLossPoints: LinePoint[] = histSnaps
+    .filter(s => s.server_isp_packet_loss_percent != null)
+    .map(s => ({ x: tMs(s.sampled_at), y: s.server_isp_packet_loss_percent! }))
   const serverPingPoints = hours === 1 ? wsPingPoints : histPingPoints
   // For 1hr live view, fall back to HTTP pings if server ICMP unavailable.
-  // For historical views, HTTP pings only cover the last hour so don't substitute.
   const netPingPoints = hours === 1
     ? (serverPingPoints.length >= 2 ? serverPingPoints : clientPingHistory)
     : serverPingPoints
   const netLossPoints = hours === 1 ? wsLossPoints : histLossPoints
 
-  // Speed test line points (live — only snapshots with a speed test result)
-  const wsSpeedUploadPoints: LinePoint[] = recentSnapsForNet
+  const wsSpeedUploadPoints: LinePoint[] = recentSnaps
     .filter(s => s.speed_test_upload_mbps != null)
-    .map(s => ({ x: new Date(s.sampled_at).getTime(), y: s.speed_test_upload_mbps! }))
-  const wsSpeedDownloadPoints: LinePoint[] = recentSnapsForNet
+    .map(s => ({ x: tMs(s.sampled_at), y: s.speed_test_upload_mbps! }))
+  const wsSpeedDownloadPoints: LinePoint[] = recentSnaps
     .filter(s => s.speed_test_download_mbps != null)
-    .map(s => ({ x: new Date(s.sampled_at).getTime(), y: s.speed_test_download_mbps! }))
-
-  // Speed test line points (history)
+    .map(s => ({ x: tMs(s.sampled_at), y: s.speed_test_download_mbps! }))
   const histSpeedUploadPoints: LinePoint[] = histSnaps
     .filter(s => s.speed_test_upload_mbps != null)
-    .map(s => ({ x: new Date(s.sampled_at).getTime(), y: s.speed_test_upload_mbps! }))
+    .map(s => ({ x: tMs(s.sampled_at), y: s.speed_test_upload_mbps! }))
   const histSpeedDownloadPoints: LinePoint[] = histSnaps
     .filter(s => s.speed_test_download_mbps != null)
-    .map(s => ({ x: new Date(s.sampled_at).getTime(), y: s.speed_test_download_mbps! }))
-
+    .map(s => ({ x: tMs(s.sampled_at), y: s.speed_test_download_mbps! }))
   const speedUploadPoints = hours === 1 ? wsSpeedUploadPoints : histSpeedUploadPoints
   const speedDownloadPoints = hours === 1 ? wsSpeedDownloadPoints : histSpeedDownloadPoints
 
-  // Additional metric line points (live)
-  const wsUsersPoints: LinePoint[] = recentSnapsForNet.map(s => ({ x: new Date(s.sampled_at).getTime(), y: s.total_user_count }))
-  const wsActiveUsersPoints: LinePoint[] = recentSnapsForNet.map(s => ({ x: new Date(s.sampled_at).getTime(), y: s.active_user_count }))
-  const wsDiskPoints: LinePoint[] = recentSnapsForNet.map(s => ({
-    x: new Date(s.sampled_at).getTime(),
+  const wsUsersPoints: LinePoint[] = recentSnaps.map(s => ({ x: tMs(s.sampled_at), y: s.total_user_count }))
+  const wsActiveUsersPoints: LinePoint[] = recentSnaps.map(s => ({ x: tMs(s.sampled_at), y: s.active_user_count }))
+  const wsDiskPoints: LinePoint[] = recentSnaps.map(s => ({
+    x: tMs(s.sampled_at),
     y: (s.disk_total_bytes - s.disk_free_bytes) + Math.max(0, s.storage_total_quota_bytes - s.storage_total_used_bytes),
   }))
-  const wsMemoryPoints: LinePoint[] = recentSnapsForNet.map(s => ({ x: new Date(s.sampled_at).getTime(), y: s.memory_used_bytes }))
-
-  // Additional metric line points (history)
-  const histUsersPoints: LinePoint[] = histSnaps.map(s => ({ x: new Date(s.sampled_at).getTime(), y: s.total_user_count }))
-  const histActiveUsersPoints: LinePoint[] = histSnaps.map(s => ({ x: new Date(s.sampled_at).getTime(), y: s.active_user_count }))
+  const histUsersPoints: LinePoint[] = histSnaps.map(s => ({ x: tMs(s.sampled_at), y: s.total_user_count }))
+  const histActiveUsersPoints: LinePoint[] = histSnaps.map(s => ({ x: tMs(s.sampled_at), y: s.active_user_count }))
   const histDiskPoints: LinePoint[] = histSnaps.map(s => ({
-    x: new Date(s.sampled_at).getTime(),
+    x: tMs(s.sampled_at),
     y: (s.disk_total_bytes - s.disk_free_bytes) + Math.max(0, s.storage_total_quota_bytes - s.storage_total_used_bytes),
   }))
-  const histMemoryPoints: LinePoint[] = histSnaps.map(s => ({ x: new Date(s.sampled_at).getTime(), y: s.memory_used_bytes }))
-
   const usersPoints = hours === 1 ? wsUsersPoints : histUsersPoints
   const activeUsersPoints = hours === 1 ? wsActiveUsersPoints : histActiveUsersPoints
   const diskPoints = hours === 1 ? wsDiskPoints : histDiskPoints
-  const memoryPoints = hours === 1 ? wsMemoryPoints : histMemoryPoints
-
-  const hasCpuTemp = latest?.cpu_temp_celsius != null
-  const hasDriveTemp = latest?.drive_temp_celsius != null
-
-  const { data: driveTemps } = useQuery({ ...driveTempsQueryOptions, enabled: !inactive })
 
   const { data: speedTest, error: speedTestError } = useQuery({
     ...speedTestQueryOptions,
@@ -436,18 +403,6 @@ function RouteComponent() {
       }
     },
   })
-
-  let netSentRate: string | null = null
-  let netRecvRate: string | null = null
-  if (snapshots.length >= 2) {
-    const prev = snapshots[snapshots.length - 2]
-    const curr = snapshots[snapshots.length - 1]
-    const dtMs = new Date(curr.sampled_at).getTime() - new Date(prev.sampled_at).getTime()
-    if (dtMs > 0) {
-      netSentRate = formatBytesPerSec(((curr.network_bytes_sent - prev.network_bytes_sent) / dtMs) * 1000)
-      netRecvRate = formatBytesPerSec(((curr.network_bytes_recv - prev.network_bytes_recv) / dtMs) * 1000)
-    }
-  }
 
   const graphW = Math.min(820, window.innerWidth - 80)
 
@@ -511,83 +466,105 @@ function RouteComponent() {
       </div>
 
       {latest && (
-        <div className="grid grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-3 mb-8">
-          <StatCard
-            label="Total users"
-            value={String(latest.total_user_count)}
-            selected={selectedMetric === 'total_users'}
-            onClick={() => setSelectedMetric('total_users')}
-          />
-          <StatCard
-            label="Active (5 min)"
-            value={String(latest.active_user_count)}
-            selected={selectedMetric === 'active_users'}
-            onClick={() => setSelectedMetric('active_users')}
-          />
-          <StatCard
-            label="Disk committed"
-            value={`${(diskCommittedBytes / GB).toFixed(1)} GB`}
-            sub={`${diskCommittedPct.toFixed(1)}% of ${(latest.disk_total_bytes / GB).toFixed(0)} GB`}
-            selected={selectedMetric === 'disk'}
-            onClick={() => setSelectedMetric('disk')}
-          />
-          <StatCard
-            label="Memory"
-            value={`${(latest.memory_used_bytes / GB).toFixed(2)} GB`}
-            sub={`${memPct.toFixed(1)}% of ${(latest.memory_total_bytes / GB).toFixed(1)} GB`}
-            selected={selectedMetric === 'memory'}
-            onClick={() => setSelectedMetric('memory')}
-          />
-          {netSentRate !== null && (
-            <NetworkTrafficCard
-              sent={netSentRate!}
-              recv={netRecvRate!}
-              selected={selectedMetric === 'traffic'}
-              onClick={() => setSelectedMetric('traffic')}
-            />
-          )}
-          <SpeedTestCard result={liveSpeedTest} onRun={() => speedTestMutation.mutate()} pending={speedTestMutation.isPending} selected={selectedMetric === 'speed'} onClick={() => setSelectedMetric('speed')} />
-          {hasCpuTemp && (
-            <StatCard
-              label="CPU temp"
-              value={`${latest.cpu_temp_celsius!.toFixed(1)}°C`}
-              selected={selectedMetric === 'cpu_temp'}
-              onClick={() => setSelectedMetric('cpu_temp')}
-            />
-          )}
-          {hasDriveTemp && (
-            <StatCard
-              label="Drive temp"
-              value={`${latest.drive_temp_celsius!.toFixed(1)}°C`}
-              selected={selectedMetric === 'drive_temp'}
-              onClick={() => setSelectedMetric('drive_temp')}
-            />
-          )}
-          {(driveTemps?.length ?? 0) > 0 && (
-            <NvmeTempsCard
-              temps={driveTemps!}
-              selected={selectedMetric === 'drive_temp'}
-              onClick={() => setSelectedMetric('drive_temp')}
-            />
-          )}
-          <PingCard
-            serverMs={latest?.server_isp_ping_ms ?? null}
-            clientMs={clientPingMs}
-            selected={selectedMetric === 'ping'}
-            onClick={() => setSelectedMetric('ping')}
-          />
-          <PacketLossCard
-            serverLoss={latest?.server_isp_packet_loss_percent ?? null}
-            clientLoss={clientPacketLoss}
-            selected={selectedMetric === 'loss'}
-            onClick={() => setSelectedMetric('loss')}
-          />
-        </div>
+        <>
+          {/* ── Node hardware (per selected node) ─────────────────────────── */}
+          <section className="mb-8">
+            <div className="flex items-center justify-between mb-3 gap-3 flex-wrap">
+              <h3 className="text-sm font-semibold text-gray-600 m-0">Node hardware</h3>
+              <NodeTabs
+                tabs={nodeTabs}
+                selectedId={selectedNodeId}
+                onSelect={(id) => { setSelectedNodeId(id); setDriveIdx(0) }}
+              />
+            </div>
+            <div className="grid grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-3">
+              <CpuCard
+                percent={selectedNode?.cpu_percent ?? null}
+                tempCelsius={selectedNode?.cpu_temp_celsius ?? null}
+                online={selectedNode?.online ?? false}
+                selected={selectedMetric === 'cpu'}
+                onClick={() => setSelectedMetric('cpu')}
+              />
+              <StatCard
+                label="Memory"
+                value={selectedNode ? `${(selectedNode.memory_used_bytes / GB).toFixed(2)} GB` : '—'}
+                sub={selectedNode ? `${nodeMemPct.toFixed(1)}% of ${(selectedNode.memory_total_bytes / GB).toFixed(1)} GB` : 'no live data'}
+                selected={selectedMetric === 'memory'}
+                onClick={() => setSelectedMetric('memory')}
+              />
+              <DriveCapacityCard drives={nodeDrives} />
+              <DriveTempCarousel
+                drives={nodeDrives}
+                index={safeDriveIdx}
+                onIndex={setDriveIdx}
+                selected={selectedMetric === 'drive_temp'}
+                onClick={() => setSelectedMetric('drive_temp')}
+              />
+            </div>
+          </section>
+
+          {/* ── Node network (traffic per node, uplink shared) ────────────── */}
+          <section className="mb-8">
+            <h3 className="text-sm font-semibold text-gray-600 m-0 mb-3">Node network</h3>
+            <div className="grid grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-3">
+              <NetworkTrafficCard
+                sent={netSentRate ?? '—'}
+                recv={netRecvRate ?? '—'}
+                selected={selectedMetric === 'traffic'}
+                onClick={() => setSelectedMetric('traffic')}
+              />
+              <SpeedTestCard result={liveSpeedTest} onRun={() => speedTestMutation.mutate()} pending={speedTestMutation.isPending} selected={selectedMetric === 'speed'} onClick={() => setSelectedMetric('speed')} />
+              <PingCard
+                serverMs={latest?.server_isp_ping_ms ?? null}
+                clientMs={clientPingMs}
+                selected={selectedMetric === 'ping'}
+                onClick={() => setSelectedMetric('ping')}
+              />
+              <PacketLossCard
+                serverLoss={latest?.server_isp_packet_loss_percent ?? null}
+                clientLoss={clientPacketLoss}
+                selected={selectedMetric === 'loss'}
+                onClick={() => setSelectedMetric('loss')}
+              />
+            </div>
+          </section>
+
+          {/* ── Users & storage (cluster-wide) ────────────────────────────── */}
+          <section className="mb-8">
+            <h3 className="text-sm font-semibold text-gray-600 m-0 mb-3">Users &amp; storage</h3>
+            <div className="grid grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-3">
+              <StatCard
+                label="Total users"
+                value={String(latest.total_user_count)}
+                selected={selectedMetric === 'total_users'}
+                onClick={() => setSelectedMetric('total_users')}
+              />
+              <StatCard
+                label="Active (5 min)"
+                value={String(latest.active_user_count)}
+                selected={selectedMetric === 'active_users'}
+                onClick={() => setSelectedMetric('active_users')}
+              />
+              <StatCard
+                label="Disk committed"
+                value={`${(diskCommittedBytes / GB).toFixed(1)} GB`}
+                sub={`${diskCommittedPct.toFixed(1)}% of ${(latest.disk_total_bytes / GB).toFixed(0)} GB`}
+                selected={selectedMetric === 'disk'}
+                onClick={() => setSelectedMetric('disk')}
+              />
+            </div>
+          </section>
+        </>
       )}
 
       <section className="mb-10">
         <div className="flex items-center gap-3 mb-3">
-          <h3 className="text-sm font-semibold text-gray-600 m-0">{METRIC_LABELS[selectedMetric]} over time</h3>
+          <h3 className="text-sm font-semibold text-gray-600 m-0">
+            {METRIC_LABELS[selectedMetric]}
+            {NODE_METRICS.has(selectedMetric) && selectedNode ? ` · ${selectedNode.hostname}` : ''}
+            {selectedMetric === 'drive_temp' && selectedDrive ? ` · ${selectedDrive.label}` : ''}
+            {' '}over time
+          </h3>
           <div className="flex gap-1">
             {HOUR_OPTIONS.map(h => (
               <button
@@ -647,8 +624,8 @@ function RouteComponent() {
           {selectedMetric === 'memory' && (
             <LineGraph points={memoryPoints} width={graphW} height={200} color="#8b5cf6" formatX={formatGraphX} />
           )}
-          {selectedMetric === 'cpu_temp' && (
-            <LineGraph points={cpuTempPoints} width={graphW} height={200} color="#f59e0b" formatY={formatTempY} formatX={formatGraphX} />
+          {selectedMetric === 'cpu' && (
+            <LineGraph points={cpuPoints} width={graphW} height={200} color="#f59e0b" formatY={(v) => `${v.toFixed(0)}%`} formatX={formatGraphX} />
           )}
           {selectedMetric === 'drive_temp' && (
             <LineGraph points={driveTempPoints} width={graphW} height={200} color="#10b981" formatY={formatTempY} formatX={formatGraphX} />
@@ -705,106 +682,43 @@ function RouteComponent() {
 
       <section>
         <div className="flex items-center justify-between mb-3">
-          <h3 className="text-sm font-semibold text-gray-600 m-0">Infrastructure</h3>
-          <AddServerForm onSubmit={(params) => addServerMutation.mutate(params)} pending={addServerMutation.isPending} />
+          <div className="flex items-center gap-2">
+            <h3 className="text-sm font-semibold text-gray-600 m-0">Infrastructure</h3>
+            <span className="text-xs text-gray-400">auto-detected from the swarm</span>
+          </div>
+          <button
+            onClick={() => syncInfraMutation.mutate()}
+            disabled={syncInfraMutation.isPending}
+            className="text-xs bg-blue-600 text-white rounded px-2 py-1 disabled:opacity-50 cursor-pointer"
+            title="Index all swarm nodes and drives (roles, capacity, fast/standard) from the live cluster"
+          >
+            {syncInfraMutation.isPending ? 'Syncing…' : 'Sync infrastructure'}
+          </button>
         </div>
         {servers.length === 0 ? (
-          <p className="text-sm text-gray-400">No servers registered.</p>
+          <p className="text-sm text-gray-400">No infrastructure indexed yet. Click "Sync infrastructure" to detect the swarm.</p>
         ) : (
           <div className="flex flex-col gap-4">
             {servers.map((srv) => (
               <div key={srv.serverId} className="bg-white border border-gray-200 rounded-xl px-5 py-4">
-                <div className="flex items-center justify-between mb-3">
-                  <div className="flex items-center gap-2">
-                    <span className={`w-2 h-2 rounded-full shrink-0 ${srv.isActive ? 'bg-green-500' : 'bg-gray-300'}`} />
-                    {renamingServerId === srv.serverId ? (
-                      <form
-                        onSubmit={(e) => {
-                          e.preventDefault()
-                          if (renameValue.trim()) renameServerMutation.mutate({ serverId: srv.serverId, name: renameValue.trim() })
-                        }}
-                        className="flex items-center gap-1"
-                      >
-                        <input
-                          autoFocus
-                          value={renameValue}
-                          onChange={(e) => setRenameValue(e.target.value)}
-                          className="border border-blue-400 rounded px-2 py-0.5 text-sm font-medium text-gray-800 focus:outline-none focus:ring-1 focus:ring-blue-500 w-40"
-                        />
-                        <button type="submit" disabled={renameServerMutation.isPending} className="text-xs text-blue-600 hover:text-blue-800 cursor-pointer bg-transparent border-0 disabled:opacity-50">Save</button>
-                        <button type="button" onClick={() => setRenamingServerId(null)} className="text-xs text-gray-400 hover:text-gray-700 cursor-pointer bg-transparent border-0">Cancel</button>
-                      </form>
-                    ) : (
-                      <>
-                        <span className="font-medium text-gray-800 text-sm">{srv.name}</span>
-                        <button
-                          onClick={() => { setRenamingServerId(srv.serverId); setRenameValue(srv.name) }}
-                          className="text-xs text-gray-400 hover:text-gray-600 cursor-pointer bg-transparent border-0"
-                          title="Rename server"
-                        >
-                          ✎
-                        </button>
-                      </>
-                    )}
-                    {!srv.isActive && <span className="text-xs text-gray-400">(inactive)</span>}
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={() => toggleServerMutation.mutate({ serverId: srv.serverId, active: !srv.isActive })}
-                      className="text-xs text-gray-500 hover:text-gray-800 cursor-pointer bg-transparent border border-gray-200 hover:border-gray-400 rounded px-2 py-1 transition-colors"
-                    >
-                      {srv.isActive ? 'Deactivate' : 'Activate'}
-                    </button>
-                    <AddNodeForm
-                      onSubmit={(params) => addNodeMutation.mutate({ serverId: srv.serverId, params })}
-                      pending={addNodeMutation.isPending}
-                    />
-                  </div>
+                <div className="flex items-center gap-2 mb-3">
+                  <span className={`w-2 h-2 rounded-full shrink-0 ${srv.isActive ? 'bg-green-500' : 'bg-gray-300'}`} />
+                  <span className="font-medium text-gray-800 text-sm">{srv.name}</span>
+                  {!srv.isActive && <span className="text-xs text-gray-400">(inactive)</span>}
                 </div>
                 <div className="flex flex-col gap-3">
                   {srv.nodes.length === 0 && srv.unassigned.length === 0 && (
-                    <p className="text-xs text-gray-400 m-0">No nodes registered. Add a node to mount drives.</p>
+                    <p className="text-xs text-gray-400 m-0">No nodes detected on this server.</p>
                   )}
                   {srv.nodes.map((ng) => (
-                    <NodeBlock
-                      key={ng.node.node_id}
-                      group={ng}
-                      driveStats={driveStats}
-                      onAddDrive={(params) => addDriveMutation.mutate({ serverId: srv.serverId, params: { ...params, node_id: ng.node.node_id } })}
-                      addDrivePending={addDriveMutation.isPending}
-                      onUpdateNode={(params) => updateNodeMutation.mutate({ serverId: srv.serverId, nodeId: ng.node.node_id, params })}
-                      onDeleteNode={() => {
-                        const msg = ng.drives.length > 0
-                          ? `Remove node "${ng.node.hostname}"? Its ${ng.drives.length} drive(s) will be detached (not deleted).`
-                          : `Remove node "${ng.node.hostname}"?`
-                        if (confirm(msg)) deleteNodeMutation.mutate({ serverId: srv.serverId, nodeId: ng.node.node_id })
-                      }}
-                      onToggleDrive={(d) => toggleDriveMutation.mutate({ serverId: d.server_id, driveId: d.drive_id, active: !d.drive_is_active })}
-                      onDeleteDrive={(d) => {
-                        if (confirm(`Remove drive "${d.drive_label}" from ${d.server_name}? This cannot be undone.`)) {
-                          deleteDriveMutation.mutate({ serverId: d.server_id, driveId: d.drive_id })
-                        }
-                      }}
-                      onSyncCapacity={(d) => syncCapacityMutation.mutate(d.drive_id)}
-                    />
+                    <NodeBlock key={ng.node.node_id} group={ng} driveStats={driveStats} />
                   ))}
                   {srv.unassigned.length > 0 && (
                     <div className="border border-dashed border-gray-200 rounded-lg px-3 py-3">
                       <div className="text-xs font-medium text-gray-400 mb-2">Unassigned drives (no node)</div>
                       <div className="flex flex-col gap-3">
                         {srv.unassigned.map((d) => (
-                          <DriveBar
-                            key={d.drive_id}
-                            drive={d}
-                            stat={driveStats[d.drive_id]}
-                            onToggle={() => toggleDriveMutation.mutate({ serverId: d.server_id, driveId: d.drive_id, active: !d.drive_is_active })}
-                            onDelete={() => {
-                              if (confirm(`Remove drive "${d.drive_label}" from ${d.server_name}? This cannot be undone.`)) {
-                                deleteDriveMutation.mutate({ serverId: d.server_id, driveId: d.drive_id })
-                              }
-                            }}
-                            onSyncCapacity={() => syncCapacityMutation.mutate(d.drive_id)}
-                          />
+                          <DriveBar key={d.drive_id} drive={d} stat={driveStats[d.drive_id]} />
                         ))}
                       </div>
                     </div>
@@ -972,23 +886,132 @@ function tempColor(c: number): string {
   return 'text-emerald-600'
 }
 
-function NvmeTempsCard({ temps, selected, onClick }: { temps: DriveTemp[]; selected?: boolean; onClick?: () => void }) {
+// NodeTabs is the per-node selector that drives the hardware + traffic cards.
+function NodeTabs({ tabs, selectedId, onSelect }: {
+  tabs: { id: string; hostname: string; role: string }[]
+  selectedId: string | null
+  onSelect: (id: string) => void
+}) {
+  if (tabs.length <= 1) return null
+  return (
+    <div className="flex gap-1 flex-wrap">
+      {tabs.map(t => (
+        <button
+          key={t.id}
+          onClick={() => onSelect(t.id)}
+          title={t.role}
+          className={`px-2.5 py-1 text-xs rounded-md border cursor-pointer transition-colors ${
+            t.id === selectedId
+              ? 'bg-blue-600 text-white border-blue-600'
+              : 'bg-white text-gray-600 border-gray-200 hover:border-gray-400'
+          }`}
+        >
+          {t.hostname}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+// CpuCard merges utilisation (%) and temperature (°C) for the selected node.
+function CpuCard({ percent, tempCelsius, online, selected, onClick }: {
+  percent: number | null
+  tempCelsius: number | null
+  online: boolean
+  selected?: boolean
+  onClick?: () => void
+}) {
   return (
     <div
-      className={`bg-white border rounded-xl px-4 py-3 transition-colors ${onClick ? 'cursor-pointer' : ''} ${selected ? 'border-blue-500 ring-1 ring-blue-500' : 'border-gray-200 hover:border-gray-300'}`}
+      className={`bg-white border rounded-xl px-4 py-3 cursor-pointer transition-colors ${selected ? 'border-blue-500 ring-1 ring-blue-500' : 'border-gray-200 hover:border-gray-300'}`}
       onClick={onClick}
     >
-      <div className="text-xs text-gray-400 mb-2">NVMe temps</div>
-      <div className="flex flex-col gap-1 max-h-28 overflow-y-auto pr-1">
-        {temps.map((d) => (
-          <div key={d.name} className="flex items-center justify-between gap-2">
-            <span className="text-xs text-gray-600 font-medium truncate" title={d.name}>{d.name}</span>
-            <span className={`text-xs font-semibold tabular-nums shrink-0 ${tempColor(d.temp_celsius)}`}>
-              {d.temp_celsius.toFixed(1)}°C
+      <div className="text-xs text-gray-400 mb-2">CPU</div>
+      <div className="flex flex-col gap-1">
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-xs text-gray-500">Utilization</span>
+          <span className="text-sm font-semibold text-gray-900 tabular-nums shrink-0">
+            {percent != null ? `${percent.toFixed(0)}%` : '—'}
+          </span>
+        </div>
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-xs text-gray-500">Temperature</span>
+          <span className={`text-sm font-semibold tabular-nums shrink-0 ${tempCelsius != null ? tempColor(tempCelsius) : 'text-gray-400'}`}>
+            {tempCelsius != null ? `${tempCelsius.toFixed(1)}°C` : '—'}
+          </span>
+        </div>
+      </div>
+      {!online && <div className="text-xs text-gray-400 mt-1">no live data</div>}
+    </div>
+  )
+}
+
+// DriveCapacityCard summarises the selected node's drive capacity/usage.
+function DriveCapacityCard({ drives }: { drives: DriveFrame[] }) {
+  const total = drives.reduce((s, d) => s + d.total_bytes, 0)
+  const used = drives.reduce((s, d) => s + d.used_bytes, 0)
+  const pct = total > 0 ? (used / total) * 100 : 0
+  return (
+    <div className="bg-white border border-gray-200 rounded-xl px-4 py-3">
+      <div className="text-xs text-gray-400 mb-1">Drive capacity</div>
+      {drives.length === 0 ? (
+        <div className="text-sm font-semibold text-gray-400">no live data</div>
+      ) : (
+        <>
+          <div className="text-xl font-semibold text-gray-900">{fmtCapacity(used)}</div>
+          <div className="text-xs text-gray-400 mt-0.5">
+            {pct.toFixed(1)}% of {fmtCapacity(total)} · {drives.length} drive{drives.length !== 1 ? 's' : ''}
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+// DriveTempCarousel pages through the selected node's drives, one temperature
+// per slide. Replaces the old NVMe-temps + drive-temp cards.
+function DriveTempCarousel({ drives, index, onIndex, selected, onClick }: {
+  drives: DriveFrame[]
+  index: number
+  onIndex: (i: number) => void
+  selected?: boolean
+  onClick?: () => void
+}) {
+  const has = drives.length > 0
+  const d = has ? drives[Math.min(index, drives.length - 1)] : undefined
+  const step = (delta: number, e: React.MouseEvent) => {
+    e.stopPropagation()
+    if (!has) return
+    onIndex((index + delta + drives.length) % drives.length)
+  }
+  return (
+    <div
+      className={`bg-white border rounded-xl px-4 py-3 cursor-pointer transition-colors ${selected ? 'border-blue-500 ring-1 ring-blue-500' : 'border-gray-200 hover:border-gray-300'}`}
+      onClick={onClick}
+    >
+      <div className="flex items-center justify-between mb-2">
+        <div className="text-xs text-gray-400">Drive temp</div>
+        {drives.length > 1 && (
+          <div className="flex items-center gap-1">
+            <button onClick={(e) => step(-1, e)} className="text-xs text-gray-400 hover:text-gray-700 cursor-pointer bg-transparent border-0 px-1" title="Previous drive">‹</button>
+            <span className="text-xs text-gray-400 tabular-nums">{index + 1}/{drives.length}</span>
+            <button onClick={(e) => step(1, e)} className="text-xs text-gray-400 hover:text-gray-700 cursor-pointer bg-transparent border-0 px-1" title="Next drive">›</button>
+          </div>
+        )}
+      </div>
+      {d ? (
+        <>
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-xs text-gray-600 font-medium truncate" title={d.label}>{d.label}</span>
+            <span className={`text-lg font-semibold tabular-nums shrink-0 ${d.temp_celsius != null ? tempColor(d.temp_celsius) : 'text-gray-400'}`}>
+              {d.temp_celsius != null ? `${d.temp_celsius.toFixed(1)}°C` : '—'}
             </span>
           </div>
-        ))}
-      </div>
+          <div className="text-xs text-gray-400 mt-0.5">{d.drive_type === 'nvme' ? 'Fast' : 'Standard'}</div>
+        </>
+      ) : (
+        <div className="text-sm font-semibold text-gray-400">no live data</div>
+      )}
     </div>
   )
 }
@@ -1133,12 +1156,12 @@ function fmtCapacity(bytes: number): string {
   return gb >= 1024 ? `${(gb / 1024).toFixed(1)} TB` : `${gb.toFixed(0)} GB`
 }
 
-function DriveBar({ drive, stat, onToggle, onDelete, onSyncCapacity }: {
+// DriveBar renders a single drive read-only: its label, tier (Fast/Standard),
+// bucket, temperature, and a capacity/usage bar. Drives are detected by the
+// infrastructure sync, so there are no per-drive controls.
+function DriveBar({ drive, stat }: {
   drive: DriveSummary
   stat?: DriveStat
-  onToggle: () => void
-  onDelete: () => void
-  onSyncCapacity: () => void
 }) {
   const syncRequired = drive.capacity_bytes === 0
   const overAllocated = !syncRequired && drive.allocated_quota_bytes > drive.capacity_bytes
@@ -1167,7 +1190,7 @@ function DriveBar({ drive, stat, onToggle, onDelete, onSyncCapacity }: {
           </span>
           <span className="text-gray-400 truncate">{drive.minio_bucket}</span>
           {temp != null && (
-            <span className={`font-semibold tabular-nums shrink-0 ${tempColor(temp)}`} title={stat?.device ? `Sensor on ${stat.device}` : 'Drive temperature'}>
+            <span className={`font-semibold tabular-nums shrink-0 ${tempColor(temp)}`} title="Drive temperature">
               {temp.toFixed(1)}°C
             </span>
           )}
@@ -1177,12 +1200,12 @@ function DriveBar({ drive, stat, onToggle, onDelete, onSyncCapacity }: {
             </span>
           )}
           {syncRequired && (
-            <span className="text-amber-500 font-medium shrink-0" title="Run Sync to detect actual drive capacity before this drive can accept allocations">
+            <span className="text-amber-500 font-medium shrink-0" title="Re-run Sync infrastructure to detect this drive's capacity">
               ⚠ Sync required
             </span>
           )}
           {overAllocated && (
-            <span className="text-red-500 font-medium shrink-0" title="Allocated quota exceeds detected drive capacity — run Sync to refresh">
+            <span className="text-red-500 font-medium shrink-0" title="Allocated quota exceeds detected drive capacity — re-run Sync infrastructure to refresh">
               ⚠ over-allocated
             </span>
           )}
@@ -1196,25 +1219,6 @@ function DriveBar({ drive, stat, onToggle, onDelete, onSyncCapacity }: {
               <span className={overAllocated ? 'text-red-500' : ''}>{fmtCapacity(totalBytes)}</span>
             </span>
           )}
-          <button
-            onClick={onSyncCapacity}
-            title="Re-detect capacity from disk"
-            className={`cursor-pointer bg-transparent border rounded px-2 py-0.5 transition-colors ${syncRequired ? 'text-amber-600 border-amber-300 hover:border-amber-500' : 'text-gray-400 hover:text-blue-600 border-gray-200 hover:border-blue-300'}`}
-          >
-            Sync
-          </button>
-          <button
-            onClick={onToggle}
-            className="text-gray-400 hover:text-gray-700 cursor-pointer bg-transparent border border-gray-200 hover:border-gray-400 rounded px-2 py-0.5 transition-colors"
-          >
-            {drive.drive_is_active ? 'Deactivate' : 'Activate'}
-          </button>
-          <button
-            onClick={onDelete}
-            className="text-red-400 hover:text-red-600 cursor-pointer bg-transparent border border-red-200 hover:border-red-400 rounded px-2 py-0.5 transition-colors"
-          >
-            Remove
-          </button>
         </div>
       </div>
       {!syncRequired && (
@@ -1227,90 +1231,6 @@ function DriveBar({ drive, stat, onToggle, onDelete, onSyncCapacity }: {
   )
 }
 
-function AddServerForm({ onSubmit, pending }: {
-  onSubmit: (p: Parameters<typeof createServer>[0]) => void
-  pending: boolean
-}) {
-  const [open, setOpen] = useState(false)
-  const [state, setState] = useState('')
-  const [endpoint, setEndpoint] = useState('')
-  const [accessKey, setAccessKey] = useState('')
-  const [secretKey, setSecretKey] = useState('')
-  const [ssl, setSsl] = useState(false)
-
-  function submit(e: React.FormEvent) {
-    e.preventDefault()
-    onSubmit({ state, minio_endpoint: endpoint, minio_use_ssl: ssl, access_key: accessKey, secret_key: secretKey })
-    setOpen(false)
-    setState(''); setEndpoint(''); setAccessKey(''); setSecretKey('')
-  }
-
-  if (!open) {
-    return (
-      <button onClick={() => setOpen(true)} className="text-xs text-blue-600 hover:text-blue-800 cursor-pointer bg-transparent border border-blue-200 hover:border-blue-400 rounded px-2 py-1 transition-colors">
-        + Add server
-      </button>
-    )
-  }
-
-  return (
-    <form onSubmit={submit} className="flex flex-wrap gap-2 items-center">
-      <input value={state} onChange={e => setState(e.target.value.toUpperCase())} maxLength={2} placeholder="State (NH)" required className="w-20 border border-gray-200 rounded px-2 py-1 text-xs" />
-      <input value={endpoint} onChange={e => setEndpoint(e.target.value)} placeholder="minio:9000" required className="w-36 border border-gray-200 rounded px-2 py-1 text-xs" />
-      <input value={accessKey} onChange={e => setAccessKey(e.target.value)} placeholder="Access key" required className="w-28 border border-gray-200 rounded px-2 py-1 text-xs" />
-      <input value={secretKey} onChange={e => setSecretKey(e.target.value)} placeholder="Secret key" type="password" required className="w-28 border border-gray-200 rounded px-2 py-1 text-xs" />
-      <label className="flex items-center gap-1 text-xs text-gray-500 cursor-pointer">
-        <input type="checkbox" checked={ssl} onChange={e => setSsl(e.target.checked)} /> SSL
-      </label>
-      <button type="submit" disabled={pending} className="text-xs bg-blue-600 text-white rounded px-2 py-1 disabled:opacity-50 cursor-pointer">
-        {pending ? 'Adding…' : 'Add'}
-      </button>
-      <button type="button" onClick={() => setOpen(false)} className="text-xs text-gray-400 hover:text-gray-700 cursor-pointer bg-transparent border-0">
-        Cancel
-      </button>
-    </form>
-  )
-}
-
-function AddDriveForm({ onSubmit, pending }: {
-  onSubmit: (p: { label: string; minio_bucket: string }) => void
-  pending: boolean
-}) {
-  const [open, setOpen] = useState(false)
-  const [label, setLabel] = useState('')
-  const [bucket, setBucket] = useState('')
-
-  function submit(e: React.FormEvent) {
-    e.preventDefault()
-    onSubmit({ label, minio_bucket: bucket })
-    setOpen(false)
-    setLabel(''); setBucket('')
-  }
-
-  if (!open) {
-    return (
-      <button onClick={() => setOpen(true)} className="text-xs text-gray-500 hover:text-gray-800 cursor-pointer bg-transparent border border-gray-200 hover:border-gray-400 rounded px-2 py-1 transition-colors">
-        + Add drive
-      </button>
-    )
-  }
-
-  return (
-    <form onSubmit={submit} className="flex flex-wrap gap-2 items-center">
-      <input value={label} onChange={e => setLabel(e.target.value)} placeholder="nvme-02" required className="w-24 border border-gray-200 rounded px-2 py-1 text-xs" />
-      <input value={bucket} onChange={e => setBucket(e.target.value)} placeholder="Bucket name" required className="w-32 border border-gray-200 rounded px-2 py-1 text-xs" />
-      <button type="submit" disabled={pending} className="text-xs bg-blue-600 text-white rounded px-2 py-1 disabled:opacity-50 cursor-pointer">
-        {pending ? 'Adding…' : 'Add'}
-      </button>
-      <button type="button" onClick={() => setOpen(false)} className="text-xs text-gray-400 hover:text-gray-700 cursor-pointer bg-transparent border-0">
-        Cancel
-      </button>
-    </form>
-  )
-}
-
-const NODE_ROLES: NodeRole[] = ['manager', 'worker', 'storage']
-
 function roleBadgeClass(role: string): string {
   switch (role) {
     case 'manager': return 'bg-indigo-50 text-indigo-700'
@@ -1319,127 +1239,34 @@ function roleBadgeClass(role: string): string {
   }
 }
 
-function NodeBlock({ group, driveStats, onAddDrive, addDrivePending, onUpdateNode, onDeleteNode, onToggleDrive, onDeleteDrive, onSyncCapacity }: {
+// NodeBlock renders a single swarm node read-only: status, hostname, role
+// (manager/worker), address, and its detected drives. The infrastructure sync is
+// the source of truth, so there are no edit/add/remove controls.
+function NodeBlock({ group, driveStats }: {
   group: NodeGroup
   driveStats: Record<string, DriveStat>
-  onAddDrive: (p: { label: string; minio_bucket: string }) => void
-  addDrivePending: boolean
-  onUpdateNode: (params: { hostname?: string; role?: NodeRole; address?: string; is_active?: boolean }) => void
-  onDeleteNode: () => void
-  onToggleDrive: (d: DriveSummary) => void
-  onDeleteDrive: (d: DriveSummary) => void
-  onSyncCapacity: (d: DriveSummary) => void
 }) {
   const { node, drives } = group
-  const [editing, setEditing] = useState(false)
-  const [hostname, setHostname] = useState(node.hostname)
-  const [role, setRole] = useState<NodeRole>(node.role)
-  const [address, setAddress] = useState(node.address)
-
-  function saveEdit(e: React.FormEvent) {
-    e.preventDefault()
-    if (!hostname.trim()) return
-    onUpdateNode({ hostname: hostname.trim(), role, address: address.trim() })
-    setEditing(false)
-  }
 
   return (
     <div className="border border-gray-100 rounded-lg px-3 py-3 bg-gray-50/60">
-      <div className="flex items-center justify-between mb-2 gap-2">
-        {editing ? (
-          <form onSubmit={saveEdit} className="flex flex-wrap items-center gap-1.5">
-            <input autoFocus value={hostname} onChange={e => setHostname(e.target.value)} placeholder="hostname" className="w-32 border border-blue-400 rounded px-2 py-0.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500" />
-            <select value={role} onChange={e => setRole(e.target.value as NodeRole)} className="border border-gray-200 rounded px-1.5 py-0.5 text-xs bg-white">
-              {NODE_ROLES.map(r => <option key={r} value={r}>{r}</option>)}
-            </select>
-            <input value={address} onChange={e => setAddress(e.target.value)} placeholder="address (optional)" className="w-36 border border-gray-200 rounded px-2 py-0.5 text-xs" />
-            <button type="submit" className="text-xs text-blue-600 hover:text-blue-800 cursor-pointer bg-transparent border-0">Save</button>
-            <button type="button" onClick={() => { setEditing(false); setHostname(node.hostname); setRole(node.role); setAddress(node.address) }} className="text-xs text-gray-400 hover:text-gray-700 cursor-pointer bg-transparent border-0">Cancel</button>
-          </form>
-        ) : (
-          <div className="flex items-center gap-2 min-w-0">
-            <span className={`w-2 h-2 rounded-full shrink-0 ${node.is_active ? 'bg-green-500' : 'bg-gray-300'}`} />
-            <span className="font-medium text-gray-800 text-sm truncate">{node.hostname}</span>
-            <span className={`text-xs font-semibold px-1.5 py-0.5 rounded uppercase tracking-wide shrink-0 ${roleBadgeClass(node.role)}`}>{node.role}</span>
-            {node.address && <span className="text-xs text-gray-400 truncate">{node.address}</span>}
-            <span className="text-xs text-gray-400 shrink-0">{drives.length} drive{drives.length !== 1 ? 's' : ''}</span>
-            <button onClick={() => setEditing(true)} className="text-xs text-gray-400 hover:text-gray-600 cursor-pointer bg-transparent border-0 shrink-0" title="Edit node">✎</button>
-            {!node.is_active && <span className="text-xs text-gray-400 shrink-0">(inactive)</span>}
-          </div>
-        )}
-        <div className="flex items-center gap-2 shrink-0">
-          <AddDriveForm onSubmit={onAddDrive} pending={addDrivePending} />
-          <button
-            onClick={() => onUpdateNode({ is_active: !node.is_active })}
-            className="text-xs text-gray-500 hover:text-gray-800 cursor-pointer bg-transparent border border-gray-200 hover:border-gray-400 rounded px-2 py-1 transition-colors"
-          >
-            {node.is_active ? 'Deactivate' : 'Activate'}
-          </button>
-          <button
-            onClick={onDeleteNode}
-            className="text-xs text-red-400 hover:text-red-600 cursor-pointer bg-transparent border border-red-200 hover:border-red-400 rounded px-2 py-1 transition-colors"
-          >
-            Remove
-          </button>
-        </div>
+      <div className="flex items-center gap-2 mb-2 min-w-0">
+        <span className={`w-2 h-2 rounded-full shrink-0 ${node.is_active ? 'bg-green-500' : 'bg-gray-300'}`} />
+        <span className="font-medium text-gray-800 text-sm truncate">{node.hostname}</span>
+        <span className={`text-xs font-semibold px-1.5 py-0.5 rounded uppercase tracking-wide shrink-0 ${roleBadgeClass(node.role)}`}>{node.role}</span>
+        {node.address && <span className="text-xs text-gray-400 truncate">{node.address}</span>}
+        <span className="text-xs text-gray-400 shrink-0">{drives.length} drive{drives.length !== 1 ? 's' : ''}</span>
+        {!node.is_active && <span className="text-xs text-gray-400 shrink-0">(inactive)</span>}
       </div>
       {drives.length === 0 ? (
-        <p className="text-xs text-gray-400 m-0 pl-4">No drives mounted on this node.</p>
+        <p className="text-xs text-gray-400 m-0 pl-4">No drives detected on this node.</p>
       ) : (
         <div className="flex flex-col gap-3 pl-4">
           {drives.map((d) => (
-            <DriveBar
-              key={d.drive_id}
-              drive={d}
-              stat={driveStats[d.drive_id]}
-              onToggle={() => onToggleDrive(d)}
-              onDelete={() => onDeleteDrive(d)}
-              onSyncCapacity={() => onSyncCapacity(d)}
-            />
+            <DriveBar key={d.drive_id} drive={d} stat={driveStats[d.drive_id]} />
           ))}
         </div>
       )}
     </div>
-  )
-}
-
-function AddNodeForm({ onSubmit, pending }: {
-  onSubmit: (p: { hostname: string; role: NodeRole; address?: string }) => void
-  pending: boolean
-}) {
-  const [open, setOpen] = useState(false)
-  const [hostname, setHostname] = useState('')
-  const [role, setRole] = useState<NodeRole>('worker')
-  const [address, setAddress] = useState('')
-
-  function submit(e: React.FormEvent) {
-    e.preventDefault()
-    onSubmit({ hostname, role, address: address.trim() || undefined })
-    setOpen(false)
-    setHostname(''); setRole('worker'); setAddress('')
-  }
-
-  if (!open) {
-    return (
-      <button onClick={() => setOpen(true)} className="text-xs text-blue-600 hover:text-blue-800 cursor-pointer bg-transparent border border-blue-200 hover:border-blue-400 rounded px-2 py-1 transition-colors">
-        + Add node
-      </button>
-    )
-  }
-
-  return (
-    <form onSubmit={submit} className="flex flex-wrap gap-2 items-center">
-      <input value={hostname} onChange={e => setHostname(e.target.value)} placeholder="hostname (apollo-sfs-1)" required className="w-40 border border-gray-200 rounded px-2 py-1 text-xs" />
-      <select value={role} onChange={e => setRole(e.target.value as NodeRole)} className="border border-gray-200 rounded px-1.5 py-1 text-xs bg-white">
-        {NODE_ROLES.map(r => <option key={r} value={r}>{r}</option>)}
-      </select>
-      <input value={address} onChange={e => setAddress(e.target.value)} placeholder="address (optional)" className="w-36 border border-gray-200 rounded px-2 py-1 text-xs" />
-      <button type="submit" disabled={pending} className="text-xs bg-blue-600 text-white rounded px-2 py-1 disabled:opacity-50 cursor-pointer">
-        {pending ? 'Adding…' : 'Add'}
-      </button>
-      <button type="button" onClick={() => setOpen(false)} className="text-xs text-gray-400 hover:text-gray-700 cursor-pointer bg-transparent border-0">
-        Cancel
-      </button>
-    </form>
   )
 }

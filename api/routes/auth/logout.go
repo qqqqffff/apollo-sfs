@@ -27,9 +27,17 @@ func (h *Handler) Logout(c *gin.Context) {
 		}
 	}
 
-	// Clear the session cookie.
+	// Clear the session cookie. Path, Domain, Secure, HttpOnly, and SameSite must
+	// match the original Set-Cookie attributes so the browser actually deletes it.
 	session.Clear()
-	session.Options(sessions.Options{MaxAge: -1})
+	session.Options(sessions.Options{
+		Path:     "/",
+		Domain:   h.cookieDomain,
+		MaxAge:   -1,
+		Secure:   h.cookieSecure,
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+	})
 	if err := session.Save(); err != nil {
 		log.Printf("logout: clear session: %v", err)
 	}

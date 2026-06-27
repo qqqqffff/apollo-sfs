@@ -5,16 +5,24 @@ A self-hosted encrypted file storage service. Files are encrypted at rest with p
 ## Architecture
 
 ```
-Internet → Cloudflare (proxy) → Host nginx (TLS termination)
-                                      ├── :3000 → frontend container (React/Vite)
-                                      └── :8080 → api container (Go/Gin)
-                                                       ├── db-app (PostgreSQL)
-                                                       ├── keycloak (OIDC/auth)
-                                                       ├── minio (encrypted blobs)
-                                                       └── postfix (SMTP relay)
+Internet → Cloudflare (proxy) → Host nginx (TLS termination, host process)
+                                      ├── :3000 → frontend  (React/Vite)
+                                      └── :8080 → api       (Go/Gin)
+                                                       ├── db-app    (PostgreSQL)
+                                                       ├── keycloak  (OIDC/auth)
+                                                       ├── postfix   (SMTP relay)
+                                                       ├── minio-standard  (8 TB HDD, cold storage)
+                                                       └── minio-fast      (Pi 5 NVMe pool, hot storage)
 ```
 
-nginx runs **on the host**, not in Docker. All other services run in Docker Compose on an internal bridge network.
+### Production — Two-Node Docker Swarm
+
+| Node | Hardware | Swarm role | Label | Workloads |
+|------|----------|-----------|-------|-----------|
+| **Manager** | Ryzen, amd64, 8 TB HDD | manager | `tier=standard` | API, frontend, Keycloak, Postfix, DDNS, both databases, standard-tier MinIO |
+| **Worker (Pi 5)** | ARM64, dual NVMe (mergerfs pool) | worker | `tier=fast` | Fast-tier MinIO only |
+
+nginx and fail2ban run **on the manager host**, not inside Docker. All application services run as Docker Swarm services on the `app-network` overlay network. No service ports are exposed directly to the internet.
 
 ---
 
@@ -293,7 +301,165 @@ Once logged in as admin, go to **Invitations** in the nav. Enter an email addres
 
 ---
 
-## Day-2 operations
+---
+
+## Docker Swarm — Deploying and Redeploying
+
+This section covers production deployments to the two-node Swarm. For local development, use the Docker Compose commands in the next section instead.
+
+### Initial Swarm Setup (one time)
+
+```bash
+# On the manager node — initialize the swarm
+docker swarm init
+
+# On the Pi 5 — join as a worker (use the token printed by the command above)
+docker swarm join --token <worker-token> <manager-ip>:2377
+
+# Back on the manager — assign placement labels
+docker node update --label-add tier=standard <manager-node-id>
+docker node update --label-add tier=fast <pi5-node-id>
+
+# Confirm labels are set
+docker node ls
+docker node inspect <node-id> --format '{{ .Spec.Labels }}'
+```
+
+### Building and Pushing Images
+
+Images must be built and pushed to a registry before deploying to the Swarm. The API needs `linux/amd64` (manager) and `linux/arm64` (Pi 5 only reads this if it runs the API, which it currently does not — amd64-only is fine for now). The frontend only runs on the manager.
+
+```bash
+# Build and push the API (amd64 only — API runs on the manager)
+docker build -t <registry>/apollo-sfs-api:latest api/
+docker push <registry>/apollo-sfs-api:latest
+
+# Build and push the frontend (amd64 only)
+docker build -t <registry>/apollo-sfs-frontend:latest frontend/
+docker push <registry>/apollo-sfs-frontend:latest
+
+# Cross-compile for both platforms if needed (requires docker buildx)
+docker buildx build \
+  --platform linux/amd64,linux/arm64 \
+  -t <registry>/apollo-sfs-api:latest \
+  api/ --push
+```
+
+Tag releases with a version as well as `latest` so you can roll back:
+
+```bash
+docker tag <registry>/apollo-sfs-api:latest <registry>/apollo-sfs-api:v1.2.0
+docker push <registry>/apollo-sfs-api:v1.2.0
+```
+
+### Initial Stack Deployment
+
+```bash
+# Deploy the full stack for the first time
+docker stack deploy -c docker-stack.yml apollo-sfs
+
+# Watch services come up
+docker stack services apollo-sfs
+docker stack ps apollo-sfs
+```
+
+### Redeploying After a Code Change
+
+#### Redeploy the API
+
+```bash
+docker build -t <registry>/apollo-sfs-api:latest api/
+docker push <registry>/apollo-sfs-api:latest
+docker service update --image <registry>/apollo-sfs-api:latest apollo-sfs_api
+```
+
+#### Redeploy the Frontend
+
+```bash
+docker build -t <registry>/apollo-sfs-frontend:latest frontend/
+docker push <registry>/apollo-sfs-frontend:latest
+docker service update --image <registry>/apollo-sfs-frontend:latest apollo-sfs_frontend
+```
+
+#### Redeploy Any Other Service
+
+```bash
+# General pattern
+docker service update --image <registry>/<image>:latest apollo-sfs_<service-name>
+
+# Examples
+docker service update --image quay.io/keycloak/keycloak:26.0.7 apollo-sfs_keycloak
+docker service update --image minio/minio:latest apollo-sfs_minio-standard
+docker service update --image minio/minio:latest apollo-sfs_minio-fast
+```
+
+#### Redeploy the Entire Stack (stack config changed)
+
+When you change `docker-stack.yml` itself (environment variables, volume mounts, placement constraints, replicas, etc.), redeploy the whole stack:
+
+```bash
+docker stack deploy -c docker-stack.yml apollo-sfs
+```
+
+Swarm performs a rolling update — existing tasks continue serving traffic until replacement tasks are healthy.
+
+#### Force Restart a Service (no image change)
+
+```bash
+docker service update --force apollo-sfs_api
+```
+
+Useful after changing secrets or environment variables that don't require a new image.
+
+### Monitoring the Swarm
+
+```bash
+# List all services and their replica counts
+docker stack services apollo-sfs
+
+# Show which tasks are running on which node
+docker stack ps apollo-sfs
+
+# Show only failed or pending tasks
+docker stack ps apollo-sfs --filter "desired-state=running" --no-trunc
+
+# Tail logs for a service (across all replicas)
+docker service logs apollo-sfs_api --follow
+docker service logs apollo-sfs_frontend --follow
+docker service logs apollo-sfs_keycloak --follow
+docker service logs apollo-sfs_minio-fast --follow
+
+# Inspect a specific service
+docker service inspect apollo-sfs_api --pretty
+```
+
+### Rolling Back a Deployment
+
+Swarm remembers the previous service spec and can roll back instantly:
+
+```bash
+docker service rollback apollo-sfs_api
+docker service rollback apollo-sfs_frontend
+```
+
+To roll back to a specific tagged image instead:
+
+```bash
+docker service update --image <registry>/apollo-sfs-api:v1.1.0 apollo-sfs_api
+```
+
+### Tearing Down the Stack
+
+```bash
+# Remove all services (data volumes are preserved)
+docker stack rm apollo-sfs
+```
+
+---
+
+## Day-2 Operations (Development / Single-Node)
+
+These commands apply to the local development environment (`docker-compose.yml`). For production, use the Docker Swarm commands above.
 
 ### View logs
 

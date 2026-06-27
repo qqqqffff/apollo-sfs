@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
-import type { MetricsSnapshot } from '../api/admin'
+import type { MetricsFrame } from '../api/admin'
 
-// 720 snapshots ≈ 1 hour at 5-second intervals
+// 720 frames ≈ 1 hour at 5-second intervals
 const MAX_SNAPSHOTS = 720
 
 export function useMetricsStream(paused = false) {
-  const [snapshots, setSnapshots] = useState<MetricsSnapshot[]>([])
+  const [frames, setFrames] = useState<MetricsFrame[]>([])
   const [connected, setConnected] = useState(false)
   const reconnectDelay = useRef(1_000)
   const cancelledRef = useRef(false)
@@ -44,9 +44,10 @@ export function useMetricsStream(paused = false) {
       ws.onmessage = (e: MessageEvent<string>) => {
         if (cancelledRef.current) return
         try {
-          const snap = JSON.parse(e.data) as MetricsSnapshot
-          setSnapshots(prev => {
-            const next = [...prev, snap]
+          const frame = JSON.parse(e.data) as MetricsFrame
+          if (!frame || !frame.cluster) return
+          setFrames(prev => {
+            const next = [...prev, frame]
             return next.length > MAX_SNAPSHOTS
               ? next.slice(next.length - MAX_SNAPSHOTS)
               : next
@@ -79,5 +80,5 @@ export function useMetricsStream(paused = false) {
     }
   }, [paused])
 
-  return { snapshots, connected }
+  return { frames, connected }
 }

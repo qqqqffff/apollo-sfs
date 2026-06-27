@@ -93,6 +93,9 @@ export function resendInvitation(id: string) {
 
 // ── Metrics ────────────────────────────────────────────────────────────────────
 
+// MetricsSnapshot is the cluster-wide (manager uplink + app) snapshot. Hardware
+// fields (cpu_*, drive_temp) remain for backward compatibility but the per-node
+// view sources hardware from NodeFrame instead — see MetricsFrame.
 export interface MetricsSnapshot {
   id: string
   sampled_at: string
@@ -118,12 +121,78 @@ export interface MetricsSnapshot {
   speed_test_error?: string | null
 }
 
+// DriveFrame is one drive's live figures within a node, as reported by that
+// node's agent and resolved to its registered drive_id.
+export interface DriveFrame {
+  drive_id: string
+  label: string
+  drive_type: 'nvme' | 'hdd'
+  temp_celsius: number | null
+  total_bytes: number
+  used_bytes: number
+  free_bytes: number
+}
+
+// NodeFrame is one node's latest hardware state within a MetricsFrame. online is
+// false when the node's agent has stopped reporting (the UI then greys it out).
+export interface NodeFrame {
+  node_id: string
+  hostname: string
+  role: string
+  is_active: boolean
+  online: boolean
+  cpu_percent: number
+  cpu_temp_celsius: number | null
+  memory_used_bytes: number
+  memory_total_bytes: number
+  network_bytes_sent: number
+  network_bytes_recv: number
+  sampled_at: string
+  drives: DriveFrame[]
+}
+
+// MetricsFrame is the per-tick WebSocket payload: a cluster snapshot plus a
+// per-node hardware breakdown. Seed (historical) frames carry an empty nodes list.
+export interface MetricsFrame {
+  cluster: MetricsSnapshot
+  nodes: NodeFrame[]
+}
+
+// Per-node hardware history (downsampled), backing the per-node line graphs.
+export interface NodeMetricSnapshot {
+  id: string
+  node_id: string
+  cpu_percent: number
+  cpu_temp_celsius: number | null
+  memory_used_bytes: number
+  memory_total_bytes: number
+  network_bytes_sent: number
+  network_bytes_recv: number
+  sampled_at: string
+}
+
+// Per-drive temperature history (downsampled), backing the carousel graph.
+export interface DriveTempSnapshot {
+  id: string
+  drive_id: string
+  temp_celsius: number
+  sampled_at: string
+}
+
 export function getMetrics() {
   return get<MetricsSnapshot>('/admin/system/metrics')
 }
 
 export function getMetricsHistoryByHours(hours: number) {
   return get<MetricsSnapshot[]>(`/admin/system/metrics/history?hours=${hours}`)
+}
+
+export function getNodeMetricsHistory(nodeId: string, hours: number) {
+  return get<NodeMetricSnapshot[]>(`/admin/system/nodes/${nodeId}/metrics/history?hours=${hours}`)
+}
+
+export function getDriveTempsHistory(driveId: string, hours: number) {
+  return get<DriveTempSnapshot[]>(`/admin/system/drives/${driveId}/temps/history?hours=${hours}`)
 }
 
 export async function pingServer(): Promise<number> {
@@ -175,13 +244,11 @@ export function listInfrastructure() {
   return get<{ nodes: NodeSummary[]; drives: DriveSummary[] }>('/admin/system/infrastructure')
 }
 
-// Live, per-drive view discovered from each drive's filesystem mount (keyed by
-// drive_id). online=false means the mount couldn't be found (offline node or a
-// mount not visible to the API), in which case the UI falls back to DB capacity.
+// Live, per-drive view sourced from the owning node's agent push (keyed by
+// drive_id). online=false means no online node currently reports the drive (e.g.
+// the node is offline), in which case the UI falls back to stored DB capacity.
 export interface DriveStat {
   label: string
-  mount_path: string
-  device: string
   total_bytes: number
   used_bytes: number
   free_bytes: number
@@ -204,66 +271,22 @@ export function getCapacity() {
   return get<CapacitySummary>('/admin/system/capacity')
 }
 
-export function createServer(params: {
-  state: string
-  minio_endpoint: string
-  minio_use_ssl: boolean
-  access_key: string
-  secret_key: string
-}) {
-  return post<{ id: string; name: string }>('/admin/system/servers', params)
+// SyncSummary reports what the universal infrastructure sync indexed: the count
+// of servers, swarm nodes, and drives reconciled, plus how many stale rows were
+// retired (marked inactive).
+export interface SyncSummary {
+  servers: number
+  nodes: number
+  drives: number
+  pruned: number
 }
 
-export function updateServer(serverId: string, params: { is_active?: boolean; name?: string }) {
-  return patch<{ message: string }>(`/admin/system/servers/${serverId}`, params)
-}
-
-export function createNode(
-  serverId: string,
-  params: { hostname: string; role?: NodeRole; address?: string },
-) {
-  return post<{ id: string; hostname: string }>(`/admin/system/servers/${serverId}/nodes`, params)
-}
-
-export function updateNode(
-  serverId: string,
-  nodeId: string,
-  params: { hostname?: string; role?: NodeRole; address?: string; is_active?: boolean },
-) {
-  return patch<{ id: string; hostname: string }>(
-    `/admin/system/servers/${serverId}/nodes/${nodeId}`,
-    params,
-  )
-}
-
-export function deleteNode(serverId: string, nodeId: string) {
-  return del<{ message: string }>(`/admin/system/servers/${serverId}/nodes/${nodeId}`)
-}
-
-export function addDrive(
-  serverId: string,
-  params: { label: string; minio_bucket: string; node_id?: string },
-) {
-  return post<DriveSummary>(`/admin/system/servers/${serverId}/drives`, params)
-}
-
-export function updateDrive(
-  serverId: string,
-  driveId: string,
-  params: { label?: string; is_active?: boolean; node_id?: string | null },
-) {
-  return patch<DriveSummary>(
-    `/admin/system/servers/${serverId}/drives/${driveId}`,
-    params,
-  )
-}
-
-export function deleteDrive(serverId: string, driveId: string) {
-  return del<{ message: string }>(`/admin/system/servers/${serverId}/drives/${driveId}`)
-}
-
-export function syncDriveCapacity(driveId: string) {
-  return post<{ id: string; label: string; capacity_bytes: number }>(`/admin/system/drives/${driveId}/sync-capacity`)
+// syncInfrastructure indexes the live Docker Swarm and the configured MinIO
+// instances, reconciling the servers → nodes → drives topology automatically
+// (manager/worker roles, drive capacity, fast/standard classification). It is
+// idempotent and replaces the former manual add/edit/remove controls.
+export function syncInfrastructure() {
+  return post<SyncSummary>('/admin/system/sync')
 }
 
 export const infrastructureQueryOptions = {
@@ -367,24 +390,6 @@ export const adminInterestInfiniteQueryOptions = {
 export const interestFormSettingsQueryOptions = {
   queryKey: ['admin', 'interest', 'settings'] as const,
   queryFn: getInterestFormSettings,
-}
-
-// ── Drive temperatures ─────────────────────────────────────────────────────────
-
-export interface DriveTemp {
-  name: string
-  temp_celsius: number
-}
-
-export function getDriveTemps() {
-  return get<DriveTemp[]>('/admin/system/drive-temps')
-}
-
-export const driveTempsQueryOptions = {
-  queryKey: ['admin', 'drive-temps'] as const,
-  queryFn: getDriveTemps,
-  staleTime: 10_000,
-  refetchInterval: 10_000,
 }
 
 // ── Speed test ─────────────────────────────────────────────────────────────────

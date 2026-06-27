@@ -239,6 +239,9 @@ func (s *stubAdminQuerier) RenameServer(_ context.Context, _ uuid.UUID, _ string
 func (s *stubAdminQuerier) GetServer(_ context.Context, _ uuid.UUID) (*models.Server, error) {
 	return nil, nil
 }
+func (s *stubAdminQuerier) GetServerByEndpoint(_ context.Context, _ string) (*models.Server, error) {
+	return nil, nil
+}
 func (s *stubAdminQuerier) GetDrive(_ context.Context, _ uuid.UUID) (*models.Drive, error) {
 	return nil, nil
 }
@@ -248,7 +251,13 @@ func (s *stubAdminQuerier) CreateDrive(_ context.Context, _ db.CreateDriveParams
 func (s *stubAdminQuerier) UpdateDrive(_ context.Context, _ uuid.UUID, _ db.UpdateDriveParams) (*models.Drive, error) {
 	return nil, nil
 }
+func (s *stubAdminQuerier) UpsertDrive(_ context.Context, _ db.UpsertDriveParams) (*models.Drive, error) {
+	return &models.Drive{ID: uuid.New()}, nil
+}
 func (s *stubAdminQuerier) DeleteDrive(_ context.Context, _ uuid.UUID) error { return nil }
+func (s *stubAdminQuerier) DeactivateMissingDrives(_ context.Context, _ uuid.UUID, _ []uuid.UUID) error {
+	return nil
+}
 func (s *stubAdminQuerier) UpdateDriveCapacity(_ context.Context, _ uuid.UUID, _ int64) (*models.Drive, error) {
 	return nil, nil
 }
@@ -266,7 +275,13 @@ func (s *stubAdminQuerier) CreateNode(_ context.Context, _ db.CreateNodeParams) 
 func (s *stubAdminQuerier) UpdateNode(_ context.Context, _ uuid.UUID, _ db.UpdateNodeParams) (*models.Node, error) {
 	return nil, nil
 }
+func (s *stubAdminQuerier) UpsertNode(_ context.Context, p db.CreateNodeParams, isActive bool) (*models.Node, error) {
+	return &models.Node{ID: uuid.New(), ServerID: p.ServerID, Hostname: p.Hostname, Role: p.Role, Address: p.Address, IsActive: isActive}, nil
+}
 func (s *stubAdminQuerier) DeleteNode(_ context.Context, _ uuid.UUID) error { return nil }
+func (s *stubAdminQuerier) DeactivateMissingNodes(_ context.Context, _ uuid.UUID, _ []uuid.UUID) error {
+	return nil
+}
 func (s *stubAdminQuerier) AssignDriveToNode(_ context.Context, _ uuid.UUID, _ *uuid.UUID) error {
 	return nil
 }
@@ -535,10 +550,15 @@ func newAdminHandlerWithFiles(q admin.AdminQuerier, fileSvc routes.FileServicer)
 // ── Stub MetricsService ───────────────────────────────────────────────────────
 
 type stubMetricsService struct {
-	latest     *models.ServerMetricSnapshot
-	latestErr  error
-	history    []models.ServerMetricSnapshot
-	historyErr error
+	latest         *models.ServerMetricSnapshot
+	latestErr      error
+	history        []models.ServerMetricSnapshot
+	historyErr     error
+	nodeHistory    []models.NodeMetricSnapshot
+	nodeHistoryErr error
+	driveTemps     []models.DriveTempSnapshot
+	driveTempsErr  error
+	nodeStates     []models.NodeFrame
 }
 
 func (s *stubMetricsService) GetLatest(_ context.Context) (*models.ServerMetricSnapshot, error) {
@@ -561,7 +581,14 @@ func (s *stubMetricsService) GetHistoryByDate(_ context.Context, _ string, _ db.
 	}
 	return &db.PageResult[models.ServerMetricSnapshot]{Items: items}, s.historyErr
 }
-func (s *stubMetricsService) Hub() *services.Hub { return nil }
+func (s *stubMetricsService) GetNodeHistoryByHours(_ context.Context, _ uuid.UUID, _ int) ([]models.NodeMetricSnapshot, error) {
+	return s.nodeHistory, s.nodeHistoryErr
+}
+func (s *stubMetricsService) GetDriveTempHistoryByHours(_ context.Context, _ uuid.UUID, _ int) ([]models.DriveTempSnapshot, error) {
+	return s.driveTemps, s.driveTempsErr
+}
+func (s *stubMetricsService) NodeStates() []models.NodeFrame { return s.nodeStates }
+func (s *stubMetricsService) Hub() *services.Hub             { return nil }
 
 // ── Stub FavServicer ──────────────────────────────────────────────────────────
 

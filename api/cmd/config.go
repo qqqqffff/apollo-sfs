@@ -21,6 +21,11 @@ type Config struct {
 	MinIOAccessKey  string
 	MinIOSecretKey  string
 	MinIOBucketName string
+	MinIOUseSSL     bool
+	// MinIOStandardEndpoint is the standard-tier MinIO endpoint, reachable with the
+	// same root credentials. Empty for single-instance deployments (e.g. local dev).
+	// Used only by the on-demand infrastructure sync.
+	MinIOStandardEndpoint string
 
 	CookieDomain string
 	CookieSecure bool
@@ -35,6 +40,11 @@ type Config struct {
 	QuotaWarningThresholdPct int
 	DiskStatsPath            string
 	DiskStatsDriveLabel      string
+
+	// NodeAgentToken is the shared secret the per-node metrics agents present in
+	// the X-Internal-Token header when pushing to /api/v1/internal/node-metrics.
+	// Empty disables the ingest endpoint (no agent pushes are accepted).
+	NodeAgentToken string
 
 	// SessionKey is the secret used to sign and encrypt the session cookie.
 	// Must be 32 or 64 bytes (AES-128 or AES-256). Set via SESSION_KEY env var.
@@ -129,10 +139,12 @@ func loadConfig() Config {
 		KeycloakClientID:     requireEnv("KEYCLOAK_CLIENT_ID"),
 		KeycloakClientSecret: requireEnv("KEYCLOAK_CLIENT_SECRET"),
 
-		MinIOEndpoint:   requireEnv("MINIO_ENDPOINT"),
-		MinIOAccessKey:  requireEnv("MINIO_ROOT_USER"),
-		MinIOSecretKey:  requireEnv("MINIO_ROOT_PASSWORD"),
-		MinIOBucketName: requireEnv("MINIO_BUCKET_NAME"),
+		MinIOEndpoint:         requireEnv("MINIO_ENDPOINT"),
+		MinIOAccessKey:        requireEnv("MINIO_ROOT_USER"),
+		MinIOSecretKey:        requireEnv("MINIO_ROOT_PASSWORD"),
+		MinIOBucketName:       requireEnv("MINIO_BUCKET_NAME"),
+		MinIOUseSSL:           os.Getenv("MINIO_USE_SSL") == "true",
+		MinIOStandardEndpoint: getEnv("MINIO_STANDARD_ENDPOINT", ""),
 
 		CookieDomain: requireEnv("COOKIE_DOMAIN"),
 		CookieSecure: os.Getenv("COOKIE_SECURE") == "true",
@@ -147,6 +159,7 @@ func loadConfig() Config {
 		QuotaWarningThresholdPct: quotaPct,
 		DiskStatsPath:            getEnv("DISK_STATS_PATH", "/mnt/data"),
 		DiskStatsDriveLabel:      getEnv("DISK_STATS_DRIVE_LABEL", ""),
+		NodeAgentToken:           os.Getenv("NODE_AGENT_TOKEN"),
 
 		SessionKey: requireEnv("SESSION_KEY"),
 

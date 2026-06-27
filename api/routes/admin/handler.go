@@ -22,6 +22,20 @@ type Handler struct {
 	files    routes.FileServicer
 	registry *services.MinIORegistry
 	geo      *geoip2.Reader
+	// swarm and storage drive the infrastructure sync: swarm enumerates Docker
+	// Swarm nodes (manager/worker, tier label); storage reads each MinIO
+	// instance's buckets and capacity. Both are interfaces so the sync is testable.
+	swarm   services.SwarmInspector
+	storage services.StorageInspector
+	// minioStandardEndpoint is the standard-tier MinIO endpoint (MINIO_STANDARD_ENDPOINT).
+	// Empty when the deployment has a single MinIO instance (e.g. local dev).
+	minioStandardEndpoint string
+	// minioEndpoint / minioUseSSL describe the primary (fast) MinIO instance, used
+	// by the sync to register/refresh its server row.
+	minioEndpoint string
+	minioAccessKey string
+	minioSecretKey string
+	minioUseSSL    bool
 	// diskStatsPath is the filesystem path used to auto-detect drive capacity
 	// for the sync-capacity endpoint (e.g. "/data" inside the container).
 	diskStatsPath string
@@ -64,4 +78,30 @@ type Handler struct {
 // shutdownCh:      channel closed by the Shutdown endpoint to trigger graceful server exit. nil disables the endpoint.
 func NewHandler(queries AdminQuerier, inviteSvc AdminInviteService, metricsSvc MetricsServicer, authSvc *services.AuthService, fileSvc routes.FileServicer, registry *services.MinIORegistry, geoReader *geoip2.Reader, diskStatsPath, diskStatsLabel, backendTestURL, apiDir, frontendTestURL, frontendE2EURL string, shutdownCh chan struct{}) *Handler {
 	return &Handler{queries: queries, invites: inviteSvc, metrics: metricsSvc, auth: authSvc, files: fileSvc, registry: registry, geo: geoReader, diskStatsPath: diskStatsPath, diskStatsLabel: diskStatsLabel, backendTestURL: backendTestURL, apiDir: apiDir, frontendTestURL: frontendTestURL, frontendE2EURL: frontendE2EURL, shutdownCh: shutdownCh}
+}
+
+// InfraSyncConfig configures the on-demand infrastructure sync (POST /system/sync).
+type InfraSyncConfig struct {
+	Swarm   services.SwarmInspector
+	Storage services.StorageInspector
+	// Primary (fast-tier) MinIO instance — the API's own MINIO_* credentials.
+	MinIOEndpoint  string
+	MinIOAccessKey string
+	MinIOSecretKey string
+	MinIOUseSSL    bool
+	// StandardEndpoint is the standard-tier MinIO endpoint (MINIO_STANDARD_ENDPOINT),
+	// reachable with the same root credentials. Empty for single-instance deployments.
+	StandardEndpoint string
+}
+
+// ConfigureInfraSync attaches the swarm/storage inspectors and MinIO connection
+// details used by SyncInfrastructure. Call once at startup after NewHandler.
+func (h *Handler) ConfigureInfraSync(c InfraSyncConfig) {
+	h.swarm = c.Swarm
+	h.storage = c.Storage
+	h.minioEndpoint = c.MinIOEndpoint
+	h.minioAccessKey = c.MinIOAccessKey
+	h.minioSecretKey = c.MinIOSecretKey
+	h.minioUseSSL = c.MinIOUseSSL
+	h.minioStandardEndpoint = c.StandardEndpoint
 }

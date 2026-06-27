@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 
 	"apollo-sfs.com/api/models"
 )
@@ -107,6 +108,44 @@ func (q *Queries) AssignDriveToNode(ctx context.Context, driveID uuid.UUID, node
 		`UPDATE drives SET node_id = $2 WHERE id = $1`, driveID, nodeID)
 	if err != nil {
 		return fmt.Errorf("AssignDriveToNode: %w", err)
+	}
+	return nil
+}
+
+// UpsertNode inserts a node, or updates its role/address/active flag when one
+// already exists for (server_id, hostname). Returns the resulting row. Used by
+// the infrastructure sync to reconcile discovered swarm nodes idempotently.
+func (q *Queries) UpsertNode(ctx context.Context, p CreateNodeParams, isActive bool) (*models.Node, error) {
+	role := p.Role
+	if role == "" {
+		role = "worker"
+	}
+	row := q.db.QueryRowContext(ctx, `
+		INSERT INTO nodes (server_id, hostname, role, address, is_active)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (server_id, hostname)
+		DO UPDATE SET role = EXCLUDED.role, address = EXCLUDED.address, is_active = EXCLUDED.is_active
+		RETURNING`+nodeColumns,
+		p.ServerID, p.Hostname, role, p.Address, isActive,
+	)
+	n, err := scanNode(row)
+	if err != nil {
+		return nil, fmt.Errorf("UpsertNode: %w", err)
+	}
+	return n, nil
+}
+
+// DeactivateMissingNodes marks every node of a server inactive except those whose
+// ID is in keepIDs. Used by the sync to retire nodes that have left the swarm
+// without deleting them (drives stay attached). A nil/empty keepIDs deactivates
+// all of the server's nodes.
+func (q *Queries) DeactivateMissingNodes(ctx context.Context, serverID uuid.UUID, keepIDs []uuid.UUID) error {
+	_, err := q.db.ExecContext(ctx, `
+		UPDATE nodes SET is_active = false
+		WHERE server_id = $1 AND is_active = true AND NOT (id = ANY($2::uuid[]))
+	`, serverID, pq.Array(keepIDs))
+	if err != nil {
+		return fmt.Errorf("DeactivateMissingNodes: %w", err)
 	}
 	return nil
 }

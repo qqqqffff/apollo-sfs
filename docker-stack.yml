@@ -78,6 +78,9 @@ services:
       # stored encrypted in the DB. Points at the fast-tier service named `minio`
       # (matches the existing server record — see doc Part 6).
       MINIO_ENDPOINT: minio:9000
+      # Standard-tier MinIO endpoint, used by the on-demand infrastructure sync to
+      # discover the standard-tier server/drive (same root credentials).
+      MINIO_STANDARD_ENDPOINT: minio-standard:9000
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
       MINIO_BUCKET_NAME: ${MINIO_BUCKET_NAME}
@@ -107,6 +110,8 @@ services:
       # Cloudflare Turnstile
       CLOUDFLARE_TURNSTILE_SECRET_KEY: ${CLOUDFLARE_TURNSTILE_SECRET_KEY}
       CLOUDFLARE_TURNSTILE_SITE_KEY: ${CLOUDFLARE_TURNSTILE_SITE_KEY}
+      # Shared secret authenticating per-node agent pushes to /api/v1/internal/*
+      NODE_AGENT_TOKEN: ${NODE_AGENT_TOKEN}
       # Premium tier / SFS API / PayPal
       SFS_API_KEY_PEPPER: ${SFS_API_KEY_PEPPER}
       PAYPAL_CLIENT_ID: ${PAYPAL_CLIENT_ID:-}
@@ -328,6 +333,33 @@ services:
       replicas: 1
       placement:
         constraints: [node.labels.tier == standard]
+      restart_policy:
+        condition: any
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  # ── Node metrics agent (one per node) ────────────────────────────────────────
+  # Global mode → a replica runs on EVERY node (manager + Pi worker). Each agent
+  # reads its host's CPU/memory/network/drive sensors and pushes them to the API,
+  # which aggregates the per-node view shown on the admin metrics page. Mounts are
+  # read-only; the agent identifies its node via the Swarm {{.Node.Hostname}} template.
+  node-agent:
+    image: apollo-sfs-node-agent:latest
+    environment:
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
+      API_INTERNAL_URL: http://api:8080
+      NODE_AGENT_TOKEN: ${NODE_AGENT_TOKEN}
+    volumes:
+      - /sys:/sys:ro
+      - /dev/disk/by-label:/dev/disk/by-label:ro
+      # Storage mounts the agent reports capacity for (read-only). Adjust per node;
+      # both tiers are listed so the same stack works on manager and worker.
+      - /srv/minio/hdd-01:/srv/minio/hdd-01:ro
+      - /home/apollo/apollo-sfs/minio/nvme-01/data:/home/apollo/apollo-sfs/minio/nvme-01/data:ro
+    networks: [app-network]
+    deploy:
+      mode: global
       restart_policy:
         condition: any
     logging:

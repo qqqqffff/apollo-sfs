@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 
 	"apollo-sfs.com/api/models"
 )
@@ -140,6 +141,63 @@ func (q *Queries) DeleteDrive(ctx context.Context, id uuid.UUID) error {
 	_, err := q.db.ExecContext(ctx, `DELETE FROM drives WHERE id = $1`, id)
 	if err != nil {
 		return fmt.Errorf("DeleteDrive: %w", err)
+	}
+	return nil
+}
+
+// UpsertDriveParams carries all fields needed to insert-or-update a drive during
+// an infrastructure sync, keyed by (server_id, minio_bucket).
+type UpsertDriveParams struct {
+	ServerID      uuid.UUID
+	NodeID        *uuid.UUID
+	Label         string
+	CapacityBytes int64
+	MinioBucket   string
+	DriveType     string
+	IsActive      bool
+}
+
+// UpsertDrive inserts a drive, or updates its node/label/capacity/type/active
+// flag when one already exists for (server_id, minio_bucket). Returns the
+// resulting row. Used by the infrastructure sync to reconcile discovered buckets
+// idempotently. Capacity is refreshed here (unlike UpdateDrive) because the sync
+// is the authoritative source for it.
+func (q *Queries) UpsertDrive(ctx context.Context, p UpsertDriveParams) (*models.Drive, error) {
+	driveType := p.DriveType
+	if driveType == "" {
+		driveType = "hdd"
+	}
+	row := q.db.QueryRowContext(ctx, `
+		INSERT INTO drives (server_id, node_id, label, capacity_bytes, minio_bucket, drive_type, is_active)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		ON CONFLICT (server_id, minio_bucket)
+		DO UPDATE SET
+			node_id        = EXCLUDED.node_id,
+			label          = EXCLUDED.label,
+			capacity_bytes = EXCLUDED.capacity_bytes,
+			drive_type     = EXCLUDED.drive_type,
+			is_active      = EXCLUDED.is_active
+		RETURNING`+driveColumns,
+		p.ServerID, p.NodeID, p.Label, p.CapacityBytes, p.MinioBucket, driveType, p.IsActive,
+	)
+	d, err := scanDrive(row)
+	if err != nil {
+		return nil, fmt.Errorf("UpsertDrive: %w", err)
+	}
+	return d, nil
+}
+
+// DeactivateMissingDrives marks every drive of a server inactive except those
+// whose ID is in keepIDs. Used by the sync to retire drives whose buckets have
+// disappeared without deleting them (preserving user allocations). A nil/empty
+// keepIDs deactivates all of the server's drives.
+func (q *Queries) DeactivateMissingDrives(ctx context.Context, serverID uuid.UUID, keepIDs []uuid.UUID) error {
+	_, err := q.db.ExecContext(ctx, `
+		UPDATE drives SET is_active = false
+		WHERE server_id = $1 AND is_active = true AND NOT (id = ANY($2::uuid[]))
+	`, serverID, pq.Array(keepIDs))
+	if err != nil {
+		return fmt.Errorf("DeactivateMissingDrives: %w", err)
 	}
 	return nil
 }

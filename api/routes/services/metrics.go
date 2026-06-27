@@ -8,11 +8,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/shirou/gopsutil/v4/cpu"
 	psdisk "github.com/shirou/gopsutil/v4/disk"
 	"github.com/shirou/gopsutil/v4/mem"
@@ -168,13 +170,24 @@ func (h *Hub) ClientCount() int {
 // snapshot to the DB, and broadcasts it to all active WebSocket clients. A
 // separate daily goroutine prunes rows older than 7 days.
 type MetricsService struct {
-	queries          *db.Queries
-	hub              *Hub
-	diskStatsPath    string
-	ping             *pingCollector
-	speedTestMu      sync.RWMutex
-	speedTestStream  SpeedTestStreamProvider
+	queries         *db.Queries
+	hub             *Hub
+	diskStatsPath   string
+	ping            *pingCollector
+	speedTestMu     sync.RWMutex
+	speedTestStream SpeedTestStreamProvider
+
+	// nodeState holds the latest hardware frame pushed by each node's agent,
+	// keyed by node_id. Merged into every WS broadcast and served to the live
+	// drive-stats endpoint. A node drops to Online=false once its last push ages
+	// past nodeStaleAfter.
+	nodeMu    sync.RWMutex
+	nodeState map[uuid.UUID]models.NodeFrame
 }
+
+// nodeStaleAfter is how long after a node's last push it is still considered
+// online. Agents push every ~5s, so 20s tolerates a few missed samples.
+const nodeStaleAfter = 20 * time.Second
 
 // NewMetricsService constructs a MetricsService.
 // diskStatsPath is the filesystem path used to report disk capacity — it should
@@ -185,6 +198,7 @@ func NewMetricsService(q *db.Queries, diskStatsPath string) *MetricsService {
 		hub:           newHub(),
 		diskStatsPath: diskStatsPath,
 		ping:          &pingCollector{},
+		nodeState:     make(map[uuid.UUID]models.NodeFrame),
 	}
 }
 
@@ -234,6 +248,123 @@ func (s *MetricsService) GetHistoryByDate(ctx context.Context, date string, page
 	return s.queries.ListSnapshotsByDate(ctx, date, page)
 }
 
+// GetNodeHistoryByHours returns ~120 evenly-distributed hardware snapshots for
+// one node from the past hours hours, oldest-first. Backs the per-node graphs.
+func (s *MetricsService) GetNodeHistoryByHours(ctx context.Context, nodeID uuid.UUID, hours int) ([]models.NodeMetricSnapshot, error) {
+	return s.queries.ListNodeSnapshotsByHours(ctx, nodeID, hours, 120)
+}
+
+// GetDriveTempHistoryByHours returns ~120 evenly-distributed temperature
+// readings for one drive from the past hours hours, oldest-first. Backs the
+// drive-temperature carousel graph.
+func (s *MetricsService) GetDriveTempHistoryByHours(ctx context.Context, driveID uuid.UUID, hours int) ([]models.DriveTempSnapshot, error) {
+	return s.queries.ListDriveTempsByHours(ctx, driveID, hours, 120)
+}
+
+// ── Per-node hardware aggregation ──────────────────────────────────────────────
+
+// UpdateNodeMetrics ingests a hardware push from a node's agent: it resolves the
+// reporting hostname to a node, persists the node snapshot and any drive
+// temperatures, and updates the in-memory frame merged into WS broadcasts.
+// Pushes from unregistered hostnames are logged and ignored (no error) so an
+// unconfigured agent never disrupts the stream.
+func (s *MetricsService) UpdateNodeMetrics(ctx context.Context, p *models.NodeMetricsPayload) error {
+	node, err := s.queries.GetNodeByHostname(ctx, p.Hostname)
+	if err != nil {
+		return err
+	}
+	if node == nil {
+		log.Printf("metrics: node-metrics push from unknown hostname %q (ignored)", p.Hostname)
+		return nil
+	}
+
+	now := time.Now().UTC()
+	snap := &models.NodeMetricSnapshot{
+		NodeID:           node.ID,
+		CPUPercent:       p.CPUPercent,
+		CPUTempCelsius:   p.CPUTempCelsius,
+		MemoryUsedBytes:  p.MemoryUsedBytes,
+		MemoryTotalBytes: p.MemoryTotalBytes,
+		NetworkBytesSent: p.NetworkBytesSent,
+		NetworkBytesRecv: p.NetworkBytesRecv,
+		SampledAt:        now,
+	}
+	if err := s.queries.InsertNodeSnapshot(ctx, snap); err != nil {
+		log.Printf("metrics: insert node snapshot: %v", err)
+	}
+
+	// Map reported drive labels to registered drives on this node so the frame
+	// carries each drive's UUID and tier. Unregistered labels are skipped.
+	summaries, err := s.queries.GetDriveSummaries(ctx)
+	if err != nil {
+		log.Printf("metrics: drive summaries for node push: %v", err)
+	}
+	byLabel := make(map[string]models.DriveSummary)
+	for _, d := range summaries {
+		if d.NodeID != nil && *d.NodeID == node.ID {
+			byLabel[d.DriveLabel] = d
+		}
+	}
+
+	drives := make([]models.DriveFrame, 0, len(p.Drives))
+	for _, dp := range p.Drives {
+		sum, ok := byLabel[dp.Label]
+		if !ok {
+			continue
+		}
+		drives = append(drives, models.DriveFrame{
+			DriveID:     sum.DriveID,
+			Label:       sum.DriveLabel,
+			DriveType:   sum.DriveType,
+			TempCelsius: dp.TempCelsius,
+			TotalBytes:  dp.TotalBytes,
+			UsedBytes:   dp.UsedBytes,
+			FreeBytes:   dp.FreeBytes,
+		})
+		if dp.TempCelsius != nil {
+			if err := s.queries.InsertDriveTemp(ctx, sum.DriveID, *dp.TempCelsius, now); err != nil {
+				log.Printf("metrics: insert drive temp: %v", err)
+			}
+		}
+	}
+
+	frame := models.NodeFrame{
+		NodeID:           node.ID,
+		Hostname:         node.Hostname,
+		Role:             node.Role,
+		IsActive:         node.IsActive,
+		Online:           true,
+		CPUPercent:       p.CPUPercent,
+		CPUTempCelsius:   p.CPUTempCelsius,
+		MemoryUsedBytes:  p.MemoryUsedBytes,
+		MemoryTotalBytes: p.MemoryTotalBytes,
+		NetworkBytesSent: p.NetworkBytesSent,
+		NetworkBytesRecv: p.NetworkBytesRecv,
+		SampledAt:        now,
+		Drives:           drives,
+	}
+	s.nodeMu.Lock()
+	s.nodeState[node.ID] = frame
+	s.nodeMu.Unlock()
+	return nil
+}
+
+// NodeStates returns a stable, hostname-sorted snapshot of every node that has
+// reported at least once. Online is recomputed from each frame's age so a node
+// whose agent has gone silent still appears (with Online=false) for the UI.
+func (s *MetricsService) NodeStates() []models.NodeFrame {
+	s.nodeMu.RLock()
+	defer s.nodeMu.RUnlock()
+	now := time.Now().UTC()
+	out := make([]models.NodeFrame, 0, len(s.nodeState))
+	for _, f := range s.nodeState {
+		f.Online = now.Sub(f.SampledAt) < nodeStaleAfter
+		out = append(out, f)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Hostname < out[j].Hostname })
+	return out
+}
+
 // ── Goroutines ────────────────────────────────────────────────────────────────
 
 func (s *MetricsService) runSampler(ctx context.Context) {
@@ -267,8 +398,11 @@ func (s *MetricsService) runSampler(ctx context.Context) {
 				log.Printf("metrics: insert: %v", err)
 				continue
 			}
+			// Broadcast the combined frame: cluster snapshot + the latest per-node
+			// hardware pushed by each node's agent.
 			if s.hub.ClientCount() > 0 {
-				if msg, err := json.Marshal(snap); err == nil {
+				frame := models.MetricsFrame{Cluster: snap, Nodes: s.NodeStates()}
+				if msg, err := json.Marshal(frame); err == nil {
 					s.hub.Broadcast(msg)
 				}
 			}
@@ -288,6 +422,12 @@ func (s *MetricsService) runPruner(ctx context.Context) {
 			cutoff := time.Now().UTC().Add(-metricsRetention)
 			if err := s.queries.PruneOldSnapshots(ctx, cutoff); err != nil {
 				log.Printf("metrics: prune: %v", err)
+			}
+			if err := s.queries.PruneOldNodeSnapshots(ctx, cutoff); err != nil {
+				log.Printf("metrics: prune node snapshots: %v", err)
+			}
+			if err := s.queries.PruneOldDriveTemps(ctx, cutoff); err != nil {
+				log.Printf("metrics: prune drive temps: %v", err)
 			}
 		}
 	}

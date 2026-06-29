@@ -189,18 +189,11 @@ func (h *Handler) AddDrive(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "server not found"})
 		return
 	}
-	client, ok := h.registry.Client(serverID)
-	if !ok {
-		c.JSON(http.StatusConflict, gin.H{"error": "server has no active MinIO client; re-activate it first"})
-		return
-	}
-	if err := services.EnsureBucket(ctx, client, req.MinioBucket); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("cannot ensure bucket: %v", err)})
-		return
-	}
-
 	// Resolve the optional node assignment, ensuring it belongs to this server.
+	// A node may override the server's MinIO endpoint, in which case the new
+	// drive's bucket must be created on the node's instance, not the server's.
 	var nodeID *uuid.UUID
+	nodeHasEndpoint := false
 	if req.NodeID != "" {
 		nid, err := uuid.Parse(req.NodeID)
 		if err != nil {
@@ -213,6 +206,17 @@ func (h *Handler) AddDrive(c *gin.Context) {
 			return
 		}
 		nodeID = &nid
+		nodeHasEndpoint = node.MinioEndpoint != nil && *node.MinioEndpoint != ""
+	}
+
+	client, ok := h.registry.ClientForDrive(serverID, nodeID, nodeHasEndpoint)
+	if !ok {
+		c.JSON(http.StatusConflict, gin.H{"error": "server has no active MinIO client; re-activate it first"})
+		return
+	}
+	if err := services.EnsureBucket(ctx, client, req.MinioBucket); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("cannot ensure bucket: %v", err)})
+		return
 	}
 
 	// Tier: use the explicit drive_type, else infer from the label for backward

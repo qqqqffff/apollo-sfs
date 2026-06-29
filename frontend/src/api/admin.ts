@@ -149,6 +149,21 @@ export interface NodeFrame {
   network_bytes_recv: number
   sampled_at: string
   drives: DriveFrame[]
+  // Every physical disk the node reports, independent of logical drives — so a
+  // single disk in a pooled drive can be tracked (and run hot/fail) on its own.
+  disks: DiskFrame[]
+}
+
+// DiskFrame is one physical disk's live figures within a node, resolved to its
+// node_disks row (disk_id) so per-disk history can be fetched.
+export interface DiskFrame {
+  disk_id: string
+  label: string
+  device: string
+  temp_celsius: number | null
+  total_bytes: number
+  used_bytes: number
+  free_bytes: number
 }
 
 // MetricsFrame is the per-tick WebSocket payload: a cluster snapshot plus a
@@ -179,6 +194,28 @@ export interface DriveTempSnapshot {
   sampled_at: string
 }
 
+// A physical disk's latest reported state (from GET .../nodes/:id/disks).
+export interface NodeDisk {
+  id: string
+  node_id: string
+  label: string
+  device: string
+  capacity_bytes: number
+  used_bytes: number
+  free_bytes: number
+  temp_celsius: number | null
+  last_seen_at: string
+  created_at: string
+}
+
+// Per-physical-disk temperature history (downsampled).
+export interface NodeDiskTempSnapshot {
+  id: string
+  disk_id: string
+  temp_celsius: number
+  sampled_at: string
+}
+
 export function getMetrics() {
   return get<MetricsSnapshot>('/admin/system/metrics')
 }
@@ -193,6 +230,14 @@ export function getNodeMetricsHistory(nodeId: string, hours: number) {
 
 export function getDriveTempsHistory(driveId: string, hours: number) {
   return get<DriveTempSnapshot[]>(`/admin/system/drives/${driveId}/temps/history?hours=${hours}`)
+}
+
+export function getNodeDisks(nodeId: string) {
+  return get<NodeDisk[]>(`/admin/system/nodes/${nodeId}/disks`)
+}
+
+export function getNodeDiskTempsHistory(diskId: string, hours: number) {
+  return get<NodeDiskTempSnapshot[]>(`/admin/system/disks/${diskId}/temps/history?hours=${hours}`)
 }
 
 export async function pingServer(): Promise<number> {

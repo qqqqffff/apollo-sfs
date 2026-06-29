@@ -265,8 +265,9 @@ docker exec -i "$KCDB"  pg_restore -U "$POSTGRES_KC_USER"  -d "$POSTGRES_KC_DB" 
 
 > **Two facts confirmed from the code that shape this section:**
 > 1. **`PATCH /servers/:id` (`UpdateServer`) only accepts `is_active` and `name`** — it
->    **cannot change `minio_endpoint`** (the endpoint is set only at `CreateServer`). So
->    re-pointing the existing server via the API is not possible.
+>    **cannot change the server's `minio_endpoint`** (set only at `CreateServer`). To point
+>    storage at a *different* MinIO instance, set a **per-node** `minio_endpoint` override
+>    (`POST`/`PATCH .../nodes`) instead — see "Add the manager + its 8TB HDD" below.
 > 2. **`drive_type` (`nvme`/`hdd`) is now a persisted column on `drives`**, set
 >    explicitly at `AddDrive` (migration `db/migrations/020_drive_type.sql`). Pass it in
 >    the request; if omitted it's inferred from the label (`nvme` substring → `nvme`,
@@ -291,20 +292,32 @@ Register the Pi as the fast server's node (admin API, `/api/v1/admin/system/...`
 POST /servers/<fast_server_id>/nodes   { "hostname": "apollo-sfs", "role": "worker", "address": "<pi-ip>" }
 ```
 
-**Create the standard server + node + drive (the 8TB HDD):**
+**Add the manager + its 8TB HDD to the *same* server (per-node MinIO endpoint).**
+A node may now override its server's MinIO endpoint (migration
+`db/migrations/023_node_minio_endpoints.sql`), so the standard tier lives under the **same
+server** as the fast tier instead of a separate one — both show under one server in the
+metrics view, while each drive still routes to the correct MinIO instance. Credentials are
+inherited from the server (every instance shares the same root credentials), so only the
+endpoint is set per node.
 ```
-POST /servers                          { "state": "XX", "minio_endpoint": "minio-standard:9000",
-                                         "minio_use_ssl": false, "access_key": "...", "secret_key": "..." }
-POST /servers/<std_server_id>/nodes    { "hostname": "apollo-sfs-1", "role": "manager", "address": "<mgr-ip>" }
-POST /servers/<std_server_id>/drives   { "label": "hdd-01", "minio_bucket": "<std-bucket>",
-                                         "drive_type": "hdd", "node_id": "<node-id>" }
+POST /servers/<server_id>/nodes    { "hostname": "apollo-sfs-1", "role": "manager", "address": "<mgr-ip>",
+                                     "minio_endpoint": "minio-standard:9000", "minio_use_ssl": false }
+POST /servers/<server_id>/drives   { "label": "hdd-01", "minio_bucket": "<std-bucket>",
+                                     "drive_type": "hdd", "node_id": "<apollo-sfs-1 node-id>" }
 ```
-`CreateServer` test-connects to MinIO and encrypts the credentials with the KEK;
-`AddDrive` auto-creates the bucket and persists `drive_type` (here `hdd` → standard tier).
-Run `POST /drives/<id>/sync-capacity` to populate capacity from the disk-stats path.
+`AddDrive` creates the bucket **on the node's MinIO** (`minio-standard:9000`) when the node
+carries an endpoint override, and persists `drive_type` (here `hdd` → standard tier). Run
+`POST /drives/<id>/sync-capacity` to populate capacity from the disk-stats path.
+
+> **Or let the sync do it.** `POST /system/sync` reconciles the whole Swarm into a single
+> server: each node whose `tier` label maps to a non-primary endpoint
+> (`MINIO_STANDARD_ENDPOINT`) gets that endpoint as an override automatically, and each
+> tier's buckets attach to the matching node. No separate standard server is created.
 
 > Endpoints resolve over the Swarm **overlay** by service name (`minio:9000`,
-> `minio-standard:9000`) from the `api` container — no host ports for MinIO.
+> `minio-standard:9000`) from the `api` container — no host ports for MinIO. A drive on a
+> node with no endpoint override falls back to its server's endpoint (unchanged for
+> single-instance clusters).
 
 > ⚠ **Remaining limitation.** `sync-capacity` still reads the single `DISK_STATS_PATH`
 > (`/data`) regardless of which drive you sync — so capacity auto-detect is only correct
@@ -331,3 +344,90 @@ Run `POST /drives/<id>/sync-capacity` to populate capacity from the disk-stats p
 - **Redundancy:** none by design ("for now"). The standard tier is a single HDD — back it
   up. If a tier's MinIO is down, the app surfaces capacity/expansion handling per
   `models/expansion_request.go`.
+
+---
+
+## Part 8 — Deploying an update to the running Swarm
+
+Run everything from the repo root on the **manager** unless noted. Swarm deploys
+pre-built images, so the cycle is **migrate DB → rebuild images → redeploy**.
+
+### 8.1 Pull the new code
+```bash
+cd /home/apollo/apollo-sfs
+git pull
+set -a && . ./.env && set +a            # stack deploy does NOT auto-read .env
+```
+
+### 8.2 Back up, then apply pending migrations
+Migrations are **not** auto-run; apply each new file once against the live app DB.
+```bash
+APPDB=$(docker ps -qf name=apollo-sfs_db-app)
+docker exec "$APPDB" pg_dump -U "$POSTGRES_APP_USER" "$POSTGRES_APP_DB" \
+  | gzip > ~/apollo-app-$(date +%F-%H%M).sql.gz          # safety net
+
+for m in 023_node_minio_endpoints 024_node_disks; do
+  docker exec -i "$APPDB" psql -v ON_ERROR_STOP=1 -U "$POSTGRES_APP_USER" -d "$POSTGRES_APP_DB" \
+    -f "/docker-entrypoint-initdb.d/migrations/${m}.sql"
+done
+```
+Both migrations are idempotent (`ADD COLUMN IF NOT EXISTS` / `CREATE TABLE IF NOT EXISTS`).
+
+### 8.3 Ensure the node-agent token exists
+Per-disk telemetry needs the agents pushing; an empty token disables ingest (fails
+closed) and crash-loops the agent.
+```bash
+grep -q '^NODE_AGENT_TOKEN=' .env || echo "NODE_AGENT_TOKEN=$(openssl rand -hex 32)" >> .env
+set -a && . ./.env && set +a
+```
+
+### 8.4 Rebuild images
+The custom images run only on the manager (amd64); build them there:
+```bash
+docker build -t apollo-sfs-api:amd64       ./api
+docker build -t apollo-sfs-frontend:amd64  ./frontend
+docker build -t apollo-sfs-node-agent:latest -f api/Dockerfile.node-agent ./api
+```
+The **node-agent runs on the Pi too** (arm64), and its code is unchanged by this
+update — but if its image is missing/stale on the Pi, rebuild it there so the
+worker has a matching local image:
+```bash
+ssh apollo@<pi-ip> 'cd /home/apollo/apollo-sfs && git pull && \
+  docker build -t apollo-sfs-node-agent:latest -f api/Dockerfile.node-agent ./api'
+```
+
+### 8.5 Label the Pi's pooled disks (one-time)
+The agent reports each **labelled, mounted** disk. `nvme-02` is already xfs-labelled;
+give the ext4 `nvme-01` partition a label so it reports too (safe, live):
+```bash
+ssh apollo@<pi-ip> 'sudo e2label /dev/nvme0n1p1 nvme-01 && lsblk -f /dev/nvme0n1'
+```
+The stack now bind-mounts both `…/minio/nvme-01` and `…/minio/nvme-02` into the
+node-agent so it can read each disk's usage.
+
+### 8.6 Redeploy
+A stack deploy rolls only the services whose image/spec changed:
+```bash
+docker stack deploy -c docker-stack.yml --resolve-image never apollo-sfs
+docker stack services apollo-sfs        # watch replicas reach 1/1
+```
+To roll a single service instead of the whole stack (local image, no registry):
+```bash
+docker service update --no-resolve-image --force --image apollo-sfs-api:amd64       apollo-sfs_api
+docker service update --no-resolve-image --force --image apollo-sfs-frontend:amd64  apollo-sfs_frontend
+docker service update --no-resolve-image --force apollo-sfs_node-agent   # picks up new mounts + token
+```
+
+### 8.7 Reconcile topology + verify
+```bash
+# Fold both tiers into one server (sets the manager node's minio-standard override):
+curl -fsS -X POST https://files.<domain>/api/v1/admin/system/sync -H "Cookie: <admin session>"
+```
+- Admin → **infrastructure**: one server (`NH-0001`) with `apollo-sfs` (fast) and
+  `apollo-sfs-1` (standard) nodes; no stale `NH-0001-node-1`, no separate `Standard tier`.
+  Delete the stale node/server if the sync left them (`DELETE …/nodes/:id`).
+- Admin → **metrics** → pick the Pi node: the **Physical disks** card lists `nvme-01`
+  *and* `nvme-02` with independent fill bars + temperatures; click one to graph its
+  temperature history. Upload to fast and to standard to confirm routing.
+- `docker service logs apollo-sfs_node-agent --tail 20` on each node — pushes succeeding,
+  no `NODE_AGENT_TOKEN is required` fatal.

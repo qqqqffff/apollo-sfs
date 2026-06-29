@@ -172,7 +172,7 @@ func (s *FileService) storageFor(ctx context.Context, username string) (*MinIOSe
 	if alloc == nil {
 		return nil, uuid.Nil, fmt.Errorf("storage lookup for %q: no drive allocation", username)
 	}
-	client, ok := s.registry.Client(alloc.Server.ID)
+	client, ok := s.registry.ClientForDrive(alloc.Server.ID, alloc.Drive.NodeID, alloc.NodeHasMinIO)
 	if !ok {
 		return nil, uuid.Nil, fmt.Errorf("storage lookup for %q: no MinIO client for server %s", username, alloc.Server.Name)
 	}
@@ -207,7 +207,7 @@ func (s *FileService) storageForDrive(ctx context.Context, driveID uuid.UUID) (*
 	if alloc == nil {
 		return nil, fmt.Errorf("drive lookup %s: not found", driveID)
 	}
-	client, ok := s.registry.Client(alloc.Server.ID)
+	client, ok := s.registry.ClientForDrive(alloc.Server.ID, alloc.Drive.NodeID, alloc.NodeHasMinIO)
 	if !ok {
 		return nil, fmt.Errorf("drive lookup %s: no MinIO client for server %s", driveID, alloc.Server.Name)
 	}

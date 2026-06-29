@@ -7,6 +7,7 @@ import {
   driveStatsQueryOptions,
   getDriveTempsHistory,
   getMetricsHistoryByHours,
+  getNodeDiskTempsHistory,
   getNodeMetricsHistory,
   infrastructureQueryOptions,
   pingServer,
@@ -17,7 +18,7 @@ import {
   triggerSpeedTest,
   upsertAlarmSubscription,
 } from '../../api/admin'
-import type { AlarmType, DriveFrame, DriveStat, DriveSummary, MetricsFrame, NodeFrame, NodeSummary, TestRunResponse } from '../../api/admin'
+import type { AlarmType, DiskFrame, DriveFrame, DriveStat, DriveSummary, MetricsFrame, NodeFrame, NodeSummary, TestRunResponse } from '../../api/admin'
 import { useMetricsStream } from '../../hooks/useMetricsStream'
 import { LineGraph } from '../../components/LineGraph'
 import type { LinePoint } from '../../components/LineGraph'
@@ -45,9 +46,9 @@ const HOUR_OPTIONS: HourWindow[] = [1, 12, 24, 48, 72]
 
 // Per-node metrics (cpu, memory, traffic, drive_temp) graph the selected node;
 // cluster metrics (users, disk, speed, ping, loss) are cluster-wide (manager uplink).
-type MetricKey = 'total_users' | 'active_users' | 'disk' | 'memory' | 'traffic' | 'speed' | 'ping' | 'loss' | 'cpu' | 'drive_temp'
+type MetricKey = 'total_users' | 'active_users' | 'disk' | 'memory' | 'traffic' | 'speed' | 'ping' | 'loss' | 'cpu' | 'drive_temp' | 'disk_temp'
 
-const NODE_METRICS: ReadonlySet<MetricKey> = new Set<MetricKey>(['cpu', 'memory', 'traffic', 'drive_temp'])
+const NODE_METRICS: ReadonlySet<MetricKey> = new Set<MetricKey>(['cpu', 'memory', 'traffic', 'drive_temp', 'disk_temp'])
 
 const METRIC_LABELS: Record<MetricKey, string> = {
   total_users:  'Total users',
@@ -60,6 +61,7 @@ const METRIC_LABELS: Record<MetricKey, string> = {
   loss:         'Packet loss',
   cpu:          'CPU utilization',
   drive_temp:   'Drive temperature',
+  disk_temp:    'Disk temperature',
 }
 
 function formatTempY(v: number): string {
@@ -103,6 +105,7 @@ function RouteComponent() {
   const [selectedMetric, setSelectedMetric] = useState<MetricKey>('traffic')
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
   const [driveIdx, setDriveIdx] = useState(0)
+  const [diskIdx, setDiskIdx] = useState(0)
 
   const { data: infraData } = useQuery({ ...infrastructureQueryOptions, enabled: !inactive })
   const { data: driveStatsData } = useQuery({ ...driveStatsQueryOptions, enabled: !inactive })
@@ -156,6 +159,11 @@ function RouteComponent() {
   const nodeDrives: DriveFrame[] = selectedNode?.drives ?? []
   const safeDriveIdx = nodeDrives.length ? Math.min(driveIdx, nodeDrives.length - 1) : 0
   const selectedDrive = nodeDrives[safeDriveIdx]
+  // Physical disks are reported independently of logical drives, so a pooled
+  // drive's disks each surface their own capacity + temperature here.
+  const nodeDisks: DiskFrame[] = selectedNode?.disks ?? []
+  const safeDiskIdx = nodeDisks.length ? Math.min(diskIdx, nodeDisks.length - 1) : 0
+  const selectedDisk = nodeDisks[safeDiskIdx]
 
   // The metrics page no longer edits infrastructure by hand. A single sync
   // indexes the live swarm + MinIO and reconciles the server → node → drive tree.
@@ -232,6 +240,16 @@ function RouteComponent() {
     retry: 1,
   })
 
+  // ── Per-physical-disk temperature history (carousel) for the selected disk ────
+  const selectedDiskId = selectedDisk?.disk_id
+  const { data: diskTempHistory } = useQuery({
+    queryKey: ['admin', 'disk-temps', selectedDiskId, hours],
+    queryFn: () => getNodeDiskTempsHistory(selectedDiskId!, hours),
+    staleTime: 60_000,
+    enabled: !!selectedDiskId && hours > 1 && !inactive,
+    retry: 1,
+  })
+
   const { pingMs: clientPingMs, packetLossPercent: clientPacketLoss, history: clientPingHistory } = useServerPing(inactive)
 
   // Cluster snapshots / frames within the last hour, for live series.
@@ -305,6 +323,16 @@ function RouteComponent() {
     : []
   const histDriveTempPoints: LinePoint[] = (driveTempHistory ?? []).map(s => ({ x: tMs(s.sampled_at), y: s.temp_celsius }))
   const driveTempPoints = hours === 1 ? wsDriveTempPoints : histDriveTempPoints
+
+  // ── Physical-disk temperature (selected node's selected disk) ──
+  const wsDiskTempPoints: LinePoint[] = selectedDiskId
+    ? recentFrames.flatMap(f => {
+        const d = nodeIn(f)?.disks?.find(dk => dk.disk_id === selectedDiskId)
+        return d && d.temp_celsius != null ? [{ x: tMs(f.cluster.sampled_at), y: d.temp_celsius }] : []
+      })
+    : []
+  const histDiskTempPoints: LinePoint[] = (diskTempHistory ?? []).map(s => ({ x: tMs(s.sampled_at), y: s.temp_celsius }))
+  const diskTempPoints = hours === 1 ? wsDiskTempPoints : histDiskTempPoints
 
   // ── Cluster-level series: ping, loss, speed, users, disk ──
   const wsPingPoints: LinePoint[] = recentSnaps
@@ -478,7 +506,7 @@ function RouteComponent() {
               <NodeTabs
                 tabs={nodeTabs}
                 selectedId={selectedNodeId}
-                onSelect={(id) => { setSelectedNodeId(id); setDriveIdx(0) }}
+                onSelect={(id) => { setSelectedNodeId(id); setDriveIdx(0); setDiskIdx(0) }}
               />
             </div>
             <div className="grid grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-3">
@@ -504,7 +532,25 @@ function RouteComponent() {
                 selected={selectedMetric === 'drive_temp'}
                 onClick={() => setSelectedMetric('drive_temp')}
               />
+              {nodeDisks.length > 0 && (
+                <DiskTempCarousel
+                  disks={nodeDisks}
+                  index={safeDiskIdx}
+                  onIndex={setDiskIdx}
+                  selected={selectedMetric === 'disk_temp'}
+                  onClick={() => setSelectedMetric('disk_temp')}
+                />
+              )}
             </div>
+            {nodeDisks.length > 0 && (
+              <div className="mt-3">
+                <PhysicalDisksCard
+                  disks={nodeDisks}
+                  selectedIdx={safeDiskIdx}
+                  onSelect={(i) => { setDiskIdx(i); setSelectedMetric('disk_temp') }}
+                />
+              </div>
+            )}
           </section>
 
           {/* ── Node network (traffic per node, uplink shared) ────────────── */}
@@ -567,6 +613,7 @@ function RouteComponent() {
             {METRIC_LABELS[selectedMetric]}
             {NODE_METRICS.has(selectedMetric) && selectedNode ? ` · ${selectedNode.hostname}` : ''}
             {selectedMetric === 'drive_temp' && selectedDrive ? ` · ${selectedDrive.label}` : ''}
+            {selectedMetric === 'disk_temp' && selectedDisk ? ` · ${selectedDisk.label}` : ''}
             {' '}over time
           </h3>
           <div className="flex gap-1">
@@ -633,6 +680,9 @@ function RouteComponent() {
           )}
           {selectedMetric === 'drive_temp' && (
             <LineGraph points={driveTempPoints} width={graphW} height={200} color="#10b981" formatY={formatTempY} formatX={formatGraphX} />
+          )}
+          {selectedMetric === 'disk_temp' && (
+            <LineGraph points={diskTempPoints} width={graphW} height={200} color="#06b6d4" formatY={formatTempY} formatX={formatGraphX} />
           )}
         </div>
       </section>
@@ -1133,6 +1183,95 @@ function DriveTempCarousel({ drives, index, onIndex, selected, onClick }: {
       ) : (
         <div className="text-sm font-semibold text-gray-400">no live data</div>
       )}
+    </div>
+  )
+}
+
+// DiskTempCarousel pages through the selected node's physical disks, one
+// temperature per slide — independent of logical drives, so each disk in a pool
+// is visible on its own.
+function DiskTempCarousel({ disks, index, onIndex, selected, onClick }: {
+  disks: DiskFrame[]
+  index: number
+  onIndex: (i: number) => void
+  selected?: boolean
+  onClick?: () => void
+}) {
+  const has = disks.length > 0
+  const d = has ? disks[Math.min(index, disks.length - 1)] : undefined
+  const step = (delta: number, e: React.MouseEvent) => {
+    e.stopPropagation()
+    if (!has) return
+    onIndex((index + delta + disks.length) % disks.length)
+  }
+  return (
+    <div
+      className={`bg-white border rounded-xl px-4 py-3 cursor-pointer transition-colors ${selected ? 'border-blue-500 ring-1 ring-blue-500' : 'border-gray-200 hover:border-gray-300'}`}
+      onClick={onClick}
+    >
+      <div className="flex items-center justify-between mb-2">
+        <div className="text-xs text-gray-400">Disk temp</div>
+        {disks.length > 1 && (
+          <div className="flex items-center gap-1">
+            <button onClick={(e) => step(-1, e)} className="text-xs text-gray-400 hover:text-gray-700 cursor-pointer bg-transparent border-0 px-1" title="Previous disk">‹</button>
+            <span className="text-xs text-gray-400 tabular-nums">{index + 1}/{disks.length}</span>
+            <button onClick={(e) => step(1, e)} className="text-xs text-gray-400 hover:text-gray-700 cursor-pointer bg-transparent border-0 px-1" title="Next disk">›</button>
+          </div>
+        )}
+      </div>
+      {d ? (
+        <>
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-xs text-gray-600 font-medium truncate" title={d.device || d.label}>{d.label}</span>
+            <span className={`text-lg font-semibold tabular-nums shrink-0 ${d.temp_celsius != null ? tempColor(d.temp_celsius) : 'text-gray-400'}`}>
+              {d.temp_celsius != null ? `${d.temp_celsius.toFixed(1)}°C` : '—'}
+            </span>
+          </div>
+          <div className="text-xs text-gray-400 mt-0.5 truncate">{d.device || 'physical disk'}</div>
+        </>
+      ) : (
+        <div className="text-sm font-semibold text-gray-400">no live data</div>
+      )}
+    </div>
+  )
+}
+
+// PhysicalDisksCard lists every physical disk a node reports, each with its own
+// fill bar + temperature. With a pooled drive this is where divergence shows up:
+// one disk filling or running hotter than the others in the same pool.
+function PhysicalDisksCard({ disks, selectedIdx, onSelect }: {
+  disks: DiskFrame[]
+  selectedIdx: number
+  onSelect: (i: number) => void
+}) {
+  return (
+    <div className="bg-white border border-gray-200 rounded-xl px-4 py-3">
+      <div className="text-xs text-gray-400 mb-2">Physical disks · {disks.length}</div>
+      <div className="flex flex-col gap-2">
+        {disks.map((d, i) => {
+          const pct = d.total_bytes > 0 ? (d.used_bytes / d.total_bytes) * 100 : 0
+          return (
+            <button
+              key={d.disk_id}
+              onClick={() => onSelect(i)}
+              className={`w-full text-left bg-transparent border rounded-lg px-3 py-2 cursor-pointer transition-colors ${i === selectedIdx ? 'border-blue-500 ring-1 ring-blue-500' : 'border-gray-100 hover:border-gray-300'}`}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-sm font-medium text-gray-800 truncate" title={d.device || d.label}>{d.label}</span>
+                <span className={`text-sm font-semibold tabular-nums shrink-0 ${d.temp_celsius != null ? tempColor(d.temp_celsius) : 'text-gray-400'}`}>
+                  {d.temp_celsius != null ? `${d.temp_celsius.toFixed(1)}°C` : '—'}
+                </span>
+              </div>
+              <div className="h-1.5 bg-gray-100 rounded-full mt-1.5 overflow-hidden">
+                <div className={`h-full rounded-full ${pct >= 90 ? 'bg-red-500' : pct >= 75 ? 'bg-amber-500' : 'bg-emerald-500'}`} style={{ width: `${Math.min(pct, 100)}%` }} />
+              </div>
+              <div className="text-xs text-gray-400 mt-0.5">
+                {fmtCapacity(d.used_bytes)} / {fmtCapacity(d.total_bytes)} · {pct.toFixed(1)}%
+              </div>
+            </button>
+          )
+        })}
+      </div>
     </div>
   )
 }

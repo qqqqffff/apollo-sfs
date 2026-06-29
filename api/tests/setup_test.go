@@ -544,15 +544,19 @@ func newAdminHandlerWithFiles(q admin.AdminQuerier, fileSvc routes.FileServicer)
 // ── Stub MetricsService ───────────────────────────────────────────────────────
 
 type stubMetricsService struct {
-	latest         *models.ServerMetricSnapshot
-	latestErr      error
-	history        []models.ServerMetricSnapshot
-	historyErr     error
-	nodeHistory    []models.NodeMetricSnapshot
-	nodeHistoryErr error
-	driveTemps     []models.DriveTempSnapshot
-	driveTempsErr  error
-	nodeStates     []models.NodeFrame
+	latest           *models.ServerMetricSnapshot
+	latestErr        error
+	history          []models.ServerMetricSnapshot
+	historyErr       error
+	nodeHistory      []models.NodeMetricSnapshot
+	nodeHistoryErr   error
+	driveTemps       []models.DriveTempSnapshot
+	driveTempsErr    error
+	nodeDisks        []models.NodeDisk
+	nodeDisksErr     error
+	nodeDiskTemps    []models.NodeDiskTempSnapshot
+	nodeDiskTempsErr error
+	nodeStates       []models.NodeFrame
 }
 
 func (s *stubMetricsService) GetLatest(_ context.Context) (*models.ServerMetricSnapshot, error) {
@@ -580,6 +584,12 @@ func (s *stubMetricsService) GetNodeHistoryByHours(_ context.Context, _ uuid.UUI
 }
 func (s *stubMetricsService) GetDriveTempHistoryByHours(_ context.Context, _ uuid.UUID, _ int) ([]models.DriveTempSnapshot, error) {
 	return s.driveTemps, s.driveTempsErr
+}
+func (s *stubMetricsService) GetNodeDisks(_ context.Context, _ uuid.UUID) ([]models.NodeDisk, error) {
+	return s.nodeDisks, s.nodeDisksErr
+}
+func (s *stubMetricsService) GetNodeDiskTempHistoryByHours(_ context.Context, _ uuid.UUID, _ int) ([]models.NodeDiskTempSnapshot, error) {
+	return s.nodeDiskTemps, s.nodeDiskTempsErr
 }
 func (s *stubMetricsService) NodeStates() []models.NodeFrame { return s.nodeStates }
 func (s *stubMetricsService) Hub() *services.Hub             { return nil }

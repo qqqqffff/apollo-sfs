@@ -14,14 +14,18 @@ import (
 // ── Nodes ──────────────────────────────────────────────────────────────────────
 
 const nodeColumns = `
-	id, server_id, hostname, role, address, is_active, created_at`
+	id, server_id, hostname, role, address, minio_endpoint, minio_use_ssl, is_active, created_at`
 
 func scanNode(row *sql.Row) (*models.Node, error) {
 	var n models.Node
+	var endpoint sql.NullString
 	err := row.Scan(&n.ID, &n.ServerID, &n.Hostname, &n.Role,
-		&n.Address, &n.IsActive, &n.CreatedAt)
+		&n.Address, &endpoint, &n.MinioUseSSL, &n.IsActive, &n.CreatedAt)
 	if err != nil {
 		return nil, err
+	}
+	if endpoint.Valid && endpoint.String != "" {
+		n.MinioEndpoint = &endpoint.String
 	}
 	return &n, nil
 }
@@ -41,11 +45,14 @@ func (q *Queries) GetNode(ctx context.Context, id uuid.UUID) (*models.Node, erro
 }
 
 // CreateNodeParams carries the fields needed to insert a new node row.
+// MinioEndpoint is optional — nil leaves the node inheriting its server's endpoint.
 type CreateNodeParams struct {
-	ServerID uuid.UUID
-	Hostname string
-	Role     string
-	Address  string
+	ServerID      uuid.UUID
+	Hostname      string
+	Role          string
+	Address       string
+	MinioEndpoint *string
+	MinioUseSSL   bool
 }
 
 // CreateNode inserts a new node and returns the created row.
@@ -55,10 +62,10 @@ func (q *Queries) CreateNode(ctx context.Context, p CreateNodeParams) (*models.N
 		role = "worker"
 	}
 	row := q.db.QueryRowContext(ctx, `
-		INSERT INTO nodes (server_id, hostname, role, address)
-		VALUES ($1, $2, $3, $4)
+		INSERT INTO nodes (server_id, hostname, role, address, minio_endpoint, minio_use_ssl)
+		VALUES ($1, $2, $3, $4, $5, $6)
 		RETURNING`+nodeColumns,
-		p.ServerID, p.Hostname, role, p.Address,
+		p.ServerID, p.Hostname, role, p.Address, p.MinioEndpoint, p.MinioUseSSL,
 	)
 	n, err := scanNode(row)
 	if err != nil {
@@ -69,19 +76,23 @@ func (q *Queries) CreateNode(ctx context.Context, p CreateNodeParams) (*models.N
 
 // UpdateNodeParams carries updateable fields for a node.
 type UpdateNodeParams struct {
-	Hostname string
-	Role     string
-	Address  string
-	IsActive bool
+	Hostname      string
+	Role          string
+	Address       string
+	MinioEndpoint *string
+	MinioUseSSL   bool
+	IsActive      bool
 }
 
 // UpdateNode updates the mutable fields of a node and returns the updated row.
 func (q *Queries) UpdateNode(ctx context.Context, id uuid.UUID, p UpdateNodeParams) (*models.Node, error) {
 	row := q.db.QueryRowContext(ctx, `
-		UPDATE nodes SET hostname = $2, role = $3, address = $4, is_active = $5
+		UPDATE nodes
+		SET hostname = $2, role = $3, address = $4,
+		    minio_endpoint = $5, minio_use_ssl = $6, is_active = $7
 		WHERE id = $1
 		RETURNING`+nodeColumns,
-		id, p.Hostname, p.Role, p.Address, p.IsActive,
+		id, p.Hostname, p.Role, p.Address, p.MinioEndpoint, p.MinioUseSSL, p.IsActive,
 	)
 	n, err := scanNode(row)
 	if err != nil {
@@ -121,12 +132,17 @@ func (q *Queries) UpsertNode(ctx context.Context, p CreateNodeParams, isActive b
 		role = "worker"
 	}
 	row := q.db.QueryRowContext(ctx, `
-		INSERT INTO nodes (server_id, hostname, role, address, is_active)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO nodes (server_id, hostname, role, address, minio_endpoint, minio_use_ssl, is_active)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		ON CONFLICT (server_id, hostname)
-		DO UPDATE SET role = EXCLUDED.role, address = EXCLUDED.address, is_active = EXCLUDED.is_active
+		DO UPDATE SET
+			role           = EXCLUDED.role,
+			address        = EXCLUDED.address,
+			minio_endpoint = EXCLUDED.minio_endpoint,
+			minio_use_ssl  = EXCLUDED.minio_use_ssl,
+			is_active      = EXCLUDED.is_active
 		RETURNING`+nodeColumns,
-		p.ServerID, p.Hostname, role, p.Address, isActive,
+		p.ServerID, p.Hostname, role, p.Address, p.MinioEndpoint, p.MinioUseSSL, isActive,
 	)
 	n, err := scanNode(row)
 	if err != nil {
@@ -148,6 +164,38 @@ func (q *Queries) DeactivateMissingNodes(ctx context.Context, serverID uuid.UUID
 		return fmt.Errorf("DeactivateMissingNodes: %w", err)
 	}
 	return nil
+}
+
+// ListActiveNodesWithMinIO returns every active node that carries its own MinIO
+// endpoint, joined to the parent server so the registry can build a client using
+// the server's (inherited) credentials. Used at startup to seed node-level
+// MinIO clients.
+func (q *Queries) ListActiveNodesWithMinIO(ctx context.Context) ([]models.Node, error) {
+	rows, err := q.db.QueryContext(ctx, `
+		SELECT`+nodeColumns+`
+		FROM nodes
+		WHERE is_active = true AND minio_endpoint IS NOT NULL AND minio_endpoint <> ''
+		ORDER BY created_at ASC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("ListActiveNodesWithMinIO: %w", err)
+	}
+	defer rows.Close()
+
+	var out []models.Node
+	for rows.Next() {
+		var n models.Node
+		var endpoint sql.NullString
+		if err := rows.Scan(&n.ID, &n.ServerID, &n.Hostname, &n.Role,
+			&n.Address, &endpoint, &n.MinioUseSSL, &n.IsActive, &n.CreatedAt); err != nil {
+			return nil, fmt.Errorf("ListActiveNodesWithMinIO scan: %w", err)
+		}
+		if endpoint.Valid && endpoint.String != "" {
+			n.MinioEndpoint = &endpoint.String
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
 }
 
 // GetNodeSummaries returns every node with its parent server's display fields,

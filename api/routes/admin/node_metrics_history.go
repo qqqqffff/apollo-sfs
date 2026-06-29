@@ -59,3 +59,41 @@ func (h *Handler) GetDriveTempsHistory(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, temps)
 }
+
+// GetNodeDisks handles GET /api/v1/admin/system/nodes/:node_id/disks.
+// Returns every physical disk currently reported for a node, with its latest
+// capacity/temperature — independent of which logical drives they back.
+func (h *Handler) GetNodeDisks(c *gin.Context) {
+	nodeID, err := uuid.Parse(c.Param("node_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid node_id"})
+		return
+	}
+	disks, err := h.metrics.GetNodeDisks(c.Request.Context(), nodeID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not retrieve node disks"})
+		return
+	}
+	c.JSON(http.StatusOK, disks)
+}
+
+// GetNodeDiskTempsHistory handles
+// GET /api/v1/admin/system/disks/:disk_id/temps/history?hours=N.
+// Returns ~120 downsampled temperature readings for one physical disk.
+func (h *Handler) GetNodeDiskTempsHistory(c *gin.Context) {
+	diskID, err := uuid.Parse(c.Param("disk_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid disk_id"})
+		return
+	}
+	hours, ok := parseHoursWindow(c)
+	if !ok {
+		return
+	}
+	temps, err := h.metrics.GetNodeDiskTempHistoryByHours(c.Request.Context(), diskID, hours)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not retrieve disk temperature history"})
+		return
+	}
+	c.JSON(http.StatusOK, temps)
+}

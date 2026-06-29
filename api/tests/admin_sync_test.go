@@ -41,25 +41,46 @@ func (f fakeStorage) Inspect(context.Context, string, string, string, bool) (ser
 	return f.info, nil
 }
 
+// endpointStorage is a StorageInspector returning a different bucket set per
+// endpoint, so a multi-tier sync can be asserted to attach the right bucket to
+// the right node.
+type endpointStorage struct {
+	byEndpoint map[string]services.StorageInfo
+}
+
+func (f endpointStorage) Inspect(_ context.Context, endpoint, _, _ string, _ bool) (services.StorageInfo, error) {
+	return f.byEndpoint[endpoint], nil
+}
+
 // syncStub records the upserts the sync performs so the test can assert on them.
 type syncStub struct {
 	stubAdminQuerier
-	serverID    uuid.UUID
-	nodes       []db.CreateNodeParams
-	drives      []db.UpsertDriveParams
-	prunedNodes int
-	prunedDrvs  int
+	serverID         uuid.UUID
+	nodes            []db.CreateNodeParams
+	drives           []db.UpsertDriveParams
+	nodeIDByHostname map[string]uuid.UUID
+	prunedNodes      int
+	prunedDrvs       int
 }
 
 func (s *syncStub) GetServerByEndpoint(_ context.Context, endpoint string) (*models.Server, error) {
 	// Pretend the server already exists and is active so the sync skips
 	// credential encryption / registry registration (no registry in the test).
-	return &models.Server{ID: s.serverID, Name: "Fast-tier", MinioEndpoint: endpoint, IsActive: true}, nil
+	// The sync anchors the cluster on the primary endpoint, so report that one.
+	return &models.Server{ID: s.serverID, Name: "NH-0001", MinioEndpoint: endpoint, IsActive: true}, nil
 }
 
 func (s *syncStub) UpsertNode(_ context.Context, p db.CreateNodeParams, isActive bool) (*models.Node, error) {
 	s.nodes = append(s.nodes, p)
-	return &models.Node{ID: uuid.New(), ServerID: p.ServerID, Hostname: p.Hostname, Role: p.Role, Address: p.Address, IsActive: isActive}, nil
+	id := uuid.New()
+	if s.nodeIDByHostname == nil {
+		s.nodeIDByHostname = make(map[string]uuid.UUID)
+	}
+	s.nodeIDByHostname[p.Hostname] = id
+	return &models.Node{
+		ID: id, ServerID: p.ServerID, Hostname: p.Hostname, Role: p.Role, Address: p.Address,
+		MinioEndpoint: p.MinioEndpoint, MinioUseSSL: p.MinioUseSSL, IsActive: isActive,
+	}, nil
 }
 
 func (s *syncStub) UpsertDrive(_ context.Context, p db.UpsertDriveParams) (*models.Drive, error) {
@@ -148,5 +169,82 @@ func TestSyncInfrastructure_Idempotent(t *testing.T) {
 	// Two runs index the same node/drive twice (upserts), never erroring.
 	if len(stub.nodes) != 2 || len(stub.drives) != 2 {
 		t.Errorf("expected 2 upserts each across 2 runs, got nodes=%d drives=%d", len(stub.nodes), len(stub.drives))
+	}
+}
+
+// TestSyncInfrastructure_TwoTierSingleServer verifies that a fast + standard
+// deployment is reconciled into ONE server (not two), with the standard node
+// carrying its own MinIO endpoint and the standard bucket's drive attached to it.
+func TestSyncInfrastructure_TwoTierSingleServer(t *testing.T) {
+	stub := &syncStub{serverID: uuid.New()}
+	h := newAdminHandler(stub, &stubAdminInviteService{})
+	h.ConfigureInfraSync(admin.InfraSyncConfig{
+		Swarm: fakeSwarm{nodes: []services.SwarmNode{
+			{Hostname: "apollo-sfs", Addr: "10.0.0.2", Tier: "fast", IsManager: false, Ready: true},
+			{Hostname: "apollo-sfs-1", Addr: "10.0.0.1", Tier: "standard", IsManager: true, Ready: true},
+		}},
+		Storage: endpointStorage{byEndpoint: map[string]services.StorageInfo{
+			"minio:9000":          {Buckets: []string{"fast-bucket"}, TotalBytes: 4 << 40},
+			"minio-standard:9000": {Buckets: []string{"std-bucket"}, TotalBytes: 8 << 40},
+		}},
+		MinIOEndpoint:    "minio:9000",
+		MinIOAccessKey:   "key",
+		MinIOSecretKey:   "secret",
+		StandardEndpoint: "minio-standard:9000",
+	})
+	r := newEngine()
+	r.POST("/admin/system/sync", h.SyncInfrastructure)
+
+	w := doRequest(r, httptest.NewRequest(http.MethodPost, "/admin/system/sync", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	var summary struct{ Servers, Nodes, Drives int }
+	if err := json.Unmarshal(w.Body.Bytes(), &summary); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	// The whole point: both tiers live under a single server.
+	if summary.Servers != 1 {
+		t.Errorf("expected 1 server, got %d", summary.Servers)
+	}
+	if summary.Nodes != 2 || summary.Drives != 2 {
+		t.Fatalf("expected 2 nodes + 2 drives, got nodes=%d drives=%d", summary.Nodes, summary.Drives)
+	}
+
+	// Endpoint overrides: standard node carries minio-standard, fast node inherits.
+	endpointByHost := map[string]*string{}
+	for _, n := range stub.nodes {
+		endpointByHost[n.Hostname] = n.MinioEndpoint
+	}
+	if ep := endpointByHost["apollo-sfs-1"]; ep == nil || *ep != "minio-standard:9000" {
+		t.Errorf("standard node should override endpoint to minio-standard:9000, got %v", ep)
+	}
+	if ep := endpointByHost["apollo-sfs"]; ep != nil {
+		t.Errorf("fast node should inherit the server endpoint (nil override), got %v", *ep)
+	}
+
+	// The standard bucket's drive must be attached to the standard node and typed hdd.
+	stdNodeID := stub.nodeIDByHostname["apollo-sfs-1"]
+	fastNodeID := stub.nodeIDByHostname["apollo-sfs"]
+	for _, d := range stub.drives {
+		switch d.MinioBucket {
+		case "std-bucket":
+			if d.NodeID == nil || *d.NodeID != stdNodeID {
+				t.Errorf("std-bucket drive should attach to the standard node")
+			}
+			if d.DriveType != "hdd" {
+				t.Errorf("std-bucket drive should be hdd, got %q", d.DriveType)
+			}
+		case "fast-bucket":
+			if d.NodeID == nil || *d.NodeID != fastNodeID {
+				t.Errorf("fast-bucket drive should attach to the fast node")
+			}
+			if d.DriveType != "nvme" {
+				t.Errorf("fast-bucket drive should be nvme, got %q", d.DriveType)
+			}
+		default:
+			t.Errorf("unexpected bucket %q", d.MinioBucket)
+		}
 	}
 }

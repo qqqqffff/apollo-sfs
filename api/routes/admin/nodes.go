@@ -18,6 +18,11 @@ type createNodeRequest struct {
 	Hostname string `json:"hostname" binding:"required"`
 	Role     string `json:"role"`
 	Address  string `json:"address"`
+	// MinioEndpoint optionally overrides the parent server's MinIO endpoint for
+	// drives mounted on this node ("host:port"). Omit/empty to inherit the
+	// server's endpoint. Credentials are always inherited from the server.
+	MinioEndpoint string `json:"minio_endpoint"`
+	MinioUseSSL   bool   `json:"minio_use_ssl"`
 }
 
 // CreateNode handles POST /api/v1/admin/system/servers/:server_id/nodes.
@@ -51,11 +56,18 @@ func (h *Handler) CreateNode(c *gin.Context) {
 		return
 	}
 
+	var endpoint *string
+	if ep := sanitize.String(req.MinioEndpoint); ep != "" {
+		endpoint = &ep
+	}
+
 	node, err := h.queries.CreateNode(ctx, db.CreateNodeParams{
-		ServerID: serverID,
-		Hostname: sanitize.String(req.Hostname),
-		Role:     role,
-		Address:  sanitize.String(req.Address),
+		ServerID:      serverID,
+		Hostname:      sanitize.String(req.Hostname),
+		Role:          role,
+		Address:       sanitize.String(req.Address),
+		MinioEndpoint: endpoint,
+		MinioUseSSL:   req.MinioUseSSL,
 	})
 	if err != nil {
 		if strings.Contains(err.Error(), "unique") {
@@ -66,14 +78,28 @@ func (h *Handler) CreateNode(c *gin.Context) {
 		return
 	}
 
+	// Open a MinIO client for the node's endpoint override so uploads route to it
+	// without a restart. Inherits the server's credentials.
+	if h.registry != nil && endpoint != nil {
+		if err := h.registry.RegisterNode(node, server); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "could not register node MinIO client"})
+			return
+		}
+	}
+
 	c.JSON(http.StatusCreated, node)
 }
 
 type updateNodeRequest struct {
-	Hostname string `json:"hostname"`
-	Role     string `json:"role"`
+	Hostname string  `json:"hostname"`
+	Role     string  `json:"role"`
 	Address  *string `json:"address"`
-	IsActive *bool   `json:"is_active"`
+	// MinioEndpoint present (non-nil) applies a new endpoint override; an empty
+	// string clears it (the node falls back to the server's endpoint). Absent
+	// (nil) leaves it unchanged.
+	MinioEndpoint *string `json:"minio_endpoint"`
+	MinioUseSSL   *bool   `json:"minio_use_ssl"`
+	IsActive      *bool   `json:"is_active"`
 }
 
 // UpdateNode handles PATCH /api/v1/admin/system/servers/:server_id/nodes/:node_id.
@@ -117,12 +143,27 @@ func (h *Handler) UpdateNode(c *gin.Context) {
 	if req.IsActive != nil {
 		isActive = *req.IsActive
 	}
+	// Endpoint override: absent leaves it unchanged; empty clears it.
+	endpoint := existing.MinioEndpoint
+	useSSL := existing.MinioUseSSL
+	if req.MinioEndpoint != nil {
+		if ep := sanitize.String(*req.MinioEndpoint); ep != "" {
+			endpoint = &ep
+		} else {
+			endpoint = nil
+		}
+	}
+	if req.MinioUseSSL != nil {
+		useSSL = *req.MinioUseSSL
+	}
 
 	node, err := h.queries.UpdateNode(ctx, nodeID, db.UpdateNodeParams{
-		Hostname: hostname,
-		Role:     role,
-		Address:  address,
-		IsActive: isActive,
+		Hostname:      hostname,
+		Role:          role,
+		Address:       address,
+		MinioEndpoint: endpoint,
+		MinioUseSSL:   useSSL,
+		IsActive:      isActive,
 	})
 	if err != nil {
 		if strings.Contains(err.Error(), "unique") {
@@ -131,6 +172,22 @@ func (h *Handler) UpdateNode(c *gin.Context) {
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not update node"})
 		return
+	}
+
+	// Reconcile the node's MinIO client: (re)register when it has an endpoint,
+	// remove it when the override was cleared, so routing follows immediately.
+	if h.registry != nil {
+		if node.MinioEndpoint != nil {
+			server, err := h.queries.GetServer(ctx, node.ServerID)
+			if err == nil && server != nil {
+				if err := h.registry.RegisterNode(node, server); err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "could not register node MinIO client"})
+					return
+				}
+			}
+		} else {
+			h.registry.Remove(node.ID)
+		}
 	}
 
 	c.JSON(http.StatusOK, node)

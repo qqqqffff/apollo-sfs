@@ -52,6 +52,11 @@ type UserDriveAllocation struct {
 	// Populated by GetUserDrive — not stored directly in the table.
 	Drive  Drive  `json:"drive"`
 	Server Server `json:"server"`
+
+	// NodeHasMinIO is true when the drive's node carries its own MinIO endpoint,
+	// so storage routing should use the node's client (keyed by Drive.NodeID)
+	// rather than the server's. Populated by GetUserDrive / GetDriveWithServer.
+	NodeHasMinIO bool `json:"-"`
 }
 
 // DriveSummary is returned by GetDriveSummaries for the infrastructure view.
@@ -65,6 +70,7 @@ type DriveSummary struct {
 	NodeHostname        string     `json:"node_hostname"`
 	NodeRole            string     `json:"node_role"`
 	NodeIsActive        bool       `json:"node_is_active"`
+	NodeHasMinIO        bool       `json:"-"` // node carries its own MinIO endpoint
 	DriveLabel          string     `json:"drive_label"`
 	DriveType           string     `json:"drive_type"` // "nvme" | "hdd"
 	CapacityBytes       int64      `json:"capacity_bytes"`

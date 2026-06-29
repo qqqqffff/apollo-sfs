@@ -326,10 +326,12 @@ func (q *Queries) GetUserDrive(ctx context.Context, username string) (*models.Us
 			s.id, s.name, s.state, s.minio_endpoint, s.minio_use_ssl,
 			s.minio_access_key_enc, s.minio_access_key_nonce,
 			s.minio_secret_key_enc, s.minio_secret_key_nonce,
-			s.is_active, s.created_at
+			s.is_active, s.created_at,
+			(n.minio_endpoint IS NOT NULL AND n.minio_endpoint <> '') AS node_has_minio
 		FROM user_drive_allocations uda
 		JOIN drives d ON d.id = uda.drive_id
 		JOIN servers s ON s.id = d.server_id
+		LEFT JOIN nodes n ON n.id = d.node_id
 		WHERE uda.user_id = $1
 		ORDER BY uda.is_primary DESC, uda.allocated_at ASC
 		LIMIT 1
@@ -342,6 +344,7 @@ func (q *Queries) GetUserDrive(ctx context.Context, username string) (*models.Us
 		&a.Server.MinioAccessKeyEnc, &a.Server.MinioAccessKeyNonce,
 		&a.Server.MinioSecretKeyEnc, &a.Server.MinioSecretKeyNonce,
 		&a.Server.IsActive, &a.Server.CreatedAt,
+		&a.NodeHasMinIO,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -362,9 +365,11 @@ func (q *Queries) GetDriveWithServer(ctx context.Context, driveID uuid.UUID) (*m
 			s.id, s.name, s.state, s.minio_endpoint, s.minio_use_ssl,
 			s.minio_access_key_enc, s.minio_access_key_nonce,
 			s.minio_secret_key_enc, s.minio_secret_key_nonce,
-			s.is_active, s.created_at
+			s.is_active, s.created_at,
+			(n.minio_endpoint IS NOT NULL AND n.minio_endpoint <> '') AS node_has_minio
 		FROM drives d
 		JOIN servers s ON s.id = d.server_id
+		LEFT JOIN nodes n ON n.id = d.node_id
 		WHERE d.id = $1
 	`, driveID).Scan(
 		&a.Drive.ID, &a.Drive.ServerID, &a.Drive.NodeID, &a.Drive.Label, &a.Drive.CapacityBytes,
@@ -374,6 +379,7 @@ func (q *Queries) GetDriveWithServer(ctx context.Context, driveID uuid.UUID) (*m
 		&a.Server.MinioAccessKeyEnc, &a.Server.MinioAccessKeyNonce,
 		&a.Server.MinioSecretKeyEnc, &a.Server.MinioSecretKeyNonce,
 		&a.Server.IsActive, &a.Server.CreatedAt,
+		&a.NodeHasMinIO,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -519,6 +525,7 @@ func (q *Queries) GetDriveSummaries(ctx context.Context) ([]models.DriveSummary,
 		SELECT
 			d.id, d.server_id, s.name,
 			d.node_id, COALESCE(n.hostname, ''), COALESCE(n.role, ''), COALESCE(n.is_active, false),
+			(n.minio_endpoint IS NOT NULL AND n.minio_endpoint <> '') AS node_has_minio,
 			d.label,
 			d.drive_type,
 			d.capacity_bytes, d.minio_bucket,
@@ -544,6 +551,7 @@ func (q *Queries) GetDriveSummaries(ctx context.Context) ([]models.DriveSummary,
 		if err := rows.Scan(
 			&ds.DriveID, &ds.ServerID, &ds.ServerName,
 			&ds.NodeID, &ds.NodeHostname, &ds.NodeRole, &ds.NodeIsActive,
+			&ds.NodeHasMinIO,
 			&ds.DriveLabel, &ds.DriveType,
 			&ds.CapacityBytes, &ds.MinioBucket,
 			&ds.AllocatedQuotaBytes, &ds.UsedBytes,

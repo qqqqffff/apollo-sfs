@@ -353,10 +353,13 @@ services:
     volumes:
       - /sys:/sys:ro
       - /dev/disk/by-label:/dev/disk/by-label:ro
-      # Storage mounts the agent reports capacity for (read-only). Adjust per node;
-      # both tiers are listed so the same stack works on manager and worker.
+      # Physical disks the agent reports capacity/temperature for (read-only). The
+      # agent reports EVERY mounted, labelled disk it can see here — list each one
+      # (per node) so pooled disks (e.g. nvme-01 + nvme-02) each report on their
+      # own. Both tiers are listed so the same stack works on manager and worker.
       - /srv/minio/hdd-01:/srv/minio/hdd-01:ro
-      - /home/apollo/apollo-sfs/minio/nvme-01/data:/home/apollo/apollo-sfs/minio/nvme-01/data:ro
+      - /home/apollo/apollo-sfs/minio/nvme-01:/home/apollo/apollo-sfs/minio/nvme-01:ro
+      - /home/apollo/apollo-sfs/minio/nvme-02:/home/apollo/apollo-sfs/minio/nvme-02:ro
     networks: [app-network]
     deploy:
       mode: global

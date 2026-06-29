@@ -261,6 +261,18 @@ func (s *MetricsService) GetDriveTempHistoryByHours(ctx context.Context, driveID
 	return s.queries.ListDriveTempsByHours(ctx, driveID, hours, 120)
 }
 
+// GetNodeDisks returns every physical disk currently reported for a node.
+func (s *MetricsService) GetNodeDisks(ctx context.Context, nodeID uuid.UUID) ([]models.NodeDisk, error) {
+	return s.queries.ListNodeDisks(ctx, nodeID)
+}
+
+// GetNodeDiskTempHistoryByHours returns ~120 evenly-distributed temperature
+// readings for one physical disk from the past hours hours, oldest-first. Backs
+// the per-disk temperature history graph.
+func (s *MetricsService) GetNodeDiskTempHistoryByHours(ctx context.Context, diskID uuid.UUID, hours int) ([]models.NodeDiskTempSnapshot, error) {
+	return s.queries.ListNodeDiskTempsByHours(ctx, diskID, hours, 120)
+}
+
 // ── Per-node hardware aggregation ──────────────────────────────────────────────
 
 // UpdateNodeMetrics ingests a hardware push from a node's agent: it resolves the
@@ -307,7 +319,41 @@ func (s *MetricsService) UpdateNodeMetrics(ctx context.Context, p *models.NodeMe
 	}
 
 	drives := make([]models.DriveFrame, 0, len(p.Drives))
+	disks := make([]models.DiskFrame, 0, len(p.Drives))
 	for _, dp := range p.Drives {
+		// Physical-disk telemetry: persist every reported disk and its temperature,
+		// independent of whether it backs a registered drive. This is what lets one
+		// disk in a pool be tracked (and run hot/fail) on its own.
+		disk, err := s.queries.UpsertNodeDisk(ctx, db.UpsertNodeDiskParams{
+			NodeID:        node.ID,
+			Label:         dp.Label,
+			Device:        dp.Device,
+			CapacityBytes: dp.TotalBytes,
+			UsedBytes:     dp.UsedBytes,
+			FreeBytes:     dp.FreeBytes,
+			TempCelsius:   dp.TempCelsius,
+		})
+		if err != nil {
+			log.Printf("metrics: upsert node disk %q: %v", dp.Label, err)
+		} else {
+			disks = append(disks, models.DiskFrame{
+				DiskID:      disk.ID,
+				Label:       disk.Label,
+				Device:      disk.Device,
+				TempCelsius: dp.TempCelsius,
+				TotalBytes:  dp.TotalBytes,
+				UsedBytes:   dp.UsedBytes,
+				FreeBytes:   dp.FreeBytes,
+			})
+			if dp.TempCelsius != nil {
+				if err := s.queries.InsertNodeDiskTemp(ctx, disk.ID, *dp.TempCelsius, now); err != nil {
+					log.Printf("metrics: insert node disk temp: %v", err)
+				}
+			}
+		}
+
+		// Logical-drive frame: only disks whose label backs a registered drive on
+		// this node carry a drive_id for the infrastructure view.
 		sum, ok := byLabel[dp.Label]
 		if !ok {
 			continue
@@ -342,6 +388,7 @@ func (s *MetricsService) UpdateNodeMetrics(ctx context.Context, p *models.NodeMe
 		NetworkBytesRecv: p.NetworkBytesRecv,
 		SampledAt:        now,
 		Drives:           drives,
+		Disks:            disks,
 	}
 	s.nodeMu.Lock()
 	s.nodeState[node.ID] = frame
@@ -428,6 +475,9 @@ func (s *MetricsService) runPruner(ctx context.Context) {
 			}
 			if err := s.queries.PruneOldDriveTemps(ctx, cutoff); err != nil {
 				log.Printf("metrics: prune drive temps: %v", err)
+			}
+			if err := s.queries.PruneOldNodeDiskTemps(ctx, cutoff); err != nil {
+				log.Printf("metrics: prune node disk temps: %v", err)
 			}
 		}
 	}

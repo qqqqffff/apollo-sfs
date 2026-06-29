@@ -31,6 +31,33 @@ type DriveTempSnapshot struct {
 	SampledAt   time.Time `json:"sampled_at" db:"sampled_at"`
 }
 
+// NodeDisk mirrors the `node_disks` table — one physical disk on a node, keyed by
+// its filesystem label and refreshed on every agent push. Telemetry here is
+// per-physical-disk and independent of logical drives: a pooled MinIO drive can
+// span several of these, each reporting its own capacity and temperature.
+type NodeDisk struct {
+	ID            uuid.UUID `json:"id" db:"id"`
+	NodeID        uuid.UUID `json:"node_id" db:"node_id"`
+	Label         string    `json:"label" db:"label"`
+	Device        string    `json:"device" db:"device"`
+	CapacityBytes int64     `json:"capacity_bytes" db:"capacity_bytes"`
+	UsedBytes     int64     `json:"used_bytes" db:"used_bytes"`
+	FreeBytes     int64     `json:"free_bytes" db:"free_bytes"`
+	TempCelsius   *float64  `json:"temp_celsius" db:"temp_celsius"`
+	LastSeenAt    time.Time `json:"last_seen_at" db:"last_seen_at"`
+	CreatedAt     time.Time `json:"created_at" db:"created_at"`
+}
+
+// NodeDiskTempSnapshot mirrors the `node_disk_temp_snapshots` table — one
+// temperature reading per physical disk per sample. Backs the per-disk history
+// graph, so a single disk in a pool running hot is visible on its own.
+type NodeDiskTempSnapshot struct {
+	ID          uuid.UUID `json:"id" db:"id"`
+	DiskID      uuid.UUID `json:"disk_id" db:"disk_id"`
+	TempCelsius float64   `json:"temp_celsius" db:"temp_celsius"`
+	SampledAt   time.Time `json:"sampled_at" db:"sampled_at"`
+}
+
 // NodeMetricsPayload is the JSON body the per-node agent POSTs to
 // /api/v1/internal/node-metrics every sample. The agent identifies itself by
 // hostname (its Docker Swarm node hostname); the API resolves it to a node row.
@@ -78,6 +105,21 @@ type NodeFrame struct {
 	NetworkBytesRecv int64        `json:"network_bytes_recv"`
 	SampledAt        time.Time    `json:"sampled_at"`
 	Drives           []DriveFrame `json:"drives"`
+	// Disks is every physical disk the node reports, independent of logical
+	// drives, so per-disk capacity/temperature is visible even within a pool.
+	Disks []DiskFrame `json:"disks"`
+}
+
+// DiskFrame is one physical disk's live figures within a NodeFrame, resolved to
+// its node_disks row so the frontend can correlate with the per-disk history.
+type DiskFrame struct {
+	DiskID      uuid.UUID `json:"disk_id"`
+	Label       string    `json:"label"`
+	Device      string    `json:"device"`
+	TempCelsius *float64  `json:"temp_celsius"`
+	TotalBytes  int64     `json:"total_bytes"`
+	UsedBytes   int64     `json:"used_bytes"`
+	FreeBytes   int64     `json:"free_bytes"`
 }
 
 // DriveFrame is one drive's live figures within a NodeFrame, resolved to its

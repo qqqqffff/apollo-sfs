@@ -237,7 +237,7 @@ function RouteComponent() {
   // Cluster snapshots / frames within the last hour, for live series.
   const recentSnaps = snapshots.filter(s => tMs(s.sampled_at) >= nowMs - HOUR_MS)
   const recentFrames = frames.filter(f => tMs(f.cluster.sampled_at) >= nowMs - HOUR_MS)
-  const nodeIn = (f: MetricsFrame) => f.nodes.find(n => n.node_id === selectedNodeId)
+  const nodeIn = (f: MetricsFrame) => f.nodes?.find(n => n.node_id === selectedNodeId)
 
   // ── CPU utilisation (per node) ──
   const wsCpuPoints: LinePoint[] = recentFrames.flatMap(f => {

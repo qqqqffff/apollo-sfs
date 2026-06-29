@@ -327,21 +327,21 @@ docker node inspect <node-id> --format '{{ .Spec.Labels }}'
 
 ### Building Images
 
-Images are built locally on the manager — no external registry is used. The stack is deployed with `--resolve-image never` so Docker uses whatever is in the local image cache.
+Images are built locally on the manager — no external registry is used. All deployments and redeployments go through `docker stack deploy --resolve-image never`, which tells Swarm to use the local image cache and never attempt a registry pull.
 
 ```bash
 # Build the API (amd64 — runs on the manager only)
-docker build -t apollo-sfs-api:amd64 api/
+docker build -t apollo-sfs_api:amd64 api/
 
 # Build the frontend (amd64 — runs on the manager only)
-docker build -t apollo-sfs-frontend:amd64 frontend/
+docker build -t apollo-sfs_frontend:amd64 frontend/
 ```
 
 Tag a release before redeploying so you can roll back to it if needed:
 
 ```bash
-docker tag apollo-sfs-api:amd64 apollo-sfs-api:v1.2.0
-docker tag apollo-sfs-frontend:amd64 apollo-sfs-frontend:v1.2.0
+docker tag apollo-sfs_api:amd64 apollo-sfs_api:v1.2.0
+docker tag apollo-sfs_frontend:amd64 apollo-sfs_frontend:v1.2.0
 ```
 
 ### Initial Stack Deployment
@@ -360,47 +360,39 @@ docker stack ps apollo-sfs
 
 ### Redeploying After a Code Change
 
+Use `docker stack deploy` for all redeployments — it supports `--resolve-image never`, which tells Swarm to use the local image cache instead of attempting a registry pull. Using `docker service update` without this flag defaults to `--resolve-image always`, which will try to pull `apollo-sfs_api:amd64` from Docker Hub, fail (the image isn't there), and cause the task to terminate early and the update to pause.
+
 #### Redeploy the API
 
 ```bash
-# 1. Build the new image on the manager
-docker build -t apollo-sfs-api:amd64 api/
-
-# 2. Rolling-update the running service (no registry pull)
-docker service update --image apollo-sfs-api:amd64 --resolve-image never apollo-sfs_api
+docker build -t apollo-sfs_api:amd64 api/
+set -a && source .env && set +a
+docker stack deploy -c docker-stack.yml --resolve-image never apollo-sfs
 ```
 
 #### Redeploy the Frontend
 
 ```bash
-docker build -t apollo-sfs-frontend:amd64 frontend/
-docker service update --image apollo-sfs-frontend:amd64 --resolve-image never apollo-sfs_frontend
+docker build -t apollo-sfs_frontend:amd64 frontend/
+set -a && source .env && set +a
+docker stack deploy -c docker-stack.yml --resolve-image never apollo-sfs
 ```
+
+`docker stack deploy` compares each service's spec against what's currently running and only restarts services where something changed. It will not cycle Keycloak, MinIO, or other services unless their config changed in `docker-stack.yml`.
 
 #### Redeploy Any Other Service
 
 ```bash
-# General pattern
+# General pattern (public images pulled from a registry — no --resolve-image flag needed)
 docker service update --image <image>:<tag> apollo-sfs_<service-name>
 
-# Examples (public images — no --resolve-image needed)
+# Examples
 docker service update --image quay.io/keycloak/keycloak:26.0.7 apollo-sfs_keycloak
 docker service update --image minio/minio:latest apollo-sfs_minio-standard
 docker service update --image minio/minio:latest apollo-sfs_minio
 ```
 
-#### Redeploy the Entire Stack (stack config changed)
-
-When you change `docker-stack.yml` itself (environment variables, volume mounts, placement constraints, replicas, etc.), redeploy the whole stack:
-
-```bash
-set -a && source .env && set +a
-docker stack deploy -c docker-stack.yml --resolve-image never apollo-sfs
-```
-
-Swarm performs a rolling update — existing tasks continue serving traffic until replacement tasks are healthy.
-
-#### Force Restart a Service (no image change)
+#### Restart a Service Without an Image Change
 
 ```bash
 docker service update --force apollo-sfs_api
@@ -468,11 +460,49 @@ docker service rollback apollo-sfs_api
 docker service rollback apollo-sfs_frontend
 ```
 
-To roll back to a specific version tag instead (requires that you tagged before the last deploy):
+To roll back to a specific version tag (requires that you tagged before the last deploy), update the image reference in `docker-stack.yml` and redeploy:
 
 ```bash
-docker service update --image apollo-sfs-api:v1.1.0 --resolve-image never apollo-sfs_api
-docker service update --image apollo-sfs-frontend:v1.1.0 --resolve-image never apollo-sfs_frontend
+# In docker-stack.yml, change:
+#   image: apollo-sfs_api:amd64
+# to:
+#   image: apollo-sfs_api:v1.1.0
+
+set -a && source .env && set +a
+docker stack deploy -c docker-stack.yml --resolve-image never apollo-sfs
+```
+
+### Troubleshooting Failed Updates
+
+#### "No suitable node (N nodes not available)" warning during a rolling update
+
+Expected when using `mode: host` port bindings on a single-node placement constraint. The old task holds the host port, so Swarm briefly has no valid slot for the new task until the old one stops. The `update_config` in `docker-stack.yml` sets `order: stop-first` explicitly to avoid ambiguity, and `failure_action: rollback` so a crash auto-reverts instead of leaving the service paused.
+
+#### "update paused due to failure or early termination of task"
+
+The new container started but exited before becoming healthy. Diagnose with:
+
+```bash
+# Show all tasks for the service with full error messages
+docker service ps apollo-sfs_api --no-trunc
+
+# Tail the service logs to see the crash output
+docker service logs apollo-sfs_api --tail 50
+
+# Inspect a specific failed task by its ID
+docker inspect <task-id>
+```
+
+Once the underlying issue is fixed, either rollback or retry:
+
+```bash
+# Rollback to the previous image
+docker service rollback apollo-sfs_api
+
+# Or retry with a fresh stack deploy after rebuilding
+docker build -t apollo-sfs_api:amd64 api/
+set -a && source .env && set +a
+docker stack deploy -c docker-stack.yml --resolve-image never apollo-sfs
 ```
 
 ### Tearing Down the Stack

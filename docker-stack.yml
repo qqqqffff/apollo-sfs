@@ -12,8 +12,8 @@
 #
 # Deploy:
 #   set -a && . ./.env && set +a      # stack deploy does NOT auto-read .env
-#   docker build -t apollo-sfs-api:amd64 ./api
-#   docker build -t apollo-sfs-frontend:amd64 ./frontend
+#   docker build -t apollo-sfs_api:amd64 ./api
+#   docker build -t apollo-sfs_frontend:amd64 ./frontend
 #   docker stack deploy -c docker-stack.yml --resolve-image never apollo-sfs
 #
 # NOTE — three Swarm differences vs docker-compose, all called out below:
@@ -28,7 +28,7 @@ services:
 
   # ── Frontend (React/Vite, served by nginx:alpine) ───────────────────────────
   frontend:
-    image: apollo-sfs-frontend:amd64
+    image: apollo-sfs_frontend:amd64
     ports:
       - target: 80
         published: 3000
@@ -39,6 +39,11 @@ services:
       replicas: 1
       placement:
         constraints: [node.labels.tier == standard]
+      update_config:
+        parallelism: 1
+        order: stop-first   # host-mode ports can't coexist; must stop old task before starting new one
+        failure_action: rollback
+        delay: 5s
       restart_policy:
         condition: any
     logging:
@@ -51,10 +56,10 @@ services:
   #     (a) accept that the kill switch is inert here (everything else works), or
   #     (b) run the API as a standalone privileged container attached to the
   #         attachable overlay instead of in this stack:
-  #           docker run -d --name apollo-sfs-api --privileged --user root \
-  #             --network app-network --env-file .env ... apollo-sfs-api:amd64
+  #           docker run -d --name apollo-sfs_api --privileged --user root \
+  #             --network app-network --env-file .env ... apollo-sfs_api:amd64
   api:
-    image: apollo-sfs-api:amd64
+    image: apollo-sfs_api:amd64
     user: root
     ports:
       - target: 8080
@@ -133,6 +138,11 @@ services:
       replicas: 1
       placement:
         constraints: [node.labels.tier == standard]
+      update_config:
+        parallelism: 1
+        order: stop-first   # host-mode port 8080 can only be held by one task at a time
+        failure_action: rollback
+        delay: 5s
       restart_policy:
         condition: any
     logging:
@@ -152,7 +162,8 @@ services:
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
     volumes:
       # The Pi's EXISTING data dir — do NOT wipe; existing buckets/objects live here.
-      - /home/apollo/apollo-sfs/minio/nvme-01/data:/data
+      # pool/ is the mergerfs union mount; user files are at its top level (no /data subdir).
+      - /home/apollo/apollo-sfs/minio/pool:/data
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 30s

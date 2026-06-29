@@ -29,9 +29,10 @@ import {
   speedTestQueryOptions,
   adminInterestInfiniteQueryOptions,
   interestFormSettingsQueryOptions,
-  getAlarmSettings,
-  toggleAlarmSubscription,
-  alarmSettingsQueryOptions,
+  getAlarmSubscriptions,
+  upsertAlarmSubscription,
+  deleteAlarmSubscription,
+  alarmSubscriptionsQueryOptions,
 } from '../../api/admin'
 import type { InterestSubmission, PageResult } from '../../types/api'
 
@@ -425,70 +426,52 @@ describe('shutdownServer', () => {
   })
 })
 
-// ── Alarm settings ─────────────────────────────────────────────────────────────
+// ── Alarm subscriptions ────────────────────────────────────────────────────────
 
-const ALARM_DEFAULTS = {
-  cpu_usage_emails: [] as string[],
-  cpu_usage_last_fired_at: null,
-  cpu_temp_emails: [] as string[],
-  cpu_temp_last_fired_at: null,
-  drive_temp_emails: [] as string[],
-  drive_temp_last_fired_at: null,
-  drive_load_emails: [] as string[],
-  drive_load_last_fired_at: null,
-  network_traffic_emails: [] as string[],
-  network_traffic_last_fired_at: null,
-  api_error_rate_emails: [] as string[],
-  api_error_rate_last_fired_at: null,
-  updated_at: '2026-01-01T00:00:00Z',
-}
-
-describe('getAlarmSettings', () => {
-  it('GETs /admin/system/alarm/settings', async () => {
-    mockFetch(200, ALARM_DEFAULTS)
-    const result = await getAlarmSettings()
-    expect(lastUrl()).toBe('/api/v1/admin/system/alarm/settings')
+describe('getAlarmSubscriptions', () => {
+  it('GETs /admin/system/alarm/subscriptions for the current user', async () => {
+    mockFetch(200, [])
+    await getAlarmSubscriptions()
+    expect(lastUrl()).toBe('/api/v1/admin/system/alarm/subscriptions')
     expect(lastInit().method).toBeUndefined()
-    expect(result).toEqual(ALARM_DEFAULTS)
+  })
+
+  it('appends ?username when reviewing another user', async () => {
+    mockFetch(200, [])
+    await getAlarmSubscriptions('alice')
+    expect(lastUrl()).toBe('/api/v1/admin/system/alarm/subscriptions?username=alice')
   })
 })
 
-describe('toggleAlarmSubscription', () => {
-  it('POSTs /admin/system/alarm/subscribe with subscribe=true', async () => {
-    mockFetch(200, ALARM_DEFAULTS)
-    await toggleAlarmSubscription('cpu_usage', true)
-    expect(lastUrl()).toBe('/api/v1/admin/system/alarm/subscribe')
-    expect(lastInit().method).toBe('POST')
-    expect(lastBody()).toEqual({ alarm_type: 'cpu_usage', subscribed: true })
-  })
-
-  it('POSTs /admin/system/alarm/subscribe with subscribe=false', async () => {
-    mockFetch(200, ALARM_DEFAULTS)
-    await toggleAlarmSubscription('cpu_temp', false)
-    expect(lastBody()).toEqual({ alarm_type: 'cpu_temp', subscribed: false })
-  })
-
-  it('sends correct alarm_type for each type', async () => {
-    const types = [
-      'cpu_usage', 'cpu_temp', 'drive_temp',
-      'drive_load', 'network_traffic', 'api_error_rate',
-    ] as const
-    for (const t of types) {
-      mockFetch(200, ALARM_DEFAULTS)
-      await toggleAlarmSubscription(t, true)
-      expect(lastBody().alarm_type).toBe(t)
-    }
+describe('upsertAlarmSubscription', () => {
+  it('PUTs the subscription target and threshold', async () => {
+    mockFetch(200, {})
+    await upsertAlarmSubscription({ alarm_type: 'cpu_usage', node_id: 'n1', threshold: 85 })
+    expect(lastUrl()).toBe('/api/v1/admin/system/alarm/subscriptions')
+    expect(lastInit().method).toBe('PUT')
+    expect(lastBody()).toEqual({ alarm_type: 'cpu_usage', node_id: 'n1', threshold: 85 })
   })
 })
 
-describe('alarmSettingsQueryOptions', () => {
-  it('has correct queryKey', () => {
-    expect(alarmSettingsQueryOptions.queryKey).toEqual(['admin', 'alarm', 'settings'])
+describe('deleteAlarmSubscription', () => {
+  it('DELETEs with the target body', async () => {
+    mockFetch(200, { ok: true })
+    await deleteAlarmSubscription({ alarm_type: 'api_error_rate' })
+    expect(lastUrl()).toBe('/api/v1/admin/system/alarm/subscriptions')
+    expect(lastInit().method).toBe('DELETE')
+    expect(lastBody()).toEqual({ alarm_type: 'api_error_rate' })
+  })
+})
+
+describe('alarmSubscriptionsQueryOptions', () => {
+  it('keys by the target user (self by default)', () => {
+    expect(alarmSubscriptionsQueryOptions().queryKey).toEqual(['admin', 'alarm', 'subscriptions', 'self'])
+    expect(alarmSubscriptionsQueryOptions('alice').queryKey).toEqual(['admin', 'alarm', 'subscriptions', 'alice'])
   })
 
-  it('queryFn calls getAlarmSettings', () => {
-    mockFetch(200, ALARM_DEFAULTS)
-    alarmSettingsQueryOptions.queryFn()
-    expect(lastUrl()).toBe('/api/v1/admin/system/alarm/settings')
+  it('queryFn fetches subscriptions', () => {
+    mockFetch(200, [])
+    alarmSubscriptionsQueryOptions().queryFn()
+    expect(lastUrl()).toBe('/api/v1/admin/system/alarm/subscriptions')
   })
 })

@@ -325,38 +325,33 @@ docker node ls
 docker node inspect <node-id> --format '{{ .Spec.Labels }}'
 ```
 
-### Building and Pushing Images
+### Building Images
 
-Images must be built and pushed to a registry before deploying to the Swarm. The API needs `linux/amd64` (manager) and `linux/arm64` (Pi 5 only reads this if it runs the API, which it currently does not — amd64-only is fine for now). The frontend only runs on the manager.
+Images are built locally on the manager — no external registry is used. The stack is deployed with `--resolve-image never` so Docker uses whatever is in the local image cache.
 
 ```bash
-# Build and push the API (amd64 only — API runs on the manager)
-docker build -t <registry>/apollo-sfs-api:latest api/
-docker push <registry>/apollo-sfs-api:latest
+# Build the API (amd64 — runs on the manager only)
+docker build -t apollo-sfs-api:amd64 api/
 
-# Build and push the frontend (amd64 only)
-docker build -t <registry>/apollo-sfs-frontend:latest frontend/
-docker push <registry>/apollo-sfs-frontend:latest
-
-# Cross-compile for both platforms if needed (requires docker buildx)
-docker buildx build \
-  --platform linux/amd64,linux/arm64 \
-  -t <registry>/apollo-sfs-api:latest \
-  api/ --push
+# Build the frontend (amd64 — runs on the manager only)
+docker build -t apollo-sfs-frontend:amd64 frontend/
 ```
 
-Tag releases with a version as well as `latest` so you can roll back:
+Tag a release before redeploying so you can roll back to it if needed:
 
 ```bash
-docker tag <registry>/apollo-sfs-api:latest <registry>/apollo-sfs-api:v1.2.0
-docker push <registry>/apollo-sfs-api:v1.2.0
+docker tag apollo-sfs-api:amd64 apollo-sfs-api:v1.2.0
+docker tag apollo-sfs-frontend:amd64 apollo-sfs-frontend:v1.2.0
 ```
 
 ### Initial Stack Deployment
 
 ```bash
+# Load .env (stack deploy does not read it automatically)
+set -a && source .env && set +a
+
 # Deploy the full stack for the first time
-docker stack deploy -c docker-stack.yml apollo-sfs
+docker stack deploy -c docker-stack.yml --resolve-image never apollo-sfs
 
 # Watch services come up
 docker stack services apollo-sfs
@@ -368,29 +363,30 @@ docker stack ps apollo-sfs
 #### Redeploy the API
 
 ```bash
-docker build -t <registry>/apollo-sfs-api:latest api/
-docker push <registry>/apollo-sfs-api:latest
-docker service update --image <registry>/apollo-sfs-api:latest apollo-sfs_api
+# 1. Build the new image on the manager
+docker build -t apollo-sfs-api:amd64 api/
+
+# 2. Rolling-update the running service (no registry pull)
+docker service update --image apollo-sfs-api:amd64 --resolve-image never apollo-sfs_api
 ```
 
 #### Redeploy the Frontend
 
 ```bash
-docker build -t <registry>/apollo-sfs-frontend:latest frontend/
-docker push <registry>/apollo-sfs-frontend:latest
-docker service update --image <registry>/apollo-sfs-frontend:latest apollo-sfs_frontend
+docker build -t apollo-sfs-frontend:amd64 frontend/
+docker service update --image apollo-sfs-frontend:amd64 --resolve-image never apollo-sfs_frontend
 ```
 
 #### Redeploy Any Other Service
 
 ```bash
 # General pattern
-docker service update --image <registry>/<image>:latest apollo-sfs_<service-name>
+docker service update --image <image>:<tag> apollo-sfs_<service-name>
 
-# Examples
+# Examples (public images — no --resolve-image needed)
 docker service update --image quay.io/keycloak/keycloak:26.0.7 apollo-sfs_keycloak
 docker service update --image minio/minio:latest apollo-sfs_minio-standard
-docker service update --image minio/minio:latest apollo-sfs_minio-fast
+docker service update --image minio/minio:latest apollo-sfs_minio
 ```
 
 #### Redeploy the Entire Stack (stack config changed)
@@ -398,7 +394,8 @@ docker service update --image minio/minio:latest apollo-sfs_minio-fast
 When you change `docker-stack.yml` itself (environment variables, volume mounts, placement constraints, replicas, etc.), redeploy the whole stack:
 
 ```bash
-docker stack deploy -c docker-stack.yml apollo-sfs
+set -a && source .env && set +a
+docker stack deploy -c docker-stack.yml --resolve-image never apollo-sfs
 ```
 
 Swarm performs a rolling update — existing tasks continue serving traffic until replacement tasks are healthy.
@@ -410,6 +407,35 @@ docker service update --force apollo-sfs_api
 ```
 
 Useful after changing secrets or environment variables that don't require a new image.
+
+### Running PostgreSQL Migrations
+
+The initial schema (`db/00_extensions.sql` through `db/29_node_metrics_snapshots.sql`) is applied automatically by PostgreSQL on first boot via the `docker-entrypoint-initdb.d` mount — it is **skipped on subsequent starts** once the data volume exists.
+
+Incremental schema changes live in `db/migrations/NNN_name.sql` and must be applied manually. The `db/` directory is bind-mounted into the container at `/docker-entrypoint-initdb.d`, so the migration files are accessible without copying anything.
+
+```bash
+# Load env so $POSTGRES_APP_USER and $POSTGRES_APP_DB are available
+set -a && source .env && set +a
+
+# Get the running db-app container name (Swarm appends a task suffix)
+DB_CONTAINER=$(docker ps --format '{{.Names}}' | grep db-app | head -1)
+
+# Apply a single migration
+docker exec "$DB_CONTAINER" \
+  psql -U "$POSTGRES_APP_USER" -d "$POSTGRES_APP_DB" \
+  -f /docker-entrypoint-initdb.d/migrations/022_alarm_subscriptions.sql
+
+# Apply a range of migrations in order
+for f in db/migrations/0{20,21,22}_*.sql; do
+  echo "Applying $f …"
+  docker exec "$DB_CONTAINER" \
+    psql -U "$POSTGRES_APP_USER" -d "$POSTGRES_APP_DB" \
+    -f "/docker-entrypoint-initdb.d/migrations/$(basename "$f")"
+done
+```
+
+> **Tip:** Migrations are not idempotent by default. Track which ones have been applied (e.g., in a changelog comment or a simple text file) to avoid re-running them on a live database.
 
 ### Monitoring the Swarm
 
@@ -442,10 +468,11 @@ docker service rollback apollo-sfs_api
 docker service rollback apollo-sfs_frontend
 ```
 
-To roll back to a specific tagged image instead:
+To roll back to a specific version tag instead (requires that you tagged before the last deploy):
 
 ```bash
-docker service update --image <registry>/apollo-sfs-api:v1.1.0 apollo-sfs_api
+docker service update --image apollo-sfs-api:v1.1.0 --resolve-image never apollo-sfs_api
+docker service update --image apollo-sfs-frontend:v1.1.0 --resolve-image never apollo-sfs_frontend
 ```
 
 ### Tearing Down the Stack

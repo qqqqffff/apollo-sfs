@@ -446,43 +446,93 @@ export function shutdownServer() {
   return post<{ message: string }>('/admin/system/shutdown')
 }
 
-// ── Alarm settings ─────────────────────────────────────────────────────────────
+// ── Alarm subscriptions ──────────────────────────────────────────────────────
 
 export type AlarmType =
   | 'cpu_usage'
   | 'cpu_temp'
+  | 'memory'
+  | 'network_traffic'
   | 'drive_temp'
   | 'drive_load'
-  | 'network_traffic'
   | 'api_error_rate'
 
-export interface AlarmSettings {
-  cpu_usage_emails: string[]
-  cpu_usage_last_fired_at: string | null
-  cpu_temp_emails: string[]
-  cpu_temp_last_fired_at: string | null
-  drive_temp_emails: string[]
-  drive_temp_last_fired_at: string | null
-  drive_load_emails: string[]
-  drive_load_last_fired_at: string | null
-  network_traffic_emails: string[]
-  network_traffic_last_fired_at: string | null
-  api_error_rate_emails: string[]
-  api_error_rate_last_fired_at: string | null
-  updated_at: string
+// AlarmScope is the target dimension each alarm type is configured against.
+export type AlarmScope = 'node' | 'drive' | 'cluster'
+
+export const ALARM_SCOPE: Record<AlarmType, AlarmScope> = {
+  cpu_usage:       'node',
+  cpu_temp:        'node',
+  memory:          'node',
+  network_traffic: 'node',
+  drive_temp:      'drive',
+  drive_load:      'drive',
+  api_error_rate:  'cluster',
 }
 
-export function getAlarmSettings() {
-  return get<AlarmSettings>('/admin/system/alarm/settings')
+// Default thresholds offered when a subscriber first enables an alarm. Mirrors
+// the Default*Threshold constants in api/routes/services/alarm.go.
+export const ALARM_DEFAULT_THRESHOLD: Record<AlarmType, number> = {
+  cpu_usage:       90,
+  cpu_temp:        75,
+  memory:          90,
+  network_traffic: 90,
+  drive_temp:      50,
+  drive_load:      90,
+  api_error_rate:  5,
 }
 
-export function toggleAlarmSubscription(alarmType: AlarmType, subscribed: boolean) {
-  return post<AlarmSettings>('/admin/system/alarm/subscribe', { alarm_type: alarmType, subscribed })
+// Unit suffix shown next to a threshold input, by alarm type.
+export const ALARM_UNIT: Record<AlarmType, string> = {
+  cpu_usage:       '%',
+  cpu_temp:        '°C',
+  memory:          '%',
+  network_traffic: '% of capacity',
+  drive_temp:      '°C',
+  drive_load:      '% of capacity',
+  api_error_rate:  '%',
 }
 
-export const alarmSettingsQueryOptions = {
-  queryKey: ['admin', 'alarm', 'settings'] as const,
-  queryFn: getAlarmSettings,
+export interface AlarmSubscription {
+  id: string
+  email: string
+  alarm_type: AlarmType
+  node_id: string | null
+  drive_id: string | null
+  threshold: number
+  last_fired_at: string | null
+  node_hostname?: string
+  node_role?: string
+  drive_label?: string
+  server_name?: string
+}
+
+export interface AlarmSubscriptionTarget {
+  alarm_type: AlarmType
+  node_id?: string | null
+  drive_id?: string | null
+  threshold?: number
+  username?: string
+}
+
+export function getAlarmSubscriptions(username?: string) {
+  const qs = username ? `?username=${encodeURIComponent(username)}` : ''
+  return get<AlarmSubscription[]>(`/admin/system/alarm/subscriptions${qs}`)
+}
+
+export function upsertAlarmSubscription(body: AlarmSubscriptionTarget) {
+  return put<AlarmSubscription>('/admin/system/alarm/subscriptions', body)
+}
+
+export function deleteAlarmSubscription(body: AlarmSubscriptionTarget) {
+  return del<{ ok: boolean }>('/admin/system/alarm/subscriptions', body)
+}
+
+export function alarmSubscriptionsQueryOptions(username?: string) {
+  return {
+    queryKey: ['admin', 'alarm', 'subscriptions', username ?? 'self'] as const,
+    queryFn: () => getAlarmSubscriptions(username),
+  }
 }
 
 // ── Query options ──────────────────────────────────────────────────────────────

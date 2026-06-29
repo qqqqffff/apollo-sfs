@@ -38,6 +38,17 @@ import { useSort, sortedFolders, sortedFiles } from '../../hooks/useSort'
 import { useInfiniteFolderContents } from '../../hooks/useInfiniteFolderContents'
 import { useFavorites } from '../../hooks/useFavorites'
 import { useImpersonation } from '../../context/ImpersonationContext'
+import { GoogleServiceSelectModal } from '../../components/GoogleServiceSelectModal'
+import { GoogleBackupModal } from '../../components/GoogleBackupModal'
+import type { GoogleServiceSelection } from '../../components/GoogleServiceSelectModal'
+import {
+  requestGoogleAccessToken,
+  listGoogleDriveFiles,
+  pickGooglePhotosWeb,
+  uploadGoogleEntries,
+  type BackupEntry,
+  type GoogleBackupItem,
+} from '../../api/googleBackup'
 
 export const Route = createFileRoute('/_auth/client/')({
   validateSearch: (search: Record<string, unknown>) => ({
@@ -123,6 +134,18 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
   const { favoriteFileIds, favoriteFolderIds, toggleFile, toggleFolder } = useFavorites()
   const { data: prefs } = useQuery(preferencesQueryOptions)
   const autoUploadTargetId = prefs?.media_autoupload_folder_id ?? null
+
+  // ── Google Backup state ────────────────────────────────────────────────────
+  const [serviceSelectOpen, setServiceSelectOpen]   = useState(false)
+  const [googleLoading, setGoogleLoading]           = useState(false)
+  const [googleError, setGoogleError]               = useState<string | null>(null)
+  const [googleAccessToken, setGoogleAccessToken]   = useState('')
+  const [googleBackupItems, setGoogleBackupItems]   = useState<GoogleBackupItem[] | null>(null)
+  const [bgBackupState, setBgBackupState] = useState<{
+    running: boolean; done: number; total: number
+    uploaded: number; duplicates: number; errors: number
+    driveIds: string[]
+  } | null>(null)
 
   const {
     folder,
@@ -249,6 +272,49 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
   if (error) return <p className="text-sm text-red-500">Failed to load files.</p>
 
   const isPremium = user?.is_premium || user?.is_admin
+  const hasGoogleLinked = user?.linked_providers?.includes('google') ?? false
+  const showGoogleBackup = !readOnly && isPremium && hasGoogleLinked
+
+  // ── Google Backup handlers ─────────────────────────────────────────────────
+
+  async function handleGoogleServiceContinue(selection: GoogleServiceSelection) {
+    setServiceSelectOpen(false)
+    setGoogleLoading(true)
+    setGoogleError(null)
+    try {
+      const token = await requestGoogleAccessToken()
+      setGoogleAccessToken(token)
+      const driveItems = selection.drive  ? await listGoogleDriveFiles(token)    : []
+      const photoItems = selection.photos ? await pickGooglePhotosWeb(token)      : []
+      const all = [...driveItems, ...photoItems]
+      if (all.length === 0) {
+        setGoogleError('No files were found or selected.')
+        return
+      }
+      setGoogleBackupItems(all)
+    } catch (e: any) {
+      // GIS popup closed by user has no stable error code — swallow silently
+      const msg = e?.message ?? ''
+      if (msg && !msg.toLowerCase().includes('popup') && !msg.toLowerCase().includes('cancel')) {
+        setGoogleError(msg)
+      }
+    } finally {
+      setGoogleLoading(false)
+    }
+  }
+
+  function handleStartBackground(entries: BackupEntry[], token: string) {
+    setGoogleBackupItems(null)
+    const driveIds = entries.filter((e) => e.googleItem.source === 'drive').map((e) => e.googleItem.id)
+    setBgBackupState({ running: true, done: 0, total: entries.length, uploaded: 0, duplicates: 0, errors: 0, driveIds })
+    uploadGoogleEntries(entries, token, (done, total) =>
+      setBgBackupState((s) => (s ? { ...s, done, total } : s)),
+    ).then(({ uploaded, duplicates, errors }) => {
+      setBgBackupState((s) => (s ? { ...s, running: false, uploaded, duplicates, errors } : s))
+      queryClient.invalidateQueries({ queryKey: ['folders', folderId] })
+      queryClient.invalidateQueries({ queryKey: ['me'] })
+    })
+  }
 
   // Media collections render as a date-sorted gallery with hidden/subcollection
   // controls instead of the standard file/folder listing.
@@ -356,11 +422,78 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
           >
             <MdUploadFile className="text-base" /> Upload
           </button>
+          {showGoogleBackup && (
+            <button
+              onClick={() => { setGoogleError(null); setServiceSelectOpen(true) }}
+              disabled={googleLoading || bgBackupState?.running}
+              className="inline-flex items-center gap-1.5 px-3 py-2 text-sm bg-white hover:bg-gray-50 text-gray-700 rounded-lg font-medium cursor-pointer border border-gray-200 transition-colors disabled:opacity-50"
+            >
+              {googleLoading ? (
+                <div className="w-3.5 h-3.5 border-2 border-gray-400 border-t-transparent rounded-full animate-spin" />
+              ) : (
+                <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" aria-hidden="true">
+                  <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
+                  <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
+                  <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z" fill="#FBBC05"/>
+                  <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
+                </svg>
+              )}
+              Google Backup
+            </button>
+          )}
         </div>
       )}
 
       {viewingUser && (
         <QuotaBar used={viewingUser.storage_used_bytes} quota={viewingUser.storage_quota_bytes} />
+      )}
+
+      {/* Google Backup error */}
+      {googleError && (
+        <div className="flex items-center gap-2 mb-3 px-3 py-2 bg-red-50 border border-red-200 rounded-lg text-xs text-red-600">
+          <span className="flex-1">{googleError}</span>
+          <button onClick={() => setGoogleError(null)} className="text-red-400 hover:text-red-600 cursor-pointer"><MdClose /></button>
+        </div>
+      )}
+
+      {/* Background Google Backup progress card */}
+      {bgBackupState && (
+        <div className="mb-3 px-3 py-2.5 bg-white border border-gray-200 rounded-lg shadow-sm flex flex-col gap-1.5">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-1.5">
+              <svg viewBox="0 0 24 24" className="w-3.5 h-3.5 shrink-0" aria-hidden="true">
+                <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
+                <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
+                <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z" fill="#FBBC05"/>
+                <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
+              </svg>
+              <span className="text-xs font-semibold text-gray-700">
+                {bgBackupState.running ? 'Backing up from Google…' : 'Google Backup complete'}
+              </span>
+            </div>
+            {!bgBackupState.running && (
+              <button onClick={() => setBgBackupState(null)} className="text-gray-400 hover:text-gray-600 cursor-pointer"><MdClose className="text-sm" /></button>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            <div className="flex-1 h-1.5 bg-gray-200 rounded-full overflow-hidden">
+              <div
+                className={`h-full rounded-full transition-all ${bgBackupState.running ? 'bg-blue-500' : bgBackupState.errors > 0 ? 'bg-amber-500' : 'bg-green-500'}`}
+                style={{ width: `${bgBackupState.total > 0 ? Math.round((bgBackupState.done / bgBackupState.total) * 100) : 0}%` }}
+              />
+            </div>
+            <span className="text-xs text-gray-500 shrink-0">{bgBackupState.done}/{bgBackupState.total}</span>
+          </div>
+          {!bgBackupState.running && (
+            <p className={`text-xs ${bgBackupState.errors > 0 ? 'text-amber-600' : 'text-green-600'}`}>
+              {[
+                `${bgBackupState.uploaded} backed up`,
+                bgBackupState.duplicates > 0 ? `${bgBackupState.duplicates} duplicate${bgBackupState.duplicates !== 1 ? 's' : ''}` : null,
+                bgBackupState.errors > 0 ? `${bgBackupState.errors} failed` : null,
+              ].filter(Boolean).join(' · ')}
+            </p>
+          )}
+        </div>
       )}
 
       <SearchBar value={search} onChange={setSearch} />
@@ -536,6 +669,36 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
       )}
 
       <UploadToast progress={progress} onDismiss={dismiss} />
+
+      {/* Google Backup — service selection */}
+      {serviceSelectOpen && (
+        <GoogleServiceSelectModal
+          onCancel={() => setServiceSelectOpen(false)}
+          onContinue={handleGoogleServiceContinue}
+        />
+      )}
+
+      {/* Google Backup — file picker + upload modal */}
+      {googleBackupItems && user && (
+        <GoogleBackupModal
+          items={googleBackupItems}
+          accessToken={googleAccessToken}
+          quotaBytes={user.storage_quota_bytes}
+          usedBytes={user.storage_used_bytes}
+          redirectFolderName={
+            autoUploadTargetId
+              ? (subfolders.find((f) => f.id === autoUploadTargetId)?.name ?? null)
+              : null
+          }
+          onClose={() => setGoogleBackupItems(null)}
+          onDone={() => {
+            setGoogleBackupItems(null)
+            queryClient.invalidateQueries({ queryKey: ['folders', folderId] })
+            queryClient.invalidateQueries({ queryKey: ['me'] })
+          }}
+          onStartBackground={handleStartBackground}
+        />
+      )}
 
       {pendingDelete && (
         <DeleteConfirmModal

@@ -2,7 +2,6 @@ package admin
 
 import (
 	"context"
-	"time"
 
 	"github.com/google/uuid"
 
@@ -62,10 +61,11 @@ type AdminQuerier interface {
 	DeactivateMissingNodes(ctx context.Context, serverID uuid.UUID, keepIDs []uuid.UUID) error
 	AssignDriveToNode(ctx context.Context, driveID uuid.UUID, nodeID *uuid.UUID) error
 
-	// Alarm settings
-	GetAlarmSettings(ctx context.Context) (*models.AlarmSettings, error)
-	SetAlarmSubscription(ctx context.Context, alarmType, email string, subscribe bool) (*models.AlarmSettings, error)
-	ListSnapshotsWindow(ctx context.Context, window time.Duration) ([]models.ServerMetricSnapshot, error)
+	// Alarm subscriptions
+	ListAlarmSubscriptions(ctx context.Context) ([]models.AlarmSubscription, error)
+	ListAlarmSubscriptionsByEmail(ctx context.Context, email string) ([]models.AlarmSubscription, error)
+	UpsertAlarmSubscription(ctx context.Context, email, alarmType string, nodeID, driveID *uuid.UUID, threshold float64) (*models.AlarmSubscription, error)
+	DeleteAlarmSubscription(ctx context.Context, email, alarmType string, nodeID, driveID *uuid.UUID) error
 
 	// Interest form
 	ListInterestSubmissions(ctx context.Context, in db.PageInput) (*db.PageResult[models.InterestSubmission], error)

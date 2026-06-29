@@ -9,6 +9,7 @@ export interface User {
   is_premium: boolean
   premium_granted_at: string | null
   active_ban?: UserBan | null
+  linked_providers: string[]
 }
 
 export type APIKeyOperation = 'read' | 'write' | 'delete' | 'list'

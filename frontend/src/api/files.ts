@@ -46,11 +46,13 @@ export function uploadFile(
   file: globalThis.File,
   onProgress?: (loaded: number, total: number) => void,
   name?: string,
+  source?: string,
 ) {
   const form = new FormData()
   form.append('file', file)
   if (folderId) form.append('folder_id', folderId)
   if (name) form.append('name', name)
+  if (source) form.append('source', source)
   if (onProgress) return uploadWithProgress<UploadResponse>('/files/upload', form, onProgress)
   return upload<UploadResponse>('/files/upload', form)
 }

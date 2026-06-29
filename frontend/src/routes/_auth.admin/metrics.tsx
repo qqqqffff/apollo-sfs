@@ -2,6 +2,8 @@ import { createFileRoute } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
+  alarmSubscriptionsQueryOptions,
+  deleteAlarmSubscription,
   driveStatsQueryOptions,
   getDriveTempsHistory,
   getMetricsHistoryByHours,
@@ -13,11 +15,13 @@ import {
   speedTestQueryOptions,
   syncInfrastructure,
   triggerSpeedTest,
+  upsertAlarmSubscription,
 } from '../../api/admin'
-import type { DriveFrame, DriveStat, DriveSummary, MetricsFrame, NodeFrame, NodeSummary, TestRunResponse } from '../../api/admin'
+import type { AlarmType, DriveFrame, DriveStat, DriveSummary, MetricsFrame, NodeFrame, NodeSummary, TestRunResponse } from '../../api/admin'
 import { useMetricsStream } from '../../hooks/useMetricsStream'
 import { LineGraph } from '../../components/LineGraph'
 import type { LinePoint } from '../../components/LineGraph'
+import { AlarmConfig } from '../../components/AlarmConfig'
 import { useNotification } from '../../context/NotificationContext'
 
 export const Route = createFileRoute('/_auth/admin/metrics')({
@@ -633,6 +637,17 @@ function RouteComponent() {
         </div>
       </section>
 
+      <MetricAlarms
+        selectedMetric={selectedMetric}
+        nodeId={selectedNodeId}
+        nodeLabel={(() => {
+          const t = nodeTabs.find(tab => tab.id === selectedNodeId)
+          return t ? `${t.hostname}${t.role ? ` · ${t.role}` : ''}` : ''
+        })()}
+        driveId={selectedDrive?.drive_id ?? null}
+        driveLabel={selectedDrive?.label ?? ''}
+      />
+
       <section className="mb-10">
         <div className="flex items-center justify-between mb-3">
           <h3 className="text-sm font-semibold text-gray-600 m-0">Tests</h3>
@@ -730,6 +745,112 @@ function RouteComponent() {
         )}
       </section>
     </div>
+  )
+}
+
+// MetricAlarms renders the alarm controls contextual to the current metric +
+// node/drive selection, plus a persistent cluster-wide API error-rate alarm.
+// Subscriptions belong to the signed-in admin (emailed to them when breached).
+function MetricAlarms({ selectedMetric, nodeId, nodeLabel, driveId, driveLabel }: {
+  selectedMetric: MetricKey
+  nodeId: string | null
+  nodeLabel: string
+  driveId: string | null
+  driveLabel: string
+}) {
+  const queryClient = useQueryClient()
+  const { notify } = useNotification()
+  const { data: subs } = useQuery(alarmSubscriptionsQueryOptions())
+
+  const invalidate = () =>
+    queryClient.invalidateQueries({ queryKey: ['admin', 'alarm', 'subscriptions', 'self'] })
+  const upsertMut = useMutation({
+    mutationFn: upsertAlarmSubscription,
+    onSuccess: invalidate,
+    onError: () => notify('error', 'Failed to update alarm'),
+  })
+  const removeMut = useMutation({
+    mutationFn: deleteAlarmSubscription,
+    onSuccess: invalidate,
+    onError: () => notify('error', 'Failed to update alarm'),
+  })
+  const pending = upsertMut.isPending || removeMut.isPending
+
+  const find = (type: AlarmType, nId: string | null, dId: string | null) =>
+    subs?.find(s => s.alarm_type === type && (s.node_id ?? null) === nId && (s.drive_id ?? null) === dId)
+
+  type Row = { type: AlarmType; label: string; description: string }
+  let rows: Row[] = []
+  let scopeNodeId: string | null = null
+  let scopeDriveId: string | null = null
+  let targetLabel = ''
+
+  if (selectedMetric === 'cpu' && nodeId) {
+    rows = [
+      { type: 'cpu_usage', label: 'High CPU usage', description: 'Average CPU over 30 min exceeds the threshold.' },
+      { type: 'cpu_temp', label: 'High CPU temperature', description: 'Average CPU temperature over 30 min exceeds the threshold.' },
+    ]
+    scopeNodeId = nodeId; targetLabel = nodeLabel
+  } else if (selectedMetric === 'memory' && nodeId) {
+    rows = [{ type: 'memory', label: 'High memory usage', description: 'Average memory over 30 min exceeds the threshold.' }]
+    scopeNodeId = nodeId; targetLabel = nodeLabel
+  } else if (selectedMetric === 'traffic' && nodeId) {
+    rows = [{ type: 'network_traffic', label: 'High network traffic', description: 'Average throughput over 30 min exceeds the % of the last speed test.' }]
+    scopeNodeId = nodeId; targetLabel = nodeLabel
+  } else if (selectedMetric === 'drive_temp' && driveId) {
+    rows = [
+      { type: 'drive_temp', label: 'High drive temperature', description: 'Average drive temperature over 30 min exceeds the threshold.' },
+      { type: 'drive_load', label: 'High drive load', description: 'Allocated capacity exceeds the threshold.' },
+    ]
+    scopeDriveId = driveId; targetLabel = driveLabel
+  }
+
+  return (
+    <section className="mb-10">
+      <div className="flex items-center gap-3 mb-3">
+        <h3 className="text-sm font-semibold text-gray-600 m-0">Alarms</h3>
+        <span className="text-xs text-gray-400">emailed to you · 30-min sustained · 1-hr cooldown</span>
+      </div>
+      <div className="bg-white border border-gray-200 rounded-xl divide-y divide-gray-100">
+        {rows.length === 0 && (
+          <p className="px-5 py-4 text-sm text-gray-400 m-0">
+            No node/drive alarms apply to this metric. Select CPU, Memory, Network traffic, or Drive temperature to configure them.
+          </p>
+        )}
+        {rows.map(r => (
+          <AlarmConfig
+            key={r.type}
+            alarmType={r.type}
+            label={r.label}
+            description={r.description}
+            targetLabel={targetLabel}
+            subscription={find(r.type, scopeNodeId, scopeDriveId)}
+            pending={pending}
+            onUpsert={(threshold) => upsertMut.mutate({
+              alarm_type: r.type,
+              node_id: scopeNodeId ?? undefined,
+              drive_id: scopeDriveId ?? undefined,
+              threshold,
+            })}
+            onRemove={() => removeMut.mutate({
+              alarm_type: r.type,
+              node_id: scopeNodeId ?? undefined,
+              drive_id: scopeDriveId ?? undefined,
+            })}
+          />
+        ))}
+        <AlarmConfig
+          alarmType="api_error_rate"
+          label="Elevated API error rate"
+          description="Cluster-wide: percentage of API requests returning a server error over 30 min."
+          targetLabel="Cluster"
+          subscription={find('api_error_rate', null, null)}
+          pending={pending}
+          onUpsert={(threshold) => upsertMut.mutate({ alarm_type: 'api_error_rate', threshold })}
+          onRemove={() => removeMut.mutate({ alarm_type: 'api_error_rate' })}
+        />
+      </div>
+    </section>
   )
 }
 

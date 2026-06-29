@@ -36,13 +36,14 @@ function RouteComponent() {
   const { data: capacity } = useQuery(capacityQueryOptions)
   const { data: infraData } = useQuery(infrastructureQueryOptions)
 
-  // Group drives by server for the dropdowns
-  const serverMap = new Map<string, { name: string; drives: { id: string; label: string }[] }>()
+  // Group drives by node for the drive picker
+  const nodeMap = new Map<string, { hostname: string; drives: NonNullable<typeof infraData>['drives'][number][] }>()
   for (const d of infraData?.drives ?? []) {
-    if (!serverMap.has(d.server_id)) serverMap.set(d.server_id, { name: d.server_name, drives: [] })
-    serverMap.get(d.server_id)!.drives.push({ id: d.drive_id, label: d.drive_label })
+    const key = d.node_hostname
+    if (!nodeMap.has(key)) nodeMap.set(key, { hostname: key, drives: [] })
+    nodeMap.get(key)!.drives.push(d)
   }
-  const servers = Array.from(serverMap.entries()).map(([id, v]) => ({ id, ...v }))
+  const nodeGroups = Array.from(nodeMap.values())
 
   const [email, setEmail] = useState('')
   const [quotaBytes, setQuotaBytes] = useState(10 * GB)
@@ -50,10 +51,7 @@ function RouteComponent() {
   const [useCustom, setUseCustom] = useState(false)
   const [grantAdmin, setGrantAdmin] = useState(false)
   const [grantPremium, setGrantPremium] = useState(false)
-  const [selectedServerId, setSelectedServerId] = useState<string>('')
   const [selectedDriveId, setSelectedDriveId] = useState<string>('')
-
-  const selectedServerDrives = servers.find(s => s.id === selectedServerId)?.drives ?? []
   const { notify } = useNotification()
   const [createError, setCreateError] = useState<string | null>(null)
   const [copiedId, setCopiedId] = useState<string | null>(null)
@@ -70,7 +68,6 @@ function RouteComponent() {
       setEmail('')
       setGrantAdmin(false)
       setGrantPremium(false)
-      setSelectedServerId('')
       setSelectedDriveId('')
       setCreateError(null)
       queryClient.invalidateQueries({ queryKey: ['admin', 'invitations'] })
@@ -215,36 +212,39 @@ function RouteComponent() {
             </div>
           )}
         </div>
-        {servers.length > 0 && (
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-xs text-gray-500 shrink-0">Drive assignment:</span>
-            <select
-              value={selectedServerId}
-              onChange={(e) => {
-                setSelectedServerId(e.target.value)
-                setSelectedDriveId('')
-              }}
-              className="border border-gray-200 rounded px-2 py-1 text-xs text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer"
-            >
-              <option value="">Auto-select server</option>
-              {servers.map(s => (
-                <option key={s.id} value={s.id}>{s.name}</option>
+        {nodeGroups.length > 0 && (
+          <div className="flex flex-col gap-1.5">
+            <span className="text-xs text-gray-500">Drive assignment:</span>
+            <div className="flex flex-wrap gap-4">
+              {nodeGroups.map(node => (
+                <div key={node.hostname} className="flex flex-col gap-1 min-w-36">
+                  <span className="text-xs font-medium text-gray-500">{node.hostname}</span>
+                  {node.drives.map(drive => (
+                    <button
+                      key={drive.drive_id}
+                      type="button"
+                      onClick={() => setSelectedDriveId(drive.drive_id === selectedDriveId ? '' : drive.drive_id)}
+                      className={`flex items-center gap-2 px-2.5 py-1.5 rounded-md border text-xs text-left transition-colors cursor-pointer ${
+                        selectedDriveId === drive.drive_id
+                          ? 'bg-blue-50 border-blue-400 text-blue-700'
+                          : 'bg-white border-gray-200 text-gray-700 hover:border-gray-400'
+                      }`}
+                    >
+                      <span className="flex-1 truncate">{drive.drive_label}</span>
+                      <span className={`shrink-0 px-1.5 py-0.5 rounded text-[10px] font-semibold ${
+                        drive.drive_type === 'nvme'
+                          ? 'bg-emerald-100 text-emerald-700'
+                          : 'bg-gray-100 text-gray-500'
+                      }`}>
+                        {drive.drive_type === 'nvme' ? 'Fast' : 'Slow'}
+                      </span>
+                    </button>
+                  ))}
+                </div>
               ))}
-            </select>
-            {selectedServerId && (
-              <select
-                value={selectedDriveId}
-                onChange={(e) => setSelectedDriveId(e.target.value)}
-                className="border border-gray-200 rounded px-2 py-1 text-xs text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer"
-              >
-                <option value="">Auto-select drive</option>
-                {selectedServerDrives.map(d => (
-                  <option key={d.id} value={d.id}>{d.label}</option>
-                ))}
-              </select>
-            )}
-            {!selectedServerId && (
-              <span className="text-xs text-gray-400">Best-fit drive chosen automatically</span>
+            </div>
+            {!selectedDriveId && (
+              <span className="text-xs text-gray-400">No drive selected — best-fit chosen automatically</span>
             )}
           </div>
         )}

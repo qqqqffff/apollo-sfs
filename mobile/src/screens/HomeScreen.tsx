@@ -882,7 +882,9 @@ export default function HomeScreen() {
         onClose={() => setUpgradeVisible(false)}
       />
 
-      {/* In-app Google Photos Picker — sharedCookiesEnabled reuses the user's Safari session */}
+      {/* In-app Google Photos Picker.
+          iOS: sharedCookiesEnabled reuses the user's Safari/Google session.
+          Android: thirdPartyCookiesEnabled is required for Google auth within the WebView. */}
       <Modal
         visible={photosPickerVisible}
         animationType="slide"
@@ -905,6 +907,7 @@ export default function HomeScreen() {
             <WebView
               source={{ uri: photosPickerUrl }}
               sharedCookiesEnabled
+              thirdPartyCookiesEnabled
               style={styles.webPickerView}
             />
           ) : null}

@@ -555,8 +555,9 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 			adminGroup.GET("/system/speed-test", adminHandler.GetSpeedTest)
 			adminGroup.POST("/system/speed-test", adminHandler.TriggerSpeedTest)
 
-			adminGroup.GET("/system/alarm/settings", adminHandler.GetAlarmSettings)
-			adminGroup.POST("/system/alarm/subscribe", adminHandler.ToggleAlarmSubscription)
+			adminGroup.GET("/system/alarm/subscriptions", adminHandler.GetAlarmSubscriptions)
+			adminGroup.PUT("/system/alarm/subscriptions", adminHandler.UpsertAlarmSubscription)
+			adminGroup.DELETE("/system/alarm/subscriptions", adminHandler.DeleteAlarmSubscription)
 
 			adminGroup.GET("/emails/workers", inboundEmailHandler.ListEmailWorkers)
 			adminGroup.GET("/emails", inboundEmailHandler.ListEmails)

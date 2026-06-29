@@ -22,6 +22,7 @@ jest.mock('../../../context/NotificationContext', () => ({
   useNotification: () => ({ notify: mockNotify }),
 }))
 
+const ALL_ALARM_TYPES = ['cpu_usage', 'cpu_temp', 'memory', 'network_traffic', 'drive_temp', 'drive_load', 'api_error_rate']
 jest.mock('../../../api/admin', () => ({
   infrastructureQueryOptions: { queryKey: ['admin', 'infrastructure'],  queryFn: jest.fn() },
   driveStatsQueryOptions:     { queryKey: ['admin', 'drive-stats'],     queryFn: jest.fn() },
@@ -35,6 +36,18 @@ jest.mock('../../../api/admin', () => ({
   shutdownServer:   jest.fn(),
   triggerSpeedTest: jest.fn(),
   syncInfrastructure: jest.fn(),
+  // Alarm config (rendered by the contextual MetricAlarms section).
+  ALARM_DEFAULT_THRESHOLD: Object.fromEntries(ALL_ALARM_TYPES.map(t => [t, 90])),
+  ALARM_UNIT: Object.fromEntries(ALL_ALARM_TYPES.map(t => [t, '%'])),
+  ALARM_SCOPE: {
+    cpu_usage: 'node', cpu_temp: 'node', memory: 'node', network_traffic: 'node',
+    drive_temp: 'drive', drive_load: 'drive', api_error_rate: 'cluster',
+  },
+  alarmSubscriptionsQueryOptions: (u?: string) => ({
+    queryKey: ['admin', 'alarm', 'subscriptions', u ?? 'self'], queryFn: jest.fn(),
+  }),
+  upsertAlarmSubscription: jest.fn(),
+  deleteAlarmSubscription: jest.fn(),
 }))
 
 jest.mock('../../../components/BarGraph',  () => ({ BarGraph:  () => <div data-testid="bar-graph" /> }))

@@ -139,8 +139,10 @@ func (s *stubQuerier) CreateDevice(_ context.Context, userID uuid.UUID, name, pl
 func (s *stubQuerier) GetDevice(_ context.Context, id uuid.UUID) (*db.Device, error) {
 	return &db.Device{ID: id}, nil
 }
-func (s *stubQuerier) UpdateDeviceLastSeen(_ context.Context, _ uuid.UUID, _ *string) error { return nil }
-func (s *stubQuerier) DeleteDevice(_ context.Context, _ uuid.UUID) error                    { return nil }
+func (s *stubQuerier) UpdateDeviceLastSeen(_ context.Context, _ uuid.UUID, _ *string) error {
+	return nil
+}
+func (s *stubQuerier) DeleteDevice(_ context.Context, _ uuid.UUID) error { return nil }
 func (s *stubQuerier) DeltaSyncFiles(_ context.Context, _ uuid.UUID, _ time.Time) ([]models.File, error) {
 	return []models.File{}, nil
 }
@@ -165,28 +167,28 @@ func (s *stubInviteValidator) Validate(_ context.Context, _ string) (*services.I
 // ── Stub AdminQuerier ─────────────────────────────────────────────────────────
 
 type stubAdminQuerier struct {
-	users            []models.User
-	user             *models.User
-	userErr          error
-	submissions      []models.InterestSubmission
-	submissionsErr   error
-	singleSub        *models.InterestSubmission
-	singleSubErr     error
-	settings         *models.InterestFormSettings
-	settingsErr      error
-	updatedSettings  *models.InterestFormSettings
+	users              []models.User
+	user               *models.User
+	userErr            error
+	submissions        []models.InterestSubmission
+	submissionsErr     error
+	singleSub          *models.InterestSubmission
+	singleSubErr       error
+	settings           *models.InterestFormSettings
+	settingsErr        error
+	updatedSettings    *models.InterestFormSettings
 	updatedSettingsErr error
-	provisionErr     error
+	provisionErr       error
 	// drive / quota fields
-	userDrive        *models.UserDriveAllocation
-	userDriveErr     error
-	driveAvail       int64
-	driveAvailErr    error
-	updateQuotaErr   error
-	// alarm settings fields
-	alarmSettings           *models.AlarmSettings
-	alarmSettingsErr        error
-	subscriptionErr         error
+	userDrive      *models.UserDriveAllocation
+	userDriveErr   error
+	driveAvail     int64
+	driveAvailErr  error
+	updateQuotaErr error
+	// alarm subscription fields
+	alarmSubs       []models.AlarmSubscription
+	alarmSubsErr    error
+	subscriptionErr error
 }
 
 func (s *stubAdminQuerier) ListUsers(_ context.Context, _ db.PageInput) (*db.PageResult[models.User], error) {
@@ -211,8 +213,8 @@ func (s *stubAdminQuerier) GetDriveAvailableBytes(_ context.Context, _ uuid.UUID
 func (s *stubAdminQuerier) ListBannedIPs(_ context.Context, _ bool, _ db.PageInput) (*db.PageResult[models.BannedIP], error) {
 	return &db.PageResult[models.BannedIP]{Items: []models.BannedIP{}}, nil
 }
-func (s *stubAdminQuerier) UnbanIP(_ context.Context, _ int64) error        { return nil }
-func (s *stubAdminQuerier) ExtendBan(_ context.Context, _ int64) error      { return nil }
+func (s *stubAdminQuerier) UnbanIP(_ context.Context, _ int64) error         { return nil }
+func (s *stubAdminQuerier) ExtendBan(_ context.Context, _ int64) error       { return nil }
 func (s *stubAdminQuerier) AddBannedIP(_ context.Context, _, _ string) error { return nil }
 func (s *stubAdminQuerier) CreateBan(_ context.Context, _ db.CreateBanParams) (*models.UserBan, error) {
 	return &models.UserBan{}, nil
@@ -262,6 +264,7 @@ func (s *stubAdminQuerier) UpdateDriveCapacity(_ context.Context, _ uuid.UUID, _
 	return nil, nil
 }
 func (s *stubAdminQuerier) AutoSyncDriveCapacities(_ context.Context, _ int64) error { return nil }
+
 // Nodes
 func (s *stubAdminQuerier) GetNodeSummaries(_ context.Context) ([]models.NodeSummary, error) {
 	return []models.NodeSummary{}, nil
@@ -285,38 +288,29 @@ func (s *stubAdminQuerier) DeactivateMissingNodes(_ context.Context, _ uuid.UUID
 func (s *stubAdminQuerier) AssignDriveToNode(_ context.Context, _ uuid.UUID, _ *uuid.UUID) error {
 	return nil
 }
-// Alarm settings
-func (s *stubAdminQuerier) GetAlarmSettings(_ context.Context) (*models.AlarmSettings, error) {
-	if s.alarmSettings == nil && s.alarmSettingsErr == nil {
-		return &models.AlarmSettings{
-			CPUUsageEmails:       []string{},
-			CPUTempEmails:        []string{},
-			DriveTempEmails:      []string{},
-			DriveLoadEmails:      []string{},
-			NetworkTrafficEmails: []string{},
-			APIErrorRateEmails:   []string{},
-		}, nil
-	}
-	return s.alarmSettings, s.alarmSettingsErr
+
+// Alarm subscriptions
+func (s *stubAdminQuerier) ListAlarmSubscriptions(_ context.Context) ([]models.AlarmSubscription, error) {
+	return s.alarmSubs, s.alarmSubsErr
 }
-func (s *stubAdminQuerier) SetAlarmSubscription(_ context.Context, _, _ string, _ bool) (*models.AlarmSettings, error) {
+func (s *stubAdminQuerier) ListAlarmSubscriptionsByEmail(_ context.Context, _ string) ([]models.AlarmSubscription, error) {
+	return s.alarmSubs, s.alarmSubsErr
+}
+func (s *stubAdminQuerier) UpsertAlarmSubscription(_ context.Context, email, alarmType string, nodeID, driveID *uuid.UUID, threshold float64) (*models.AlarmSubscription, error) {
 	if s.subscriptionErr != nil {
 		return nil, s.subscriptionErr
 	}
-	if s.alarmSettings != nil {
-		return s.alarmSettings, nil
-	}
-	return &models.AlarmSettings{
-		CPUUsageEmails:       []string{},
-		CPUTempEmails:        []string{},
-		DriveTempEmails:      []string{},
-		DriveLoadEmails:      []string{},
-		NetworkTrafficEmails: []string{},
-		APIErrorRateEmails:   []string{},
+	return &models.AlarmSubscription{
+		ID:        uuid.New(),
+		Email:     email,
+		AlarmType: alarmType,
+		NodeID:    nodeID,
+		DriveID:   driveID,
+		Threshold: threshold,
 	}, nil
 }
-func (s *stubAdminQuerier) ListSnapshotsWindow(_ context.Context, _ time.Duration) ([]models.ServerMetricSnapshot, error) {
-	return []models.ServerMetricSnapshot{}, nil
+func (s *stubAdminQuerier) DeleteAlarmSubscription(_ context.Context, _, _ string, _, _ *uuid.UUID) error {
+	return s.subscriptionErr
 }
 
 func (s *stubAdminQuerier) ListInterestSubmissions(_ context.Context, _ db.PageInput) (*db.PageResult[models.InterestSubmission], error) {
@@ -354,9 +348,9 @@ func (s *stubAdminQuerier) MarkInterestSubmissionProvisioned(_ context.Context, 
 // ── Stub AdminInviteService ───────────────────────────────────────────────────
 
 type stubAdminInviteService struct {
-	inv    *models.Invitation
-	invErr error
-	invs   []models.Invitation
+	inv       *models.Invitation
+	invErr    error
+	invs      []models.Invitation
 	resendErr error
 	revokeErr error
 }
@@ -606,9 +600,9 @@ func (s *stubFavService) List(_ context.Context, _ uuid.UUID) (*services.Favorit
 		Folders: []models.Folder{},
 	}, s.listErr
 }
-func (s *stubFavService) AddFile(_ context.Context, _, _ uuid.UUID) error    { return nil }
-func (s *stubFavService) RemoveFile(_ context.Context, _, _ uuid.UUID) error { return nil }
-func (s *stubFavService) AddFolder(_ context.Context, _, _ uuid.UUID) error  { return nil }
+func (s *stubFavService) AddFile(_ context.Context, _, _ uuid.UUID) error      { return nil }
+func (s *stubFavService) RemoveFile(_ context.Context, _, _ uuid.UUID) error   { return nil }
+func (s *stubFavService) AddFolder(_ context.Context, _, _ uuid.UUID) error    { return nil }
 func (s *stubFavService) RemoveFolder(_ context.Context, _, _ uuid.UUID) error { return nil }
 
 // newAdminBrowseHandler builds a routes.Handler wired for admin browse tests.

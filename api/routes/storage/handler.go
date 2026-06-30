@@ -99,6 +99,7 @@ type breakdownResponse struct {
 // total quota, used bytes, NVMe vs HDD allocations, and their assigned server.
 func (h *Handler) GetBreakdown(c *gin.Context) {
 	username := c.GetString("username")
+	userID := c.GetString("userID")
 
 	user, err := h.queries.GetUserByUsername(c.Request.Context(), username)
 	if err != nil || user == nil {
@@ -106,7 +107,7 @@ func (h *Handler) GetBreakdown(c *gin.Context) {
 		return
 	}
 
-	breakdown, err := h.queries.GetUserStorageBreakdown(c.Request.Context(), username)
+	breakdown, err := h.queries.GetUserStorageBreakdown(c.Request.Context(), userID)
 	if err != nil {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "load breakdown"})
 		return
@@ -158,7 +159,8 @@ type myServerResponse struct {
 // storage bars and the primary selector.
 func (h *Handler) ListMyServers(c *gin.Context) {
 	username := c.GetString("username")
-	drives, err := h.queries.GetUserDrives(c.Request.Context(), username)
+	userID := c.GetString("userID")
+	drives, err := h.queries.GetUserDrives(c.Request.Context(), username, userID)
 	if err != nil {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "list servers"})
 		return
@@ -208,7 +210,8 @@ func (h *Handler) SetPrimaryServer(c *gin.Context) {
 		return
 	}
 
-	drives, err := h.queries.GetUserDrives(c.Request.Context(), username)
+	userID := c.GetString("userID")
+	drives, err := h.queries.GetUserDrives(c.Request.Context(), username, userID)
 	if err != nil {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "load servers"})
 		return

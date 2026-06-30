@@ -98,8 +98,8 @@ type UserStorageBreakdown struct {
 // each file lives on (NVMe "fast" vs HDD "standard"). Earlier this summed
 // purchased add-on quota from storage_orders, which read 0 whenever the quota
 // came from the initial allocation; joining files→drives reports real usage.
-// username is the Keycloak subject, stored verbatim as files.user_id (UUID).
-func (q *Queries) GetUserStorageBreakdown(ctx context.Context, username string) (UserStorageBreakdown, error) {
+// userID is the Keycloak subject UUID, stored verbatim as files.user_id.
+func (q *Queries) GetUserStorageBreakdown(ctx context.Context, userID string) (UserStorageBreakdown, error) {
 	var b UserStorageBreakdown
 	err := q.db.QueryRowContext(ctx, `
 		SELECT
@@ -108,7 +108,7 @@ func (q *Queries) GetUserStorageBreakdown(ctx context.Context, username string) 
 		FROM files f
 		JOIN drives d ON d.id = f.drive_id
 		WHERE f.user_id = $1::uuid
-	`, username).Scan(&b.NVMEBytes, &b.HDDBytes)
+	`, userID).Scan(&b.NVMEBytes, &b.HDDBytes)
 	if err != nil {
 		return b, fmt.Errorf("GetUserStorageBreakdown: %w", err)
 	}

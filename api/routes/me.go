@@ -53,6 +53,8 @@ type meResponse struct {
 	LastSeenAt        *time.Time `json:"last_seen_at"`
 	CreatedAt         time.Time  `json:"created_at"`
 	IsAdmin           bool       `json:"is_admin"`
+	IsPremium         bool       `json:"is_premium"`
+	PremiumGrantedAt  *time.Time `json:"premium_granted_at"`
 	LinkedProviders   []string   `json:"linked_providers"`
 }
 
@@ -145,6 +147,8 @@ func (h *Handler) Me(c *gin.Context) {
 		LastSeenAt:        user.LastSeenAt,
 		CreatedAt:         user.CreatedAt,
 		IsAdmin:           isAdmin,
+		IsPremium:         user.IsPremium,
+		PremiumGrantedAt:  user.PremiumGrantedAt,
 		LinkedProviders:   linkedProviders,
 	})
 }

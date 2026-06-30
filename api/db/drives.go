@@ -466,7 +466,9 @@ type UserDriveInfo struct {
 // GetUserDrives returns all of a user's drive allocations with usage stats,
 // primary first. Used for upload routing (primary + least-%-used fallback) and
 // the per-server storage UI.
-func (q *Queries) GetUserDrives(ctx context.Context, username string) ([]UserDriveInfo, error) {
+// username is the preferred_username (TEXT PK in users/user_drive_allocations).
+// userID is the Keycloak subject UUID stored as files.user_id.
+func (q *Queries) GetUserDrives(ctx context.Context, username, userID string) ([]UserDriveInfo, error) {
 	rows, err := q.db.QueryContext(ctx, `
 		SELECT
 			d.id, d.server_id, s.name, s.state, s.is_active,
@@ -480,10 +482,10 @@ func (q *Queries) GetUserDrives(ctx context.Context, username string) ([]UserDri
 		JOIN drives d ON d.id = uda.drive_id
 		JOIN servers s ON s.id = d.server_id
 		LEFT JOIN (SELECT drive_id, SUM(size_bytes) AS bytes FROM files GROUP BY drive_id) du ON du.drive_id = d.id
-		LEFT JOIN (SELECT drive_id, SUM(size_bytes) AS bytes FROM files WHERE user_id = $1::uuid GROUP BY drive_id) uu ON uu.drive_id = d.id
+		LEFT JOIN (SELECT drive_id, SUM(size_bytes) AS bytes FROM files WHERE user_id = $2::uuid GROUP BY drive_id) uu ON uu.drive_id = d.id
 		WHERE uda.user_id = $1
 		ORDER BY uda.is_primary DESC, s.name ASC
-	`, username)
+	`, username, userID)
 	if err != nil {
 		return nil, fmt.Errorf("GetUserDrives: %w", err)
 	}

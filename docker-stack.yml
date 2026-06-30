@@ -10,16 +10,25 @@
 #   worker   apollo-sfs   (Pi 5, arm64,  node.labels.tier=fast)
 #            → minio-fast (existing 4TB NVMe blobs — reused in place).
 #
-# Deploy:
-#   export TAG=$(git rev-parse --short HEAD)  # or any version string you choose
-#   docker build -t apollo-sfs_api:${TAG} ./api
-#   docker build -t apollo-sfs_frontend:${TAG} ./frontend
+# Deploy (see docs/registry_setup.md for the full registry workflow):
+#   export REGISTRY=<manager-ip>:5000           # private registry endpoint
+#   export TAG=$(git rev-parse --short HEAD)     # or any version string
+#   # build + push every custom image to the registry (one host, all arches):
+#   docker buildx build --platform linux/amd64,linux/arm64 \
+#     -t ${REGISTRY}/apollo-sfs_api:${TAG}        api/        --push
+#   docker buildx build --platform linux/amd64 \
+#     -t ${REGISTRY}/apollo-sfs_frontend:${TAG}   frontend/   --push
+#   docker buildx build --platform linux/amd64,linux/arm64 \
+#     -f api/Dockerfile.node-agent \
+#     -t ${REGISTRY}/apollo-sfs-node-agent:${TAG} api/        --push
 #   set -a && . ./.env && set +a      # stack deploy does NOT auto-read .env
-#   docker stack deploy -c docker-stack.yml --resolve-image never apollo-sfs
+#   docker stack deploy -c docker-stack.yml apollo-sfs   # nodes pull from the registry
 #
-# TAG must be exported before `docker stack deploy` — it is substituted from the
-# shell environment (not from .env). If TAG is unset the image reference will be
-# invalid and the deploy will fail loudly, which is intentional.
+# REGISTRY and TAG must both be exported before `docker stack deploy` — they are
+# substituted from the shell environment (not from .env). REGISTRY defaults to
+# apollo-sfs-1:5000 when unset; TAG has no default, so an unset TAG fails loudly,
+# which is intentional. Because every node pulls the versioned image from the
+# registry, you no longer build on each node or pass --resolve-image never.
 #
 # NOTE — three Swarm differences vs docker-compose, all called out below:
 #   * `build:` is unsupported → images are pre-built (Part 1 of the doc).
@@ -33,7 +42,7 @@ services:
 
   # ── Frontend (React/Vite, served by nginx:alpine) ───────────────────────────
   frontend:
-    image: apollo-sfs_frontend:${TAG}
+    image: ${REGISTRY:-apollo-sfs-1:5000}/apollo-sfs_frontend:${TAG}
     ports:
       - target: 80
         published: 3000
@@ -64,7 +73,7 @@ services:
   #           docker run -d --name apollo-sfs_api --privileged --user root \
   #             --network app-network --env-file .env ... apollo-sfs_api:amd64
   api:
-    image: apollo-sfs_api:${TAG}
+    image: ${REGISTRY:-apollo-sfs-1:5000}/apollo-sfs_api:${TAG}
     user: root
     ports:
       - target: 8080
@@ -359,7 +368,7 @@ services:
   # Reads this node's CPU/memory/network/HDD sensors and pushes to the API.
   # Only mounts paths that exist on the manager; see node-agent-fast for the Pi.
   node-agent-standard:
-    image: apollo-sfs-1:5000/apollo-sfs-node-agent:latest
+    image: ${REGISTRY:-apollo-sfs-1:5000}/apollo-sfs-node-agent:${TAG}
     environment:
       NODE_HOSTNAME: "{{.Node.Hostname}}"
       API_INTERNAL_URL: http://api:8080
@@ -388,7 +397,7 @@ services:
   # Reads the Pi's CPU/memory/network/NVMe sensors and pushes to the API.
   # Only mounts paths that exist on the Pi; see node-agent-standard for the manager.
   node-agent-fast:
-    image: apollo-sfs-1:5000/apollo-sfs-node-agent:latest
+    image: ${REGISTRY:-apollo-sfs-1:5000}/apollo-sfs-node-agent:${TAG}
     environment:
       NODE_HOSTNAME: "{{.Node.Hostname}}"
       API_INTERNAL_URL: http://api:8080

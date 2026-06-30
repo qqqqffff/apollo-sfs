@@ -325,147 +325,177 @@ docker node ls
 docker node inspect <node-id> --format '{{ .Spec.Labels }}'
 ```
 
-### Local Registry Setup (one time)
+### Private Registry Setup (one time)
 
-The node-agent runs on both nodes (manager amd64 + Pi arm64), so its image must be reachable from both. A private registry on the manager serves both nodes over the LAN.
+Every node needs each custom service's image (`api`, `frontend`, `node-agent`) for
+its own architecture. Rather than building on each node, build once on the manager
+and push to a private registry that all nodes pull from. This is the scalable
+workflow — adding a node requires no builds on it. **See
+[docs/registry_setup.md](docs/registry_setup.md) for the full guide** (rationale,
+maintenance, adding nodes, troubleshooting). The essential one-time steps:
 
-**1. Start the registry on the manager:**
+**1. Start a persistent registry on the manager:**
 
 ```bash
-docker run -d -p 5000:5000 --restart=always --name registry registry:2
+docker run -d --name registry --restart=always \
+  -p 5000:5000 -v /srv/registry:/var/lib/registry registry:2
+curl -s http://127.0.0.1:5000/v2/_catalog    # -> {"repositories":[]}
 ```
 
-**2. Allow the insecure (HTTP) registry on every Swarm node.** On both the manager and the Pi, add or merge into `/etc/docker/daemon.json`:
+The `-v` volume is required — without it a registry restart drops all images and the
+next deploy can't pull.
+
+**2. Choose a `REGISTRY` endpoint every node can reach.** The manager's static LAN IP
+is simplest (an IP needs no name resolution):
+
+```bash
+export REGISTRY=192.168.1.10:5000     # manager LAN IP
+```
+
+**3. Trust the insecure (HTTP) registry on every node.** On the manager and every
+worker, merge into `/etc/docker/daemon.json` (use your `REGISTRY` value), then
+`sudo systemctl restart docker`:
 
 ```json
 {
-  "insecure-registries": ["apollo-sfs-1:5000"]
+  "insecure-registries": ["192.168.1.10:5000"]
 }
 ```
 
-Then restart Docker on each node:
+**4. Enable multi-arch builds on the manager** (the cluster mixes amd64 + arm64):
 
 ```bash
-sudo systemctl restart docker
-```
-
-**3. Enable multi-arch builds on the manager** (needed to produce the arm64 node-agent image):
-
-```bash
-# Install QEMU binfmt handlers so buildx can emulate arm64
+# QEMU emulators (re-run after reboot) — without this, arm64 builds fail with
+# "exec /bin/sh: exec format error"
 docker run --privileged --rm tonistiigi/binfmt --install all
-# Create and activate a multi-platform builder
-docker buildx create --use --name multi-builder
+
+# A container-driver builder on the host network that trusts the insecure registry.
+# network=host avoids the buildx "no such host" push failure; the toml avoids the
+# "HTTP response to HTTPS client" failure.
+cat > /tmp/buildkitd.toml <<EOF
+[registry."${REGISTRY}"]
+  http = true
+  insecure = true
+EOF
+docker buildx create --name apollo-builder --driver docker-container \
+  --driver-opt network=host --config /tmp/buildkitd.toml --bootstrap --use
 ```
 
 ### Building Images
 
-The API and frontend only run on the manager, so they are built locally and referenced by their local tag. The node-agent must be built for both architectures and pushed to the local registry so the Pi can pull the `arm64` variant.
-
-Each build must use a unique `TAG` so Swarm detects the change and rolls out new tasks. Without a changing tag Swarm sees no spec diff and silently skips the update. The short git SHA is a reliable, low-friction choice:
+All three custom images are built on the manager and **pushed to the registry** so
+every node pulls them — no per-node builds. Each build uses a unique `TAG` so Swarm
+detects the change and rolls out new tasks; re-using a tag (e.g. `:latest`) leaves
+the spec identical and the update is silently skipped. The short git SHA is a
+reliable, low-friction choice:
 
 ```bash
+export REGISTRY=192.168.1.10:5000          # manager LAN IP (same on every node)
 export TAG=$(git rev-parse --short HEAD)
 
-# API (amd64 — manager only, local image is sufficient)
-docker build -t apollo-sfs_api:${TAG} api/
+# API (multi-arch so any tier can schedule it) → registry
+docker buildx build --platform linux/amd64,linux/arm64 \
+  -t ${REGISTRY}/apollo-sfs_api:${TAG} api/ --push
 
-# Frontend (amd64 — manager only, local image is sufficient)
-docker build -t apollo-sfs_frontend:${TAG} frontend/
+# Frontend (manager/amd64) → registry
+docker buildx build --platform linux/amd64 \
+  -t ${REGISTRY}/apollo-sfs_frontend:${TAG} frontend/ --push
 
-# Node agent (amd64 + arm64 — runs on both nodes, must be in the registry)
-docker buildx build \
-  --platform linux/amd64,linux/arm64 \
+# Node agent (amd64 + arm64 — runs on every node) → registry
+docker buildx build --platform linux/amd64,linux/arm64 \
   -f api/Dockerfile.node-agent \
-  -t apollo-sfs-1:5000/apollo-sfs-node-agent:latest \
-  api/ --push
+  -t ${REGISTRY}/apollo-sfs-node-agent:${TAG} api/ --push
 ```
 
-`TAG` must remain exported in your shell for the subsequent `docker stack deploy` call — the stack file reads it from the environment, not from `.env`.
+Both `REGISTRY` and `TAG` must remain exported in your shell for the subsequent
+`docker stack deploy` — the stack file substitutes them from the environment, not
+from `.env`. (`REGISTRY` defaults to `apollo-sfs-1:5000` if unset.)
 
 ### Initial Stack Deployment
 
+Every custom image is pushed to the registry first, then a normal `docker stack
+deploy` lets each node pull its architecture. No per-node builds, no
+`--resolve-image never`.
+
 ```bash
+export REGISTRY=192.168.1.10:5000
 export TAG=$(git rev-parse --short HEAD)
 
-# Build manager-only images
-docker build -t apollo-sfs_api:${TAG} api/
-docker build -t apollo-sfs_frontend:${TAG} frontend/
-
-# Build and push the node-agent for both nodes
-docker buildx build \
-  --platform linux/amd64,linux/arm64 \
+# Build + push every custom image to the registry
+docker buildx build --platform linux/amd64,linux/arm64 \
+  -t ${REGISTRY}/apollo-sfs_api:${TAG} api/ --push
+docker buildx build --platform linux/amd64 \
+  -t ${REGISTRY}/apollo-sfs_frontend:${TAG} frontend/ --push
+docker buildx build --platform linux/amd64,linux/arm64 \
   -f api/Dockerfile.node-agent \
-  -t apollo-sfs-1:5000/apollo-sfs-node-agent:latest \
-  api/ --push
+  -t ${REGISTRY}/apollo-sfs-node-agent:${TAG} api/ --push
 
 # Load .env (stack deploy does not read it automatically)
 set -a && source .env && set +a
 
-# Deploy the full stack for the first time
-docker stack deploy -c docker-stack.yml --resolve-image never apollo-sfs
+# Deploy the full stack — nodes pull the versioned images from the registry
+docker stack deploy -c docker-stack.yml apollo-sfs
 
 # Watch services come up
 docker stack services apollo-sfs
 docker stack ps apollo-sfs
 ```
 
-> **Pi 5 — first deploy only:** before the first `docker stack deploy`, pull the latest repo changes on the Pi so its copy of the stack file is up to date:
-> ```bash
-> # On the Pi
-> cd /home/apollo/apollo-sfs && git pull
-> ```
-> After that the manager drives all deployments; the Pi only needs to pull the repo again if you SSH into it to rebuild images locally.
-
 ### Redeploying After a Code Change
 
-Use `docker stack deploy` for all redeployments — it supports `--resolve-image never`, which tells Swarm to use the local image cache instead of attempting a registry pull. Using `docker service update` without this flag defaults to `--resolve-image always`, which will try to pull `apollo-sfs_api:amd64` from Docker Hub, fail (the image isn't there), and cause the task to terminate early and the update to pause.
+Re-build and push the changed image(s) under a **new** `TAG`, then re-run the same
+`docker stack deploy`. Because the image reference changes, Swarm rolls out only the
+affected services and each node pulls the new image from the registry. (Re-using a
+tag is a no-op — Swarm sees no spec change.) Keep `REGISTRY` and `TAG` exported.
 
 #### Redeploy the API
 
 ```bash
+export REGISTRY=192.168.1.10:5000
 export TAG=$(git rev-parse --short HEAD)
-docker build -t apollo-sfs_api:${TAG} api/
+docker buildx build --platform linux/amd64,linux/arm64 \
+  -t ${REGISTRY}/apollo-sfs_api:${TAG} api/ --push
 set -a && source .env && set +a
-docker stack deploy -c docker-stack.yml --resolve-image never apollo-sfs
+docker stack deploy -c docker-stack.yml apollo-sfs
 ```
 
 #### Redeploy the Frontend
 
 ```bash
+export REGISTRY=192.168.1.10:5000
 export TAG=$(git rev-parse --short HEAD)
-docker build -t apollo-sfs_frontend:${TAG} frontend/
+docker buildx build --platform linux/amd64 \
+  -t ${REGISTRY}/apollo-sfs_frontend:${TAG} frontend/ --push
 set -a && source .env && set +a
-docker stack deploy -c docker-stack.yml --resolve-image never apollo-sfs
+docker stack deploy -c docker-stack.yml apollo-sfs
 ```
 
 #### Redeploy the Node Agent
 
-The node-agent runs on both nodes, so it always requires a multi-arch build pushed to the registry before redeploying:
-
 ```bash
-docker buildx build \
-  --platform linux/amd64,linux/arm64 \
+export REGISTRY=192.168.1.10:5000
+export TAG=$(git rev-parse --short HEAD)
+docker buildx build --platform linux/amd64,linux/arm64 \
   -f api/Dockerfile.node-agent \
-  -t apollo-sfs-1:5000/apollo-sfs-node-agent:latest \
-  api/ --push
+  -t ${REGISTRY}/apollo-sfs-node-agent:${TAG} api/ --push
 set -a && source .env && set +a
-docker stack deploy -c docker-stack.yml --resolve-image never apollo-sfs
+docker stack deploy -c docker-stack.yml apollo-sfs
 ```
 
 #### Redeploy Everything at Once
 
 ```bash
+export REGISTRY=192.168.1.10:5000
 export TAG=$(git rev-parse --short HEAD)
-docker build -t apollo-sfs_api:${TAG} api/
-docker build -t apollo-sfs_frontend:${TAG} frontend/
-docker buildx build \
-  --platform linux/amd64,linux/arm64 \
+docker buildx build --platform linux/amd64,linux/arm64 \
+  -t ${REGISTRY}/apollo-sfs_api:${TAG} api/ --push
+docker buildx build --platform linux/amd64 \
+  -t ${REGISTRY}/apollo-sfs_frontend:${TAG} frontend/ --push
+docker buildx build --platform linux/amd64,linux/arm64 \
   -f api/Dockerfile.node-agent \
-  -t apollo-sfs-1:5000/apollo-sfs-node-agent:latest \
-  api/ --push
+  -t ${REGISTRY}/apollo-sfs-node-agent:${TAG} api/ --push
 set -a && source .env && set +a
-docker stack deploy -c docker-stack.yml --resolve-image never apollo-sfs
+docker stack deploy -c docker-stack.yml apollo-sfs
 ```
 
 `docker stack deploy` compares each service's spec against what's currently running. Because `TAG` changes with each build, Swarm detects the new image reference and rolls out only the affected services — Keycloak, MinIO, and other unchanged services are left alone.
@@ -553,12 +583,14 @@ docker service rollback apollo-sfs_api
 docker service rollback apollo-sfs_frontend
 ```
 
-To roll back to a specific git SHA tag (the image must still be present locally), set `TAG` to the old SHA and redeploy:
+To roll back to a specific git SHA tag (the image must still be in the registry),
+set `TAG` to the old SHA and redeploy — nodes pull that version back:
 
 ```bash
+export REGISTRY=192.168.1.10:5000
 export TAG=<previous-git-sha>   # e.g. a663b28
 set -a && source .env && set +a
-docker stack deploy -c docker-stack.yml --resolve-image never apollo-sfs
+docker stack deploy -c docker-stack.yml apollo-sfs
 ```
 
 ### Troubleshooting Failed Updates
@@ -588,11 +620,13 @@ Once the underlying issue is fixed, either rollback or retry:
 # Rollback to the previous image
 docker service rollback apollo-sfs_api
 
-# Or retry with a fresh stack deploy after rebuilding
+# Or retry with a fresh stack deploy after rebuilding + pushing
+export REGISTRY=192.168.1.10:5000
 export TAG=$(git rev-parse --short HEAD)
-docker build -t apollo-sfs_api:${TAG} api/
+docker buildx build --platform linux/amd64,linux/arm64 \
+  -t ${REGISTRY}/apollo-sfs_api:${TAG} api/ --push
 set -a && source .env && set +a
-docker stack deploy -c docker-stack.yml --resolve-image never apollo-sfs
+docker stack deploy -c docker-stack.yml apollo-sfs
 ```
 
 ### Tearing Down the Stack

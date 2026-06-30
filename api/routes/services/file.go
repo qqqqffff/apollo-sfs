@@ -237,8 +237,9 @@ func (s *FileService) storageForFile(ctx context.Context, username string, file 
 // on. The user's primary drive wins when it has room; otherwise the owned drive
 // with the lowest physical used-percentage that can fit the file is used. Falls
 // back to the user's primary allocation when no usage data is available.
-func (s *FileService) resolveUploadDrive(ctx context.Context, username string, fileSize int64) (*MinIOService, uuid.UUID, error) {
-	drives, err := s.queries.GetUserDrives(ctx, username)
+// userID is the Keycloak sub UUID (stored as files.user_id) used to compute per-user usage.
+func (s *FileService) resolveUploadDrive(ctx context.Context, username string, userID uuid.UUID, fileSize int64) (*MinIOService, uuid.UUID, error) {
+	drives, err := s.queries.GetUserDrives(ctx, username, userID.String())
 	if err != nil {
 		return nil, uuid.Nil, fmt.Errorf("resolve upload drive: %w", err)
 	}
@@ -364,7 +365,7 @@ func (s *FileService) Upload(ctx context.Context, in UploadInput) (*models.File,
 
 	// 6. Resolve the destination drive: the user's primary, or the least-full
 	// owned drive when the primary can't fit the file.
-	storage, driveID, err := s.resolveUploadDrive(ctx, in.Username, fileSize)
+	storage, driveID, err := s.resolveUploadDrive(ctx, in.Username, in.UserID, fileSize)
 	if err != nil {
 		return nil, fmt.Errorf("upload: %w", err)
 	}
@@ -1200,7 +1201,7 @@ func (s *FileService) BeginChunkedUpload(ctx context.Context, sess *UploadSessio
 	if err != nil {
 		return fmt.Errorf("begin chunked upload: decrypt user key: %w", err)
 	}
-	storage, driveID, err := s.resolveUploadDrive(ctx, sess.Username, sess.TotalSize)
+	storage, driveID, err := s.resolveUploadDrive(ctx, sess.Username, sess.UserID, sess.TotalSize)
 	if err != nil {
 		zeroBytes(userKey)
 		return fmt.Errorf("begin chunked upload: %w", err)

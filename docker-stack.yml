@@ -359,11 +359,16 @@ services:
   # Reads this node's CPU/memory/network/HDD sensors and pushes to the API.
   # Only mounts paths that exist on the manager; see node-agent-fast for the Pi.
   node-agent-standard:
-    image: apollo-sfs-node-agent:latest
+    image: apollo-sfs-1:5000/apollo-sfs-node-agent:latest
     environment:
       NODE_HOSTNAME: "{{.Node.Hostname}}"
       API_INTERNAL_URL: http://api:8080
       NODE_AGENT_TOKEN: ${NODE_AGENT_TOKEN}
+      # Physical disks to report, as label:/mount/point (comma-separated). These
+      # point at the bind-mounted data dirs below, so usage is readable inside the
+      # container without resolving /dev/disk/by-label symlinks (whose block-device
+      # targets under /dev are not mounted into the agent).
+      NODE_DISK_MOUNTS: "hdd-01:/srv/minio/hdd-01"
     volumes:
       - /sys:/sys:ro
       - /dev/disk/by-label:/dev/disk/by-label:ro
@@ -383,11 +388,16 @@ services:
   # Reads the Pi's CPU/memory/network/NVMe sensors and pushes to the API.
   # Only mounts paths that exist on the Pi; see node-agent-standard for the manager.
   node-agent-fast:
-    image: apollo-sfs-node-agent:latest
+    image: apollo-sfs-1:5000/apollo-sfs-node-agent:latest
     environment:
       NODE_HOSTNAME: "{{.Node.Hostname}}"
       API_INTERNAL_URL: http://api:8080
       NODE_AGENT_TOKEN: ${NODE_AGENT_TOKEN}
+      # Physical disks to report, as label:/mount/point (comma-separated). The two
+      # NVMe drives are bind-mounted below, so usage is readable inside the
+      # container without resolving /dev/disk/by-label symlinks (whose block-device
+      # targets under /dev are not mounted into the agent).
+      NODE_DISK_MOUNTS: "nvme-01:/home/apollo/apollo-sfs/minio/nvme-01,nvme-02:/home/apollo/apollo-sfs/minio/nvme-02"
     volumes:
       - /sys:/sys:ro
       - /dev/disk/by-label:/dev/disk/by-label:ro

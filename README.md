@@ -325,20 +325,60 @@ docker node ls
 docker node inspect <node-id> --format '{{ .Spec.Labels }}'
 ```
 
+### Local Registry Setup (one time)
+
+The node-agent runs on both nodes (manager amd64 + Pi arm64), so its image must be reachable from both. A private registry on the manager serves both nodes over the LAN.
+
+**1. Start the registry on the manager:**
+
+```bash
+docker run -d -p 5000:5000 --restart=always --name registry registry:2
+```
+
+**2. Allow the insecure (HTTP) registry on every Swarm node.** On both the manager and the Pi, add or merge into `/etc/docker/daemon.json`:
+
+```json
+{
+  "insecure-registries": ["apollo-sfs-1:5000"]
+}
+```
+
+Then restart Docker on each node:
+
+```bash
+sudo systemctl restart docker
+```
+
+**3. Enable multi-arch builds on the manager** (needed to produce the arm64 node-agent image):
+
+```bash
+# Install QEMU binfmt handlers so buildx can emulate arm64
+docker run --privileged --rm tonistiigi/binfmt --install all
+# Create and activate a multi-platform builder
+docker buildx create --use --name multi-builder
+```
+
 ### Building Images
 
-Images are built locally on the manager — no external registry is used. All deployments and redeployments go through `docker stack deploy --resolve-image never`, which tells Swarm to use the local image cache and never attempt a registry pull.
+The API and frontend only run on the manager, so they are built locally and referenced by their local tag. The node-agent must be built for both architectures and pushed to the local registry so the Pi can pull the `arm64` variant.
 
 Each build must use a unique `TAG` so Swarm detects the change and rolls out new tasks. Without a changing tag Swarm sees no spec diff and silently skips the update. The short git SHA is a reliable, low-friction choice:
 
 ```bash
 export TAG=$(git rev-parse --short HEAD)
 
-# Build the API (amd64 — runs on the manager only)
+# API (amd64 — manager only, local image is sufficient)
 docker build -t apollo-sfs_api:${TAG} api/
 
-# Build the frontend (amd64 — runs on the manager only)
+# Frontend (amd64 — manager only, local image is sufficient)
 docker build -t apollo-sfs_frontend:${TAG} frontend/
+
+# Node agent (amd64 + arm64 — runs on both nodes, must be in the registry)
+docker buildx build \
+  --platform linux/amd64,linux/arm64 \
+  -f api/Dockerfile.node-agent \
+  -t apollo-sfs-1:5000/apollo-sfs-node-agent:latest \
+  api/ --push
 ```
 
 `TAG` must remain exported in your shell for the subsequent `docker stack deploy` call — the stack file reads it from the environment, not from `.env`.
@@ -348,9 +388,16 @@ docker build -t apollo-sfs_frontend:${TAG} frontend/
 ```bash
 export TAG=$(git rev-parse --short HEAD)
 
-# Build images
+# Build manager-only images
 docker build -t apollo-sfs_api:${TAG} api/
 docker build -t apollo-sfs_frontend:${TAG} frontend/
+
+# Build and push the node-agent for both nodes
+docker buildx build \
+  --platform linux/amd64,linux/arm64 \
+  -f api/Dockerfile.node-agent \
+  -t apollo-sfs-1:5000/apollo-sfs-node-agent:latest \
+  api/ --push
 
 # Load .env (stack deploy does not read it automatically)
 set -a && source .env && set +a
@@ -362,6 +409,13 @@ docker stack deploy -c docker-stack.yml --resolve-image never apollo-sfs
 docker stack services apollo-sfs
 docker stack ps apollo-sfs
 ```
+
+> **Pi 5 — first deploy only:** before the first `docker stack deploy`, pull the latest repo changes on the Pi so its copy of the stack file is up to date:
+> ```bash
+> # On the Pi
+> cd /home/apollo/apollo-sfs && git pull
+> ```
+> After that the manager drives all deployments; the Pi only needs to pull the repo again if you SSH into it to rebuild images locally.
 
 ### Redeploying After a Code Change
 
@@ -385,12 +439,31 @@ set -a && source .env && set +a
 docker stack deploy -c docker-stack.yml --resolve-image never apollo-sfs
 ```
 
-#### Redeploy Both at Once
+#### Redeploy the Node Agent
+
+The node-agent runs on both nodes, so it always requires a multi-arch build pushed to the registry before redeploying:
+
+```bash
+docker buildx build \
+  --platform linux/amd64,linux/arm64 \
+  -f api/Dockerfile.node-agent \
+  -t apollo-sfs-1:5000/apollo-sfs-node-agent:latest \
+  api/ --push
+set -a && source .env && set +a
+docker stack deploy -c docker-stack.yml --resolve-image never apollo-sfs
+```
+
+#### Redeploy Everything at Once
 
 ```bash
 export TAG=$(git rev-parse --short HEAD)
 docker build -t apollo-sfs_api:${TAG} api/
 docker build -t apollo-sfs_frontend:${TAG} frontend/
+docker buildx build \
+  --platform linux/amd64,linux/arm64 \
+  -f api/Dockerfile.node-agent \
+  -t apollo-sfs-1:5000/apollo-sfs-node-agent:latest \
+  api/ --push
 set -a && source .env && set +a
 docker stack deploy -c docker-stack.yml --resolve-image never apollo-sfs
 ```
@@ -462,7 +535,10 @@ docker stack ps apollo-sfs --filter "desired-state=running" --no-trunc
 docker service logs apollo-sfs_api --follow
 docker service logs apollo-sfs_frontend --follow
 docker service logs apollo-sfs_keycloak --follow
-docker service logs apollo-sfs_minio-fast --follow
+docker service logs apollo-sfs_minio --follow          # fast tier (Pi)
+docker service logs apollo-sfs_minio-standard --follow # standard tier (manager)
+docker service logs apollo-sfs_node-agent-standard --follow
+docker service logs apollo-sfs_node-agent-fast --follow
 
 # Inspect a specific service
 docker service inspect apollo-sfs_api --pretty

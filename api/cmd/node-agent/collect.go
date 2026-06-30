@@ -73,40 +73,100 @@ func collectCPUTemp() *float64 {
 	return nil
 }
 
-// collectDrives enumerates filesystem labels under /dev/disk/by-label, resolves
-// each to its mount point, and reports live capacity/used/free plus temperature.
-// Drives whose mount can't be found are skipped (the API falls back to stored DB
-// capacity). The label is matched to a registered drive on the API side.
-func collectDrives(temps []sensors.TemperatureStat) []models.DrivePayload {
+// diskMount is one physical disk the agent reports, identified by a display label
+// and the mount point whose capacity/usage is read.
+type diskMount struct {
+	label string
+	mount string
+}
+
+// configuredDiskMounts parses NODE_DISK_MOUNTS — a comma-separated list of
+// "label:/mount/point" entries (a bare "/mount/point" is labelled by its
+// basename). This is the reliable source inside a container: the data mounts are
+// bind-mounted into the agent, whereas the /dev/disk/by-label symlinks point at
+// block devices under /dev that are not, so resolving them fails.
+func configuredDiskMounts() []diskMount {
+	raw := os.Getenv("NODE_DISK_MOUNTS")
+	if raw == "" {
+		return nil
+	}
+	var out []diskMount
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		label, mount := "", part
+		if i := strings.Index(part, ":"); i > 0 {
+			label, mount = strings.TrimSpace(part[:i]), strings.TrimSpace(part[i+1:])
+		}
+		if label == "" {
+			label = filepath.Base(mount)
+		}
+		out = append(out, diskMount{label: label, mount: mount})
+	}
+	return out
+}
+
+// labelMounts discovers labelled filesystems from /dev/disk/by-label. It reads
+// each symlink's text with os.Readlink (not filepath.EvalSymlinks) so it works
+// inside a container where the symlink targets under /dev are absent; the device
+// basename is then matched to a currently-visible mount.
+func labelMounts(partitions []psdisk.PartitionStat) []diskMount {
 	entries, err := os.ReadDir(byLabelDir())
 	if err != nil {
 		return nil
 	}
-	partitions, _ := psdisk.Partitions(true)
-
-	var out []models.DrivePayload
+	var out []diskMount
 	for _, e := range entries {
 		label := e.Name()
-		dev, err := filepath.EvalSymlinks(filepath.Join(byLabelDir(), label))
+		target, err := os.Readlink(filepath.Join(byLabelDir(), label))
 		if err != nil {
 			continue
 		}
-		mount := ""
+		devBase := filepath.Base(target) // e.g. "nvme0n1p1"
 		for _, prt := range partitions {
-			if prt.Device == dev {
-				mount = prt.Mountpoint
+			if filepath.Base(prt.Device) == devBase {
+				out = append(out, diskMount{label: label, mount: prt.Mountpoint})
 				break
 			}
 		}
-		if mount == "" {
-			continue
+	}
+	return out
+}
+
+// collectDrives reports live capacity/used/free plus temperature for each physical
+// disk. Disks come from NODE_DISK_MOUNTS when set (deterministic, label-free),
+// otherwise from /dev/disk/by-label. Mounts that can't be read are skipped (the
+// API falls back to stored DB capacity). The label is matched to a registered
+// drive on the API side.
+func collectDrives(temps []sensors.TemperatureStat) []models.DrivePayload {
+	partitions, _ := psdisk.Partitions(true)
+
+	mounts := configuredDiskMounts()
+	if len(mounts) == 0 {
+		mounts = labelMounts(partitions)
+	}
+
+	// Resolve a mount's backing device so temperatures can be matched to it.
+	deviceFor := func(mount string) string {
+		for _, prt := range partitions {
+			if prt.Mountpoint == mount {
+				return prt.Device
+			}
 		}
-		usage, err := psdisk.Usage(mount)
+		return ""
+	}
+
+	var out []models.DrivePayload
+	for _, m := range mounts {
+		usage, err := psdisk.Usage(m.mount)
 		if err != nil {
 			continue
 		}
+		dev := deviceFor(m.mount)
 		d := models.DrivePayload{
-			Label:  label,
+			Label:  m.label,
 			Device: dev,
 			// Free = available to non-root; Total = Used+Free so percentages
 			// exclude filesystem-reserved blocks (matches the metrics sampler).
@@ -114,7 +174,7 @@ func collectDrives(temps []sensors.TemperatureStat) []models.DrivePayload {
 			UsedBytes:  int64(usage.Used),
 			FreeBytes:  int64(usage.Free),
 		}
-		d.TempCelsius = matchDriveTemp(dev, label, temps)
+		d.TempCelsius = matchDriveTemp(dev, m.label, temps)
 		out = append(out, d)
 	}
 	return out

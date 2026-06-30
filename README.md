@@ -329,24 +329,29 @@ docker node inspect <node-id> --format '{{ .Spec.Labels }}'
 
 Images are built locally on the manager — no external registry is used. All deployments and redeployments go through `docker stack deploy --resolve-image never`, which tells Swarm to use the local image cache and never attempt a registry pull.
 
+Each build must use a unique `TAG` so Swarm detects the change and rolls out new tasks. Without a changing tag Swarm sees no spec diff and silently skips the update. The short git SHA is a reliable, low-friction choice:
+
 ```bash
+export TAG=$(git rev-parse --short HEAD)
+
 # Build the API (amd64 — runs on the manager only)
-docker build -t apollo-sfs_api:amd64 api/
+docker build -t apollo-sfs_api:${TAG} api/
 
 # Build the frontend (amd64 — runs on the manager only)
-docker build -t apollo-sfs_frontend:amd64 frontend/
+docker build -t apollo-sfs_frontend:${TAG} frontend/
 ```
 
-Tag a release before redeploying so you can roll back to it if needed:
-
-```bash
-docker tag apollo-sfs_api:amd64 apollo-sfs_api:v1.2.0
-docker tag apollo-sfs_frontend:amd64 apollo-sfs_frontend:v1.2.0
-```
+`TAG` must remain exported in your shell for the subsequent `docker stack deploy` call — the stack file reads it from the environment, not from `.env`.
 
 ### Initial Stack Deployment
 
 ```bash
+export TAG=$(git rev-parse --short HEAD)
+
+# Build images
+docker build -t apollo-sfs_api:${TAG} api/
+docker build -t apollo-sfs_frontend:${TAG} frontend/
+
 # Load .env (stack deploy does not read it automatically)
 set -a && source .env && set +a
 
@@ -365,7 +370,8 @@ Use `docker stack deploy` for all redeployments — it supports `--resolve-image
 #### Redeploy the API
 
 ```bash
-docker build -t apollo-sfs_api:amd64 api/
+export TAG=$(git rev-parse --short HEAD)
+docker build -t apollo-sfs_api:${TAG} api/
 set -a && source .env && set +a
 docker stack deploy -c docker-stack.yml --resolve-image never apollo-sfs
 ```
@@ -373,12 +379,23 @@ docker stack deploy -c docker-stack.yml --resolve-image never apollo-sfs
 #### Redeploy the Frontend
 
 ```bash
-docker build -t apollo-sfs_frontend:amd64 frontend/
+export TAG=$(git rev-parse --short HEAD)
+docker build -t apollo-sfs_frontend:${TAG} frontend/
 set -a && source .env && set +a
 docker stack deploy -c docker-stack.yml --resolve-image never apollo-sfs
 ```
 
-`docker stack deploy` compares each service's spec against what's currently running and only restarts services where something changed. It will not cycle Keycloak, MinIO, or other services unless their config changed in `docker-stack.yml`.
+#### Redeploy Both at Once
+
+```bash
+export TAG=$(git rev-parse --short HEAD)
+docker build -t apollo-sfs_api:${TAG} api/
+docker build -t apollo-sfs_frontend:${TAG} frontend/
+set -a && source .env && set +a
+docker stack deploy -c docker-stack.yml --resolve-image never apollo-sfs
+```
+
+`docker stack deploy` compares each service's spec against what's currently running. Because `TAG` changes with each build, Swarm detects the new image reference and rolls out only the affected services — Keycloak, MinIO, and other unchanged services are left alone.
 
 #### Redeploy Any Other Service
 
@@ -460,14 +477,10 @@ docker service rollback apollo-sfs_api
 docker service rollback apollo-sfs_frontend
 ```
 
-To roll back to a specific version tag (requires that you tagged before the last deploy), update the image reference in `docker-stack.yml` and redeploy:
+To roll back to a specific git SHA tag (the image must still be present locally), set `TAG` to the old SHA and redeploy:
 
 ```bash
-# In docker-stack.yml, change:
-#   image: apollo-sfs_api:amd64
-# to:
-#   image: apollo-sfs_api:v1.1.0
-
+export TAG=<previous-git-sha>   # e.g. a663b28
 set -a && source .env && set +a
 docker stack deploy -c docker-stack.yml --resolve-image never apollo-sfs
 ```
@@ -500,7 +513,8 @@ Once the underlying issue is fixed, either rollback or retry:
 docker service rollback apollo-sfs_api
 
 # Or retry with a fresh stack deploy after rebuilding
-docker build -t apollo-sfs_api:amd64 api/
+export TAG=$(git rev-parse --short HEAD)
+docker build -t apollo-sfs_api:${TAG} api/
 set -a && source .env && set +a
 docker stack deploy -c docker-stack.yml --resolve-image never apollo-sfs
 ```

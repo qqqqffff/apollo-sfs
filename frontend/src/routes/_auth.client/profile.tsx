@@ -87,7 +87,7 @@ function RouteComponent() {
   const barColor = pct >= 90 ? 'bg-red-500' : pct >= 50 ? 'bg-amber-400' : 'bg-green-500'
 
   return (
-    <div className="max-w-lg space-y-6">
+    <div className="max-w-lg mx-auto space-y-6">
       <h2 className="text-lg font-semibold text-gray-900 mb-6 mt-0">Profile</h2>
 
       <div className="bg-white border border-gray-200 rounded-xl divide-y divide-gray-100">

@@ -11,10 +11,15 @@
 #            → minio-fast (existing 4TB NVMe blobs — reused in place).
 #
 # Deploy:
+#   export TAG=$(git rev-parse --short HEAD)  # or any version string you choose
+#   docker build -t apollo-sfs_api:${TAG} ./api
+#   docker build -t apollo-sfs_frontend:${TAG} ./frontend
 #   set -a && . ./.env && set +a      # stack deploy does NOT auto-read .env
-#   docker build -t apollo-sfs_api:amd64 ./api
-#   docker build -t apollo-sfs_frontend:amd64 ./frontend
 #   docker stack deploy -c docker-stack.yml --resolve-image never apollo-sfs
+#
+# TAG must be exported before `docker stack deploy` — it is substituted from the
+# shell environment (not from .env). If TAG is unset the image reference will be
+# invalid and the deploy will fail loudly, which is intentional.
 #
 # NOTE — three Swarm differences vs docker-compose, all called out below:
 #   * `build:` is unsupported → images are pre-built (Part 1 of the doc).
@@ -28,7 +33,7 @@ services:
 
   # ── Frontend (React/Vite, served by nginx:alpine) ───────────────────────────
   frontend:
-    image: apollo-sfs_frontend:amd64
+    image: apollo-sfs_frontend:${TAG}
     ports:
       - target: 80
         published: 3000
@@ -59,7 +64,7 @@ services:
   #           docker run -d --name apollo-sfs_api --privileged --user root \
   #             --network app-network --env-file .env ... apollo-sfs_api:amd64
   api:
-    image: apollo-sfs_api:amd64
+    image: apollo-sfs_api:${TAG}
     user: root
     ports:
       - target: 8080

@@ -238,6 +238,28 @@ func (q *Queries) ListNodeDisks(ctx context.Context, nodeID uuid.UUID) ([]models
 	return out, rows.Err()
 }
 
+// ListAllNodeDisks returns every physical disk reported across all nodes, ordered
+// by node then label. Used by the infrastructure view to nest each node's
+// physical disks under its logical drive.
+func (q *Queries) ListAllNodeDisks(ctx context.Context) ([]models.NodeDisk, error) {
+	rows, err := q.db.QueryContext(ctx,
+		`SELECT`+nodeDiskColumns+` FROM node_disks ORDER BY node_id, label ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("ListAllNodeDisks: %w", err)
+	}
+	defer rows.Close()
+
+	var out []models.NodeDisk
+	for rows.Next() {
+		d, err := scanNodeDiskRow(rows)
+		if err != nil {
+			return nil, fmt.Errorf("ListAllNodeDisks scan: %w", err)
+		}
+		out = append(out, *d)
+	}
+	return out, rows.Err()
+}
+
 // InsertNodeDiskTemp persists one physical-disk temperature reading.
 func (q *Queries) InsertNodeDiskTemp(ctx context.Context, diskID uuid.UUID, tempCelsius float64, sampledAt time.Time) error {
 	_, err := q.db.ExecContext(ctx, `

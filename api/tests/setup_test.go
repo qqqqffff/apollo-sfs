@@ -264,6 +264,22 @@ func (s *stubAdminQuerier) UpdateDriveCapacity(_ context.Context, _ uuid.UUID, _
 	return nil, nil
 }
 func (s *stubAdminQuerier) AutoSyncDriveCapacities(_ context.Context, _ int64) error { return nil }
+func (s *stubAdminQuerier) ListServers(_ context.Context) ([]models.Server, error) {
+	return nil, nil
+}
+func (s *stubAdminQuerier) DeleteServer(_ context.Context, _ uuid.UUID) error { return nil }
+func (s *stubAdminQuerier) ListDrives(_ context.Context, _ uuid.UUID) ([]models.Drive, error) {
+	return nil, nil
+}
+func (s *stubAdminQuerier) AdoptNodeDrive(_ context.Context, _, _ uuid.UUID, _ db.UpsertDriveParams) (*models.Drive, error) {
+	return nil, nil
+}
+func (s *stubAdminQuerier) ReassignDriveToServer(_ context.Context, _, _ uuid.UUID, _ *uuid.UUID) error {
+	return nil
+}
+func (s *stubAdminQuerier) ListAllNodeDisks(_ context.Context) ([]models.NodeDisk, error) {
+	return nil, nil
+}
 
 // Nodes
 func (s *stubAdminQuerier) GetNodeSummaries(_ context.Context) ([]models.NodeSummary, error) {

@@ -230,7 +230,7 @@ export async function pickGooglePhotosWeb(
   isCancelled: () => boolean,
 ): Promise<GoogleBackupItem[]> {
   if (!popup) {
-    throw new Error('Google Photos picker was blocked by your browser. Allow popups for this site and try again.')
+    throw new Error('Could not open a new tab for Google Photos. Allow popups / new tabs for this site in your browser settings and try again.')
   }
 
   let session: PhotosPickerSession
@@ -252,8 +252,11 @@ export async function pickGooglePhotosWeb(
     if (isCancelled()) break
     await new Promise<void>((r) => setTimeout(r, current.pollIntervalMs))
     if (isCancelled()) break
-    if (popup.closed) break
+    // Poll the session BEFORE checking tab.closed so we don't miss a final
+    // mediaItemsSet=true that arrived the instant the user clicked Done and the
+    // picker tab auto-closed (or the user closed it themselves right after).
     try { current = await getPhotosPickerSession(session.id, accessToken) } catch { break }
+    if (!current.mediaItemsSet && popup.closed) break
   }
 
   popup.close()

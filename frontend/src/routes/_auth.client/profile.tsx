@@ -1,11 +1,20 @@
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useCallback, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { MdCheck, MdClose, MdPhotoLibrary, MdRocketLaunch, MdKey, MdStorage, MdVpnKey, MdCloudUpload, MdSpeed } from 'react-icons/md'
+import { MdCheck, MdClose, MdPhotoLibrary, MdRocketLaunch, MdKey, MdStorage, MdVpnKey, MdCloudUpload, MdSpeed, MdBolt, MdRefresh } from 'react-icons/md'
 import { FaGoogle, FaApple } from 'react-icons/fa'
 import { meQueryOptions, changePassword, preferencesQueryOptions, updatePreferences } from '../../api/me'
 import { listRoot } from '../../api/folders'
 import { ApiError } from '../../api/client'
+import {
+  getStorageBreakdown,
+  listMyServers,
+  setPrimaryServer,
+  pingServer,
+  runSpeedTest,
+  type SpeedMetrics,
+  type MyServer,
+} from '../../api/storage'
 
 export const Route = createFileRoute('/_auth/client/profile')({
   component: RouteComponent,
@@ -124,6 +133,8 @@ function RouteComponent() {
         </div>
       </div>
 
+      <StorageInfraCard />
+
       <LinkedAccountsCard linkedProviders={user.linked_providers} />
 
       <PremiumCard
@@ -205,6 +216,303 @@ function RouteComponent() {
         </form>
       </div>
     </div>
+  )
+}
+
+const SPEED_RATE_LIMIT = 5
+
+function StorageInfraCard() {
+  const queryClient = useQueryClient()
+
+  const { data: breakdown, isLoading: breakdownLoading } = useQuery({
+    queryKey: ['storage', 'breakdown'],
+    queryFn: getStorageBreakdown,
+  })
+
+  const { data: myServers = [] } = useQuery({
+    queryKey: ['storage', 'my-servers'],
+    queryFn: listMyServers,
+  })
+
+  const [primaryPingMs, setPrimaryPingMs] = useState<number | null>(null)
+  const [primaryTesting, setPrimaryTesting] = useState(false)
+  const [settingPrimary, setSettingPrimary] = useState<string | null>(null)
+
+  const [speed, setSpeed] = useState<SpeedMetrics | null>(null)
+  const [speedLoading, setSpeedLoading] = useState(false)
+  const [speedError, setSpeedError] = useState<string | null>(null)
+  const speedCallsRef = useRef<number[]>([])
+  const [speedRemaining, setSpeedRemaining] = useState(SPEED_RATE_LIMIT)
+
+  const testPrimaryConnection = useCallback(async (servers: MyServer[]) => {
+    const primary = servers.find((s) => s.is_primary)
+    if (!primary) { setPrimaryPingMs(null); return }
+    setPrimaryTesting(true)
+    try {
+      setPrimaryPingMs(await pingServer(primary.ping_url))
+    } catch {
+      setPrimaryPingMs(null)
+    } finally {
+      setPrimaryTesting(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (myServers.length > 0) testPrimaryConnection(myServers)
+  }, [myServers, testPrimaryConnection])
+
+  const runSpeed = useCallback(async () => {
+    if (speedLoading) return
+    const now = Date.now()
+    speedCallsRef.current = speedCallsRef.current.filter((t) => now - t < 60_000)
+    const remaining = SPEED_RATE_LIMIT - speedCallsRef.current.length
+    setSpeedRemaining(remaining)
+    if (remaining <= 0) {
+      setSpeedError('Limit reached. Try again in a minute.')
+      return
+    }
+    setSpeedLoading(true)
+    setSpeedError(null)
+    speedCallsRef.current.push(Date.now())
+    setSpeedRemaining(SPEED_RATE_LIMIT - speedCallsRef.current.length)
+    const pingUrl = breakdown?.server?.ping_url ?? '/api/v1/storage/servers'
+    try {
+      const result = await runSpeedTest(pingUrl)
+      setSpeed(result)
+    } catch (e: any) {
+      if (e?.code === 'RATE_LIMITED') {
+        setSpeedError('Limit reached. Try again in a minute.')
+      } else {
+        setSpeedError('Speed test failed. Check your connection.')
+      }
+    } finally {
+      setSpeedLoading(false)
+      const t = Date.now()
+      speedCallsRef.current = speedCallsRef.current.filter((x) => t - x < 60_000)
+      setSpeedRemaining(SPEED_RATE_LIMIT - speedCallsRef.current.length)
+    }
+  }, [speedLoading, breakdown])
+
+  // Auto-run once when breakdown first loads
+  useEffect(() => {
+    if (breakdown && !speed && !speedLoading) runSpeed()
+  }, [breakdown]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleSelectPrimary = useCallback(async (srv: MyServer) => {
+    if (srv.is_primary || settingPrimary) return
+    setSettingPrimary(srv.server_id)
+    try {
+      await setPrimaryServer(srv.server_id)
+      queryClient.invalidateQueries({ queryKey: ['storage', 'my-servers'] })
+    } catch {
+      // keep previous selection on failure
+    } finally {
+      setSettingPrimary(null)
+    }
+  }, [settingPrimary, queryClient])
+
+  const ownedTypes = new Set(myServers.map((s) => s.drive_type))
+  const showNvme = ownedTypes.size === 0 || ownedTypes.has('nvme')
+  const showHdd = ownedTypes.size === 0 || ownedTypes.has('hdd')
+  const nvmePct = breakdown && breakdown.quota_bytes > 0
+    ? Math.min((breakdown.nvme_bytes / breakdown.quota_bytes) * 100, 100) : 0
+  const hddPct = breakdown && breakdown.quota_bytes > 0
+    ? Math.min((breakdown.hdd_bytes / breakdown.quota_bytes) * 100, 100) : 0
+
+  return (
+    <>
+      {/* Storage + Servers card */}
+      <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
+        <div className="px-5 py-4">
+          <h3 className="text-sm font-semibold text-gray-800 mb-3">Infrastructure</h3>
+
+          {breakdownLoading && !breakdown ? (
+            <p className="text-sm text-gray-400">Loading…</p>
+          ) : breakdown ? (
+            <div className="flex flex-col gap-3">
+              {showNvme && (
+                <div className="flex items-center gap-3">
+                  <div className="w-7 h-7 rounded-lg bg-blue-50 flex items-center justify-center shrink-0">
+                    <MdBolt className="text-blue-600 text-sm" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex justify-between text-xs mb-1.5">
+                      <span className="text-gray-500">Fast storage (NVMe)</span>
+                      <span className="text-gray-700 font-medium">{formatSize(breakdown.nvme_bytes)}</span>
+                    </div>
+                    <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                      <div className="h-full rounded-full bg-blue-500 transition-all" style={{ width: `${nvmePct}%` }} />
+                    </div>
+                  </div>
+                </div>
+              )}
+              {showHdd && (
+                <div className="flex items-center gap-3">
+                  <div className="w-7 h-7 rounded-lg bg-amber-50 flex items-center justify-center shrink-0">
+                    <MdStorage className="text-amber-500 text-sm" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex justify-between text-xs mb-1.5">
+                      <span className="text-gray-500">Standard storage (HDD)</span>
+                      <span className="text-gray-700 font-medium">{formatSize(breakdown.hdd_bytes)}</span>
+                    </div>
+                    <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                      <div className="h-full rounded-full bg-amber-400 transition-all" style={{ width: `${hddPct}%` }} />
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          ) : (
+            <p className="text-xs text-gray-400">Could not load storage info.</p>
+          )}
+        </div>
+
+        {myServers.length > 0 && (
+          <>
+            <div className="border-t border-gray-100" />
+            <div className="px-5 py-4">
+              <h3 className="text-sm font-semibold text-gray-800 mb-2">Servers</h3>
+              {myServers.length > 1 && (
+                <p className="text-xs text-gray-400 mb-3">
+                  Uploads go to your primary server, falling back to the least-full one when it's full.
+                </p>
+              )}
+              <div className="divide-y divide-gray-100">
+                {myServers.map((srv) => (
+                  <button
+                    key={srv.server_id}
+                    onClick={() => handleSelectPrimary(srv)}
+                    disabled={srv.is_primary || settingPrimary !== null}
+                    className={`flex items-center gap-3 py-3 text-left w-full bg-transparent border-0 transition-colors ${
+                      !srv.is_primary && settingPrimary === null
+                        ? 'cursor-pointer hover:bg-gray-50'
+                        : 'cursor-default'
+                    }`}
+                  >
+                    <div className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 ${
+                      srv.drive_type === 'nvme' ? 'bg-blue-50' : 'bg-amber-50'
+                    }`}>
+                      {srv.drive_type === 'nvme'
+                        ? <MdBolt className="text-blue-600 text-sm" />
+                        : <MdStorage className="text-amber-500 text-sm" />}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 mb-1.5">
+                        <span className="text-sm font-medium text-gray-800">{srv.name}</span>
+                        {srv.is_primary && (
+                          <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider bg-blue-50 text-blue-600 rounded">
+                            Primary
+                          </span>
+                        )}
+                      </div>
+                      <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden mb-1.5">
+                        <div
+                          className={`h-full rounded-full transition-all ${srv.drive_type === 'nvme' ? 'bg-blue-500' : 'bg-amber-400'}`}
+                          style={{ width: `${Math.min(srv.drive_used_pct, 100)}%` }}
+                        />
+                      </div>
+                      <p className="text-xs text-gray-400 m-0">
+                        {formatSize(srv.used_bytes)} stored · {srv.drive_used_pct}% full
+                        {srv.is_primary && (
+                          primaryTesting
+                            ? ' · Testing…'
+                            : primaryPingMs != null
+                              ? ` · ${primaryPingMs} ms`
+                              : ''
+                        )}
+                      </p>
+                    </div>
+                    <div className="shrink-0">
+                      {settingPrimary === srv.server_id ? (
+                        <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+                      ) : srv.is_primary ? (
+                        <MdCheck className="text-blue-600 text-lg" />
+                      ) : (
+                        <div className="w-4 h-4 rounded-full border-2 border-gray-300" />
+                      )}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* Connection card */}
+      {breakdown?.server && (
+        <div className="bg-white border border-gray-200 rounded-xl px-5 py-4">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-semibold text-gray-800">Connection</h3>
+            <button
+              onClick={runSpeed}
+              disabled={speedLoading || speedRemaining <= 0}
+              title="Re-run speed test"
+              className={`w-7 h-7 rounded-lg flex items-center justify-center transition-colors ${
+                speedLoading || speedRemaining <= 0
+                  ? 'bg-gray-100 text-gray-300 cursor-not-allowed'
+                  : 'bg-blue-50 text-blue-600 hover:bg-blue-100 cursor-pointer'
+              }`}
+            >
+              <MdRefresh className={`text-base ${speedLoading ? 'animate-spin' : ''}`} />
+            </button>
+          </div>
+
+          {speedRemaining < SPEED_RATE_LIMIT && !speedLoading && (
+            <p className="text-xs text-gray-400 mb-3">
+              {speedRemaining > 0
+                ? `${speedRemaining} refresh${speedRemaining !== 1 ? 'es' : ''} remaining this minute`
+                : 'Limit reached — try again in a minute'}
+            </p>
+          )}
+
+          {speedError && <p className="text-xs text-red-500 mb-3">{speedError}</p>}
+
+          <div className="grid grid-cols-3 divide-x divide-gray-100 mt-1">
+            <div className="flex flex-col items-center py-2">
+              <span className="text-2xl font-bold text-gray-900 leading-none">
+                {speedLoading ? '—' : speed?.ping_ms != null ? speed.ping_ms : '—'}
+              </span>
+              <span className="text-xs text-gray-400 mt-0.5 h-4">
+                {!speedLoading && speed?.ping_ms != null ? 'ms' : ''}
+              </span>
+              <span className="text-xs text-gray-500 mt-1">Ping</span>
+            </div>
+            <div className="flex flex-col items-center py-2">
+              <span className="text-2xl font-bold text-gray-900 leading-none">
+                {speedLoading ? '—' : speed?.download_mbps != null
+                  ? speed.download_mbps >= 1000
+                    ? (speed.download_mbps / 1000).toFixed(1)
+                    : speed.download_mbps.toFixed(1)
+                  : '—'}
+              </span>
+              <span className="text-xs text-gray-400 mt-0.5 h-4">
+                {!speedLoading && speed?.download_mbps != null
+                  ? speed.download_mbps >= 1000 ? 'Gbps' : 'Mbps'
+                  : ''}
+              </span>
+              <span className="text-xs text-gray-500 mt-1">Download</span>
+            </div>
+            <div className="flex flex-col items-center py-2">
+              <span className="text-2xl font-bold text-gray-900 leading-none">
+                {speedLoading ? '—' : speed?.upload_mbps != null
+                  ? speed.upload_mbps >= 1000
+                    ? (speed.upload_mbps / 1000).toFixed(1)
+                    : speed.upload_mbps.toFixed(1)
+                  : '—'}
+              </span>
+              <span className="text-xs text-gray-400 mt-0.5 h-4">
+                {!speedLoading && speed?.upload_mbps != null
+                  ? speed.upload_mbps >= 1000 ? 'Gbps' : 'Mbps'
+                  : ''}
+              </span>
+              <span className="text-xs text-gray-500 mt-1">Upload</span>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   )
 }
 

@@ -11,6 +11,7 @@ import {
   getNodeMetricsHistory,
   infrastructureQueryOptions,
   pingServer,
+  renameServer,
   runTests,
   shutdownServer,
   speedTestQueryOptions,
@@ -18,7 +19,7 @@ import {
   triggerSpeedTest,
   upsertAlarmSubscription,
 } from '../../api/admin'
-import type { AlarmType, DiskFrame, DriveFrame, DriveStat, DriveSummary, MetricsFrame, NodeFrame, NodeSummary, TestRunResponse } from '../../api/admin'
+import type { AlarmType, DiskFrame, DriveFrame, DriveStat, DriveSummary, MetricsFrame, NodeDisk, NodeFrame, NodeSummary, TestRunResponse } from '../../api/admin'
 import { useMetricsStream } from '../../hooks/useMetricsStream'
 import { LineGraph } from '../../components/LineGraph'
 import type { LinePoint } from '../../components/LineGraph'
@@ -112,6 +113,15 @@ function RouteComponent() {
   const driveStats = driveStatsData?.stats ?? {}
   const nodes = infraData?.nodes ?? []
   const drives = infraData?.drives ?? []
+  const physicalDisks = infraData?.disks ?? []
+
+  // Physical disks nest under their node's logical drive in the infra tree.
+  const disksByNode = new Map<string, NodeDisk[]>()
+  for (const d of physicalDisks) {
+    const arr = disksByNode.get(d.node_id)
+    if (arr) arr.push(d)
+    else disksByNode.set(d.node_id, [d])
+  }
 
   // Build the server → node → drive tree. Nodes come from the dedicated list so
   // empty nodes still render; drives attach to their node or to an "Unassigned"
@@ -143,6 +153,9 @@ function RouteComponent() {
   // ── Node selection (drives the per-node hardware + traffic cards) ──────────────
   const latestFrame = frames[frames.length - 1]
   const liveNodes: NodeFrame[] = latestFrame?.nodes ?? []
+  // Live frame per node — overlays real-time disk capacity/temp/online onto the
+  // infra tree's physical-disk rows.
+  const liveNodeById = new Map(liveNodes.map(n => [n.node_id, n]))
   // Tabs come from registered nodes so a node with no live data still appears;
   // fall back to the live stream before infrastructure has loaded.
   const nodeTabs = nodes.length
@@ -524,21 +537,26 @@ function RouteComponent() {
                 selected={selectedMetric === 'memory'}
                 onClick={() => setSelectedMetric('memory')}
               />
-              <DriveCapacityCard drives={nodeDrives} />
-              <DriveTempCarousel
-                drives={nodeDrives}
-                index={safeDriveIdx}
-                onIndex={setDriveIdx}
-                selected={selectedMetric === 'drive_temp'}
-                onClick={() => setSelectedMetric('drive_temp')}
-              />
-              {nodeDisks.length > 0 && (
+              {/* Capacity + temperature come from the node's physical disks (live
+                  data from the agent); a pooled logical drive never matches a
+                  single disk label so its frames stay empty. Fall back to logical
+                  drives only when no disks are reported (non-pooled deployments). */}
+              <DriveCapacityCard items={nodeDisks.length ? nodeDisks : nodeDrives} />
+              {nodeDisks.length > 0 ? (
                 <DiskTempCarousel
                   disks={nodeDisks}
                   index={safeDiskIdx}
                   onIndex={setDiskIdx}
                   selected={selectedMetric === 'disk_temp'}
                   onClick={() => setSelectedMetric('disk_temp')}
+                />
+              ) : (
+                <DriveTempCarousel
+                  drives={nodeDrives}
+                  index={safeDriveIdx}
+                  onIndex={setDriveIdx}
+                  selected={selectedMetric === 'drive_temp'}
+                  onClick={() => setSelectedMetric('drive_temp')}
                 />
               )}
             </div>
@@ -768,7 +786,7 @@ function RouteComponent() {
               <div key={srv.serverId} className="bg-white border border-gray-200 rounded-xl px-5 py-4">
                 <div className="flex items-center gap-2 mb-3">
                   <span className={`w-2 h-2 rounded-full shrink-0 ${srv.isActive ? 'bg-green-500' : 'bg-gray-300'}`} />
-                  <span className="font-medium text-gray-800 text-sm">{srv.name}</span>
+                  <ServerNameEditor serverId={srv.serverId} name={srv.name} />
                   {!srv.isActive && <span className="text-xs text-gray-400">(inactive)</span>}
                 </div>
                 <div className="flex flex-col gap-3">
@@ -776,7 +794,13 @@ function RouteComponent() {
                     <p className="text-xs text-gray-400 m-0">No nodes detected on this server.</p>
                   )}
                   {srv.nodes.map((ng) => (
-                    <NodeBlock key={ng.node.node_id} group={ng} driveStats={driveStats} />
+                    <NodeBlock
+                      key={ng.node.node_id}
+                      group={ng}
+                      driveStats={driveStats}
+                      disks={disksByNode.get(ng.node.node_id) ?? []}
+                      liveNode={liveNodeById.get(ng.node.node_id)}
+                    />
                   ))}
                   {srv.unassigned.length > 0 && (
                     <div className="border border-dashed border-gray-200 rounded-lg px-3 py-3">
@@ -1118,20 +1142,23 @@ function CpuCard({ percent, tempCelsius, online, selected, onClick }: {
 }
 
 // DriveCapacityCard summarises the selected node's drive capacity/usage.
-function DriveCapacityCard({ drives }: { drives: DriveFrame[] }) {
-  const total = drives.reduce((s, d) => s + d.total_bytes, 0)
-  const used = drives.reduce((s, d) => s + d.used_bytes, 0)
+// DriveCapacityCard aggregates the node's storage capacity. It accepts physical
+// disks (live agent data, preferred) or logical drive frames — both expose
+// total_bytes/used_bytes — so a pooled drive reports the real disk totals.
+function DriveCapacityCard({ items }: { items: { total_bytes: number; used_bytes: number }[] }) {
+  const total = items.reduce((s, d) => s + d.total_bytes, 0)
+  const used = items.reduce((s, d) => s + d.used_bytes, 0)
   const pct = total > 0 ? (used / total) * 100 : 0
   return (
     <div className="bg-white border border-gray-200 rounded-xl px-4 py-3">
       <div className="text-xs text-gray-400 mb-1">Drive capacity</div>
-      {drives.length === 0 ? (
+      {items.length === 0 ? (
         <div className="text-sm font-semibold text-gray-400">no live data</div>
       ) : (
         <>
           <div className="text-xl font-semibold text-gray-900">{fmtCapacity(used)}</div>
           <div className="text-xs text-gray-400 mt-0.5">
-            {pct.toFixed(1)}% of {fmtCapacity(total)} · {drives.length} drive{drives.length !== 1 ? 's' : ''}
+            {pct.toFixed(1)}% of {fmtCapacity(total)} · {items.length} disk{items.length !== 1 ? 's' : ''}
           </div>
         </>
       )}
@@ -1491,6 +1518,76 @@ function DriveBar({ drive, stat }: {
   )
 }
 
+// ServerNameEditor shows the cluster server's name with an inline pencil that
+// swaps it for an input. Saving calls the existing rename endpoint and refreshes
+// the infrastructure tree.
+function ServerNameEditor({ serverId, name }: { serverId: string; name: string }) {
+  const queryClient = useQueryClient()
+  const { notify } = useNotification()
+  const [editing, setEditing] = useState(false)
+  const [value, setValue] = useState(name)
+
+  useEffect(() => { setValue(name) }, [name])
+
+  const mutation = useMutation({
+    mutationFn: (newName: string) => renameServer(serverId, newName),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['admin', 'infrastructure'] })
+      setEditing(false)
+    },
+    onError: () => notify('error', 'Failed to rename server'),
+  })
+
+  const save = () => {
+    const trimmed = value.trim()
+    if (!trimmed || trimmed === name) { setEditing(false); setValue(name); return }
+    mutation.mutate(trimmed)
+  }
+
+  if (!editing) {
+    return (
+      <div className="flex items-center gap-1.5 min-w-0">
+        <span className="font-medium text-gray-800 text-sm truncate">{name}</span>
+        <button
+          onClick={() => { setValue(name); setEditing(true) }}
+          className="text-gray-300 hover:text-gray-600 cursor-pointer bg-transparent border-0 p-0 shrink-0"
+          title="Rename server"
+          aria-label="Rename server"
+        >
+          ✎
+        </button>
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex items-center gap-1.5 min-w-0">
+      <input
+        autoFocus
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        onKeyDown={(e) => { if (e.key === 'Enter') save(); if (e.key === 'Escape') { setEditing(false); setValue(name) } }}
+        disabled={mutation.isPending}
+        className="text-sm font-medium text-gray-800 border border-gray-300 rounded px-1.5 py-0.5 focus:border-blue-500 focus:outline-none disabled:opacity-50 min-w-0 w-40"
+      />
+      <button
+        onClick={save}
+        disabled={mutation.isPending}
+        className="text-xs text-blue-600 hover:text-blue-800 cursor-pointer bg-transparent border-0 disabled:opacity-50 shrink-0"
+      >
+        Save
+      </button>
+      <button
+        onClick={() => { setEditing(false); setValue(name) }}
+        disabled={mutation.isPending}
+        className="text-xs text-gray-400 hover:text-gray-700 cursor-pointer bg-transparent border-0 disabled:opacity-50 shrink-0"
+      >
+        Cancel
+      </button>
+    </div>
+  )
+}
+
 function roleBadgeClass(role: string): string {
   switch (role) {
     case 'manager': return 'bg-indigo-50 text-indigo-700'
@@ -1499,14 +1596,56 @@ function roleBadgeClass(role: string): string {
   }
 }
 
+// DiskRow renders one physical disk nested under its node's logical drive:
+// label/device, a capacity fill bar, and temperature. Live figures from the
+// node's agent push are preferred; when the node is offline it falls back to the
+// last stored reading and is flagged offline.
+function DiskRow({ disk, live, online }: { disk: NodeDisk; live?: DiskFrame; online: boolean }) {
+  const total = online && live ? live.total_bytes : disk.capacity_bytes
+  const used = online && live ? live.used_bytes : disk.used_bytes
+  const temp = online && live ? live.temp_celsius : disk.temp_celsius
+  const pct = total > 0 ? (used / total) * 100 : 0
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex items-center justify-between text-xs gap-2 min-w-0">
+        <div className="flex items-center gap-2 min-w-0">
+          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${online ? 'bg-green-400' : 'bg-gray-300'}`} />
+          <span className="text-gray-700 font-medium truncate" title={disk.device || disk.label}>{disk.label}</span>
+          {disk.device && <span className="text-gray-400 truncate">{disk.device}</span>}
+          {temp != null && (
+            <span className={`font-semibold tabular-nums shrink-0 ${tempColor(temp)}`} title="Disk temperature">
+              {temp.toFixed(1)}°C
+            </span>
+          )}
+          {!online && (
+            <span className="text-gray-400 shrink-0" title="No online agent currently reports this disk — showing the last stored reading.">
+              offline
+            </span>
+          )}
+        </div>
+        <span className="text-gray-400 shrink-0 tabular-nums">
+          {fmtCapacity(used)} / {fmtCapacity(total)} · {pct.toFixed(1)}%
+        </span>
+      </div>
+      <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
+        <div className={`h-full rounded-full ${pct >= 90 ? 'bg-red-500' : pct >= 75 ? 'bg-amber-500' : 'bg-emerald-500'}`} style={{ width: `${Math.min(pct, 100).toFixed(1)}%` }} />
+      </div>
+    </div>
+  )
+}
+
 // NodeBlock renders a single swarm node read-only: status, hostname, role
-// (manager/worker), address, and its detected drives. The infrastructure sync is
-// the source of truth, so there are no edit/add/remove controls.
-function NodeBlock({ group, driveStats }: {
+// (manager/worker), address, its detected logical drive, and the physical disks
+// nested beneath it. The infrastructure sync is the source of truth, so there are
+// no edit/add/remove controls.
+function NodeBlock({ group, driveStats, disks, liveNode }: {
   group: NodeGroup
   driveStats: Record<string, DriveStat>
+  disks: NodeDisk[]
+  liveNode?: NodeFrame
 }) {
   const { node, drives } = group
+  const liveDisks = liveNode?.online ? (liveNode.disks ?? []) : []
 
   return (
     <div className="border border-gray-100 rounded-lg px-3 py-3 bg-gray-50/60">
@@ -1515,7 +1654,7 @@ function NodeBlock({ group, driveStats }: {
         <span className="font-medium text-gray-800 text-sm truncate">{node.hostname}</span>
         <span className={`text-xs font-semibold px-1.5 py-0.5 rounded uppercase tracking-wide shrink-0 ${roleBadgeClass(node.role)}`}>{node.role}</span>
         {node.address && <span className="text-xs text-gray-400 truncate">{node.address}</span>}
-        <span className="text-xs text-gray-400 shrink-0">{drives.length} drive{drives.length !== 1 ? 's' : ''}</span>
+        <span className="text-xs text-gray-400 shrink-0">{drives.length} drive{drives.length !== 1 ? 's' : ''} · {disks.length} disk{disks.length !== 1 ? 's' : ''}</span>
         {!node.is_active && <span className="text-xs text-gray-400 shrink-0">(inactive)</span>}
       </div>
       {drives.length === 0 ? (
@@ -1525,6 +1664,16 @@ function NodeBlock({ group, driveStats }: {
           {drives.map((d) => (
             <DriveBar key={d.drive_id} drive={d} stat={driveStats[d.drive_id]} />
           ))}
+        </div>
+      )}
+      {disks.length > 0 && (
+        <div className="mt-2 pl-4">
+          <div className="text-xs font-medium text-gray-400 mb-1.5">Physical disks</div>
+          <div className="flex flex-col gap-2">
+            {disks.map((dk) => (
+              <DiskRow key={dk.id} disk={dk} live={liveDisks.find(df => df.disk_id === dk.id)} online={liveDisks.some(df => df.disk_id === dk.id)} />
+            ))}
+          </div>
         </div>
       )}
     </div>

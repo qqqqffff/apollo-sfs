@@ -261,6 +261,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		MinIOAccessKey:   cfg.MinIOAccessKey,
 		MinIOSecretKey:   cfg.MinIOSecretKey,
 		MinIOUseSSL:      cfg.MinIOUseSSL,
+		MinIOBucketName:  cfg.MinIOBucketName,
 		StandardEndpoint: cfg.MinIOStandardEndpoint,
 	})
 	sfsHandler := sfs.NewHandler(queries, fileSvc, presignSvc, apiKeySvc)

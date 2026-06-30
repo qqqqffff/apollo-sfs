@@ -286,7 +286,12 @@ export interface CapacitySummary {
 }
 
 export function listInfrastructure() {
-  return get<{ nodes: NodeSummary[]; drives: DriveSummary[] }>('/admin/system/infrastructure')
+  return get<{ nodes: NodeSummary[]; drives: DriveSummary[]; disks: NodeDisk[] }>('/admin/system/infrastructure')
+}
+
+// Rename the top-level cluster server (inline edit on the infrastructure card).
+export function renameServer(serverId: string, name: string) {
+  return patch<{ message: string }>(`/admin/system/servers/${serverId}`, { name })
 }
 
 // Live, per-drive view sourced from the owning node's agent push (keyed by

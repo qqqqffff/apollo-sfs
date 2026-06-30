@@ -146,7 +146,7 @@ func (q *Queries) DeleteDrive(ctx context.Context, id uuid.UUID) error {
 }
 
 // UpsertDriveParams carries all fields needed to insert-or-update a drive during
-// an infrastructure sync, keyed by (server_id, minio_bucket).
+// an infrastructure sync, keyed by (server_id, node_id, minio_bucket).
 type UpsertDriveParams struct {
 	ServerID      uuid.UUID
 	NodeID        *uuid.UUID
@@ -157,11 +157,12 @@ type UpsertDriveParams struct {
 	IsActive      bool
 }
 
-// UpsertDrive inserts a drive, or updates its node/label/capacity/type/active
-// flag when one already exists for (server_id, minio_bucket). Returns the
-// resulting row. Used by the infrastructure sync to reconcile discovered buckets
-// idempotently. Capacity is refreshed here (unlike UpdateDrive) because the sync
-// is the authoritative source for it.
+// UpsertDrive inserts a drive, or updates its label/capacity/type/active flag
+// when one already exists for (server_id, node_id, minio_bucket). Returns the
+// resulting row. Used by the infrastructure sync to reconcile the per-tier drive
+// idempotently — keyed by node so each tier's node keeps its own drive even when
+// both MinIO instances expose the same bucket name. Capacity is refreshed here
+// (unlike UpdateDrive) because the sync is the authoritative source for it.
 func (q *Queries) UpsertDrive(ctx context.Context, p UpsertDriveParams) (*models.Drive, error) {
 	driveType := p.DriveType
 	if driveType == "" {
@@ -170,9 +171,8 @@ func (q *Queries) UpsertDrive(ctx context.Context, p UpsertDriveParams) (*models
 	row := q.db.QueryRowContext(ctx, `
 		INSERT INTO drives (server_id, node_id, label, capacity_bytes, minio_bucket, drive_type, is_active)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
-		ON CONFLICT (server_id, minio_bucket)
+		ON CONFLICT (server_id, node_id, minio_bucket)
 		DO UPDATE SET
-			node_id        = EXCLUDED.node_id,
 			label          = EXCLUDED.label,
 			capacity_bytes = EXCLUDED.capacity_bytes,
 			drive_type     = EXCLUDED.drive_type,
@@ -185,6 +185,60 @@ func (q *Queries) UpsertDrive(ctx context.Context, p UpsertDriveParams) (*models
 		return nil, fmt.Errorf("UpsertDrive: %w", err)
 	}
 	return d, nil
+}
+
+// AdoptNodeDrive reconciles the single active drive on a node to the configured
+// tier bucket/label, preserving its drive_id (and thus its files and user
+// allocations). This corrects a fast/pooled drive that the old bucket-enumeration
+// sync recorded at the wrong directory level: when a node already has exactly one
+// active drive whose bucket differs from the configured one, its bucket/label are
+// rewritten in place instead of inserting a second row. Returns the adopted drive,
+// or nil when the node has no (or more than one) active drive to adopt
+// unambiguously — in which case the caller falls back to UpsertDrive.
+func (q *Queries) AdoptNodeDrive(ctx context.Context, serverID uuid.UUID, nodeID uuid.UUID, p UpsertDriveParams) (*models.Drive, error) {
+	driveType := p.DriveType
+	if driveType == "" {
+		driveType = "hdd"
+	}
+	row := q.db.QueryRowContext(ctx, `
+		UPDATE drives SET
+			label          = $3,
+			minio_bucket   = $4,
+			capacity_bytes = $5,
+			drive_type     = $6,
+			is_active      = $7
+		WHERE id = (
+			SELECT id FROM drives
+			WHERE server_id = $1 AND node_id = $2 AND is_active = true
+			ORDER BY created_at ASC
+			LIMIT 1
+		)
+		AND (SELECT COUNT(*) FROM drives WHERE server_id = $1 AND node_id = $2 AND is_active = true) = 1
+		RETURNING`+driveColumns,
+		serverID, nodeID, p.Label, p.MinioBucket, p.CapacityBytes, driveType, p.IsActive,
+	)
+	d, err := scanDrive(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("AdoptNodeDrive: %w", err)
+	}
+	return d, nil
+}
+
+// ReassignDriveToServer moves a drive to a different server (and node), used by
+// the sync to migrate drives off a stale server before the stale server is
+// deleted. Files and user allocations reference drive_id, so they follow the
+// drive untouched.
+func (q *Queries) ReassignDriveToServer(ctx context.Context, driveID, serverID uuid.UUID, nodeID *uuid.UUID) error {
+	_, err := q.db.ExecContext(ctx,
+		`UPDATE drives SET server_id = $2, node_id = $3 WHERE id = $1`,
+		driveID, serverID, nodeID)
+	if err != nil {
+		return fmt.Errorf("ReassignDriveToServer: %w", err)
+	}
+	return nil
 }
 
 // DeactivateMissingDrives marks every drive of a server inactive except those

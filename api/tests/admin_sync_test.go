@@ -22,10 +22,11 @@ func adminInfraConfig() admin.InfraSyncConfig {
 		Swarm: fakeSwarm{nodes: []services.SwarmNode{
 			{Hostname: "apollo-mgr", Addr: "10.0.0.1", Tier: "fast", IsManager: true, Ready: true},
 		}},
-		Storage:        fakeStorage{info: services.StorageInfo{Buckets: []string{"sfs-data"}, TotalBytes: 8 << 40}},
-		MinIOEndpoint:  "minio:9000",
-		MinIOAccessKey: "key",
-		MinIOSecretKey: "secret",
+		Storage:         fakeStorage{info: services.StorageInfo{Buckets: []string{"sfs-data"}, TotalBytes: 8 << 40}},
+		MinIOEndpoint:   "minio:9000",
+		MinIOAccessKey:  "key",
+		MinIOSecretKey:  "secret",
+		MinIOBucketName: "sfs-data",
 	}
 }
 
@@ -136,7 +137,8 @@ func TestSyncInfrastructure_IndexesSwarmAndDrives(t *testing.T) {
 	if stub.nodes[0].Hostname != "apollo-mgr" {
 		t.Errorf("expected hostname apollo-mgr, got %q", stub.nodes[0].Hostname)
 	}
-	// The fast-tier bucket should become an nvme drive with the reported capacity.
+	// The fast tier should become a single nvme drive against the configured
+	// bucket (not per MinIO bucket), labelled by tier, with the reported capacity.
 	if len(stub.drives) != 1 {
 		t.Fatalf("expected one drive, got %d", len(stub.drives))
 	}
@@ -144,11 +146,14 @@ func TestSyncInfrastructure_IndexesSwarmAndDrives(t *testing.T) {
 	if d.DriveType != "nvme" {
 		t.Errorf("expected nvme drive_type for fast tier, got %q", d.DriveType)
 	}
+	if d.Label != "fast" {
+		t.Errorf("expected tier label fast, got %q", d.Label)
+	}
 	if d.CapacityBytes != 8<<40 {
 		t.Errorf("expected capacity 8TiB, got %d", d.CapacityBytes)
 	}
 	if d.MinioBucket != "sfs-data" {
-		t.Errorf("expected bucket sfs-data, got %q", d.MinioBucket)
+		t.Errorf("expected configured bucket sfs-data, got %q", d.MinioBucket)
 	}
 	// Stale rows are reconciled on every run.
 	if stub.prunedNodes != 1 || stub.prunedDrvs != 1 {
@@ -190,6 +195,7 @@ func TestSyncInfrastructure_TwoTierSingleServer(t *testing.T) {
 		MinIOEndpoint:    "minio:9000",
 		MinIOAccessKey:   "key",
 		MinIOSecretKey:   "secret",
+		MinIOBucketName:  "sfs-data",
 		StandardEndpoint: "minio-standard:9000",
 	})
 	r := newEngine()
@@ -224,27 +230,32 @@ func TestSyncInfrastructure_TwoTierSingleServer(t *testing.T) {
 		t.Errorf("fast node should inherit the server endpoint (nil override), got %v", *ep)
 	}
 
-	// The standard bucket's drive must be attached to the standard node and typed hdd.
+	// One drive per tier (labelled by tier, against the configured bucket): the
+	// standard drive attaches to the standard node and is hdd; the fast drive
+	// attaches to the fast node and is nvme.
 	stdNodeID := stub.nodeIDByHostname["apollo-sfs-1"]
 	fastNodeID := stub.nodeIDByHostname["apollo-sfs"]
 	for _, d := range stub.drives {
-		switch d.MinioBucket {
-		case "std-bucket":
+		if d.MinioBucket != "sfs-data" {
+			t.Errorf("expected configured bucket sfs-data, got %q", d.MinioBucket)
+		}
+		switch d.Label {
+		case "standard":
 			if d.NodeID == nil || *d.NodeID != stdNodeID {
-				t.Errorf("std-bucket drive should attach to the standard node")
+				t.Errorf("standard drive should attach to the standard node")
 			}
 			if d.DriveType != "hdd" {
-				t.Errorf("std-bucket drive should be hdd, got %q", d.DriveType)
+				t.Errorf("standard drive should be hdd, got %q", d.DriveType)
 			}
-		case "fast-bucket":
+		case "fast":
 			if d.NodeID == nil || *d.NodeID != fastNodeID {
-				t.Errorf("fast-bucket drive should attach to the fast node")
+				t.Errorf("fast drive should attach to the fast node")
 			}
 			if d.DriveType != "nvme" {
-				t.Errorf("fast-bucket drive should be nvme, got %q", d.DriveType)
+				t.Errorf("fast drive should be nvme, got %q", d.DriveType)
 			}
 		default:
-			t.Errorf("unexpected bucket %q", d.MinioBucket)
+			t.Errorf("unexpected drive label %q", d.Label)
 		}
 	}
 }

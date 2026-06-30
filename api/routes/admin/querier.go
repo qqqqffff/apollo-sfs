@@ -42,14 +42,20 @@ type AdminQuerier interface {
 	RenameServer(ctx context.Context, id uuid.UUID, name string) error
 	GetServer(ctx context.Context, id uuid.UUID) (*models.Server, error)
 	GetServerByEndpoint(ctx context.Context, endpoint string) (*models.Server, error)
+	ListServers(ctx context.Context) ([]models.Server, error)
+	DeleteServer(ctx context.Context, id uuid.UUID) error
 	GetDrive(ctx context.Context, id uuid.UUID) (*models.Drive, error)
+	ListDrives(ctx context.Context, serverID uuid.UUID) ([]models.Drive, error)
 	CreateDrive(ctx context.Context, p db.CreateDriveParams) (*models.Drive, error)
 	UpdateDrive(ctx context.Context, id uuid.UUID, p db.UpdateDriveParams) (*models.Drive, error)
 	UpsertDrive(ctx context.Context, p db.UpsertDriveParams) (*models.Drive, error)
+	AdoptNodeDrive(ctx context.Context, serverID, nodeID uuid.UUID, p db.UpsertDriveParams) (*models.Drive, error)
+	ReassignDriveToServer(ctx context.Context, driveID, serverID uuid.UUID, nodeID *uuid.UUID) error
 	DeleteDrive(ctx context.Context, id uuid.UUID) error
 	DeactivateMissingDrives(ctx context.Context, serverID uuid.UUID, keepIDs []uuid.UUID) error
 	UpdateDriveCapacity(ctx context.Context, id uuid.UUID, capacityBytes int64) (*models.Drive, error)
 	AutoSyncDriveCapacities(ctx context.Context, capacityBytes int64) error
+	ListAllNodeDisks(ctx context.Context) ([]models.NodeDisk, error)
 
 	// Nodes (storage-node layer between servers and drives)
 	GetNodeSummaries(ctx context.Context) ([]models.NodeSummary, error)

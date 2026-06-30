@@ -214,3 +214,14 @@ func (q *Queries) RenameServer(ctx context.Context, id uuid.UUID, name string) e
 	}
 	return nil
 }
+
+// DeleteServer removes a server row. Its nodes (and their node_disks) cascade via
+// the FK; drives FK-restrict, so the caller must first reassign or remove every
+// drive of the server. Used by the sync to retire stale per-tier servers once the
+// cluster has been collapsed onto a single server.
+func (q *Queries) DeleteServer(ctx context.Context, id uuid.UUID) error {
+	if _, err := q.db.ExecContext(ctx, `DELETE FROM servers WHERE id = $1`, id); err != nil {
+		return fmt.Errorf("DeleteServer: %w", err)
+	}
+	return nil
+}

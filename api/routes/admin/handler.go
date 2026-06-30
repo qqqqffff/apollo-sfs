@@ -36,6 +36,11 @@ type Handler struct {
 	minioAccessKey string
 	minioSecretKey string
 	minioUseSSL    bool
+	// minioBucketName is the configured shared bucket each MinIO instance hosts
+	// (MINIO_BUCKET_NAME). The sync reconciles one drive per tier against this
+	// bucket rather than enumerating every bucket (which surfaces user
+	// sub-directories as phantom drives).
+	minioBucketName string
 	// diskStatsPath is the filesystem path used to auto-detect drive capacity
 	// for the sync-capacity endpoint (e.g. "/data" inside the container).
 	diskStatsPath string
@@ -89,6 +94,8 @@ type InfraSyncConfig struct {
 	MinIOAccessKey string
 	MinIOSecretKey string
 	MinIOUseSSL    bool
+	// MinIOBucketName is the shared bucket each MinIO instance hosts (MINIO_BUCKET_NAME).
+	MinIOBucketName string
 	// StandardEndpoint is the standard-tier MinIO endpoint (MINIO_STANDARD_ENDPOINT),
 	// reachable with the same root credentials. Empty for single-instance deployments.
 	StandardEndpoint string
@@ -103,5 +110,6 @@ func (h *Handler) ConfigureInfraSync(c InfraSyncConfig) {
 	h.minioAccessKey = c.MinIOAccessKey
 	h.minioSecretKey = c.MinIOSecretKey
 	h.minioUseSSL = c.MinIOUseSSL
+	h.minioBucketName = c.MinIOBucketName
 	h.minioStandardEndpoint = c.StandardEndpoint
 }

@@ -288,11 +288,10 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
     // window.open once the user gesture has been consumed by a prior await.
     let photosPopup: Window | null = null
     if (selection.photos) {
-      photosPopup = window.open(
-        'about:blank',
-        'google-photos-picker',
-        'width=720,height=640,left=200,top=100,menubar=no,toolbar=no,resizable=yes',
-      )
+      // Open as a new tab (_blank, no features string) rather than a popup window.
+      // Chrome almost never blocks tab opens from user gestures, whereas popup
+      // windows (non-empty features string) are aggressively blocked.
+      photosPopup = window.open('about:blank', '_blank')
     }
 
     googleCancelRef.current = () => {

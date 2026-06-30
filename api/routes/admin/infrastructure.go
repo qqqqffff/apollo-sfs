@@ -32,7 +32,14 @@ func (h *Handler) GetInfrastructure(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not retrieve infrastructure"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"nodes": nodes, "drives": summaries})
+	// Physical disks (per node) are nested under each node's logical drive so a
+	// pooled drive's individual disks (and the manager's HDD) are visible.
+	disks, err := h.queries.ListAllNodeDisks(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not retrieve infrastructure"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"nodes": nodes, "drives": summaries, "disks": disks})
 }
 
 // GetCapacity handles GET /api/v1/admin/system/capacity.

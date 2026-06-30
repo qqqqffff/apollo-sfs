@@ -88,6 +88,7 @@ func (h *Handler) SyncInfrastructure(c *gin.Context) {
 	// rest inherit the server's endpoint.
 	keepNodes := make([]uuid.UUID, 0, len(swarmNodes))
 	nodeByTier := make(map[string]*models.Node)
+	nodeByHostname := make(map[string]*models.Node)
 	var firstNode *models.Node
 	for _, sn := range swarmNodes {
 		role := "worker"
@@ -134,11 +135,61 @@ func (h *Handler) SyncInfrastructure(c *gin.Context) {
 			firstNode = node
 		}
 		nodeByTier[tier] = node
+		nodeByHostname[node.Hostname] = node
 	}
 
-	// 5. Reconcile drives from each MinIO instance's buckets, attaching them to
-	// the node that fronts that tier (falling back to the first node).
-	keepDrives := make([]uuid.UUID, 0)
+	// 4b. Collapse any stale per-tier servers (left over from the old
+	// one-server-per-endpoint model) onto this single cluster server: migrate each
+	// stale server's drives to the matching cluster node and delete the emptied
+	// server, so the metrics view shows a single cluster card. Drives carry files
+	// and user allocations, so they are moved (never dropped); doing this before
+	// the per-tier drive reconcile lets the upsert adopt a migrated real drive in
+	// place rather than creating a duplicate.
+	allServers, err := h.queries.ListServers(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not list servers"})
+		return
+	}
+	for i := range allServers {
+		s := &allServers[i]
+		if s.ID == server.ID {
+			continue
+		}
+		staleDrives, err := h.queries.ListDrives(ctx, s.ID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "could not list stale drives"})
+			return
+		}
+		for _, d := range staleDrives {
+			var clusterNodeID *uuid.UUID
+			if d.NodeID != nil {
+				if old, err := h.queries.GetNode(ctx, *d.NodeID); err == nil && old != nil {
+					if cn, ok := nodeByHostname[old.Hostname]; ok {
+						id := cn.ID
+						clusterNodeID = &id
+					}
+				}
+			}
+			if err := h.queries.ReassignDriveToServer(ctx, d.ID, server.ID, clusterNodeID); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "could not migrate stale drive"})
+				return
+			}
+		}
+		if err := h.queries.DeleteServer(ctx, s.ID); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "could not retire stale server"})
+			return
+		}
+		summary.Pruned++
+	}
+
+	// 5. Reconcile exactly ONE drive per tier against the configured shared bucket
+	// (h.minioBucketName), attached to the node that fronts that tier (falling back
+	// to the first node). Enumerating MinIO buckets surfaced per-user
+	// sub-directories as phantom drives and recorded the pooled drive at the wrong
+	// level; one drive per tier matches the real topology. Adopt the node's
+	// existing drive in place when possible so its files/allocations are preserved
+	// and a mis-levelled pooled drive is corrected rather than duplicated.
+	keepDrives := make([]uuid.UUID, 0, len(instances))
 	for _, inst := range instances {
 		info, err := h.storage.Inspect(ctx, inst.endpoint, h.minioAccessKey, h.minioSecretKey, h.minioUseSSL)
 		if err != nil {
@@ -153,28 +204,33 @@ func (h *Handler) SyncInfrastructure(c *gin.Context) {
 		if node == nil {
 			node = firstNode
 		}
-		var nodeID *uuid.UUID
-		if node != nil {
-			id := node.ID
-			nodeID = &id
+		if node == nil {
+			continue // no swarm nodes discovered; nothing to attach the drive to
 		}
-		for _, bucket := range info.Buckets {
-			drive, err := h.queries.UpsertDrive(ctx, db.UpsertDriveParams{
-				ServerID:      server.ID,
-				NodeID:        nodeID,
-				Label:         bucket,
-				CapacityBytes: info.TotalBytes,
-				MinioBucket:   bucket,
-				DriveType:     driveType,
-				IsActive:      true,
-			})
+		nodeID := node.ID
+		params := db.UpsertDriveParams{
+			ServerID:      server.ID,
+			NodeID:        &nodeID,
+			Label:         inst.tier,
+			CapacityBytes: info.TotalBytes,
+			MinioBucket:   h.minioBucketName,
+			DriveType:     driveType,
+			IsActive:      true,
+		}
+		drive, err := h.queries.AdoptNodeDrive(ctx, server.ID, nodeID, params)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "could not sync drive"})
+			return
+		}
+		if drive == nil {
+			drive, err = h.queries.UpsertDrive(ctx, params)
 			if err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "could not sync drive"})
 				return
 			}
-			keepDrives = append(keepDrives, drive.ID)
-			summary.Drives++
 		}
+		keepDrives = append(keepDrives, drive.ID)
+		summary.Drives++
 	}
 
 	// 6. Retire nodes/drives that have disappeared from the swarm / MinIO.

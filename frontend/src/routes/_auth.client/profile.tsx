@@ -2,6 +2,7 @@ import { createFileRoute, useNavigate } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { MdCheck, MdClose, MdPhotoLibrary, MdRocketLaunch, MdKey, MdStorage, MdVpnKey, MdCloudUpload, MdSpeed } from 'react-icons/md'
+import { FaGoogle, FaApple } from 'react-icons/fa'
 import { meQueryOptions, changePassword, preferencesQueryOptions, updatePreferences } from '../../api/me'
 import { listRoot } from '../../api/folders'
 import { ApiError } from '../../api/client'
@@ -122,6 +123,8 @@ function RouteComponent() {
           <p className="text-xs text-gray-400 mt-1.5">{pct.toFixed(1)}% used</p>
         </div>
       </div>
+
+      <LinkedAccountsCard linkedProviders={user.linked_providers} />
 
       <PremiumCard
         isPremium={user.is_premium}
@@ -270,6 +273,36 @@ function MediaAutoUpload() {
           {saved && <p className="text-xs text-green-600">Preference saved.</p>}
         </div>
       )}
+    </div>
+  )
+}
+
+function LinkedAccountsCard({ linkedProviders }: { linkedProviders: string[] }) {
+  const providers = [
+    { key: 'google', label: 'Google', icon: <FaGoogle className="text-[#4285F4]" /> },
+    { key: 'apple',  label: 'Apple',  icon: <FaApple  className="text-gray-900" /> },
+  ]
+  return (
+    <div className="bg-white border border-gray-200 rounded-xl px-5 py-4">
+      <h3 className="text-sm font-semibold text-gray-800 mb-3">Linked accounts</h3>
+      <div className="flex flex-col divide-y divide-gray-100">
+        {providers.map(({ key, label, icon }) => {
+          const linked = linkedProviders.includes(key)
+          return (
+            <div key={key} className="flex items-center gap-3 py-3 first:pt-0 last:pb-0">
+              <span className="text-lg w-5 flex items-center justify-center shrink-0">{icon}</span>
+              <span className="text-sm text-gray-700 flex-1">{label}</span>
+              {linked ? (
+                <span className="flex items-center gap-1 text-xs font-medium text-green-600">
+                  <MdCheck className="shrink-0" /> Connected
+                </span>
+              ) : (
+                <span className="text-xs text-gray-400">Not connected</span>
+              )}
+            </div>
+          )
+        })}
+      </div>
     </div>
   )
 }

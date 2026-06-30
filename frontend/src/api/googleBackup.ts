@@ -58,6 +58,7 @@ declare global {
             client_id: string
             scope: string
             callback: (r: { access_token?: string; error?: string }) => void
+            error_callback?: (e: { type: string }) => void
           }) => { requestAccessToken: () => void }
         }
       }
@@ -93,6 +94,9 @@ export async function requestGoogleAccessToken(): Promise<string> {
         if (r.error || !r.access_token) reject(new Error(r.error ?? 'No access token'))
         else resolve(r.access_token!)
       },
+      // GIS fires error_callback (not callback) for popup_closed / popup_failed_to_open.
+      // Without this, a closed or errored popup leaves the promise pending forever.
+      error_callback: (e) => reject(new Error(e.type)),
     })
     client.requestAccessToken()
   })
@@ -216,28 +220,43 @@ export async function listPickedPhotos(sessionId: string, accessToken: string): 
 // Opens the Photos Picker in a browser popup. The popup shares the user's
 // Google session cookies naturally, so no re-authentication is needed.
 // Polls the session in the background until selection is complete or timed out.
-export async function pickGooglePhotosWeb(accessToken: string): Promise<GoogleBackupItem[]> {
+//
+// `popup` must be pre-opened synchronously (about:blank) before any async work
+// in the calling handler — browsers block window.open when the user gesture has
+// already been consumed by a prior await (e.g. the GIS token request).
+export async function pickGooglePhotosWeb(
+  accessToken: string,
+  popup: Window | null,
+  isCancelled: () => boolean,
+): Promise<GoogleBackupItem[]> {
+  if (!popup) {
+    throw new Error('Google Photos picker was blocked by your browser. Allow popups for this site and try again.')
+  }
+
   let session: PhotosPickerSession
   try {
     session = await createPhotosPickerSession(accessToken)
-  } catch { return [] }
+  } catch {
+    popup.close()
+    return []
+  }
 
-  const popup = window.open(
-    session.pickerUri,
-    'google-photos-picker',
-    'width=720,height=640,left=200,top=100,menubar=no,toolbar=no,resizable=yes',
-  )
+  if (isCancelled()) { popup.close(); return [] }
+
+  popup.location.href = session.pickerUri
 
   const deadline = Date.now() + session.timeoutMs
   let current = session
 
   while (!current.mediaItemsSet && Date.now() < deadline) {
+    if (isCancelled()) break
     await new Promise<void>((r) => setTimeout(r, current.pollIntervalMs))
-    if (popup?.closed) break
+    if (isCancelled()) break
+    if (popup.closed) break
     try { current = await getPhotosPickerSession(session.id, accessToken) } catch { break }
   }
 
-  popup?.close()
+  popup.close()
 
   if (current.mediaItemsSet) {
     try {

@@ -355,12 +355,10 @@ services:
       driver: json-file
       options: { max-size: "10m", max-file: "3" }
 
-  # ── Node metrics agent (one per node) ────────────────────────────────────────
-  # Global mode → a replica runs on EVERY node (manager + Pi worker). Each agent
-  # reads its host's CPU/memory/network/drive sensors and pushes them to the API,
-  # which aggregates the per-node view shown on the admin metrics page. Mounts are
-  # read-only; the agent identifies its node via the Swarm {{.Node.Hostname}} template.
-  node-agent:
+  # ── Node metrics agent — standard tier (manager, HDD) ───────────────────────
+  # Reads this node's CPU/memory/network/HDD sensors and pushes to the API.
+  # Only mounts paths that exist on the manager; see node-agent-fast for the Pi.
+  node-agent-standard:
     image: apollo-sfs-node-agent:latest
     environment:
       NODE_HOSTNAME: "{{.Node.Hostname}}"
@@ -369,16 +367,37 @@ services:
     volumes:
       - /sys:/sys:ro
       - /dev/disk/by-label:/dev/disk/by-label:ro
-      # Physical disks the agent reports capacity/temperature for (read-only). The
-      # agent reports EVERY mounted, labelled disk it can see here — list each one
-      # (per node) so pooled disks (e.g. nvme-01 + nvme-02) each report on their
-      # own. Both tiers are listed so the same stack works on manager and worker.
       - /srv/minio/hdd-01:/srv/minio/hdd-01:ro
+    networks: [app-network]
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.labels.tier == standard]
+      restart_policy:
+        condition: any
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  # ── Node metrics agent — fast tier (Pi 5, NVMe) ──────────────────────────────
+  # Reads the Pi's CPU/memory/network/NVMe sensors and pushes to the API.
+  # Only mounts paths that exist on the Pi; see node-agent-standard for the manager.
+  node-agent-fast:
+    image: apollo-sfs-node-agent:latest
+    environment:
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
+      API_INTERNAL_URL: http://api:8080
+      NODE_AGENT_TOKEN: ${NODE_AGENT_TOKEN}
+    volumes:
+      - /sys:/sys:ro
+      - /dev/disk/by-label:/dev/disk/by-label:ro
       - /home/apollo/apollo-sfs/minio/nvme-01:/home/apollo/apollo-sfs/minio/nvme-01:ro
       - /home/apollo/apollo-sfs/minio/nvme-02:/home/apollo/apollo-sfs/minio/nvme-02:ro
     networks: [app-network]
     deploy:
-      mode: global
+      replicas: 1
+      placement:
+        constraints: [node.labels.tier == fast]
       restart_policy:
         condition: any
     logging:

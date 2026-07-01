@@ -311,6 +311,7 @@ function StorageInfraCard() {
     }
   }, [settingPrimary, queryClient])
 
+  const allocatedBytes = breakdown?.quota_bytes ?? 0
   const ownedTypes = new Set(myServers.map((s) => s.drive_type))
   const showNvme = ownedTypes.size === 0 || ownedTypes.has('nvme')
   const showHdd = ownedTypes.size === 0 || ownedTypes.has('hdd')
@@ -400,6 +401,11 @@ function StorageInfraCard() {
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 mb-1.5">
                         <span className="text-sm font-medium text-gray-800">{srv.name}</span>
+                        <span className={`px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider rounded ${
+                          srv.drive_type === 'nvme' ? 'bg-blue-50 text-blue-600' : 'bg-amber-50 text-amber-600'
+                        }`}>
+                          {srv.drive_type === 'nvme' ? 'Fast' : 'Standard'}
+                        </span>
                         {srv.is_primary && (
                           <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider bg-blue-50 text-blue-600 rounded">
                             Primary
@@ -409,11 +415,11 @@ function StorageInfraCard() {
                       <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden mb-1.5">
                         <div
                           className={`h-full rounded-full transition-all ${srv.drive_type === 'nvme' ? 'bg-blue-500' : 'bg-amber-400'}`}
-                          style={{ width: `${Math.min(srv.drive_used_pct, 100)}%` }}
+                          style={{ width: `${allocatedBytes > 0 ? Math.min((srv.used_bytes / allocatedBytes) * 100, 100) : 0}%` }}
                         />
                       </div>
                       <p className="text-xs text-gray-400 m-0">
-                        {formatSize(srv.used_bytes)} stored · {srv.drive_used_pct}% full
+                        {formatSize(srv.used_bytes)} used of {formatSize(allocatedBytes)}
                         {srv.is_primary && (
                           primaryTesting
                             ? ' · Testing…'
@@ -444,7 +450,12 @@ function StorageInfraCard() {
       {breakdown?.server && (
         <div className="bg-white border border-gray-200 rounded-xl px-5 py-4">
           <div className="flex items-center justify-between mb-3">
-            <h3 className="text-sm font-semibold text-gray-800">Connection</h3>
+            <div className="min-w-0">
+              <h3 className="text-sm font-semibold text-gray-800">Connection</h3>
+              <p className="text-xs text-gray-400 m-0 mt-0.5 truncate">
+                Testing to <span className="font-medium text-gray-500">{breakdown.server.name}</span>
+              </p>
+            </div>
             <button
               onClick={runSpeed}
               disabled={speedLoading || speedRemaining <= 0}

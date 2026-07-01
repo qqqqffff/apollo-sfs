@@ -506,6 +506,67 @@ func (q *Queries) GetUserDrives(ctx context.Context, username, userID string) ([
 	return out, rows.Err()
 }
 
+// UserStorageAllocation describes one of a user's drive allocations enriched with
+// the server and node it lives on plus this user's bytes stored there. Backs the
+// admin per-user storage view (which servers/nodes a user's storage sits on).
+type UserStorageAllocation struct {
+	ServerID      uuid.UUID
+	ServerName    string
+	ServerState   string
+	NodeID        *uuid.UUID
+	NodeHostname  string // "" when the drive is not attached to a node
+	DriveID       uuid.UUID
+	DriveLabel    string
+	DriveType     string // "nvme" | "hdd"
+	CapacityBytes int64
+	UserUsedBytes int64 // this user's files on the drive
+	IsPrimary     bool
+}
+
+// GetUserStorageAllocations returns every drive a user is allocated to, joined to
+// its server and node, with this user's bytes on each. Primary first.
+// username is the users PK (stored in user_drive_allocations.user_id); userID is
+// the Keycloak subject UUID stored as files.user_id.
+func (q *Queries) GetUserStorageAllocations(ctx context.Context, username, userID string) ([]UserStorageAllocation, error) {
+	rows, err := q.db.QueryContext(ctx, `
+		SELECT
+			s.id, s.name, s.state,
+			d.node_id, COALESCE(n.hostname, ''),
+			d.id, d.label, d.drive_type, d.capacity_bytes,
+			COALESCE(uu.bytes, 0) AS user_used,
+			uda.is_primary
+		FROM user_drive_allocations uda
+		JOIN drives d ON d.id = uda.drive_id
+		JOIN servers s ON s.id = d.server_id
+		LEFT JOIN nodes n ON n.id = d.node_id
+		LEFT JOIN (
+			SELECT drive_id, SUM(size_bytes) AS bytes
+			FROM files WHERE user_id = $2::uuid GROUP BY drive_id
+		) uu ON uu.drive_id = d.id
+		WHERE uda.user_id = $1
+		ORDER BY uda.is_primary DESC, s.name ASC
+	`, username, userID)
+	if err != nil {
+		return nil, fmt.Errorf("GetUserStorageAllocations: %w", err)
+	}
+	defer rows.Close()
+
+	var out []UserStorageAllocation
+	for rows.Next() {
+		var a UserStorageAllocation
+		if err := rows.Scan(
+			&a.ServerID, &a.ServerName, &a.ServerState,
+			&a.NodeID, &a.NodeHostname,
+			&a.DriveID, &a.DriveLabel, &a.DriveType, &a.CapacityBytes,
+			&a.UserUsedBytes, &a.IsPrimary,
+		); err != nil {
+			return nil, fmt.Errorf("GetUserStorageAllocations scan: %w", err)
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
 // AllocateUserToDrive sets a user's PRIMARY drive (used at registration and when
 // switching the primary). It clears any existing primary first, then upserts the
 // target as primary, all in one transaction to satisfy the one-primary index.

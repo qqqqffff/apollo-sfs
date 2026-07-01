@@ -17,6 +17,10 @@ import { useNotification } from '../../context/NotificationContext'
 import type { ServerExpansionRequest } from '../../types/api'
 
 export const Route = createFileRoute('/_auth/admin/interest')({
+  validateSearch: (search: Record<string, unknown>): { tab?: 'interest' | 'expansion' } => {
+    const tab = search.tab === 'expansion' || search.tab === 'interest' ? search.tab : undefined
+    return { tab }
+  },
   component: RouteComponent,
 })
 
@@ -34,7 +38,8 @@ const QUOTA_OPTIONS = [
 type Tab = 'interest' | 'expansion'
 
 function RouteComponent() {
-  const [activeTab, setActiveTab] = useState<Tab>('interest')
+  const { tab } = Route.useSearch()
+  const [activeTab, setActiveTab] = useState<Tab>(tab ?? 'interest')
 
   return (
     <div>

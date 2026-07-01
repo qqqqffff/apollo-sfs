@@ -132,6 +132,23 @@ func (q *Queries) GetExpansionRequestByID(ctx context.Context, id uuid.UUID) (*m
 	return r, nil
 }
 
+// CountActiveExpansionRequests returns how many in-flight expansion requests the
+// user has — those still awaiting user payment or admin fulfilment: 'opened'
+// (deposit paid, awaiting capacity) and 'expanded' (capacity added, awaiting the
+// remaining balance). Terminal states (completed/refunded/expired) are excluded.
+// Backs the admin quick-link to the requests page.
+func (q *Queries) CountActiveExpansionRequests(ctx context.Context, username string) (int, error) {
+	var n int
+	err := q.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM server_expansion_requests
+		WHERE username = $1 AND status IN ('opened', 'expanded')
+	`, username).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("CountActiveExpansionRequests: %w", err)
+	}
+	return n, nil
+}
+
 // GetExpansionRequestByPayPalOrderID loads a request by its PayPal order ID.
 func (q *Queries) GetExpansionRequestByPayPalOrderID(ctx context.Context, orderID string) (*models.ServerExpansionRequest, error) {
 	row := q.db.QueryRowContext(ctx, `

@@ -6,6 +6,12 @@ const PHOTOS_PICKER_API = 'https://photospicker.googleapis.com/v1'
 const MAX_DRIVE_FILES   = 500
 const GOOGLE_CLIENT_ID  = '550302272436-0l08i22en4eifho0msrr07lkqr0t5ouj.apps.googleusercontent.com'
 const SCOPES = [
+  // openid + email let us read the authorizing account's address (userinfo) so we
+  // can pin the Photos Picker tab to that same account — otherwise a user signed
+  // into multiple Google accounts picks from the wrong library and clicking Done
+  // fails with "Couldn't add photos" (the session is bound to the token's account).
+  'openid',
+  'email',
   'https://www.googleapis.com/auth/drive',
   'https://www.googleapis.com/auth/photospicker.mediaitems.readonly',
 ].join(' ')
@@ -111,6 +117,17 @@ async function gFetch(url: string, accessToken: string): Promise<any> {
     throw new Error(`${res.status}: ${body}`)
   }
   return res.json()
+}
+
+// Email of the account that authorized `accessToken`. Used to pin the Photos
+// Picker tab to the correct account via the `authuser` URL parameter.
+export async function getGoogleUserEmail(accessToken: string): Promise<string | null> {
+  try {
+    const data = await gFetch('https://www.googleapis.com/oauth2/v3/userinfo', accessToken)
+    return typeof data?.email === 'string' ? data.email : null
+  } catch {
+    return null
+  }
 }
 
 function parseDurationMs(d: string | undefined, fallback: number): number {
@@ -228,6 +245,7 @@ export async function pickGooglePhotosWeb(
   accessToken: string,
   popup: Window | null,
   isCancelled: () => boolean,
+  accountEmail?: string | null,
 ): Promise<GoogleBackupItem[]> {
   if (!popup) {
     throw new Error('Could not open a new tab for Google Photos. Allow popups / new tabs for this site in your browser settings and try again.')
@@ -243,7 +261,14 @@ export async function pickGooglePhotosWeb(
 
   if (isCancelled()) { popup.close(); return [] }
 
-  popup.location.href = session.pickerUri
+  // Pin the picker to the account that authorized the token. Without this the tab
+  // opens under the browser's default Google account, which — for multi-account
+  // users — differs from the session's account and makes clicking Done fail with
+  // "Couldn't add photos". `authuser` selects the matching account; for
+  // single-account users it resolves to the same account (no behavior change).
+  popup.location.href = accountEmail
+    ? `${session.pickerUri}${session.pickerUri.includes('?') ? '&' : '?'}authuser=${encodeURIComponent(accountEmail)}`
+    : session.pickerUri
 
   const deadline = Date.now() + session.timeoutMs
   let current = session

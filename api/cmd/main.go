@@ -500,6 +500,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 			adminGroup.GET("/users/:user_id", adminHandler.GetUser)
 			adminGroup.PATCH("/users/:user_id/quota", adminHandler.UpdateUserQuota)
 			adminGroup.PATCH("/users/:user_id/username", adminHandler.UpdateUsername)
+			adminGroup.GET("/users/:user_id/storage", h.AdminGetUserStorage)
 			adminGroup.GET("/users/:user_id/folders", h.AdminListUserFolders)
 			adminGroup.GET("/users/:user_id/folders/:folder_id", h.AdminGetUserFolder)
 			adminGroup.GET("/users/:user_id/favorites", h.AdminGetUserFavorites)

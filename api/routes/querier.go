@@ -17,6 +17,11 @@ type Querier interface {
 	// Me
 	GetUserByUsername(ctx context.Context, username string) (*models.User, error)
 
+	// Admin per-user storage view
+	GetUserStorageBreakdown(ctx context.Context, userID string) (db.UserStorageBreakdown, error)
+	GetUserStorageAllocations(ctx context.Context, username, userID string) ([]db.UserStorageAllocation, error)
+	CountActiveExpansionRequests(ctx context.Context, username string) (int, error)
+
 	// User preferences
 	GetUserPreferences(ctx context.Context, userID string) (*models.UserPreferences, error)
 	SetMediaAutouploadFolder(ctx context.Context, userID string, folderID *uuid.UUID) (*models.UserPreferences, error)

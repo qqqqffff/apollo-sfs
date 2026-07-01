@@ -1,10 +1,11 @@
-import { createFileRoute, useNavigate } from '@tanstack/react-router'
+import { createFileRoute, useNavigate, Link } from '@tanstack/react-router'
 import { useRef, useState } from 'react'
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { MdCheck, MdClose, MdEdit, MdInfoOutline, MdBlock, MdLockClock, MdLockOpen } from 'react-icons/md'
+import { MdCheck, MdClose, MdEdit, MdInfoOutline, MdBlock, MdLockClock, MdLockOpen, MdStorage, MdOpenInNew, MdStar } from 'react-icons/md'
 import {
   adminUsersInfiniteQueryOptions,
   getAdminAuditLogs,
+  getAdminUserStorage,
   logImpersonationAccess,
   updateUserQuota,
   updateUsername,
@@ -12,6 +13,7 @@ import {
   suspendUser,
   pardonUser,
 } from '../../api/admin'
+import type { AdminUserStorage } from '../../api/admin'
 import { ApiError } from '../../api/client'
 import { meQueryOptions } from '../../api/me'
 import type { AuditLog, User, UserBan } from '../../types/api'
@@ -146,6 +148,157 @@ function AuditLogModal({ username, onClose }: { username: string; onClose: () =>
   )
 }
 
+// ── Per-user storage modal ────────────────────────────────────────────────────
+
+function fmtGB(bytes: number): string {
+  return `${(bytes / GB).toFixed(2)} GB`
+}
+
+function TierBar({ label, bytes, total, colour }: { label: string; bytes: number; total: number; colour: string }) {
+  const pct = total > 0 ? Math.min(100, Math.round((bytes / total) * 100)) : 0
+  return (
+    <div>
+      <div className="flex items-center justify-between text-xs mb-1">
+        <span className="font-medium text-gray-700">{label}</span>
+        <span className="text-gray-500">{fmtGB(bytes)}</span>
+      </div>
+      <div className="h-2 w-full rounded-full bg-gray-100 overflow-hidden">
+        <div className={`h-full rounded-full ${colour}`} style={{ width: `${pct}%` }} />
+      </div>
+    </div>
+  )
+}
+
+function StorageModal({ username, onClose }: { username: string; onClose: () => void }) {
+  const { data, isLoading, error } = useQuery({
+    queryKey: ['admin', 'user-storage', username],
+    queryFn: () => getAdminUserStorage(username),
+  })
+  const s = data as AdminUserStorage | undefined
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+      onClick={onClose}
+    >
+      <div
+        className="bg-white rounded-xl shadow-2xl w-full max-w-xl mx-4 flex flex-col max-h-[85vh]"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
+          <h3 className="text-sm font-semibold text-gray-800">
+            Storage — <span className="text-blue-600">{username}</span>
+          </h3>
+          <button
+            onClick={onClose}
+            className="text-gray-400 hover:text-gray-600 cursor-pointer bg-transparent border-0 p-0"
+          >
+            <MdClose className="text-lg" />
+          </button>
+        </div>
+
+        <div className="overflow-y-auto flex-1 px-5 py-4">
+          {isLoading && <p className="text-sm text-gray-400 py-4 text-center">Loading…</p>}
+          {error && <p className="text-sm text-red-500 py-4 text-center">Failed to load storage details.</p>}
+
+          {s && (
+            <div className="space-y-5">
+              {/* Active requests quick-link */}
+              {s.active_request_count > 0 && (
+                <Link
+                  to="/admin/interest"
+                  search={{ tab: 'expansion' }}
+                  className="flex items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2.5 no-underline hover:bg-amber-100 transition-colors"
+                >
+                  <span className="text-sm font-medium text-amber-800">
+                    {s.active_request_count} active expansion request{s.active_request_count === 1 ? '' : 's'}
+                  </span>
+                  <span className="inline-flex items-center gap-1 text-xs font-semibold text-amber-700 whitespace-nowrap">
+                    View requests <MdOpenInNew className="text-sm" />
+                  </span>
+                </Link>
+              )}
+
+              {/* Tier usage */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="rounded-lg border border-gray-100 p-3 space-y-2">
+                  <TierBar label="Fast (NVMe)" bytes={s.nvme_bytes} total={s.used_bytes || 1} colour="bg-emerald-500" />
+                </div>
+                <div className="rounded-lg border border-gray-100 p-3 space-y-2">
+                  <TierBar label="Standard (HDD)" bytes={s.hdd_bytes} total={s.used_bytes || 1} colour="bg-sky-500" />
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between text-xs text-gray-500 px-1">
+                <span>Total used: <span className="font-medium text-gray-700">{fmtGB(s.used_bytes)}</span></span>
+                <span>Quota: <span className="font-medium text-gray-700">{fmtGB(s.quota_bytes)}</span></span>
+              </div>
+
+              {/* Allocations */}
+              <div>
+                <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">
+                  Servers &amp; nodes
+                </h4>
+                {s.allocations.length === 0 ? (
+                  <p className="text-sm text-gray-400">No storage allocated.</p>
+                ) : (
+                  <div className="rounded-lg border border-gray-100 overflow-hidden">
+                    <table className="w-full text-sm border-collapse">
+                      <thead>
+                        <tr className="bg-gray-50 border-b border-gray-100 text-xs text-gray-500 uppercase tracking-wider">
+                          <th className="text-left px-3 py-2 font-semibold">Server</th>
+                          <th className="text-left px-3 py-2 font-semibold">Node</th>
+                          <th className="text-left px-3 py-2 font-semibold">Tier</th>
+                          <th className="text-right px-3 py-2 font-semibold">Used</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-50">
+                        {s.allocations.map((a) => (
+                          <tr key={a.drive_id}>
+                            <td className="px-3 py-2">
+                              <div className="flex items-center gap-1.5">
+                                <span className="font-medium text-gray-800">{a.server_name}</span>
+                                {a.is_primary && (
+                                  <span title="Primary upload target" className="text-amber-500">
+                                    <MdStar className="text-sm" />
+                                  </span>
+                                )}
+                              </div>
+                              <span className="text-xs text-gray-400">{a.drive_label}</span>
+                            </td>
+                            <td className="px-3 py-2 text-gray-600">
+                              {a.node_hostname || <span className="text-gray-300">—</span>}
+                            </td>
+                            <td className="px-3 py-2">
+                              <span
+                                className={`text-xs font-medium px-2 py-0.5 rounded-full ${
+                                  a.drive_type === 'nvme'
+                                    ? 'bg-emerald-100 text-emerald-700'
+                                    : 'bg-sky-100 text-sky-700'
+                                }`}
+                              >
+                                {a.drive_type === 'nvme' ? 'Fast' : 'Standard'}
+                              </span>
+                            </td>
+                            <td className="px-3 py-2 text-right text-gray-600 whitespace-nowrap">
+                              {fmtGB(a.used_bytes)}
+                              <span className="text-gray-300"> / {fmtGB(a.capacity_bytes)}</span>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ── Ban status badge ──────────────────────────────────────────────────────────
 
 function BanBadge({ ban }: { ban: UserBan | null | undefined }) {
@@ -178,6 +331,7 @@ function RouteComponent() {
   const { data: me } = useQuery(meQueryOptions)
 
   const [auditUser, setAuditUser] = useState<string | null>(null)
+  const [storageUser, setStorageUser] = useState<string | null>(null)
   const [banModal, setBanModal] = useState<BanModal | null>(null)
 
   function viewUserFiles(u: User) {
@@ -405,6 +559,13 @@ function RouteComponent() {
                   <td className="px-4 py-3">
                     <div className="flex items-center gap-1.5">
                       <button
+                        onClick={() => setStorageUser(u.username)}
+                        title="View storage details"
+                        className="text-gray-400 hover:text-blue-600 cursor-pointer bg-transparent border-0 p-0 transition-colors"
+                      >
+                        <MdStorage className="text-base" />
+                      </button>
+                      <button
                         onClick={() => setAuditUser(u.username)}
                         title="View audit log"
                         className="text-gray-400 hover:text-blue-600 cursor-pointer bg-transparent border-0 p-0 transition-colors"
@@ -482,6 +643,10 @@ function RouteComponent() {
 
       {auditUser && (
         <AuditLogModal username={auditUser} onClose={() => setAuditUser(null)} />
+      )}
+
+      {storageUser && (
+        <StorageModal username={storageUser} onClose={() => setStorageUser(null)} />
       )}
 
       {banModal && (

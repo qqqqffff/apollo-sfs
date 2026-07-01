@@ -42,6 +42,35 @@ export function logImpersonationAccess(username: string) {
   return post<{ ok: boolean }>(`/admin/users/${encodeURIComponent(username)}/audit-logs`, {})
 }
 
+// ── Per-user storage view ────────────────────────────────────────────────────
+
+export interface AdminUserStorageAllocation {
+  server_id: string
+  server_name: string
+  server_state: string
+  node_id: string
+  node_hostname: string
+  drive_id: string
+  drive_label: string
+  drive_type: 'nvme' | 'hdd'
+  capacity_bytes: number
+  used_bytes: number
+  is_primary: boolean
+}
+
+export interface AdminUserStorage {
+  quota_bytes: number
+  used_bytes: number
+  nvme_bytes: number
+  hdd_bytes: number
+  allocations: AdminUserStorageAllocation[]
+  active_request_count: number
+}
+
+export function getAdminUserStorage(username: string) {
+  return get<AdminUserStorage>(`/admin/users/${encodeURIComponent(username)}/storage`)
+}
+
 // ── Users ──────────────────────────────────────────────────────────────────────
 
 export function listUsers(cursor?: string, limit?: number) {

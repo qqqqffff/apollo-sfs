@@ -40,9 +40,11 @@ import { useFavorites } from '../../hooks/useFavorites'
 import { useImpersonation } from '../../context/ImpersonationContext'
 import { GoogleServiceSelectModal } from '../../components/GoogleServiceSelectModal'
 import { GoogleBackupModal } from '../../components/GoogleBackupModal'
+import { GooglePhotosLoadingModal } from '../../components/GooglePhotosLoadingModal'
 import type { GoogleServiceSelection } from '../../components/GoogleServiceSelectModal'
 import {
   requestGoogleAccessToken,
+  getGoogleUserEmail,
   listGoogleDriveFiles,
   pickGooglePhotosWeb,
   uploadGoogleEntries,
@@ -138,6 +140,7 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
   // ── Google Backup state ────────────────────────────────────────────────────
   const [serviceSelectOpen, setServiceSelectOpen]   = useState(false)
   const [googleLoading, setGoogleLoading]           = useState(false)
+  const [googleLoadingMsg, setGoogleLoadingMsg]     = useState('Selecting photos to upload')
   const [googleError, setGoogleError]               = useState<string | null>(null)
   const [googleAccessToken, setGoogleAccessToken]   = useState('')
   const [googleBackupItems, setGoogleBackupItems]   = useState<GoogleBackupItem[] | null>(null)
@@ -280,6 +283,11 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
 
   async function handleGoogleServiceContinue(selection: GoogleServiceSelection) {
     setServiceSelectOpen(false)
+    setGoogleLoadingMsg(
+      selection.photos && !selection.drive ? 'Selecting photos to upload'
+      : selection.photos                    ? 'Selecting files & photos to upload'
+      :                                       'Loading your Drive files',
+    )
     setGoogleLoading(true)
     setGoogleError(null)
 
@@ -303,10 +311,14 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
       const token = await requestGoogleAccessToken()
       if (cancelled) return
       setGoogleAccessToken(token)
+      // Pin the Photos picker to the account that just authorized (avoids the
+      // multi-account "Couldn't add photos" failure). Best-effort; null is fine.
+      const accountEmail = selection.photos ? await getGoogleUserEmail(token) : null
+      if (cancelled) return
       const driveItems = selection.drive  ? await listGoogleDriveFiles(token) : []
       if (cancelled) return
       const photoItems = selection.photos
-        ? await pickGooglePhotosWeb(token, photosPopup, () => cancelled)
+        ? await pickGooglePhotosWeb(token, photosPopup, () => cancelled, accountEmail)
         : []
       if (cancelled) return
       const all = [...driveItems, ...photoItems]
@@ -710,6 +722,14 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
         <GoogleServiceSelectModal
           onCancel={() => setServiceSelectOpen(false)}
           onContinue={handleGoogleServiceContinue}
+        />
+      )}
+
+      {/* Google Backup — preparing / awaiting Photos selection */}
+      {googleLoading && !googleBackupItems && (
+        <GooglePhotosLoadingModal
+          message={googleLoadingMsg}
+          onCancel={handleCancelGoogleLoading}
         />
       )}
 

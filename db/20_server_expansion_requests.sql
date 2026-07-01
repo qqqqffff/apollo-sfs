@@ -28,6 +28,9 @@ CREATE TABLE server_expansion_requests (
     expires_at           TIMESTAMPTZ NOT NULL,
     created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     completed_at         TIMESTAMPTZ,
+    -- payment_due_at is set when admin marks request 'expanded'; user has 3 days
+    -- to pay the remaining 50% balance before the request expires.
+    payment_due_at       TIMESTAMPTZ,
     refund_id            TEXT,
     cancellation_reason  TEXT
 );

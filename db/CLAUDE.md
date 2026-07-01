@@ -7,58 +7,70 @@ PostgreSQL 16 with the `pgcrypto` extension. Two separate database instances run
 | `db-app` | PostgreSQL 16 Alpine | Go API (`POSTGRES_APP_*`) |
 | `db-keycloak` | PostgreSQL 16 Alpine | Keycloak (`POSTGRES_KC_*`) |
 
-The Go API automatically runs all pending migrations on startup. Do not apply migrations manually in production.
-
 ## Schema Files
 
-Files in `/db/` are numbered and applied in order during initial container creation. Migration changes go in `/db/migrations/` instead.
+Files in `db/` are numbered and applied in order during initial container creation (mounted at `/docker-entrypoint-initdb.d`). Each file defines one table. The numbering reflects creation order — dependencies appear before dependents.
 
 | File | Table(s) | Notes |
 |------|---------|-------|
 | `00_extensions.sql` | — | Enables `pgcrypto` (UUID, crypto functions) |
 | `01_master_keys.sql` | `master_keys` | Versioned master encryption keys |
-| `02_key_rotation_log.sql` | `key_rotation_log` | Tracks which key version each user's key is wrapped under |
+| `02_key_rotation_log.sql` | `key_rotation_log` | Audit log for master key rotation events |
 | `03_users.sql` | `users` | Accounts; `username` = Keycloak UUID (sub claim) |
-| `04_folders.sql` | `folders` | Recursive folder hierarchy |
-| `05_files.sql` | `files`, `video_variants` | File metadata, encryption nonces, video transcode status |
-| `06_invitations.sql` | `invitations` | Token-based invite flow |
-| `07_email_queue.sql` | `email_queue` | Async outbound email delivery |
-| `08_server_metrics_snapshots.sql` | `server_metrics_snapshots` | Historical metric data |
-| `09_favorites.sql` | `favorites` | Per-user file/folder favorites |
-| `10_banned_ips.sql` | `banned_ips` | Fail2ban records IPs here via `record-ban.sh` |
-| `11_servers.sql` | `servers` | Storage server topology (manager vs. Pi 5) |
-| `12_drives.sql` | `drives` | Individual drives per server |
-| `13_user_drive_allocations.sql` | `user_drive_allocations` | Per-user quota per drive |
-| `14_interest_form.sql` | `interest_form` | Early access signups |
-| `15_alarm_settings.sql` | `alarm_settings` | Per-user notification/alert preferences |
-| `16_audit_logs.sql` | `audit_logs` | Activity audit trail |
-| `17_user_bans.sql` | `user_bans` | User suspension records |
-| `18_user_preferences.sql` | `user_preferences` | UI preferences (theme, sort order, etc.) |
-| `19_collection_items.sql` | `collection_items` | Media collections (albums, galleries) |
-| `20_api_keys.sql` | `api_keys` | SFS API credentials (argon2id + pepper) |
-| `21_payments.sql` | `payments` | PayPal order records |
-| `22_inbound_emails.sql` | `inbound_emails` | Parsed inbound email storage |
-| `23_math_game_scores.sql` | `math_game_scores` | Gamification leaderboard |
-| `24_devices.sql` | `devices` | Mobile device registration |
-| `25_deleted_file_log.sql` | `deleted_file_log` | Soft-delete audit trail |
-| `26_storage_orders.sql` | `storage_orders` | Tier upgrade order records |
-| `27_server_expansion_requests.sql` | `server_expansion_requests` | Infrastructure capacity requests |
-| `28_nodes.sql` | `nodes` | Individual storage node metadata |
+| `04_servers.sql` | `servers` | Storage server registry |
+| `05_nodes.sql` | `nodes` | Per-server Swarm nodes (server → node → drive topology) |
+| `06_drives.sql` | `drives` | Individual MinIO-backed drives per node |
+| `07_user_drive_allocations.sql` | `user_drive_allocations` | Per-user drive assignment and primary-drive flag |
+| `08_invitations.sql` | `invitations` | Token-based invite flow |
+| `09_folders.sql` | `folders` | Recursive folder hierarchy (RLS enabled) |
+| `10_devices.sql` | `devices` | Mobile device registration |
+| `11_files.sql` | `files` | File metadata, encryption nonces (RLS enabled) |
+| `12_video_variants.sql` | `video_variants` | FFmpeg transcode quality variants |
+| `13_favorites.sql` | `favorites` | Per-user file/folder favorites |
+| `14_user_preferences.sql` | `user_preferences` | UI preferences (media auto-upload folder, etc.) |
+| `15_collection_items.sql` | `collection_items` | Media collection item pointers |
+| `16_deleted_file_log.sql` | `deleted_file_log` | Mobile delta-sync deletion tombstones |
+| `17_api_keys.sql` | `api_keys`, `api_key_scopes` | SFS API credentials (argon2id + pepper) |
+| `18_payments.sql` | `payments` | PayPal premium-tier order records |
+| `19_storage_orders.sql` | `storage_orders` | Storage add-on purchase records |
+| `20_server_expansion_requests.sql` | `server_expansion_requests` | Infrastructure capacity expansion requests |
+| `21_audit_logs.sql` | `audit_logs` | Admin action audit trail |
+| `22_user_bans.sql` | `user_bans` | User ban and suspension records |
+| `23_banned_ips.sql` | `banned_ips` | IPs banned by fail2ban |
+| `24_email_queue.sql` | `email_queue` | Async outbound email delivery queue |
+| `25_inbound_emails.sql` | `inbound_emails` | Parsed inbound email index (SendGrid webhook) |
+| `26_math_game_scores.sql` | `math_game_scores` | Mental-math game leaderboard |
+| `27_interest_form.sql` | `interest_submissions`, `interest_form_settings` | Early access signups |
+| `28_alarm_settings.sql` | `alarm_settings` | Cluster-wide alarm subscriber email arrays |
+| `29_alarm_subscriptions.sql` | `alarm_subscriptions` | Per-node/drive alarm subscriptions with thresholds |
+| `30_server_metrics_snapshots.sql` | `server_metrics_snapshots` | Manager-host metrics history |
+| `31_node_metrics_snapshots.sql` | `node_metrics_snapshots`, `drive_temp_snapshots` | Per-node hardware metrics history |
+| `32_node_disks.sql` | `node_disks`, `node_disk_temp_snapshots` | Physical disk telemetry |
 
 ## Migrations
 
-Live in `api/migrations/` (20 versioned SQL files). The Go API runs them on startup via `db.RunMigrations()`. Each migration is idempotent (uses `IF NOT EXISTS`, `IF EXISTS`, or a migration-tracking table).
+Incremental schema changes live in `db/migrations/NNN_name.sql`. They are **not** applied automatically — the API has no migration runner. Migrations are applied manually to existing databases using the provided script.
+
+```bash
+# Apply all pending migrations (idempotent — safe to re-run)
+./db/apply-migrations.sh
+
+# Apply against a specific database instead of the docker compose service
+PSQL="psql postgresql://user:pw@host/db" ./db/apply-migrations.sh
+```
+
+The script reads `POSTGRES_APP_USER` and `POSTGRES_APP_DB` from `.env` if present, otherwise uses the `$PSQL` override. It applies every file in `db/migrations/` in numeric order.
 
 To add a migration:
-1. Create `api/migrations/<N+1>_description.sql`
-2. Write idempotent SQL
-3. The next API startup applies it automatically
+1. Create `db/migrations/<N+1>_description.sql`
+2. Write idempotent SQL (use `IF NOT EXISTS`, `IF EXISTS`, `ON CONFLICT`, etc.)
+3. Run `./db/apply-migrations.sh` against any existing database that needs the change
 
-Never modify already-applied migration files. Write a new one instead.
+**Never modify already-applied migration files.** Write a new one instead. Fresh installs apply only the base schema files and do not need migrations.
 
 ## Row-Level Security
 
-RLS is enabled on `files` and `folders`. Before executing any query against those tables, the API calls:
+RLS is enabled on `files`, `folders`, `api_keys`, `api_key_scopes`, and `math_game_scores`. Before executing any query against those tables, the API calls:
 
 ```go
 db.Queries.ForUser(userID)
@@ -78,27 +90,16 @@ Master key (KEY_ENCRYPTION_KEY env var)
 
 Key rotation bumps the version in `master_keys` and re-wraps each user's key. The `key_rotation_log` records which master key version each user's key is currently wrapped under.
 
-## Unique Constraints
-
-- `files`: `UNIQUE (user_id, folder_id, name)` — prevents duplicate names within a folder
-- `files`: `UNIQUE (user_id, name)` WHERE `folder_id IS NULL` — prevents duplicates at root level
-
-If an upload would violate these, the API returns a conflict error before touching MinIO.
-
-## Video Variants
-
-`video_variants` is a child table of `files`. FFmpeg background transcoding writes rows with status `pending` → `ready` or `failed`. Cascade delete ensures variants are removed when the parent file is deleted.
-
-## Multi-Tier Storage Topology
+## Storage Topology
 
 ```
 servers
-  └── drives          (one or more drives per server)
-        └── nodes     (logical storage nodes, e.g. a MinIO instance)
-              └── user_drive_allocations  (per-user quota assigned to this drive)
+  └── nodes          (one or more Swarm nodes per server)
+        └── drives   (one or more MinIO-backed drives per node)
+              └── user_drive_allocations  (per-user drive assignment + quota)
 ```
 
-The `servers` table has rows for the manager node (HDD, standard tier) and the Pi 5 (NVMe pool, fast tier). The API's storage routing logic reads this topology to decide where to upload each file.
+A node may override the parent server's `minio_endpoint` so that a single logical server can span multiple MinIO instances (e.g., a fast-tier NVMe node and a standard-tier HDD node). Drives resolve their endpoint by checking their node's `minio_endpoint` first, falling back to the server's.
 
 ## Connecting Locally
 

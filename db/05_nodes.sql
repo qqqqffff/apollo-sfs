@@ -33,12 +33,3 @@ CREATE TABLE nodes (
 );
 
 CREATE INDEX nodes_server_id_idx ON nodes (server_id);
-
--- Each drive is mounted on exactly one node. Nullable so existing drives (and
--- drives added before a node is registered) remain valid; the metrics view groups
--- such drives under an "Unassigned" node within their server. ON DELETE SET NULL
--- so removing a node detaches its drives rather than cascading data loss.
-ALTER TABLE drives
-    ADD COLUMN node_id UUID REFERENCES nodes (id) ON DELETE SET NULL;
-
-CREATE INDEX drives_node_id_idx ON drives (node_id);

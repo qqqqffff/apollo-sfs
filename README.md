@@ -522,32 +522,29 @@ Useful after changing secrets or environment variables that don't require a new 
 
 ### Running PostgreSQL Migrations
 
-The initial schema (`db/00_extensions.sql` through `db/29_node_metrics_snapshots.sql`) is applied automatically by PostgreSQL on first boot via the `docker-entrypoint-initdb.d` mount — it is **skipped on subsequent starts** once the data volume exists.
+The initial schema (`db/00_extensions.sql` through `db/32_node_disks.sql`) is applied automatically by PostgreSQL on first boot via the `docker-entrypoint-initdb.d` mount — it is **skipped on subsequent starts** once the data volume exists.
 
-Incremental schema changes live in `db/migrations/NNN_name.sql` and must be applied manually. The `db/` directory is bind-mounted into the container at `/docker-entrypoint-initdb.d`, so the migration files are accessible without copying anything.
+Incremental schema changes live in `db/migrations/NNN_name.sql` and must be applied manually to any existing database using the provided script:
 
 ```bash
-# Load env so $POSTGRES_APP_USER and $POSTGRES_APP_DB are available
-set -a && source .env && set +a
+# Apply all migrations to the docker compose db-app service
+# (reads POSTGRES_APP_USER and POSTGRES_APP_DB from .env automatically)
+./db/apply-migrations.sh
 
-# Get the running db-app container name (Swarm appends a task suffix)
-DB_CONTAINER=$(docker ps --format '{{.Names}}' | grep db-app | head -1)
-
-# Apply a single migration
-docker exec "$DB_CONTAINER" \
-  psql -U "$POSTGRES_APP_USER" -d "$POSTGRES_APP_DB" \
-  -f /docker-entrypoint-initdb.d/migrations/022_alarm_subscriptions.sql
-
-# Apply a range of migrations in order
-for f in db/migrations/0{20,21,22}_*.sql; do
-  echo "Applying $f …"
-  docker exec "$DB_CONTAINER" \
-    psql -U "$POSTGRES_APP_USER" -d "$POSTGRES_APP_DB" \
-    -f "/docker-entrypoint-initdb.d/migrations/$(basename "$f")"
-done
+# Apply against a specific database instead of the docker compose service
+PSQL="psql postgresql://user:pw@host/db" ./db/apply-migrations.sh
 ```
 
-> **Tip:** Migrations are not idempotent by default. Track which ones have been applied (e.g., in a changelog comment or a simple text file) to avoid re-running them on a live database.
+The script applies every file in `db/migrations/` in numeric order. All migrations use idempotent SQL (`IF NOT EXISTS`, `IF EXISTS`, `ON CONFLICT DO NOTHING`, etc.) so re-running the script against an already-migrated database is safe.
+
+For Swarm deployments where `docker compose` is not available, pass `$PSQL` pointing at the running container:
+
+```bash
+set -a && source .env && set +a
+DB_CONTAINER=$(docker ps --format '{{.Names}}' | grep db-app | head -1)
+PSQL="docker exec -i $DB_CONTAINER psql -U $POSTGRES_APP_USER -d $POSTGRES_APP_DB" \
+  ./db/apply-migrations.sh
+```
 
 ### Monitoring the Swarm
 

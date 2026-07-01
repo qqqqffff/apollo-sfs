@@ -14,27 +14,37 @@
 #   to date. Every migration is idempotent (IF [NOT] EXISTS), so re-running is safe.
 #
 # USAGE
-#   ./db/apply-migrations.sh                 # applies to the docker compose db-app service
+#   ./db/apply-migrations.sh                 # applies to the running Swarm db-app container
+#   PSQL="docker compose exec -T db-app psql" ./db/apply-migrations.sh   # docker-compose dev
 #   PSQL="psql postgresql://user:pw@host/db" ./db/apply-migrations.sh   # direct psql
 #
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MIGRATIONS_DIR="$SCRIPT_DIR/migrations"
+STACK_NAME="${STACK_NAME:-apollo-sfs}"
 
 # Load .env from the repo root if present (for POSTGRES_APP_* and the psql target).
 if [[ -f "$SCRIPT_DIR/../.env" ]]; then
   set -a; . "$SCRIPT_DIR/../.env"; set +a
 fi
 
-# Build the psql invocation. Override with $PSQL to point at any database.
+# Build the psql invocation. Override with $PSQL to point at any database
+# (e.g. a docker-compose dev stack, or a direct psql connection string).
 if [[ -n "${PSQL:-}" ]]; then
   run_psql() { $PSQL -v ON_ERROR_STOP=1 "$@"; }
 else
   DB_USER="${POSTGRES_APP_USER:?set POSTGRES_APP_USER or PSQL}"
   DB_NAME="${POSTGRES_APP_DB:?set POSTGRES_APP_DB or PSQL}"
+  APPDB="$(docker ps -qf "name=${STACK_NAME}_db-app" | head -n1)"
+  if [[ -z "$APPDB" ]]; then
+    echo "Could not find a running ${STACK_NAME}_db-app container — is the stack deployed?" >&2
+    echo "For a docker-compose dev setup, set PSQL, e.g.:" >&2
+    echo "  PSQL=\"docker compose exec -T db-app psql\" ./db/apply-migrations.sh" >&2
+    exit 1
+  fi
   run_psql() {
-    docker compose exec -T db-app \
+    docker exec -i "$APPDB" \
       psql -v ON_ERROR_STOP=1 -U "$DB_USER" -d "$DB_NAME" "$@"
   }
 fi

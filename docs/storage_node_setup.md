@@ -360,18 +360,15 @@ set -a && . ./.env && set +a            # stack deploy does NOT auto-read .env
 ```
 
 ### 8.2 Back up, then apply pending migrations
-Migrations are **not** auto-run; apply each new file once against the live app DB.
+Migrations are **not** auto-run; apply them once against the live app DB.
 ```bash
 APPDB=$(docker ps -qf name=apollo-sfs_db-app)
 docker exec "$APPDB" pg_dump -U "$POSTGRES_APP_USER" "$POSTGRES_APP_DB" \
   | gzip > ~/apollo-app-$(date +%F-%H%M).sql.gz          # safety net
 
-for m in 023_node_minio_endpoints 024_node_disks; do
-  docker exec -i "$APPDB" psql -v ON_ERROR_STOP=1 -U "$POSTGRES_APP_USER" -d "$POSTGRES_APP_DB" \
-    -f "/docker-entrypoint-initdb.d/migrations/${m}.sql"
-done
+./db/apply-migrations.sh                                # applies every db/migrations/*.sql; idempotent
 ```
-Both migrations are idempotent (`ADD COLUMN IF NOT EXISTS` / `CREATE TABLE IF NOT EXISTS`).
+Or combine this with the rebuild/redeploy below in one step: `./deploy.sh --migrate`.
 
 ### 8.3 Ensure the node-agent token exists
 Per-disk telemetry needs the agents pushing; an empty token disables ingest (fails

@@ -25,6 +25,7 @@
 #   ./deploy.sh --services frontend,api           non-interactive
 #   ./deploy.sh --registry 192.168.68.57:5000 --tag v1.2.0
 #   ./deploy.sh --deploy-only                     redeploy with no image changes (reapply stack config)
+#   ./deploy.sh --migrate                         also apply pending DB migrations first
 #   ./deploy.sh --dry-run                         print the commands without running them
 #
 # Run this on the manager (it needs the buildx/registry setup from
@@ -79,6 +80,7 @@ SERVICES_ARG=""
 ASSUME_YES=0
 DEPLOY_ONLY=0
 DRY_RUN=0
+RUN_MIGRATIONS=0
 
 usage() {
   cat <<EOF
@@ -90,6 +92,9 @@ Usage: $(basename "$0") [options]
   --deploy-only                        Skip build/push entirely; redeploy every service with
                                         whatever tag is currently running (reapplies stack
                                         config, e.g. env var changes, without an image change)
+  --migrate                            Apply pending DB migrations (db/apply-migrations.sh)
+                                        against the running apollo-sfs_db-app container before
+                                        building/deploying
   -y, --yes                            Skip the confirmation prompt
   -n, --dry-run                        Print the commands without running them
   -h, --help                           Show this help
@@ -102,6 +107,7 @@ while [[ $# -gt 0 ]]; do
     --registry) REGISTRY="$2"; shift 2 ;;
     --tag) TAG="$2"; shift 2 ;;
     --deploy-only) DEPLOY_ONLY=1; shift ;;
+    --migrate) RUN_MIGRATIONS=1; shift ;;
     -y|--yes) ASSUME_YES=1; shift ;;
     -n|--dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -118,8 +124,9 @@ run() {
 # ↑/↓ (or j/k) move, space toggles the highlighted item, enter confirms (must
 # have at least one selected), q cancels. Populates SELECTED (parallel to
 # OPTIONS) in place.
-declare -a OPTIONS=("${ORDER[@]}")
-declare -a SELECTED=(0 0 0)
+declare -a OPTIONS=("migrate" "${ORDER[@]}")
+declare -a OPTION_LABELS=("Run DB migrations (db/apply-migrations.sh)" "${ORDER[@]}")
+declare -a SELECTED=(0 0 0 0)
 CURSOR=0
 
 select_services() {
@@ -133,9 +140,9 @@ select_services() {
     for i in "${!OPTIONS[@]}"; do
       mark=" "; [[ ${SELECTED[$i]} -eq 1 ]] && mark="x"
       if [[ $i -eq $CURSOR ]]; then
-        printf '\r\033[2K\033[1;36m> [%s] %s\033[0m\n' "$mark" "${OPTIONS[$i]}"
+        printf '\r\033[2K\033[1;36m> [%s] %s\033[0m\n' "$mark" "${OPTION_LABELS[$i]}"
       else
-        printf '\r\033[2K  [%s] %s\n' "$mark" "${OPTIONS[$i]}"
+        printf '\r\033[2K  [%s] %s\n' "$mark" "${OPTION_LABELS[$i]}"
       fi
     done
     printf '\r\033[2K%s\n' "$notice"
@@ -180,6 +187,12 @@ if [[ ! -f "$DOTENV_FILE" ]]; then
   exit 1
 fi
 
+echo "── Loading $DOTENV_FILE ──"
+set -a
+# shellcheck disable=SC1090
+source "$DOTENV_FILE"
+set +a
+
 : "${REGISTRY:=$DEFAULT_REGISTRY}"
 : "${TAG:=$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || true)}"
 if [[ -z "$TAG" ]]; then
@@ -198,8 +211,9 @@ elif [[ -n "$SERVICES_ARG" ]]; then
   IFS=',' read -ra SELECTED_SERVICES <<< "$SERVICES_ARG"
 elif [[ -t 0 && -t 1 ]]; then
   select_services
-  for i in "${!OPTIONS[@]}"; do
-    [[ ${SELECTED[$i]} -eq 1 ]] && SELECTED_SERVICES+=("${OPTIONS[$i]}")
+  [[ ${SELECTED[0]} -eq 1 ]] && RUN_MIGRATIONS=1
+  for i in "${!ORDER[@]}"; do
+    [[ ${SELECTED[$((i+1))]} -eq 1 ]] && SELECTED_SERVICES+=("${ORDER[$i]}")
   done
 else
   echo "Not an interactive terminal — pass --services frontend,api,node-agent (or --deploy-only)." >&2
@@ -260,6 +274,7 @@ fi
 echo
 echo "Registry: $REGISTRY"
 [[ $DEPLOY_ONLY -eq 1 ]] && echo "Mode:     deploy-only (no images will be built)"
+[[ $RUN_MIGRATIONS -eq 1 ]] && echo "Migrate:  db/apply-migrations.sh will run against apollo-sfs_db-app first"
 echo
 printf '  %-12s %-10s %s\n' "SERVICE" "TAG" "ACTION"
 for svc in "${ORDER[@]}"; do
@@ -270,6 +285,16 @@ echo
 if [[ $ASSUME_YES -ne 1 ]]; then
   read -rp "Proceed? [y/N] " confirm
   [[ "$confirm" =~ ^[Yy]$ ]] || { echo "Aborted."; exit 1; }
+fi
+
+# ── Apply DB migrations ───────────────────────────────────────────────────────
+# Runs before build/deploy, matching the manual "migrate DB → rebuild images →
+# redeploy" order in docs/storage_node_setup.md — migrations are idempotent
+# but should still land before new code that may depend on them.
+# db/apply-migrations.sh finds the running apollo-sfs_db-app Swarm container itself.
+if [[ $RUN_MIGRATIONS -eq 1 ]]; then
+  echo "── Applying DB migrations ──"
+  STACK_NAME="$STACK_NAME" run "$REPO_ROOT/db/apply-migrations.sh"
 fi
 
 # ── Build + push selected images ──────────────────────────────────────────────
@@ -309,12 +334,6 @@ if [[ ${#SELECTED_SERVICES[@]} -gt 0 ]]; then
 fi
 
 # ── Deploy ─────────────────────────────────────────────────────────────────────
-echo "── Loading $DOTENV_FILE ──"
-set -a
-# shellcheck disable=SC1090
-source "$DOTENV_FILE"
-set +a
-
 export REGISTRY
 export API_TAG="${RESOLVED_TAG[api]}"
 export FRONTEND_TAG="${RESOLVED_TAG[frontend]}"

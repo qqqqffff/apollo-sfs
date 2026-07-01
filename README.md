@@ -495,24 +495,21 @@ The initial schema (`db/00_extensions.sql` through `db/32_node_disks.sql`) is ap
 Incremental schema changes live in `db/migrations/NNN_name.sql` and must be applied manually to any existing database using the provided script:
 
 ```bash
-# Apply all migrations to the docker compose db-app service
-# (reads POSTGRES_APP_USER and POSTGRES_APP_DB from .env automatically)
+# Apply all migrations to the running Swarm db-app container
+# (reads POSTGRES_APP_USER and POSTGRES_APP_DB from .env automatically,
+# and finds the apollo-sfs_db-app container via `docker ps`)
 ./db/apply-migrations.sh
 
-# Apply against a specific database instead of the docker compose service
+# Also wired into deploy.sh — pass --migrate to run this before build/deploy
+./deploy.sh --migrate
+
+# Apply against a specific database instead (direct psql, or a docker-compose
+# dev stack) by overriding $PSQL
 PSQL="psql postgresql://user:pw@host/db" ./db/apply-migrations.sh
+PSQL="docker compose exec -T db-app psql" ./db/apply-migrations.sh
 ```
 
 The script applies every file in `db/migrations/` in numeric order. All migrations use idempotent SQL (`IF NOT EXISTS`, `IF EXISTS`, `ON CONFLICT DO NOTHING`, etc.) so re-running the script against an already-migrated database is safe.
-
-For Swarm deployments where `docker compose` is not available, pass `$PSQL` pointing at the running container:
-
-```bash
-set -a && source .env && set +a
-DB_CONTAINER=$(docker ps --format '{{.Names}}' | grep db-app | head -1)
-PSQL="docker exec -i $DB_CONTAINER psql -U $POSTGRES_APP_USER -d $POSTGRES_APP_DB" \
-  ./db/apply-migrations.sh
-```
 
 ### Monitoring the Swarm
 

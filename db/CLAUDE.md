@@ -52,14 +52,16 @@ Files in `db/` are numbered and applied in order during initial container creati
 Incremental schema changes live in `db/migrations/NNN_name.sql`. They are **not** applied automatically — the API has no migration runner. Migrations are applied manually to existing databases using the provided script.
 
 ```bash
-# Apply all pending migrations (idempotent — safe to re-run)
+# Apply all pending migrations to the running Swarm db-app container
+# (idempotent — safe to re-run; finds the apollo-sfs_db-app container via `docker ps`)
 ./db/apply-migrations.sh
 
-# Apply against a specific database instead of the docker compose service
+# Apply against a specific database instead (direct psql, or a docker-compose dev stack)
 PSQL="psql postgresql://user:pw@host/db" ./db/apply-migrations.sh
+PSQL="docker compose exec -T db-app psql" ./db/apply-migrations.sh
 ```
 
-The script reads `POSTGRES_APP_USER` and `POSTGRES_APP_DB` from `.env` if present, otherwise uses the `$PSQL` override. It applies every file in `db/migrations/` in numeric order.
+The script reads `POSTGRES_APP_USER` and `POSTGRES_APP_DB` from `.env` if present, otherwise uses the `$PSQL` override. It applies every file in `db/migrations/` in numeric order. `deploy.sh --migrate` runs it before build/deploy.
 
 To add a migration:
 1. Create `db/migrations/<N+1>_description.sql`

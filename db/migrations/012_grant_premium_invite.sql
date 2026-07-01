@@ -3,4 +3,4 @@
 -- invitee registers, without requiring a manual Keycloak step.
 
 ALTER TABLE invitations
-    ADD COLUMN grant_premium BOOLEAN NOT NULL DEFAULT FALSE;
+    ADD COLUMN IF NOT EXISTS grant_premium BOOLEAN NOT NULL DEFAULT FALSE;

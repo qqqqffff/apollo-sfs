@@ -3,6 +3,6 @@
 -- latitude/longitude are nullable — only images with GPS EXIF tags are populated.
 
 ALTER TABLE files
-    ADD COLUMN device_id  UUID             REFERENCES devices (id) ON DELETE SET NULL,
-    ADD COLUMN latitude   DOUBLE PRECISION,
-    ADD COLUMN longitude  DOUBLE PRECISION;
+    ADD COLUMN IF NOT EXISTS device_id  UUID             REFERENCES devices (id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS latitude   DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS longitude  DOUBLE PRECISION;

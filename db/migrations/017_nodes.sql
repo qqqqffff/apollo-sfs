@@ -22,15 +22,6 @@ ALTER TABLE drives
 
 CREATE INDEX IF NOT EXISTS drives_node_id_idx ON drives (node_id);
 
--- Backfill: give every existing server a default "manager" node named after the
--- server, and attach that server's drives to it so the metrics view is populated.
-INSERT INTO nodes (server_id, hostname, role)
-SELECT s.id, s.name || '-node-1', 'manager'
-FROM servers s
-WHERE NOT EXISTS (SELECT 1 FROM nodes n WHERE n.server_id = s.id);
-
-UPDATE drives d
-SET node_id = n.id
-FROM nodes n
-WHERE n.server_id = d.server_id
-  AND d.node_id IS NULL;
+-- No data backfill: this migration only adds structure. Nodes and drive->node
+-- assignments are established by the infrastructure sync / admin actions, so
+-- re-running never alters existing rows.

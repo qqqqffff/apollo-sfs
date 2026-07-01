@@ -3,4 +3,4 @@
 -- auto-selecting via SelectDriveForQuota.
 
 ALTER TABLE invitations
-    ADD COLUMN initial_drive_id UUID REFERENCES drives(id) ON DELETE SET NULL;
+    ADD COLUMN IF NOT EXISTS initial_drive_id UUID REFERENCES drives(id) ON DELETE SET NULL;

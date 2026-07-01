@@ -5,4 +5,4 @@
 -- that window the request expires and the deposit is forfeited (not refunded).
 
 ALTER TABLE server_expansion_requests
-  ADD COLUMN payment_due_at TIMESTAMPTZ;
+  ADD COLUMN IF NOT EXISTS payment_due_at TIMESTAMPTZ;

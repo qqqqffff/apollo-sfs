@@ -7,6 +7,8 @@ import {
   deleteFolder,
   rootQueryOptions,
   folderQueryOptions,
+  requestDriveMigration,
+  getLatestDriveMigration,
 } from '../../api/folders'
 
 function mockFetch(status: number, body: unknown) {
@@ -80,7 +82,7 @@ describe('createFolder', () => {
     const [url, init] = lastCall()
     expect(url).toBe('/api/v1/folders')
     expect(init.method).toBe('POST')
-    expect(JSON.parse(init.body as string)).toEqual({ name: 'Photos', parent_id: null, kind: 'regular' })
+    expect(JSON.parse(init.body as string)).toEqual({ name: 'Photos', parent_id: null, kind: 'regular', drive_id: null })
   })
 
   it('includes parent_id when provided', async () => {
@@ -88,6 +90,13 @@ describe('createFolder', () => {
     await createFolder('Sub', 'fold-parent')
     const body = JSON.parse(lastCall()[1].body as string)
     expect(body.parent_id).toBe('fold-parent')
+  })
+
+  it('includes drive_id when provided', async () => {
+    mockFetch(200, { id: 'fold-pinned', name: 'Pinned' })
+    await createFolder('Pinned', 'fold-parent', 'regular', 'drive-123')
+    const body = JSON.parse(lastCall()[1].body as string)
+    expect(body.drive_id).toBe('drive-123')
   })
 })
 
@@ -146,5 +155,25 @@ describe('folderQueryOptions', () => {
     const opts = folderQueryOptions('fold-1')
     opts.queryFn()
     expect((global.fetch as jest.Mock).mock.calls[0][0]).toBe('/api/v1/folders/fold-1')
+  })
+})
+
+describe('requestDriveMigration', () => {
+  it('POSTs to /folders/:id/drive-migrations with the target drive id', async () => {
+    mockFetch(202, { id: 'mig-1', folder_id: 'fold-1', status: 'pending' })
+    await requestDriveMigration('fold-1', 'drive-123')
+    const [url, init] = lastCall()
+    expect(url).toBe('/api/v1/folders/fold-1/drive-migrations')
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(init.body as string)).toEqual({ drive_id: 'drive-123' })
+  })
+})
+
+describe('getLatestDriveMigration', () => {
+  it('GETs /folders/:id/drive-migrations/latest', async () => {
+    mockFetch(200, { migration: null, recent_count: 0, limit: 3, window_days: 30, next_eligible_at: null })
+    await getLatestDriveMigration('fold-1')
+    const [url] = lastCall()
+    expect(url).toBe('/api/v1/folders/fold-1/drive-migrations/latest')
   })
 })

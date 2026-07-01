@@ -233,16 +233,27 @@ func (s *FileService) storageForFile(ctx context.Context, username string, file 
 	return svc, err
 }
 
-// resolveUploadDrive chooses the drive a new upload of fileSize bytes should land
-// on. The user's primary drive wins when it has room; otherwise the owned drive
-// with the lowest physical used-percentage that can fit the file is used. Falls
-// back to the user's primary allocation when no usage data is available.
+// resolveUploadDrive chooses the drive a new upload of fileSize bytes should
+// land on. When folderDriveID is non-nil (the destination folder has a pinned
+// drive) and that drive is still usable, it wins outright. Otherwise the
+// user's primary drive wins when it has room; failing that, the owned drive
+// with the lowest physical used-percentage that can fit the file is used.
+// Falls back to the user's primary allocation when no usage data is available.
 // userID is the Keycloak sub UUID (stored as files.user_id) used to compute per-user usage.
-func (s *FileService) resolveUploadDrive(ctx context.Context, username string, userID uuid.UUID, fileSize int64) (*MinIOService, uuid.UUID, error) {
+func (s *FileService) resolveUploadDrive(ctx context.Context, username string, userID uuid.UUID, fileSize int64, folderDriveID *uuid.UUID) (*MinIOService, uuid.UUID, error) {
 	drives, err := s.queries.GetUserDrives(ctx, username, userID.String())
 	if err != nil {
 		return nil, uuid.Nil, fmt.Errorf("resolve upload drive: %w", err)
 	}
+
+	if driveID, ok := pinnedDriveIfValid(drives, folderDriveID, fileSize); ok {
+		svc, err := s.storageForDrive(ctx, driveID)
+		if err != nil {
+			return nil, uuid.Nil, fmt.Errorf("resolve upload drive: %w", err)
+		}
+		return svc, driveID, nil
+	}
+
 	// No multi-drive info (or single drive): use the existing primary path.
 	if len(drives) <= 1 {
 		return s.storageFor(ctx, username)
@@ -260,6 +271,22 @@ func (s *FileService) resolveUploadDrive(ctx context.Context, username string, u
 		return nil, uuid.Nil, fmt.Errorf("resolve upload drive: %w", err)
 	}
 	return svc, driveID, nil
+}
+
+// pinnedDriveIfValid returns the folder-pinned drive when it's still usable:
+// active, has room, and still present in the user's current allocations (an
+// allocation can be revoked after the folder was created, e.g. a premium
+// downgrade). ok=false tells the caller to fall through to pickUploadDrive.
+func pinnedDriveIfValid(drives []db.UserDriveInfo, folderDriveID *uuid.UUID, fileSize int64) (uuid.UUID, bool) {
+	if folderDriveID == nil {
+		return uuid.Nil, false
+	}
+	for _, d := range drives {
+		if d.DriveID == *folderDriveID && d.DriveIsActive && d.ServerIsActive && d.CapacityBytes-d.DriveUsedBytes >= fileSize {
+			return d.DriveID, true
+		}
+	}
+	return uuid.Nil, false
 }
 
 // pickUploadDrive selects the drive a new upload of fileSize bytes should land
@@ -363,9 +390,16 @@ func (s *FileService) Upload(ctx context.Context, in UploadInput) (*models.File,
 		}
 	}
 
-	// 6. Resolve the destination drive: the user's primary, or the least-full
-	// owned drive when the primary can't fit the file.
-	storage, driveID, err := s.resolveUploadDrive(ctx, in.Username, in.UserID, fileSize)
+	// 6. Resolve the destination drive: the destination folder's pin if valid,
+	// otherwise the user's primary, or the least-full owned drive when the
+	// primary can't fit the file.
+	var folderDriveID *uuid.UUID
+	if in.FolderID != nil {
+		if folder, err := s.queries.GetFolderByID(ctx, *in.FolderID); err == nil {
+			folderDriveID = folder.DriveID
+		}
+	}
+	storage, driveID, err := s.resolveUploadDrive(ctx, in.Username, in.UserID, fileSize, folderDriveID)
 	if err != nil {
 		return nil, fmt.Errorf("upload: %w", err)
 	}
@@ -1201,7 +1235,16 @@ func (s *FileService) BeginChunkedUpload(ctx context.Context, sess *UploadSessio
 	if err != nil {
 		return fmt.Errorf("begin chunked upload: decrypt user key: %w", err)
 	}
-	storage, driveID, err := s.resolveUploadDrive(ctx, sess.Username, sess.UserID, sess.TotalSize)
+	// The destination drive (and thus the MinIO bucket the multipart upload is
+	// opened against) must be fixed before any chunk is dispatched, so the
+	// folder pin is resolved from sess.FolderID as known at session creation.
+	var folderDriveID *uuid.UUID
+	if sess.FolderID != nil {
+		if folder, err := s.queries.GetFolderByID(ctx, *sess.FolderID); err == nil {
+			folderDriveID = folder.DriveID
+		}
+	}
+	storage, driveID, err := s.resolveUploadDrive(ctx, sess.Username, sess.UserID, sess.TotalSize, folderDriveID)
 	if err != nil {
 		zeroBytes(userKey)
 		return fmt.Errorf("begin chunked upload: %w", err)

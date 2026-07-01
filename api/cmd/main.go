@@ -438,6 +438,10 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		protected.PATCH("/folders/:folder_id", h.UpdateFolder)
 		protected.PATCH("/folders/:folder_id/move", h.MoveFolder)
 		protected.DELETE("/folders/:folder_id", h.DeleteFolder)
+		// Per-folder storage tier/server change (moves the folder's direct files
+		// to a different drive as a background job; rate-limited).
+		protected.POST("/folders/:folder_id/drive-migrations", h.RequestFolderDriveMigration)
+		protected.GET("/folders/:folder_id/drive-migrations/latest", h.GetLatestFolderDriveMigration)
 
 		// API key management for the SFS S3-like API. Premium users only;
 		// non-premium callers receive 402 from the handler.

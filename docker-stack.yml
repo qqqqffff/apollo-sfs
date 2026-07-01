@@ -11,24 +11,36 @@
 #            → minio-fast (existing 4TB NVMe blobs — reused in place).
 #
 # Deploy (see docs/registry_setup.md for the full registry workflow):
-#   export REGISTRY=<manager-ip>:5000           # private registry endpoint
-#   export TAG=$(git rev-parse --short HEAD)     # or any version string
-#   # build + push every custom image to the registry (one host, all arches):
-#   docker buildx build --platform linux/amd64,linux/arm64 \
-#     -t ${REGISTRY}/apollo-sfs_api:${TAG}        api/        --push
+#   Each custom image is pinned by its OWN tag variable (API_TAG, FRONTEND_TAG,
+#   NODE_AGENT_TAG) — NOT a single shared TAG. This is what lets you
+#   rebuild/redeploy just one service: point ONLY that service's variable at a
+#   newly built+pushed tag, and set the other two variables to whatever tag is
+#   already running (query with `docker service inspect --format
+#   '{{.Spec.TaskTemplate.ContainerSpec.Image}}' apollo-sfs_api`, etc.) so they
+#   redeploy unchanged instead of silently pointing at a tag that was never
+#   pushed for them.
+#
+#   ./deploy.sh   automates exactly this (see docs/registry_setup.md), including
+#   resolving the untouched services' tags live from the running Swarm. Manual
+#   equivalent for a frontend-only change:
+#
+#   export REGISTRY=192.168.68.57:5000          # private registry endpoint
+#   export TAG=$(git rev-parse --short HEAD)
 #   docker buildx build --platform linux/amd64 \
-#     -t ${REGISTRY}/apollo-sfs_frontend:${TAG}   frontend/   --push
-#   docker buildx build --platform linux/amd64,linux/arm64 \
-#     -f api/Dockerfile.node-agent \
-#     -t ${REGISTRY}/apollo-sfs-node-agent:${TAG} api/        --push
-#   set -a && . ./.env && set +a      # stack deploy does NOT auto-read .env
+#     -t ${REGISTRY}/apollo-sfs_frontend:${TAG} frontend/ --push
+#   export FRONTEND_TAG=${TAG}
+#   export API_TAG=$(docker service inspect --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' apollo-sfs_api | sed 's/.*://')
+#   export NODE_AGENT_TAG=$(docker service inspect --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' apollo-sfs_node-agent-standard | sed 's/.*://')
+#   set -a && . ./.env && set +a                 # stack deploy does NOT auto-read .env
 #   docker stack deploy -c docker-stack.yml apollo-sfs   # nodes pull from the registry
 #
-# REGISTRY and TAG must both be exported before `docker stack deploy` — they are
-# substituted from the shell environment (not from .env). REGISTRY defaults to
-# apollo-sfs-1:5000 when unset; TAG has no default, so an unset TAG fails loudly,
-# which is intentional. Because every node pulls the versioned image from the
-# registry, you no longer build on each node or pass --resolve-image never.
+# REGISTRY, API_TAG, FRONTEND_TAG, and NODE_AGENT_TAG must all be set before
+# `docker stack deploy` — they are substituted from the shell environment (not
+# from .env). REGISTRY defaults to 192.168.68.57:5000 (the manager's LAN IP)
+# when unset; the three TAG vars have no default, so a missing one fails the
+# deploy loudly (intentional — better than silently deploying an unpushed tag).
+# Because every node pulls the versioned image from the registry, you no longer
+# build on each node or pass --resolve-image never.
 #
 # NOTE — three Swarm differences vs docker-compose, all called out below:
 #   * `build:` is unsupported → images are pre-built (Part 1 of the doc).
@@ -42,7 +54,7 @@ services:
 
   # ── Frontend (React/Vite, served by nginx:alpine) ───────────────────────────
   frontend:
-    image: ${REGISTRY:-apollo-sfs-1:5000}/apollo-sfs_frontend:${TAG}
+    image: ${REGISTRY:-192.168.68.57:5000}/apollo-sfs_frontend:${FRONTEND_TAG}
     ports:
       - target: 80
         published: 3000
@@ -73,7 +85,7 @@ services:
   #           docker run -d --name apollo-sfs_api --privileged --user root \
   #             --network app-network --env-file .env ... apollo-sfs_api:amd64
   api:
-    image: ${REGISTRY:-apollo-sfs-1:5000}/apollo-sfs_api:${TAG}
+    image: ${REGISTRY:-192.168.68.57:5000}/apollo-sfs_api:${API_TAG}
     user: root
     ports:
       - target: 8080
@@ -368,7 +380,7 @@ services:
   # Reads this node's CPU/memory/network/HDD sensors and pushes to the API.
   # Only mounts paths that exist on the manager; see node-agent-fast for the Pi.
   node-agent-standard:
-    image: ${REGISTRY:-apollo-sfs-1:5000}/apollo-sfs-node-agent:${TAG}
+    image: ${REGISTRY:-192.168.68.57:5000}/apollo-sfs-node-agent:${NODE_AGENT_TAG}
     environment:
       NODE_HOSTNAME: "{{.Node.Hostname}}"
       API_INTERNAL_URL: http://api:8080
@@ -397,7 +409,7 @@ services:
   # Reads the Pi's CPU/memory/network/NVMe sensors and pushes to the API.
   # Only mounts paths that exist on the Pi; see node-agent-standard for the manager.
   node-agent-fast:
-    image: ${REGISTRY:-apollo-sfs-1:5000}/apollo-sfs-node-agent:${TAG}
+    image: ${REGISTRY:-192.168.68.57:5000}/apollo-sfs-node-agent:${NODE_AGENT_TAG}
     environment:
       NODE_HOSTNAME: "{{.Node.Hostname}}"
       API_INTERNAL_URL: http://api:8080

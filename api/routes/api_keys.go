@@ -80,9 +80,8 @@ func (h *Handler) CreateAPIKey(c *gin.Context) {
 }
 
 // listAPIKeyEntry is the shape returned by ListAPIKeys. MatchingOperations
-// is populated per-key when the caller passes ?path=... — used by the
-// share-directory modal to show which existing keys already cover the
-// folder being shared.
+// is populated per-key when the caller passes ?path=... — an optional path
+// filter showing which existing keys already cover the given prefix.
 type listAPIKeyEntry struct {
 	models.APIKey
 	MatchingOperations []string `json:"matching_operations,omitempty"`

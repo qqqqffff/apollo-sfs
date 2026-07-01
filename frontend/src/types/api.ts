@@ -77,8 +77,38 @@ export interface Folder {
   // Recursive sum of all file sizes under this folder. Populated by listing
   // endpoints; 0 on bare single-folder responses (create/rename/move).
   size_bytes: number
+  // Optional pin to a specific drive for this folder's direct uploads. Null
+  // means dynamic primary-first/least-full routing (today's default behavior).
+  drive_id: string | null
   created_at: string
   updated_at: string
+}
+
+export type FolderDriveMigrationStatus = 'pending' | 'in_progress' | 'completed' | 'failed'
+
+// FolderDriveMigration tracks a single job moving a folder's direct files
+// from one drive to another (potentially across servers/tiers).
+export interface FolderDriveMigration {
+  id: string
+  folder_id: string
+  status: FolderDriveMigrationStatus
+  total_files: number
+  files_moved: number
+  total_bytes: number
+  bytes_moved: number
+  error_message: string | null
+  created_at: string
+  completed_at: string | null
+}
+
+// DriveMigrationEligibility bundles the most recent migration for a folder
+// with rate-limit bookkeeping (3 changes per folder per rolling 30 days).
+export interface DriveMigrationEligibility {
+  migration: FolderDriveMigration | null
+  recent_count: number
+  limit: number
+  window_days: number
+  next_eligible_at: string | null
 }
 
 export interface UserPreferences {

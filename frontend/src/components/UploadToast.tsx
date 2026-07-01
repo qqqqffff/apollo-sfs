@@ -74,9 +74,12 @@ function FileRow({ item }: { item: FileUploadItem }) {
 interface Props {
   progress: UploadProgress
   onDismiss: () => void
+  // Label used for the in-progress header (e.g. "Uploading", "Moving").
+  // Defaults to "Uploading" so the existing upload flow is unaffected.
+  verb?: string
 }
 
-export function UploadToast({ progress, onDismiss }: Props) {
+export function UploadToast({ progress, onDismiss, verb = 'Uploading' }: Props) {
   const { status, items, totalBytes, loadedBytes, speedBps, succeeded, failed } = progress
 
   useEffect(() => {
@@ -88,6 +91,7 @@ export function UploadToast({ progress, onDismiss }: Props) {
   if (status === 'idle') return null
 
   const config = STATUS_CONFIG[status]
+  const label = status === 'uploading' ? verb : config.label
   const bytesPct = totalBytes > 0 ? Math.min((loadedBytes / totalBytes) * 100, 100) : 0
   const remainingBytes = Math.max(0, totalBytes - loadedBytes)
   const speed = fmtSpeed(speedBps)
@@ -102,7 +106,7 @@ export function UploadToast({ progress, onDismiss }: Props) {
       <div className="px-4 pt-3 pb-2 flex items-center justify-between gap-2">
         <div className="flex items-center gap-2 min-w-0">
           <span className={`text-xs font-semibold shrink-0 ${config.labelColor}`}>
-            {config.label}
+            {label}
           </span>
           {isUploading && (speed || eta) && (
             <span className="text-xs text-gray-400 truncate">

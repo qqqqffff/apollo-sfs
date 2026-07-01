@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useRef, useState } from 'react'
 import {
   MdArrowBack,
+  MdBolt,
   MdCheck,
   MdCloudQueue,
   MdCloudUpload,
@@ -10,24 +11,27 @@ import {
   MdCreateNewFolder,
   MdFolder,
   MdFolderOpen,
+  MdInfoOutline,
   MdInsertDriveFile,
-  MdLink,
   MdPhotoLibrary,
   MdStar,
   MdStarOutline,
+  MdStorage,
   MdUploadFile,
+  MdVpnKey,
 } from 'react-icons/md'
-import { createFolder, deleteFolder, moveFolder, getAncestors } from '../../api/folders'
+import { createFolder, deleteFolder, moveFolder, requestDriveMigration } from '../../api/folders'
 import { deleteFile, downloadUrl, fileQueryOptions, moveFile } from '../../api/files'
 import { meQueryOptions, preferencesQueryOptions, updatePreferences } from '../../api/me'
+import { listMyServers, type MyServer } from '../../api/storage'
+import { ApiError } from '../../api/client'
 import { useNotification } from '../../context/NotificationContext'
 import { FilePreviewModal, canPreview } from '../../components/FilePreviewModal'
 import { MediaCollectionView } from '../../components/MediaCollectionView'
-import type { FolderKind } from '../../types/api'
+import type { Folder, FolderKind } from '../../types/api'
 import { UploadModal } from '../../components/UploadModal'
 import { DeleteConfirmModal, readSkipDeleteCookie } from '../../components/DeleteConfirmModal'
 import { FolderBreadcrumb } from '../../components/FolderBreadcrumb'
-import { ShareDirectoryModal } from '../../components/ShareDirectoryModal'
 import { UploadToast } from '../../components/UploadToast'
 import { SortControls } from '../../components/SortControls'
 import { SearchBar } from '../../components/SearchBar'
@@ -37,6 +41,7 @@ import { useFileDrag } from '../../hooks/useFileDrag'
 import { useSort, sortedFolders, sortedFiles } from '../../hooks/useSort'
 import { useInfiniteFolderContents } from '../../hooks/useInfiniteFolderContents'
 import { useFavorites } from '../../hooks/useFavorites'
+import { useDriveMigrationProgress } from '../../hooks/useDriveMigrationProgress'
 import { useImpersonation } from '../../context/ImpersonationContext'
 import { GoogleServiceSelectModal } from '../../components/GoogleServiceSelectModal'
 import { GoogleBackupModal } from '../../components/GoogleBackupModal'
@@ -125,17 +130,21 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
   const fileRef = useRef<HTMLInputElement>(null)
   const [pendingFiles, setPendingFiles] = useState<globalThis.File[]>([])
   const [pendingDelete, setPendingDelete] = useState<{ type: 'file' | 'folder'; id: string; name: string } | null>(null)
-  const [sharingFolder, setSharingFolder] = useState<{ id: string; name: string } | null>(null)
   const [search, setSearch] = useState('')
   const [creatingFolder, setCreatingFolder] = useState(false)
   const [newFolderName, setNewFolderName] = useState('')
   const [newFolderKind, setNewFolderKind] = useState<FolderKind>('regular')
+  const [newFolderDriveId, setNewFolderDriveId] = useState<string | null>(null)
   const { progress, startUpload, dismiss } = useFileUpload()
   const { isDragging } = useDragDrop((dropped) => { if (!readOnly) setPendingFiles(dropped) })
   const { sort, onSort } = useSort()
   const { favoriteFileIds, favoriteFolderIds, toggleFile, toggleFolder } = useFavorites()
   const { data: prefs } = useQuery(preferencesQueryOptions)
   const autoUploadTargetId = prefs?.media_autoupload_folder_id ?? null
+  const { data: myServers } = useQuery({
+    queryKey: ['storage', 'my-servers'],
+    queryFn: listMyServers,
+  })
 
   // ── Google Backup state ────────────────────────────────────────────────────
   const [serviceSelectOpen, setServiceSelectOpen]   = useState(false)
@@ -199,12 +208,13 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
   }
 
   const createFolderMutation = useMutation({
-    mutationFn: ({ name, kind }: { name: string; kind: FolderKind }) =>
-      createFolder(name, folderId === 'root' ? undefined : folderId, kind),
+    mutationFn: ({ name, kind, driveId }: { name: string; kind: FolderKind; driveId: string | null }) =>
+      createFolder(name, folderId === 'root' ? undefined : folderId, kind, driveId ?? undefined),
     onSuccess: (folder) => {
       setCreatingFolder(false)
       setNewFolderName('')
       setNewFolderKind('regular')
+      setNewFolderDriveId(null)
       queryClient.invalidateQueries({ queryKey: ['folders', folderId] })
       // A newly created media collection becomes the user's auto-upload target.
       if (folder.kind === 'media') {
@@ -218,18 +228,21 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
   function startCreate(kind: FolderKind) {
     setNewFolderKind(kind)
     setNewFolderName('')
+    const primary = myServers?.find((s) => s.is_primary)
+    setNewFolderDriveId(primary?.drive_id ?? null)
     setCreatingFolder(true)
   }
 
   function confirmNewFolder() {
     const name = newFolderName.trim()
-    if (name) createFolderMutation.mutate({ name, kind: newFolderKind })
+    if (name) createFolderMutation.mutate({ name, kind: newFolderKind, driveId: newFolderDriveId })
   }
 
   function cancelNewFolder() {
     setCreatingFolder(false)
     setNewFolderName('')
     setNewFolderKind('regular')
+    setNewFolderDriveId(null)
   }
 
   const deleteFolderMutation = useMutation({
@@ -407,11 +420,6 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
           <FolderBreadcrumb
             folderId={folderId}
             onNavigate={(id) => navigate({ to: '/client', search: { file: undefined, folder: id } })}
-            trailing={
-              !readOnly && (user?.is_premium || user?.is_admin) && folder ? (
-                <ShareButton onOpen={() => setSharingFolder({ id: folder.id, name: folder.name })} />
-              ) : undefined
-            }
           />
           {folder && <h2 className="text-lg font-semibold text-gray-900 m-0">{folder.name}</h2>}
         </div>
@@ -444,6 +452,14 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
               className="inline-flex items-center gap-1.5 px-3 py-2 text-sm border border-gray-200 rounded-lg text-gray-700 hover:bg-gray-50 cursor-pointer transition-colors disabled:opacity-40"
             >
               <MdPhotoLibrary className="text-base text-purple-400" /> New collection
+            </button>
+          )}
+          {isPremium && (
+            <button
+              onClick={() => navigate({ to: '/settings/api-keys' })}
+              className="inline-flex items-center gap-1.5 px-3 py-2 text-sm border border-gray-200 rounded-lg text-gray-700 hover:bg-gray-50 cursor-pointer transition-colors"
+            >
+              <MdVpnKey className="text-base text-gray-500" /> API Keys
             </button>
           )}
           <input
@@ -575,6 +591,27 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
                   placeholder={newFolderKind === 'media' ? 'Collection name' : 'Folder name'}
                   className="flex-1 bg-transparent border-0 outline-none text-sm text-gray-800 placeholder-gray-400"
                 />
+                {myServers && myServers.length > 0 && (() => {
+                  const selected = myServers.find((s) => s.drive_id === newFolderDriveId)
+                  const tier = selected?.drive_type ?? myServers.find((s) => s.is_primary)?.drive_type ?? 'nvme'
+                  const hasBothTiers = myServers.some((s) => s.drive_type === 'nvme') && myServers.some((s) => s.drive_type === 'hdd')
+                  const serversInTier = myServers.filter((s) => s.drive_type === tier)
+                  function handleTierChange(t: 'nvme' | 'hdd') {
+                    const inTier = myServers!.filter((s) => s.drive_type === t)
+                    const primaryInTier = inTier.find((s) => s.is_primary)
+                    setNewFolderDriveId(primaryInTier?.drive_id ?? inTier[0]?.drive_id ?? null)
+                  }
+                  return (
+                    <>
+                      {hasBothTiers
+                        ? <TierToggle value={tier} onChange={handleTierChange} />
+                        : <span className="text-xs text-gray-500 shrink-0">{tierLabel(tier)} tier</span>}
+                      {serversInTier.length > 1
+                        ? <ServerDropdown servers={serversInTier} value={newFolderDriveId ?? ''} onChange={setNewFolderDriveId} />
+                        : serversInTier[0] && <span className="text-xs text-gray-500 shrink-0">{serversInTier[0].name}</span>}
+                    </>
+                  )
+                })()}
                 <button
                   onClick={confirmNewFolder}
                   disabled={!newFolderName.trim() || createFolderMutation.isPending}
@@ -627,15 +664,7 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
                       />
                     )}
                     <StarButton active={favoriteFolderIds.has(f.id)} onClick={() => toggleFolder(f.id)} title={favoriteFolderIds.has(f.id) ? 'Remove from favorites' : 'Add to favorites'} />
-                    {(user?.is_premium || user?.is_admin) && (
-                      <button
-                        onClick={() => setSharingFolder({ id: f.id, name: f.name })}
-                        title="Share via SFS API"
-                        className="text-amber-400 hover:text-amber-600 cursor-pointer bg-transparent border-0 p-0.5 transition-colors"
-                      >
-                        <MdLink className="text-base" />
-                      </button>
-                    )}
+                    <DriveInfoButton folder={f} servers={myServers} />
                     <button
                       onClick={() => handleDeleteClick('folder', f.id, f.name)}
                       className="text-xs text-gray-400 hover:text-red-500 cursor-pointer bg-transparent border-0 px-1 transition-colors"
@@ -768,14 +797,6 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
         />
       )}
 
-      {sharingFolder && (
-        <SharedDirectoryGate
-          folderId={sharingFolder.id}
-          folderName={sharingFolder.name}
-          onClose={() => setSharingFolder(null)}
-        />
-      )}
-
       {isDragging && !readOnly && (
         <div className="fixed inset-0 bg-blue-500/10 border-4 border-dashed border-blue-400 flex items-center justify-center z-999 pointer-events-none">
           <div className="bg-white/95 rounded-2xl px-12 py-6 text-center shadow-xl">
@@ -850,38 +871,191 @@ function AutoUploadButton({ active, onClick }: { active: boolean; onClick: () =>
   )
 }
 
-function ShareButton({ onOpen }: { onOpen: () => void }) {
+// ── Storage tier/server pickers ─────────────────────────────────────────────────
+//
+// Shared by the inline folder creator and the per-folder drive-change popover
+// below. The caller decides whether to render the interactive control or a
+// static label — only show a real choice when the user actually has one
+// (both tiers / more than one server in the selected tier).
+
+// TierToggle reuses the exact color vocabulary from profile.tsx's server list
+// (blue for nvme/"Fast", amber for hdd/"Standard").
+function TierToggle({ value, onChange }: { value: 'nvme' | 'hdd'; onChange: (tier: 'nvme' | 'hdd') => void }) {
   return (
-    <button
-      onClick={onOpen}
-      title="Share via SFS API"
-      className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded border border-amber-200 text-amber-700 bg-amber-50 hover:bg-amber-100 cursor-pointer transition-colors"
-    >
-      <MdLink className="text-sm" /> Share
-    </button>
+    <div className="inline-flex items-center gap-1">
+      <button
+        type="button"
+        onClick={() => onChange('nvme')}
+        title="Fast tier (NVMe)"
+        className={`inline-flex items-center gap-1 px-2 py-1 text-xs rounded-md cursor-pointer transition-colors ${
+          value === 'nvme' ? 'bg-blue-50 text-blue-600' : 'text-gray-400 hover:bg-gray-50'
+        }`}
+      >
+        <MdBolt className="text-sm" /> Fast
+      </button>
+      <button
+        type="button"
+        onClick={() => onChange('hdd')}
+        title="Standard tier (HDD)"
+        className={`inline-flex items-center gap-1 px-2 py-1 text-xs rounded-md cursor-pointer transition-colors ${
+          value === 'hdd' ? 'bg-amber-50 text-amber-600' : 'text-gray-400 hover:bg-gray-50'
+        }`}
+      >
+        <MdStorage className="text-sm" /> Standard
+      </button>
+    </div>
   )
 }
 
-// SharedDirectoryGate looks up the ancestor chain for the folder being
-// shared so the modal can render the SFS path string before opening.
-// Without the ancestors we can't build the slash-joined key.
-function SharedDirectoryGate({
-  folderId, folderName, onClose,
-}: { folderId: string; folderName: string; onClose: () => void }) {
-  const [path, setPath] = useState<string | null>(null)
+// ServerDropdown is a plain native <select> — there's no existing reusable
+// dropdown component elsewhere in this codebase to prefer over one.
+function ServerDropdown({
+  servers, value, onChange,
+}: { servers: MyServer[]; value: string; onChange: (driveId: string) => void }) {
+  return (
+    <select
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      className="text-xs border border-gray-200 rounded-md px-1.5 py-1 text-gray-700 bg-white cursor-pointer"
+    >
+      {servers.map((s) => (
+        <option key={s.drive_id} value={s.drive_id}>{s.name}</option>
+      ))}
+    </select>
+  )
+}
+
+function tierLabel(t: 'nvme' | 'hdd'): string {
+  return t === 'nvme' ? 'Fast' : 'Standard'
+}
+
+// DriveInfoButton shows a folder's current tier/server (resolved against the
+// user's drives) and, on click, opens DriveChangePopover to change it.
+function DriveInfoButton({ folder, servers }: { folder: Folder; servers: MyServer[] | undefined }) {
+  const [open, setOpen] = useState(false)
+  const match = folder.drive_id ? servers?.find((s) => s.drive_id === folder.drive_id) : undefined
+  const primary = servers?.find((s) => s.is_primary)
+  const label = match
+    ? `${tierLabel(match.drive_type)} tier · ${match.name}`
+    : primary
+      ? `Default (currently ${tierLabel(primary.drive_type)} tier · ${primary.name})`
+      : 'Default storage location'
+  return (
+    <div className="relative">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        title={label}
+        className="text-gray-300 hover:text-gray-500 cursor-pointer bg-transparent border-0 p-0.5 transition-colors"
+      >
+        <MdInfoOutline className="text-base" />
+      </button>
+      {open && (
+        <DriveChangePopover
+          folder={folder}
+          servers={servers}
+          currentLabel={label}
+          onClose={() => setOpen(false)}
+        />
+      )}
+    </div>
+  )
+}
+
+// DriveChangePopover shows the folder's current drive, fetches migration
+// eligibility, and lets the user request a change (subject to the 3-per-
+// folder/30-day rate limit enforced server-side). While a migration is
+// pending/in_progress it shows live progress via the reused UploadToast.
+function DriveChangePopover({
+  folder, servers, currentLabel, onClose,
+}: { folder: Folder; servers: MyServer[] | undefined; currentLabel: string; onClose: () => void }) {
+  const queryClient = useQueryClient()
+  const { notify } = useNotification()
+  const { eligibility, migration, progress, isActive } = useDriveMigrationProgress(folder.id, folder.name)
+  const [tier, setTier] = useState<'nvme' | 'hdd'>(() => {
+    const current = folder.drive_id ? servers?.find((s) => s.drive_id === folder.drive_id) : undefined
+    return current?.drive_type ?? servers?.find((s) => s.is_primary)?.drive_type ?? 'nvme'
+  })
+  const [driveId, setDriveId] = useState<string>(() => {
+    const current = folder.drive_id ? servers?.find((s) => s.drive_id === folder.drive_id) : undefined
+    return current?.drive_id ?? servers?.find((s) => s.is_primary)?.drive_id ?? ''
+  })
+
+  const hasBothTiers = !!servers?.some((s) => s.drive_type === 'nvme') && !!servers?.some((s) => s.drive_type === 'hdd')
+  const serversInTier = (servers ?? []).filter((s) => s.drive_type === tier)
+
+  function handleTierChange(t: 'nvme' | 'hdd') {
+    setTier(t)
+    const inTier = servers?.filter((s) => s.drive_type === t) ?? []
+    const primaryInTier = inTier.find((s) => s.is_primary)
+    setDriveId(primaryInTier?.drive_id ?? inTier[0]?.drive_id ?? '')
+  }
+
+  const migrateMutation = useMutation({
+    mutationFn: () => requestDriveMigration(folder.id, driveId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['folders', folder.id, 'drive-migration'] })
+    },
+    onError: (err) => {
+      notify('error', err instanceof ApiError ? err.message : 'Failed to start storage move')
+    },
+  })
+
   useEffect(() => {
-    let cancelled = false
-    getAncestors(folderId)
-      .then((res) => {
-        if (cancelled) return
-        const joined = res.ancestors.map((a) => a.name).join('/')
-        setPath(joined)
-      })
-      .catch(() => { if (!cancelled) setPath('') })
-    return () => { cancelled = true }
-  }, [folderId])
-  if (path === null) return null
-  return <ShareDirectoryModal path={path} folderName={folderName} onClose={onClose} />
+    if (migration?.status === 'completed') {
+      queryClient.invalidateQueries({ queryKey: ['folders'] })
+    }
+  }, [migration?.status, queryClient])
+
+  const atLimit = !!eligibility && eligibility.recent_count >= eligibility.limit
+
+  return (
+    <div className="absolute right-0 top-full mt-1 w-72 bg-white rounded-lg border border-gray-200 shadow-lg z-50 p-3">
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-xs font-semibold text-gray-700">Storage location</span>
+        <button onClick={onClose} className="text-gray-400 hover:text-gray-600 cursor-pointer bg-transparent border-0 p-0.5">
+          <MdClose className="text-sm" />
+        </button>
+      </div>
+      <p className="text-xs text-gray-500 mb-3">{currentLabel}</p>
+
+      {isActive && progress ? (
+        <>
+          <p className="text-xs text-gray-500 mb-1">Moving files… see progress below.</p>
+          <UploadToast progress={progress} onDismiss={onClose} verb="Moving" />
+        </>
+      ) : (
+        <>
+          <div className="flex items-center gap-2 mb-2">
+            {hasBothTiers
+              ? <TierToggle value={tier} onChange={handleTierChange} />
+              : <span className="text-xs text-gray-600">{tierLabel(tier)} tier</span>}
+          </div>
+          {serversInTier.length > 1 ? (
+            <div className="mb-3">
+              <ServerDropdown servers={serversInTier} value={driveId} onChange={setDriveId} />
+            </div>
+          ) : (
+            serversInTier[0] && <p className="text-xs text-gray-500 mb-3">{serversInTier[0].name}</p>
+          )}
+
+          {atLimit && eligibility?.next_eligible_at && (
+            <p className="text-xs text-amber-600 mb-2">
+              Reached {eligibility.limit} storage changes for this folder this period — next available{' '}
+              {new Date(eligibility.next_eligible_at).toLocaleDateString()}.
+            </p>
+          )}
+
+          <button
+            onClick={() => migrateMutation.mutate()}
+            disabled={!driveId || driveId === folder.drive_id || atLimit || migrateMutation.isPending}
+            className="w-full px-3 py-1.5 text-xs bg-blue-600 hover:bg-blue-700 text-white rounded-md font-medium cursor-pointer transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            Move
+          </button>
+        </>
+      )}
+    </div>
+  )
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

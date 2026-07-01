@@ -277,14 +277,18 @@ export async function pickGooglePhotosWeb(
     if (isCancelled()) break
     await new Promise<void>((r) => setTimeout(r, current.pollIntervalMs))
     if (isCancelled()) break
-    // Poll the session BEFORE checking tab.closed so we don't miss a final
-    // mediaItemsSet=true that arrived the instant the user clicked Done and the
-    // picker tab auto-closed (or the user closed it themselves right after).
+    // Wait until the user finishes selecting (mediaItemsSet), the session times
+    // out, or the user cancels. We intentionally never read popup.closed: once the
+    // tab navigates to photos.google.com (served with Cross-Origin-Opener-Policy:
+    // same-origin) the browser severs our handle, so popup.closed always reads
+    // `true` and logs "Cross-Origin-Opener-Policy policy would block the
+    // window.closed call". Reading it here used to abort the wait on the very
+    // first poll — right after the user signed in.
     try { current = await getPhotosPickerSession(session.id, accessToken) } catch { break }
-    if (!current.mediaItemsSet && popup.closed) break
   }
 
-  popup.close()
+  // Best-effort close; COOP may deny closing a cross-origin tab, which is fine.
+  try { popup.close() } catch { /* ignore */ }
 
   if (current.mediaItemsSet) {
     try {

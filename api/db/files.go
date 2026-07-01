@@ -540,3 +540,17 @@ func (q *Queries) SetFileTakenAt(ctx context.Context, id uuid.UUID, takenAt time
 	}
 	return nil
 }
+
+// SetFileDriveID records which drive a file's blob physically lives on after
+// a drive migration has moved it. Runs outside the user-scoped transaction
+// (called from the background migration job), so it is intentionally not
+// gated by RLS — file ids are unguessable UUIDs.
+func (q *Queries) SetFileDriveID(ctx context.Context, id, driveID uuid.UUID) error {
+	_, err := q.db.ExecContext(ctx, `
+		UPDATE files SET drive_id = $2, updated_at = NOW() WHERE id = $1
+	`, id, driveID)
+	if err != nil {
+		return fmt.Errorf("SetFileDriveID %s: %w", id, err)
+	}
+	return nil
+}

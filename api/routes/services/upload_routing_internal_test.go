@@ -69,3 +69,65 @@ func TestPickUploadDrive(t *testing.T) {
 		}
 	})
 }
+
+func TestPinnedDriveIfValid(t *testing.T) {
+	pinned := uuid.New()
+	other := uuid.New()
+
+	drive := func(id uuid.UUID, capacity, used int64, active bool) db.UserDriveInfo {
+		return db.UserDriveInfo{
+			DriveID:        id,
+			CapacityBytes:  capacity,
+			DriveUsedBytes: used,
+			DriveIsActive:  active,
+			ServerIsActive: active,
+		}
+	}
+
+	t.Run("nil folderDriveID falls through", func(t *testing.T) {
+		drives := []db.UserDriveInfo{drive(pinned, 100, 10, true)}
+		if _, ok := pinnedDriveIfValid(drives, nil, 5); ok {
+			t.Fatal("expected ok=false when folderDriveID is nil")
+		}
+	})
+
+	t.Run("pinned drive wins when active and has room", func(t *testing.T) {
+		drives := []db.UserDriveInfo{
+			drive(pinned, 100, 10, true),
+			drive(other, 100, 0, true),
+		}
+		got, ok := pinnedDriveIfValid(drives, &pinned, 5)
+		if !ok || got != pinned {
+			t.Fatalf("want pinned %s, got %s ok=%v", pinned, got, ok)
+		}
+	})
+
+	t.Run("falls through when pinned drive has no room", func(t *testing.T) {
+		drives := []db.UserDriveInfo{
+			drive(pinned, 100, 98, true), // 2 bytes free, file is 5 bytes
+			drive(other, 100, 0, true),
+		}
+		if _, ok := pinnedDriveIfValid(drives, &pinned, 5); ok {
+			t.Fatal("expected ok=false when pinned drive lacks room")
+		}
+	})
+
+	t.Run("falls through when pinned drive is inactive", func(t *testing.T) {
+		drives := []db.UserDriveInfo{
+			drive(pinned, 100, 10, false), // inactive
+			drive(other, 100, 0, true),
+		}
+		if _, ok := pinnedDriveIfValid(drives, &pinned, 5); ok {
+			t.Fatal("expected ok=false when pinned drive is inactive")
+		}
+	})
+
+	t.Run("falls through when pinned drive is no longer in the user's allocations", func(t *testing.T) {
+		// Simulates a revoked allocation (e.g. a premium downgrade) after the
+		// folder was created with this drive pinned.
+		drives := []db.UserDriveInfo{drive(other, 100, 0, true)}
+		if _, ok := pinnedDriveIfValid(drives, &pinned, 5); ok {
+			t.Fatal("expected ok=false when pinned drive is not in the user's drives")
+		}
+	})
+}

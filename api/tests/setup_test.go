@@ -394,9 +394,11 @@ func (s *stubAdminInviteService) Revoke(_ context.Context, _ uuid.UUID) error {
 // ── Stub FileServicer ─────────────────────────────────────────────────────────
 
 type stubFileService struct {
-	file    *models.File
-	fileErr error
-	deleted bool
+	file      *models.File
+	fileErr   error
+	deleted   bool
+	migration *models.FolderDriveMigration
+	migStatus *services.DriveMigrationStatus
 }
 
 func (s *stubFileService) Upload(_ context.Context, _ services.UploadInput) (*models.File, error) {
@@ -446,6 +448,12 @@ func (s *stubFileService) FinalizeChunkedUpload(_ context.Context, _ *services.U
 	return s.file, s.fileErr
 }
 func (s *stubFileService) AdminDeleteAllFiles(_ context.Context, _ string) error { return s.fileErr }
+func (s *stubFileService) RequestDriveMigration(_ context.Context, _ uuid.UUID, _ string, _, _ uuid.UUID) (*models.FolderDriveMigration, error) {
+	return s.migration, s.fileErr
+}
+func (s *stubFileService) GetLatestDriveMigration(_ context.Context, _, _ uuid.UUID) (*services.DriveMigrationStatus, error) {
+	return s.migStatus, s.fileErr
+}
 
 // ── Stub FolderServicer ───────────────────────────────────────────────────────
 
@@ -490,7 +498,7 @@ func (s *stubFolderService) GetMediaContents(_ context.Context, _, _ uuid.UUID, 
 		Files:      &db.PageResult[models.File]{Items: []models.File{}},
 	}, nil
 }
-func (s *stubFolderService) Create(_ context.Context, _ uuid.UUID, _ *uuid.UUID, _ string, _ string) (*models.Folder, error) {
+func (s *stubFolderService) Create(_ context.Context, _ uuid.UUID, _ *uuid.UUID, _, _, _ string, _ *uuid.UUID) (*models.Folder, error) {
 	return s.folder, s.folderErr
 }
 func (s *stubFolderService) Rename(_ context.Context, _, _ uuid.UUID, _ string) (*models.Folder, error) {

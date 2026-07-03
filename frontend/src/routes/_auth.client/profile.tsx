@@ -547,12 +547,15 @@ function StorageInfraCard() {
 // ── Storage upgrades ──────────────────────────────────────────────────────────
 
 const EXPANSION_STATUS_META: Record<ExpansionRequest['status'], { label: string; className: string }> = {
-  opened:    { label: 'Awaiting review',    className: 'bg-amber-50 text-amber-700' },
-  approved:  { label: 'Approved',           className: 'bg-blue-50 text-blue-700' },
-  expanded:  { label: 'Payment due',        className: 'bg-purple-50 text-purple-700' },
-  completed: { label: 'Completed',          className: 'bg-green-50 text-green-700' },
-  expired:   { label: 'Expired (refunded)', className: 'bg-gray-100 text-gray-500' },
-  refunded:  { label: 'Refunded',           className: 'bg-gray-100 text-gray-500' },
+  opened:       { label: 'Awaiting review',  className: 'bg-amber-50 text-amber-700' },
+  invoice_sent: { label: 'Invoice sent',     className: 'bg-blue-50 text-blue-700' },
+  accepted:     { label: 'Invoice accepted', className: 'bg-blue-50 text-blue-700' },
+  approved:     { label: 'Approved',         className: 'bg-blue-50 text-blue-700' },
+  expanded:     { label: 'Balance due',      className: 'bg-purple-50 text-purple-700' },
+  completed:    { label: 'Completed',        className: 'bg-green-50 text-green-700' },
+  expired:      { label: 'Expired',          className: 'bg-gray-100 text-gray-500' },
+  refunded:     { label: 'Refunded',         className: 'bg-gray-100 text-gray-500' },
+  rejected:     { label: 'Rejected',         className: 'bg-red-50 text-red-600' },
 }
 
 function expansionCapacityLabel(r: ExpansionRequest): string {
@@ -568,7 +571,7 @@ function ExpansionRequestsCard() {
     queryFn: listMyExpansionRequests,
   })
 
-  if (!requests || requests.length === 0) return null
+  if (!Array.isArray(requests) || requests.length === 0) return null
 
   return (
     <div className="bg-white border border-gray-200 rounded-xl px-5 py-4">
@@ -582,8 +585,10 @@ function ExpansionRequestsCard() {
           const meta = EXPANSION_STATUS_META[r.status] ?? { label: r.status, className: 'bg-gray-100 text-gray-500' }
           const deadline =
             r.status === 'opened' ? { label: 'Review due', at: r.approval_due_at ?? r.expires_at }
+            : r.status === 'invoice_sent' ? { label: 'Accept invoice by', at: r.invoice_accept_due_at ?? null }
+            : r.status === 'accepted' ? { label: 'Approval due', at: r.approval_due_at }
             : r.status === 'approved' ? { label: 'Expansion due', at: r.expansion_due_at }
-            : r.status === 'expanded' ? { label: 'Payment due', at: r.payment_due_at }
+            : r.status === 'expanded' ? { label: 'Balance due since', at: r.payment_due_at }
             : null
           return (
             <div key={r.id} className="py-3 first:pt-0 last:pb-0">

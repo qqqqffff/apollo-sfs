@@ -21,6 +21,7 @@ import {
   CUSTOM_PLAN_ID,
   CUSTOM_PER_TIB_CENTS,
   TIB,
+  buildCustomTibStops,
   captureExpansionOrder,
   captureStorageOrder,
   createExpansionOrder,
@@ -28,6 +29,7 @@ import {
   customPriceCents,
   formatCents,
   getBillingConfig,
+  submitCustomRequest,
   type StorageType,
 } from '../api/billing'
 import { ApiError } from '../api/client'
@@ -40,11 +42,9 @@ const MAX_ALLOCATED_PCT = 90
 // (or over it) opens this modal, unless disabled in preferences.
 export const STORAGE_PROMPT_THRESHOLD = 0.75
 
-// Custom capacity slider ladder, in TiB: above the 1 TB fixed plan up to 10 PiB.
-const CUSTOM_TIB_STOPS = [
-  2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768,
-  1024, 1536, 2048, 3072, 4096, 6144, 8192, 10240,
-]
+// Custom capacity slider ladder, in TiB: 1 TB steps to 32 TB, 4 TB steps to
+// 160 TB, 16 TB steps to 512 TB, 64 TB steps to 2 PB, 256 TB steps to 10 PB.
+const CUSTOM_TIB_STOPS = buildCustomTibStops()
 
 function formatSize(bytes: number): string {
   if (bytes >= 1024 * TIB) return `${(bytes / (1024 * TIB)).toFixed(bytes % (1024 * TIB) === 0 ? 0 : 1)} PB`
@@ -68,7 +68,7 @@ interface Props {
   promptReason?: 'upload-near-quota' | 'upload-over-quota' | null
 }
 
-type Phase = 'select' | 'purchased' | 'expansion_requested'
+type Phase = 'select' | 'purchased' | 'expansion_requested' | 'custom_submitted'
 
 export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Props) {
   const queryClient = useQueryClient()
@@ -106,6 +106,7 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
   const [busy, setBusy] = useState(false)
   const [payError, setPayError] = useState<string | null>(null)
   const [expansionResult, setExpansionResult] = useState<{ id: string; expiresAt: string } | null>(null)
+  const [customResult, setCustomResult] = useState<{ reviewDueAt: string; estimateCents: number } | null>(null)
   const [newQuota, setNewQuota] = useState<number | null>(null)
 
   // Default server selection once servers load.
@@ -140,11 +141,12 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
   const serverTypeMismatch = !!selectedServer && selectedServer.drive_type !== storageType
   const serverLacksCapacity = !!selectedServer && planBytes > selectedServer.available_bytes
 
-  // Expansion request instead of a direct purchase when the server can't take
-  // the purchase (>=90% allocated, wrong tier, or not enough free capacity),
-  // or always for custom amounts (manual review).
-  const isExpansion = !!selectedPlanId && !!selectedServer &&
-    (isCustom || serverAtCapacity || serverTypeMismatch || serverLacksCapacity)
+  // Deposit-based expansion request instead of a direct purchase when the
+  // server can't take the purchase (>=90% allocated, wrong tier, or not
+  // enough free capacity). Custom amounts never pay here: they are submitted
+  // without payment (estimated price) and invoiced after manual review.
+  const isExpansion = !!selectedPlanId && !isCustom && !!selectedServer &&
+    (serverAtCapacity || serverTypeMismatch || serverLacksCapacity)
 
   const fastAvailable = useMemo(
     () => (servers ?? []).filter((s) => s.drive_type === 'nvme').reduce((sum, s) => sum + s.available_bytes, 0),
@@ -164,12 +166,7 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
     if (!selectedPlanId || !selectedServerId) throw new Error('No plan selected')
     try {
       if (isExpansion) {
-        const res = await createExpansionOrder(
-          isCustom ? CUSTOM_PLAN_ID : selectedPlanId,
-          storageType,
-          selectedServerId,
-          isCustom ? customBytes : undefined,
-        )
+        const res = await createExpansionOrder(selectedPlanId, storageType, selectedServerId)
         return res.order_id
       }
       const res = await createStorageOrder(selectedPlanId, storageType, selectedServerId)
@@ -178,6 +175,22 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
       const msg = err instanceof ApiError ? err.message : 'Could not start checkout'
       setPayError(msg)
       throw err
+    }
+  }
+
+  async function handleSubmitCustom() {
+    if (!selectedServerId || !isCustom) return
+    setBusy(true)
+    setPayError(null)
+    try {
+      const res = await submitCustomRequest(storageType, selectedServerId, customBytes)
+      setCustomResult({ reviewDueAt: res.review_due_at, estimateCents: res.estimated_price_cents })
+      setPhase('custom_submitted')
+      queryClient.invalidateQueries({ queryKey: ['billing', 'expansion-requests'] })
+    } catch (err) {
+      setPayError(err instanceof ApiError ? err.message : 'Could not submit request')
+    } finally {
+      setBusy(false)
     }
   }
 
@@ -268,6 +281,36 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
               <p className="text-xs text-gray-400 m-0 max-w-sm">
                 You can track this request on your profile page. The remaining balance is
                 charged only after your capacity is provisioned.
+              </p>
+              <button
+                onClick={onClose}
+                className="mt-2 px-5 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium cursor-pointer transition-colors"
+              >
+                Done
+              </button>
+            </div>
+          )}
+
+          {phase === 'custom_submitted' && (
+            <div className="flex flex-col items-center text-center py-6 gap-3">
+              <MdCheckCircle className="text-5xl text-green-500" />
+              <h4 className="text-lg font-semibold text-gray-900 m-0">Custom request submitted</h4>
+              <p className="text-sm text-gray-600 m-0 max-w-sm">
+                Your request for {formatSize(customBytes)} of {storageType === 'nvme' ? 'fast' : 'standard'} storage
+                will be manually reviewed within <span className="font-semibold">3 business days</span>.
+                {customResult && (
+                  <> The estimated price is <span className="font-semibold">{formatCents(customResult.estimateCents)}</span> —
+                  an invoice with the final amount will be emailed to you after review.</>
+                )}
+              </p>
+              {customResult && (
+                <p className="text-xs text-gray-400 m-0">
+                  Review due by {new Date(customResult.reviewDueAt).toLocaleDateString()}
+                </p>
+              )}
+              <p className="text-xs text-gray-400 m-0 max-w-sm">
+                No payment has been taken. You'll have 14 business days to review and accept the
+                invoice (paying any listed deposit) before the request expires.
               </p>
               <button
                 onClick={onClose}
@@ -460,8 +503,10 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
                           Above 1 TB, up to 10 PB · manually reviewed within 3 business days
                         </p>
                       </div>
-                      <span className={`text-sm font-semibold ${isCustom ? 'text-blue-700' : 'text-gray-600'}`}>
-                        {isCustom ? formatCents(customPriceCents(customBytes, storageType)) : `from ${formatCents(customPriceCents(2 * TIB, storageType))}`}
+                      <span className={`text-sm font-semibold text-right ${isCustom ? 'text-blue-700' : 'text-gray-600'}`}>
+                        {isCustom
+                          ? <>est. {formatCents(customPriceCents(customBytes, storageType))}</>
+                          : `est. from ${formatCents(customPriceCents(2 * TIB, storageType))}`}
                       </span>
                     </div>
                     {isCustom && (
@@ -480,7 +525,9 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
                           <span>10 PB</span>
                         </div>
                         <p className="text-[11px] text-gray-400 m-0 mt-1">
-                          {formatCents(CUSTOM_PER_TIB_CENTS[storageType])} per TB · 50% deposit of {formatCents(Math.ceil(customPriceCents(customBytes, storageType) / 2))} due now
+                          Estimated at {formatCents(CUSTOM_PER_TIB_CENTS[storageType])} per TB.
+                          The final price is confirmed by invoice after a 3-business-day manual review —
+                          no payment is taken now.
                         </p>
                       </div>
                     )}
@@ -488,18 +535,16 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
                 </div>
               </div>
 
-              {/* Expansion notice */}
+              {/* Expansion notice (fixed plans, deposit-based) */}
               {isExpansion && (
                 <div className="px-4 py-3 bg-amber-50 border border-amber-200 rounded-xl">
                   <p className="text-xs font-semibold text-amber-800 m-0 mb-1">
-                    Capacity expansion request {isCustom ? '(manual review)' : ''}
+                    Capacity expansion request
                   </p>
                   <p className="text-xs text-amber-800 m-0 leading-relaxed">
-                    {isCustom
-                      ? 'Custom capacity requests are manually reviewed within 3 business days. '
-                      : serverAtCapacity
-                        ? `This server is at ${selectedServer?.allocated_pct.toFixed(0)}% allocated capacity, so direct purchases are unavailable. Your request will be reviewed within 7 business days. `
-                        : `This server can't fit ${formatSize(planBytes)} of ${storageType === 'nvme' ? 'fast' : 'standard'} storage right now. Your request will be reviewed within 7 business days. `}
+                    {serverAtCapacity
+                      ? `This server is at ${selectedServer?.allocated_pct.toFixed(0)}% allocated capacity, so direct purchases are unavailable. Your request will be reviewed within 7 business days. `
+                      : `This server can't fit ${formatSize(planBytes)} of ${storageType === 'nvme' ? 'fast' : 'standard'} storage right now. Your request will be reviewed within 7 business days. `}
                     Once approved, capacity is expanded within <span className="font-semibold">14 business days</span>.
                     You pay a <span className="font-semibold">50% deposit ({formatCents(depositCents)})</span> now;
                     if either deadline is missed, it is refunded automatically. The remaining balance is
@@ -508,11 +553,40 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
                 </div>
               )}
 
-              {payError && <p className="text-xs text-red-500 m-0">{payError}</p>}
-              {busy && <p className="text-xs text-gray-500 m-0">Verifying payment…</p>}
+              {/* Custom request notice (no payment now, invoiced after review) */}
+              {isCustom && (
+                <div className="px-4 py-3 bg-blue-50 border border-blue-200 rounded-xl">
+                  <p className="text-xs font-semibold text-blue-800 m-0 mb-1">
+                    Custom capacity request (manual review)
+                  </p>
+                  <p className="text-xs text-blue-800 m-0 leading-relaxed">
+                    The price shown is an <span className="font-semibold">estimate</span>. Your request is
+                    manually reviewed within <span className="font-semibold">3 business days</span>, after
+                    which we email an invoice with the final amount. You'll have{' '}
+                    <span className="font-semibold">14 business days</span> to review and accept it
+                    (paying any listed deposit) before the request expires. No payment is taken now.
+                  </p>
+                </div>
+              )}
 
-              {/* PayPal buttons (server-side create + capture) */}
-              {configLoading ? (
+              {payError && <p className="text-xs text-red-500 m-0">{payError}</p>}
+              {busy && <p className="text-xs text-gray-500 m-0">{isCustom ? 'Submitting request…' : 'Verifying payment…'}</p>}
+
+              {/* Custom: submit the request without payment */}
+              {isCustom ? (
+                <div>
+                  <button
+                    onClick={handleSubmitCustom}
+                    disabled={!canPay}
+                    className="w-full px-4 py-3 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium disabled:opacity-50 cursor-pointer transition-colors"
+                  >
+                    {busy ? 'Submitting…' : `Request ${formatSize(customBytes)} — est. ${formatCents(fullPriceCents)}`}
+                  </button>
+                  <p className="text-[11px] text-gray-400 text-center m-0 mt-2">
+                    Final pricing is confirmed by invoice after review. No charge today.
+                  </p>
+                </div>
+              ) : configLoading ? (
                 <p className="text-sm text-gray-400 m-0">Loading payment options…</p>
               ) : !config?.paypal_client_id ? (
                 <p className="text-sm text-red-500 m-0">Payments are not configured.</p>
@@ -534,7 +608,7 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
                     }}
                   >
                     <PayPalButtons
-                      forceReRender={[selectedPlanId, storageType, selectedServerId, customStopIdx, isExpansion]}
+                      forceReRender={[selectedPlanId, storageType, selectedServerId, isExpansion]}
                       disabled={!canPay}
                       style={{ layout: 'vertical', shape: 'rect', label: 'pay' }}
                       createOrder={handleCreateOrder}

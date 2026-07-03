@@ -36,9 +36,19 @@ type ServerExpansionRequest struct {
 	RefundID           *string    `json:"refund_id"`
 	CancellationReason *string    `json:"cancellation_reason"`
 	PaymentDueAt       *time.Time `json:"payment_due_at"`
+	// ReminderSentAt is set when the 7-business-day remaining-balance
+	// reminder email has gone out.
+	ReminderSentAt *time.Time `json:"reminder_sent_at"`
 
 	// Populated by JOIN queries.
 	ServerName  string `json:"server_name"`
 	ServerState string `json:"server_state"`
 	UserEmail   string `json:"user_email"`
+
+	// Latest invoice summary, populated only by the admin listing query for
+	// custom requests.
+	InvoiceNumber      *string    `json:"invoice_number,omitempty"`
+	InvoiceStatus      *string    `json:"invoice_status,omitempty"`
+	InvoiceSentAt      *time.Time `json:"invoice_sent_at,omitempty"`
+	InvoiceAcceptDueAt *time.Time `json:"invoice_accept_due_at,omitempty"`
 }

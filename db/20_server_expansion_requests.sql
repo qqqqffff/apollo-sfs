@@ -20,15 +20,23 @@ CREATE TABLE server_expansion_requests (
     payment_method       TEXT        NOT NULL,
     paypal_order_id      TEXT        NOT NULL,
     paypal_capture_id    TEXT,
-    -- opened    : deposit captured, awaiting admin approval
-    -- approved  : admin approved; capacity expansion in progress
-    -- expanded  : server capacity physically expanded, quota not yet allocated
-    -- completed : quota allocated to user
-    -- expired   : an SLA elapsed, deposit refunded automatically (or the user
-    --             missed the remaining-balance payment window — no refund)
-    -- refunded  : admin cancelled, deposit refunded with reason
+    -- opened       : awaiting admin review (standard: deposit captured;
+    --                custom: no payment yet, estimated price only)
+    -- invoice_sent : custom only — invoice emailed, awaiting acceptance
+    --                (14 business days)
+    -- accepted     : custom only — invoice approved, deposit paid when listed
+    -- approved     : admin approved; capacity expansion in progress
+    -- expanded     : quota provisioned; remaining balance being collected
+    --                (reminder after 7 business days; allocation reverted and
+    --                deposit kept 30 days after payment came due)
+    -- completed    : remaining balance collected
+    -- expired      : an SLA elapsed (deposit auto-refunded) or the user never
+    --                paid the remaining balance / accepted the invoice
+    -- refunded     : admin cancelled, deposit refunded with reason
+    -- rejected     : declined before any payment (no refund necessary)
     status               TEXT        NOT NULL DEFAULT 'opened'
-                             CHECK (status IN ('opened','approved','expanded','completed','expired','refunded')),
+                             CHECK (status IN ('opened','invoice_sent','accepted','approved','expanded',
+                                               'completed','expired','refunded','rejected')),
     -- is_custom marks custom capacity requests (1 TiB – 10 PiB) that go
     -- through manual review with a 3-business-day approval SLA.
     is_custom            BOOLEAN     NOT NULL DEFAULT FALSE,
@@ -44,9 +52,12 @@ CREATE TABLE server_expansion_requests (
     expansion_due_at     TIMESTAMPTZ,
     created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     completed_at         TIMESTAMPTZ,
-    -- payment_due_at is set when admin marks request 'expanded'; user has 3 days
-    -- to pay the remaining 50% balance before the request expires.
+    -- payment_due_at is set when the admin provisions the quota ('expanded');
+    -- the remaining balance is due from then. A reminder email goes out after
+    -- 7 business days (reminder_sent_at) and the allocation is reverted (the
+    -- deposit kept) 30 days after payment came due.
     payment_due_at       TIMESTAMPTZ,
+    reminder_sent_at     TIMESTAMPTZ,
     refund_id            TEXT,
     cancellation_reason  TEXT
 );

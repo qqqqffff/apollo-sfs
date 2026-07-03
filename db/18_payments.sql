@@ -15,6 +15,9 @@ CREATE TABLE payments (
     payment_method     TEXT        NOT NULL CHECK (payment_method IN ('apple_pay', 'card')),
     created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     captured_at        TIMESTAMPTZ,
+    -- Admin refunds (90-day window from capture).
+    refund_id          TEXT,
+    refunded_at        TIMESTAMPTZ,
     raw_webhook        JSONB
 );
 

@@ -25,16 +25,29 @@ type Querier interface {
 	GetExpansionRequestByPayPalOrderID(ctx context.Context, orderID string) (*models.ServerExpansionRequest, error)
 	MarkExpansionRequestCaptured(ctx context.Context, orderID, captureID string) (bool, error)
 	ApproveExpansionRequest(ctx context.Context, id uuid.UUID, expansionDueAt time.Time) (bool, error)
-	MarkExpansionRequestExpanded(ctx context.Context, id uuid.UUID, paymentWindowDays int) (bool, error)
-	ListExpansionRequests(ctx context.Context, f db.ExpansionRequestFilter, in db.PageInput) (*db.PageResult[models.ServerExpansionRequest], error)
+	ProvisionExpansionRequest(ctx context.Context, id uuid.UUID, postQuotaBytes int64) (bool, error)
+	MarkExpansionRequestPaid(ctx context.Context, id uuid.UUID) (bool, error)
+	ListExpansionRequests(ctx context.Context, f db.ExpansionRequestFilter, limit, offset int) ([]models.ServerExpansionRequest, int, error)
 	ListUserExpansionRequests(ctx context.Context, username string) ([]models.ServerExpansionRequest, error)
-	FulfillExpansionRequest(ctx context.Context, id uuid.UUID, postQuotaBytes int64) (bool, error)
 	CancelExpansionRequest(ctx context.Context, id uuid.UUID, refundID, reason string) (bool, error)
+	RejectExpansionRequest(ctx context.Context, id uuid.UUID, reason string) (bool, error)
 	ExpireExpansionRequest(ctx context.Context, id uuid.UUID, refundID string) error
-	ForfeitExpansionRequest(ctx context.Context, id uuid.UUID) error
 	ListExpiredOpenRequests(ctx context.Context) ([]models.ServerExpansionRequest, error)
 	ListExpiredApprovedRequests(ctx context.Context) ([]models.ServerExpansionRequest, error)
-	ListExpiredExpandedRequests(ctx context.Context) ([]models.ServerExpansionRequest, error)
+	ListUnpaidExpandedRequests(ctx context.Context) ([]models.ServerExpansionRequest, error)
+	MarkExpansionReminderSent(ctx context.Context, id uuid.UUID) error
+	RevertExpansionRequest(ctx context.Context, id uuid.UUID) error
+	CountFailedExpansionRequests(ctx context.Context, username string) (int, error)
+
+	// Custom-request invoices.
+	CreateExpansionInvoice(ctx context.Context, p db.CreateExpansionInvoiceParams) (*models.ExpansionInvoice, error)
+	GetExpansionInvoiceByToken(ctx context.Context, token string) (*models.ExpansionInvoice, error)
+	GetLatestExpansionInvoice(ctx context.Context, requestID uuid.UUID) (*models.ExpansionInvoice, error)
+	AcceptExpansionInvoice(ctx context.Context, id uuid.UUID, paypalOrderID, paypalCaptureID *string) (bool, error)
+	SetExpansionInvoiceStatus(ctx context.Context, id uuid.UUID, status string) error
+	ListExpiredSentInvoices(ctx context.Context) ([]models.ExpansionInvoice, error)
+	MarkExpansionInvoiceSent(ctx context.Context, id uuid.UUID) (bool, error)
+	AcceptExpansionRequestInvoice(ctx context.Context, id uuid.UUID, depositCents, fullCents int64, paypalOrderID string, paypalCaptureID *string, approvalDueAt time.Time) (bool, error)
 }
 
 // addBusinessDays returns the time n business days (Mon–Fri) after from,

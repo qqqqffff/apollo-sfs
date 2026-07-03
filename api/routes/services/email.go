@@ -272,7 +272,7 @@ func (s *EmailService) SendExpansionRequestNotification(
 	adminEmails []string,
 	username, userEmail, serverName, planLabel, depositFormatted, expiresAt string,
 ) error {
-	adminURL := s.appURL + "/admin/requests/expansion"
+	adminURL := s.appURL + "/admin/orders?tab=expansion"
 	for _, to := range adminEmails {
 		if err := s.enqueue(ctx, to,
 			fmt.Sprintf("New expansion request — %s", s.appName),
@@ -332,6 +332,51 @@ func (s *EmailService) SendExpansionCancellation(
 			"PlanLabel":       planLabel,
 			"RefundFormatted": refundFormatted,
 			"Reason":          reason,
+		},
+	)
+}
+
+// SendExpansionInvoice emails a custom-capacity invoice to the user. reviewURL
+// is empty when the admin chose not to include the website review link.
+func (s *EmailService) SendExpansionInvoice(
+	ctx context.Context,
+	toEmail, serverName, planLabel, invoiceNumber, totalFmt, depositFmt, acceptDueAt, reviewURL string,
+) error {
+	return s.enqueue(ctx, toEmail,
+		fmt.Sprintf("Invoice %s for your custom storage request — %s", invoiceNumber, s.appName),
+		"expansion_invoice",
+		map[string]any{
+			"AppName":       s.appName,
+			"AppURL":        s.appURL,
+			"ServerName":    serverName,
+			"PlanLabel":     planLabel,
+			"InvoiceNumber": invoiceNumber,
+			"TotalFmt":      totalFmt,
+			"DepositFmt":    depositFmt,
+			"AcceptDueAt":   acceptDueAt,
+			"ReviewURL":     reviewURL,
+		},
+	)
+}
+
+// SendExpansionBalanceReminder nudges the user about an outstanding remaining
+// balance on a provisioned expansion (sent once, 7 business days after the
+// balance came due). revertAt is when the allocation will be reverted.
+func (s *EmailService) SendExpansionBalanceReminder(
+	ctx context.Context,
+	toEmail, serverName, planLabel, remainingFmt, revertAt, paymentURL string,
+) error {
+	return s.enqueue(ctx, toEmail,
+		fmt.Sprintf("Reminder: balance due for your storage expansion — %s", s.appName),
+		"expansion_balance_reminder",
+		map[string]any{
+			"AppName":      s.appName,
+			"AppURL":       s.appURL,
+			"ServerName":   serverName,
+			"PlanLabel":    planLabel,
+			"RemainingFmt": remainingFmt,
+			"RevertAt":     revertAt,
+			"PaymentURL":   paymentURL,
 		},
 	)
 }

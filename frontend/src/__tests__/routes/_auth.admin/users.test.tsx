@@ -4,8 +4,9 @@ import '@testing-library/jest-dom'
 
 const mockNavigate = jest.fn()
 jest.mock('@tanstack/react-router', () => ({
-  createFileRoute: () => (opts: any) => ({ options: opts }),
+  createFileRoute: () => (opts: any) => ({ options: opts, useSearch: () => ({}) }),
   useNavigate: () => mockNavigate,
+  Link: ({ children }: { children: React.ReactNode }) => <a>{children}</a>,
 }))
 
 const mockInfiniteQuery = jest.fn()

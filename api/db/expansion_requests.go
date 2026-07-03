@@ -18,7 +18,7 @@ const expansionRequestColumns = `
 	ser.status, ser.is_custom, ser.pre_quota_bytes, ser.post_quota_bytes,
 	ser.expires_at, ser.approval_due_at, ser.approved_at, ser.expansion_due_at,
 	ser.created_at, ser.completed_at,
-	ser.refund_id, ser.cancellation_reason, ser.payment_due_at,
+	ser.refund_id, ser.cancellation_reason, ser.payment_due_at, ser.reminder_sent_at,
 	s.name AS server_name, s.state AS server_state,
 	u.email AS user_email`
 
@@ -28,7 +28,7 @@ func scanExpansionRequest(rows interface {
 	var r models.ServerExpansionRequest
 	var captureID, refundID, reason sql.NullString
 	var postQuota sql.NullInt64
-	var completedAt, paymentDueAt, approvalDueAt, approvedAt, expansionDueAt sql.NullTime
+	var completedAt, paymentDueAt, approvalDueAt, approvedAt, expansionDueAt, reminderSentAt sql.NullTime
 	err := rows.Scan(
 		&r.ID, &r.Username, &r.ServerID, &r.PlanID, &r.StorageType,
 		&r.BytesRequested, &r.DepositAmountCents, &r.FullPriceCents,
@@ -36,11 +36,15 @@ func scanExpansionRequest(rows interface {
 		&r.Status, &r.IsCustom, &r.PreQuotaBytes, &postQuota,
 		&r.ExpiresAt, &approvalDueAt, &approvedAt, &expansionDueAt,
 		&r.CreatedAt, &completedAt,
-		&refundID, &reason, &paymentDueAt,
+		&refundID, &reason, &paymentDueAt, &reminderSentAt,
 		&r.ServerName, &r.ServerState, &r.UserEmail,
 	)
 	if err != nil {
 		return nil, err
+	}
+	if reminderSentAt.Valid {
+		t := reminderSentAt.Time
+		r.ReminderSentAt = &t
 	}
 	if approvalDueAt.Valid {
 		t := approvalDueAt.Time
@@ -207,22 +211,20 @@ type ExpansionRequestFilter struct {
 	ServerID uuid.UUID // zero = all
 	From     time.Time // zero = unbounded
 	To       time.Time // zero = unbounded
+	IsCustom *bool     // nil = all; true = custom requests only; false = standard
+	Search   string    // matches username, user email, server name, plan id, invoice number
+	// Sort: "sla" (nearest active deadline first), "deposit" (largest deposit
+	// first) or "" / "created" (newest first).
+	Sort string
 }
 
-// ListExpansionRequests returns a paginated list of expansion requests, newest
-// first, with optional status / server / date-range filters.
-func (q *Queries) ListExpansionRequests(ctx context.Context, f ExpansionRequestFilter, in PageInput) (*PageResult[models.ServerExpansionRequest], error) {
-	if in.Skip {
-		return &PageResult[models.ServerExpansionRequest]{}, nil
-	}
-	limit := clampLimit(in.Limit)
-
-	var afterTime time.Time
-	if in.Cursor != "" {
-		t, err := decodeTimeCursor(in.Cursor)
-		if err == nil {
-			afterTime = t
-		}
+// ListExpansionRequests returns a filtered, searched, offset-paginated page of
+// expansion requests plus the total row count for the filter. Each row carries
+// its latest invoice summary (custom requests).
+func (q *Queries) ListExpansionRequests(ctx context.Context, f ExpansionRequestFilter, limit, offset int) ([]models.ServerExpansionRequest, int, error) {
+	limit = clampLimit(limit)
+	if offset < 0 {
+		offset = 0
 	}
 
 	args := []any{}
@@ -244,61 +246,147 @@ func (q *Queries) ListExpansionRequests(ctx context.Context, f ExpansionRequestF
 	if !f.To.IsZero() {
 		add("ser.created_at <=", f.To)
 	}
-	if !afterTime.IsZero() {
-		add("ser.created_at <", afterTime)
+	if f.IsCustom != nil {
+		add("ser.is_custom =", *f.IsCustom)
+	}
+	if f.Search != "" {
+		args = append(args, "%"+f.Search+"%")
+		n := len(args)
+		where += fmt.Sprintf(` AND (ser.username ILIKE $%d OR u.email ILIKE $%d
+			OR s.name ILIKE $%d OR ser.plan_id ILIKE $%d
+			OR COALESCE(inv.invoice_number, '') ILIKE $%d)`, n, n, n, n, n)
 	}
 
-	args = append(args, limit+1)
-	query := fmt.Sprintf(`
-		SELECT %s
+	// invJoin exposes the latest invoice per request for the custom tab.
+	const invJoin = `
+		LEFT JOIN LATERAL (
+			SELECT ei.invoice_number, ei.status AS invoice_status,
+			       ei.sent_at AS invoice_sent_at, ei.accept_due_at AS invoice_accept_due_at
+			FROM expansion_invoices ei
+			WHERE ei.request_id = ser.id
+			ORDER BY ei.created_at DESC
+			LIMIT 1
+		) inv ON TRUE`
+
+	var total int
+	countQuery := fmt.Sprintf(`
+		SELECT COUNT(*)
 		FROM server_expansion_requests ser
 		JOIN servers s ON s.id = ser.server_id
 		JOIN users   u ON u.username = ser.username
 		%s
-		ORDER BY ser.created_at DESC
-		LIMIT $%d
-	`, expansionRequestColumns, where, len(args))
+		%s
+	`, invJoin, where)
+	if err := q.db.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("ListExpansionRequests count: %w", err)
+	}
+
+	orderBy := "ser.created_at DESC"
+	switch f.Sort {
+	case "sla":
+		// Nearest active deadline first: the deadline that currently applies
+		// to the request's stage. Terminal states sort last.
+		orderBy = `
+			CASE WHEN ser.status IN ('completed','expired','refunded','rejected') THEN 1 ELSE 0 END ASC,
+			COALESCE(
+				CASE ser.status
+					WHEN 'expanded'     THEN ser.payment_due_at + INTERVAL '30 days'
+					WHEN 'approved'     THEN ser.expansion_due_at
+					WHEN 'invoice_sent' THEN inv.invoice_accept_due_at
+					ELSE COALESCE(ser.approval_due_at, ser.expires_at)
+				END,
+				ser.expires_at
+			) ASC`
+	case "deposit":
+		orderBy = "ser.deposit_amount_cents DESC, ser.created_at DESC"
+	}
+
+	args = append(args, limit, offset)
+	query := fmt.Sprintf(`
+		SELECT %s,
+		       inv.invoice_number, inv.invoice_status, inv.invoice_sent_at, inv.invoice_accept_due_at
+		FROM server_expansion_requests ser
+		JOIN servers s ON s.id = ser.server_id
+		JOIN users   u ON u.username = ser.username
+		%s
+		%s
+		ORDER BY %s
+		LIMIT $%d OFFSET $%d
+	`, expansionRequestColumns, invJoin, where, orderBy, len(args)-1, len(args))
 
 	rows, err := q.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("ListExpansionRequests: %w", err)
+		return nil, 0, fmt.Errorf("ListExpansionRequests: %w", err)
 	}
 	defer rows.Close()
 
 	var items []models.ServerExpansionRequest
 	for rows.Next() {
-		r, err := scanExpansionRequest(rows)
+		r, err := scanExpansionRequestWithInvoice(rows)
 		if err != nil {
-			return nil, fmt.Errorf("ListExpansionRequests scan: %w", err)
+			return nil, 0, fmt.Errorf("ListExpansionRequests scan: %w", err)
 		}
 		items = append(items, *r)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("ListExpansionRequests rows: %w", err)
+		return nil, 0, fmt.Errorf("ListExpansionRequests rows: %w", err)
 	}
-
-	var nextToken string
-	if len(items) > limit {
-		items = items[:limit]
-		nextToken = encodeTimeCursor(items[len(items)-1].CreatedAt)
-	}
-	return &PageResult[models.ServerExpansionRequest]{Items: items, NextToken: nextToken}, nil
+	return items, total, nil
 }
 
-// FulfillExpansionRequest sets status='completed', records post_quota_bytes and
-// completed_at. Returns false if the request was not in a fulfillable state.
-func (q *Queries) FulfillExpansionRequest(ctx context.Context, id uuid.UUID, postQuotaBytes int64) (bool, error) {
-	now := time.Now()
-	res, err := q.db.ExecContext(ctx, `
-		UPDATE server_expansion_requests
-		SET status = 'completed', post_quota_bytes = $2, completed_at = $3
-		WHERE id = $1 AND status IN ('opened','approved','expanded')
-	`, id, postQuotaBytes, now)
+// scanExpansionRequestWithInvoice scans a row produced by the admin listing
+// query, which appends the latest-invoice summary columns.
+func scanExpansionRequestWithInvoice(rows *sql.Rows) (*models.ServerExpansionRequest, error) {
+	var r models.ServerExpansionRequest
+	var captureID, refundID, reason sql.NullString
+	var postQuota sql.NullInt64
+	var completedAt, paymentDueAt, approvalDueAt, approvedAt, expansionDueAt, reminderSentAt sql.NullTime
+	var invNumber, invStatus sql.NullString
+	var invSentAt, invAcceptDueAt sql.NullTime
+	err := rows.Scan(
+		&r.ID, &r.Username, &r.ServerID, &r.PlanID, &r.StorageType,
+		&r.BytesRequested, &r.DepositAmountCents, &r.FullPriceCents,
+		&r.Currency, &r.PaymentMethod, &r.PayPalOrderID, &captureID,
+		&r.Status, &r.IsCustom, &r.PreQuotaBytes, &postQuota,
+		&r.ExpiresAt, &approvalDueAt, &approvedAt, &expansionDueAt,
+		&r.CreatedAt, &completedAt,
+		&refundID, &reason, &paymentDueAt, &reminderSentAt,
+		&r.ServerName, &r.ServerState, &r.UserEmail,
+		&invNumber, &invStatus, &invSentAt, &invAcceptDueAt,
+	)
 	if err != nil {
-		return false, fmt.Errorf("FulfillExpansionRequest: %w", err)
+		return nil, err
 	}
-	n, _ := res.RowsAffected()
-	return n > 0, nil
+	setNullString := func(dst **string, v sql.NullString) {
+		if v.Valid {
+			s := v.String
+			*dst = &s
+		}
+	}
+	setNullTime := func(dst **time.Time, v sql.NullTime) {
+		if v.Valid {
+			t := v.Time
+			*dst = &t
+		}
+	}
+	setNullString(&r.PayPalCaptureID, captureID)
+	setNullString(&r.RefundID, refundID)
+	setNullString(&r.CancellationReason, reason)
+	if postQuota.Valid {
+		v := postQuota.Int64
+		r.PostQuotaBytes = &v
+	}
+	setNullTime(&r.CompletedAt, completedAt)
+	setNullTime(&r.PaymentDueAt, paymentDueAt)
+	setNullTime(&r.ApprovalDueAt, approvalDueAt)
+	setNullTime(&r.ApprovedAt, approvedAt)
+	setNullTime(&r.ExpansionDueAt, expansionDueAt)
+	setNullTime(&r.ReminderSentAt, reminderSentAt)
+	setNullString(&r.InvoiceNumber, invNumber)
+	setNullString(&r.InvoiceStatus, invStatus)
+	setNullTime(&r.InvoiceSentAt, invSentAt)
+	setNullTime(&r.InvoiceAcceptDueAt, invAcceptDueAt)
+	return &r, nil
 }
 
 // CancelExpansionRequest sets status='refunded' and records the refund ID and
@@ -308,7 +396,7 @@ func (q *Queries) CancelExpansionRequest(ctx context.Context, id uuid.UUID, refu
 	res, err := q.db.ExecContext(ctx, `
 		UPDATE server_expansion_requests
 		SET status = 'refunded', refund_id = $2, cancellation_reason = $3, completed_at = $4
-		WHERE id = $1 AND status IN ('opened','approved','expanded')
+		WHERE id = $1 AND status IN ('opened','accepted','approved','expanded')
 	`, id, refundID, reason, now)
 	if err != nil {
 		return false, fmt.Errorf("CancelExpansionRequest: %w", err)
@@ -318,28 +406,34 @@ func (q *Queries) CancelExpansionRequest(ctx context.Context, id uuid.UUID, refu
 }
 
 // ExpireExpansionRequest marks a single request as 'expired' with a refund ID.
-// Covers both missed-approval ('opened') and missed-expansion ('approved') SLAs.
+// Covers missed-approval ('opened'/'accepted'), missed-invoice-acceptance
+// ('invoice_sent') and missed-expansion ('approved') SLAs.
 func (q *Queries) ExpireExpansionRequest(ctx context.Context, id uuid.UUID, refundID string) error {
 	now := time.Now()
+	var refund any
+	if refundID != "" {
+		refund = refundID
+	}
 	_, err := q.db.ExecContext(ctx, `
 		UPDATE server_expansion_requests
 		SET status = 'expired', refund_id = $2, completed_at = $3
-		WHERE id = $1 AND status IN ('opened','approved')
-	`, id, refundID, now)
+		WHERE id = $1 AND status IN ('opened','accepted','invoice_sent','approved')
+	`, id, refund, now)
 	if err != nil {
 		return fmt.Errorf("ExpireExpansionRequest: %w", err)
 	}
 	return nil
 }
 
-// ApproveExpansionRequest transitions an 'opened' request to 'approved',
-// stamping approved_at and the expansion deadline (14 business days out).
-// Returns false if the request was not in 'opened' state.
+// ApproveExpansionRequest transitions an 'opened' (standard) or 'accepted'
+// (custom, invoice approved) request to 'approved', stamping approved_at and
+// the expansion deadline (14 business days out). Returns false if the request
+// was not in an approvable state.
 func (q *Queries) ApproveExpansionRequest(ctx context.Context, id uuid.UUID, expansionDueAt time.Time) (bool, error) {
 	res, err := q.db.ExecContext(ctx, `
 		UPDATE server_expansion_requests
 		SET status = 'approved', approved_at = NOW(), expansion_due_at = $2
-		WHERE id = $1 AND status = 'opened'
+		WHERE id = $1 AND status IN ('opened','accepted')
 	`, id, expansionDueAt)
 	if err != nil {
 		return false, fmt.Errorf("ApproveExpansionRequest: %w", err)
@@ -348,52 +442,126 @@ func (q *Queries) ApproveExpansionRequest(ctx context.Context, id uuid.UUID, exp
 	return n > 0, nil
 }
 
-// MarkExpansionRequestExpanded transitions an 'approved' request (or a legacy
-// 'opened' one) to 'expanded', indicating the server capacity is ready and the
-// user must pay the remaining balance within paymentWindowDays days. Returns
-// false if not in an eligible state.
-func (q *Queries) MarkExpansionRequestExpanded(ctx context.Context, id uuid.UUID, paymentWindowDays int) (bool, error) {
-	due := time.Now().AddDate(0, 0, paymentWindowDays)
+// ProvisionExpansionRequest transitions an 'approved' request (or a legacy
+// 'opened' one) to 'expanded' after the quota has been provisioned. The
+// remaining balance is due from this moment (payment_due_at = NOW());
+// post_quota_bytes records the user's quota after provisioning. Returns false
+// if not in an eligible state.
+func (q *Queries) ProvisionExpansionRequest(ctx context.Context, id uuid.UUID, postQuotaBytes int64) (bool, error) {
 	res, err := q.db.ExecContext(ctx, `
 		UPDATE server_expansion_requests
-		SET status = 'expanded', payment_due_at = $2
+		SET status = 'expanded', payment_due_at = NOW(), post_quota_bytes = $2
 		WHERE id = $1 AND status IN ('opened','approved')
-	`, id, due)
+	`, id, postQuotaBytes)
 	if err != nil {
-		return false, fmt.Errorf("MarkExpansionRequestExpanded: %w", err)
+		return false, fmt.Errorf("ProvisionExpansionRequest: %w", err)
 	}
 	n, _ := res.RowsAffected()
 	return n > 0, nil
 }
 
-// ForfeitExpansionRequest marks an 'expanded' request as 'expired' WITHOUT
-// issuing a refund. Used when the user fails to pay the remaining balance
-// within the payment window.
-func (q *Queries) ForfeitExpansionRequest(ctx context.Context, id uuid.UUID) error {
-	now := time.Now()
+// MarkExpansionRequestPaid completes an 'expanded' request once the remaining
+// balance has been collected. Returns false when not in 'expanded' state.
+func (q *Queries) MarkExpansionRequestPaid(ctx context.Context, id uuid.UUID) (bool, error) {
+	res, err := q.db.ExecContext(ctx, `
+		UPDATE server_expansion_requests
+		SET status = 'completed', completed_at = NOW()
+		WHERE id = $1 AND status = 'expanded'
+	`, id)
+	if err != nil {
+		return false, fmt.Errorf("MarkExpansionRequestPaid: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// MarkExpansionInvoiceSent flips a custom 'opened' request to 'invoice_sent'.
+func (q *Queries) MarkExpansionInvoiceSent(ctx context.Context, id uuid.UUID) (bool, error) {
+	res, err := q.db.ExecContext(ctx, `
+		UPDATE server_expansion_requests
+		SET status = 'invoice_sent'
+		WHERE id = $1 AND status IN ('opened','invoice_sent')
+	`, id)
+	if err != nil {
+		return false, fmt.Errorf("MarkExpansionInvoiceSent: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// AcceptExpansionRequestInvoice records the user's invoice acceptance on the
+// request: final pricing from the invoice, the deposit payment references, a
+// fresh approval deadline for the admin, and status 'accepted'.
+func (q *Queries) AcceptExpansionRequestInvoice(
+	ctx context.Context, id uuid.UUID,
+	depositCents, fullCents int64,
+	paypalOrderID string, paypalCaptureID *string,
+	approvalDueAt time.Time,
+) (bool, error) {
+	var captureID any
+	if paypalCaptureID != nil {
+		captureID = *paypalCaptureID
+	}
+	res, err := q.db.ExecContext(ctx, `
+		UPDATE server_expansion_requests
+		SET status = 'accepted',
+		    deposit_amount_cents = $2,
+		    full_price_cents = $3,
+		    paypal_order_id = $4,
+		    paypal_capture_id = COALESCE($5, paypal_capture_id),
+		    approval_due_at = $6,
+		    expires_at = $6
+		WHERE id = $1 AND status = 'invoice_sent'
+	`, id, depositCents, fullCents, paypalOrderID, captureID, approvalDueAt)
+	if err != nil {
+		return false, fmt.Errorf("AcceptExpansionRequestInvoice: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// RejectExpansionRequest declines a request that has not collected any money
+// yet ('opened' custom or 'invoice_sent'). No refund is involved.
+func (q *Queries) RejectExpansionRequest(ctx context.Context, id uuid.UUID, reason string) (bool, error) {
+	res, err := q.db.ExecContext(ctx, `
+		UPDATE server_expansion_requests
+		SET status = 'rejected', cancellation_reason = $2, completed_at = NOW()
+		WHERE id = $1 AND status IN ('opened','invoice_sent') AND paypal_capture_id IS NULL
+	`, id, reason)
+	if err != nil {
+		return false, fmt.Errorf("RejectExpansionRequest: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// MarkExpansionReminderSent stamps reminder_sent_at after the 7-business-day
+// remaining-balance reminder email went out.
+func (q *Queries) MarkExpansionReminderSent(ctx context.Context, id uuid.UUID) error {
 	_, err := q.db.ExecContext(ctx, `
 		UPDATE server_expansion_requests
-		SET status = 'expired', completed_at = $2
-		WHERE id = $1 AND status = 'expanded'
-	`, id, now)
+		SET reminder_sent_at = NOW()
+		WHERE id = $1 AND status = 'expanded' AND reminder_sent_at IS NULL
+	`, id)
 	if err != nil {
-		return fmt.Errorf("ForfeitExpansionRequest: %w", err)
+		return fmt.Errorf("MarkExpansionReminderSent: %w", err)
 	}
 	return nil
 }
 
-// ListExpiredExpandedRequests returns 'expanded' requests whose payment_due_at
-// has passed. These are forfeited without a refund.
-func (q *Queries) ListExpiredExpandedRequests(ctx context.Context) ([]models.ServerExpansionRequest, error) {
+// ListUnpaidExpandedRequests returns 'expanded' requests still awaiting their
+// remaining balance. The caller applies the business-day reminder / 30-day
+// revert deadlines in Go.
+func (q *Queries) ListUnpaidExpandedRequests(ctx context.Context) ([]models.ServerExpansionRequest, error) {
 	rows, err := q.db.QueryContext(ctx, `
 		SELECT `+expansionRequestColumns+`
 		FROM server_expansion_requests ser
 		JOIN servers s ON s.id = ser.server_id
 		JOIN users   u ON u.username = ser.username
-		WHERE ser.status = 'expanded' AND ser.payment_due_at < NOW()
+		WHERE ser.status = 'expanded'
 	`)
 	if err != nil {
-		return nil, fmt.Errorf("ListExpiredExpandedRequests: %w", err)
+		return nil, fmt.Errorf("ListUnpaidExpandedRequests: %w", err)
 	}
 	defer rows.Close()
 
@@ -401,22 +569,56 @@ func (q *Queries) ListExpiredExpandedRequests(ctx context.Context) ([]models.Ser
 	for rows.Next() {
 		r, err := scanExpansionRequest(rows)
 		if err != nil {
-			return nil, fmt.Errorf("ListExpiredExpandedRequests scan: %w", err)
+			return nil, fmt.Errorf("ListUnpaidExpandedRequests scan: %w", err)
 		}
 		out = append(out, *r)
 	}
 	return out, rows.Err()
 }
 
-// ListExpiredOpenRequests returns all 'opened' requests whose approval
-// deadline has passed. Used by the background expiry loop.
+// RevertExpansionRequest expires an 'expanded' request whose remaining
+// balance was never collected. The provisioned quota has already been
+// subtracted by the caller; the deposit is kept (no refund).
+func (q *Queries) RevertExpansionRequest(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.ExecContext(ctx, `
+		UPDATE server_expansion_requests
+		SET status = 'expired', completed_at = NOW()
+		WHERE id = $1 AND status = 'expanded'
+	`, id)
+	if err != nil {
+		return fmt.Errorf("RevertExpansionRequest: %w", err)
+	}
+	return nil
+}
+
+// CountFailedExpansionRequests counts a user's cancelled, rejected, refunded
+// or non-paid requests. Users with 3 or more are blocked from opening new
+// expansion or custom requests. SLA-missed expirations (which carry a refund
+// the admin issued automatically) do not count against the user.
+func (q *Queries) CountFailedExpansionRequests(ctx context.Context, username string) (int, error) {
+	var n int
+	err := q.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM server_expansion_requests
+		WHERE username = $1
+		  AND (status IN ('refunded','rejected')
+		       OR (status = 'expired' AND refund_id IS NULL))
+	`, username).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("CountFailedExpansionRequests: %w", err)
+	}
+	return n, nil
+}
+
+// ListExpiredOpenRequests returns all 'opened' or 'accepted' requests whose
+// approval deadline has passed. Used by the background expiry loop.
 func (q *Queries) ListExpiredOpenRequests(ctx context.Context) ([]models.ServerExpansionRequest, error) {
 	rows, err := q.db.QueryContext(ctx, `
 		SELECT `+expansionRequestColumns+`
 		FROM server_expansion_requests ser
 		JOIN servers s ON s.id = ser.server_id
 		JOIN users   u ON u.username = ser.username
-		WHERE ser.status = 'opened' AND COALESCE(ser.approval_due_at, ser.expires_at) < NOW()
+		WHERE ser.status IN ('opened','accepted')
+		  AND COALESCE(ser.approval_due_at, ser.expires_at) < NOW()
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("ListExpiredOpenRequests: %w", err)

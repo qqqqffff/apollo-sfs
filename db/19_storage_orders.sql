@@ -15,6 +15,9 @@ CREATE TABLE IF NOT EXISTS storage_orders (
     paypal_order_id   TEXT        NOT NULL,
     paypal_capture_id TEXT        UNIQUE,                 -- idempotency key; NULL until captured
     server_id         UUID        REFERENCES servers(id), -- purchase target; NULL for legacy orders
+    -- Admin refunds (90-day window from capture); refund reverts the quota.
+    refund_id         TEXT,
+    refunded_at       TIMESTAMPTZ,
     raw_response      JSONB,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     captured_at       TIMESTAMPTZ

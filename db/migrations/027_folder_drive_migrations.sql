@@ -23,6 +23,10 @@ CREATE INDEX IF NOT EXISTS folder_drive_migrations_user_id_idx   ON folder_drive
 
 ALTER TABLE folder_drive_migrations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE folder_drive_migrations FORCE  ROW LEVEL SECURITY;
+
+-- CREATE POLICY has no IF NOT EXISTS form, so drop first to stay idempotent
+-- (matches 004_rls_files_folders.sql).
+DROP POLICY IF EXISTS folder_drive_migrations_owned_by_current_user ON folder_drive_migrations;
 CREATE POLICY folder_drive_migrations_owned_by_current_user ON folder_drive_migrations
     USING      (user_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid)
     WITH CHECK (user_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid);

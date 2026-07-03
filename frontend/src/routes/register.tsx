@@ -72,7 +72,7 @@ function RouteComponent() {
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <button
-              onClick={() => navigate({ to: '/login' })}
+              onClick={() => navigate({ to: '/login', search: { social_error: undefined, link_provider: undefined, link_email: undefined, link_username: undefined } })}
               className="flex flex-col items-start gap-3 p-6 rounded-xl border border-gray-200 bg-white hover:border-blue-300 hover:shadow-sm cursor-pointer transition-all text-left"
             >
               <MdCloud className="text-3xl text-blue-400" />

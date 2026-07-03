@@ -3,11 +3,13 @@ package middleware
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/gin-contrib/sessions"
@@ -15,6 +17,10 @@ import (
 
 	"apollo-sfs.com/api/db"
 )
+
+// errMintRequired signals that no access token was available (web session with
+// an empty cache) and one must be minted from the refresh token.
+var errMintRequired = errors.New("access token must be minted from refresh token")
 
 // keycloakTokenResponse is the relevant subset of Keycloak's token endpoint
 // response used during a refresh grant.
@@ -79,6 +85,9 @@ type AuthMiddleware struct {
 	keycloakClientSecret string
 	cookieDomain         string
 	cookieSecure         bool
+	// tokenCache holds access tokens minted from web-session refresh tokens, so
+	// the cookie only needs to carry the refresh token (under the 4 KB limit).
+	tokenCache *accessTokenCache
 }
 
 // New creates an AuthMiddleware instance.
@@ -99,6 +108,7 @@ func New(
 		keycloakClientSecret: clientSecret,
 		cookieDomain:         cookieDomain,
 		cookieSecure:         cookieSecure,
+		tokenCache:           newAccessTokenCache(),
 	}
 }
 
@@ -136,39 +146,78 @@ func (m *AuthMiddleware) RequirePremium() gin.HandlerFunc {
 	}
 }
 
-// RequireAuth reads the access_token from the session, verifies its signature
-// and expiry using the Keycloak JWKS, then injects the following keys into the
-// Gin context for use by downstream middleware and handlers:
+// RequireAuth accepts an access token from either an HttpOnly session cookie
+// (web clients) or an Authorization: Bearer header (mobile clients).
+//
+// For Bearer requests an expired token is silently refreshed if the client
+// sends a valid X-Refresh-Token header; the new pair is returned in
+// X-New-Access-Token / X-New-Refresh-Token response headers (no cookie is written).
+//
+// On success the following Gin context keys are set for downstream handlers:
 //
 //   - "username" string   — preferred_username claim
 //   - "userID"   string   — Keycloak subject claim (sub)
 //   - "exp"      int64    — token expiry Unix timestamp (consumed by ProactiveRefresh)
 //   - "roles"    []string — realm_access.roles claim (consumed by RequireAdmin)
 //
-// Returns 401 when the session carries no token or the token is invalid/expired.
+// Returns 401 when no valid credentials are present.
 // Also updates last_seen_at on every successful request (best-effort, non-blocking).
 func (m *AuthMiddleware) RequireAuth() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		session := sessions.DefaultMany(c, SessionName)
+		var accessToken, refreshToken string
+		useBearerPath := false
+		webSession := false
 
-		accessToken, ok := session.Get("access_token").(string)
-		if !ok || accessToken == "" {
+		if h := c.GetHeader("Authorization"); strings.HasPrefix(h, "Bearer ") {
+			accessToken = strings.TrimPrefix(h, "Bearer ")
+			refreshToken = c.GetHeader("X-Refresh-Token")
+			useBearerPath = true
+		} else {
+			// Web clients store only the (small) refresh token in the cookie; the
+			// access token is minted from it and kept in tokenCache, keeping the
+			// cookie under the 4 KB limit.
+			session := sessions.DefaultMany(c, SessionName)
+			refreshToken, _ = session.Get("refresh_token").(string)
+			accessToken = m.tokenCache.get(refreshToken)
+			webSession = true
+		}
+
+		// Bearer (mobile) clients must present an access token; web clients may
+		// arrive with only a refresh token and have one minted below.
+		if (useBearerPath && accessToken == "") || (accessToken == "" && refreshToken == "") {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 			return
 		}
 
-		idToken, err := m.verifier.Verify(c.Request.Context(), accessToken)
+		var idToken *oidc.IDToken
+		err := errMintRequired
+		if accessToken != "" {
+			idToken, err = m.verifier.Verify(c.Request.Context(), accessToken)
+		}
+		minted := false
 		if err != nil {
-			// Access token expired — attempt a silent refresh before giving up.
-			// This handles the case where the user was idle longer than the access
-			// token TTL; ProactiveRefresh only runs after this middleware succeeds.
-			if refreshToken, ok := session.Get("refresh_token").(string); ok && refreshToken != "" {
+			// No cached token, or it expired — mint a fresh pair from the refresh token.
+			if refreshToken != "" {
 				if tokens, refreshErr := m.callRefreshGrant(c.Request.Context(), refreshToken); refreshErr == nil {
-					session.Set("access_token", tokens.AccessToken)
-					session.Set("refresh_token", tokens.RefreshToken)
-					if saveErr := session.Save(); saveErr == nil {
-						idToken, err = m.verifier.Verify(c.Request.Context(), tokens.AccessToken)
+					accessToken = tokens.AccessToken
+					newRefresh := tokens.RefreshToken
+					if newRefresh == "" {
+						newRefresh = refreshToken
 					}
+					if useBearerPath {
+						c.Header("X-New-Access-Token", tokens.AccessToken)
+						c.Header("X-New-Refresh-Token", newRefresh)
+					} else if newRefresh != refreshToken {
+						// Refresh token rotated — persist the new one in the cookie.
+						session := sessions.DefaultMany(c, SessionName)
+						session.Set("refresh_token", newRefresh)
+						if err := session.Save(); err != nil {
+							log.Printf("RequireAuth: persist rotated refresh token: %v", err)
+						}
+					}
+					refreshToken = newRefresh
+					idToken, err = m.verifier.Verify(c.Request.Context(), tokens.AccessToken)
+					minted = err == nil
 				}
 			}
 			if err != nil {
@@ -181,6 +230,12 @@ func (m *AuthMiddleware) RequireAuth() gin.HandlerFunc {
 		if err := idToken.Claims(&claims); err != nil {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid token claims"})
 			return
+		}
+
+		// Cache the freshly minted access token for this web session so the next
+		// request is served without another Keycloak round-trip, until it expires.
+		if webSession && minted {
+			m.tokenCache.set(refreshToken, accessToken, time.Unix(claims.Exp, 0))
 		}
 
 		c.Set("userID", claims.Sub)

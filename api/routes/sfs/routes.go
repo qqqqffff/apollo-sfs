@@ -183,7 +183,7 @@ func (h *Handler) Put(c *gin.Context) {
 		folderIDStr = &s
 	}
 	token, expires, err := h.presign.IssueForUpload(
-		user.Username, user.Username, folderIDStr, req.SizeBytes, presignedUploadTTL,
+		user.Username, user.Username, folderIDStr, req.SizeBytes, false, presignedUploadTTL,
 	)
 	if err != nil {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "presign"})

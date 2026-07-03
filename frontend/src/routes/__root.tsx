@@ -52,7 +52,7 @@ function RootLayout() {
       clearSkipDeleteCookie()
       queryClient.clear()
       notify('error', 'Your session has expired. Please sign in again.')
-      navigate({ to: '/login' })
+      navigate({ to: '/login', search: { social_error: undefined, link_provider: undefined, link_email: undefined, link_username: undefined } })
     }
     window.addEventListener('apollo:session-expired', handleSessionExpired)
     return () => window.removeEventListener('apollo:session-expired', handleSessionExpired)
@@ -60,10 +60,39 @@ function RootLayout() {
 
   return (
     <>
-      {!isAuthenticated && <PublicHeader />}
-      <Outlet />
-      <NotificationBanner />
+      {isAuthenticated ? (
+        <>
+          <Outlet />
+          <NotificationBanner />
+        </>
+      ) : (
+        <div className="flex flex-col min-h-screen">
+          <PublicHeader />
+          <Outlet />
+          <NotificationBanner />
+          <Footer />
+        </div>
+      )}
     </>
+  )
+}
+
+function Footer() {
+  return (
+    <footer className="border-t border-gray-200 bg-white px-6 py-4 flex items-center justify-center gap-6">
+      <Link
+        to="/terms"
+        className="text-xs text-gray-400 hover:text-gray-600 no-underline transition-colors"
+      >
+        Terms of Service
+      </Link>
+      <Link
+        to="/privacy"
+        className="text-xs text-gray-400 hover:text-gray-600 no-underline transition-colors"
+      >
+        Privacy Policy
+      </Link>
+    </footer>
   )
 }
 
@@ -89,6 +118,7 @@ function PublicHeader() {
         </Link>
         <Link
           to="/login"
+          search={{ social_error: undefined, link_provider: undefined, link_email: undefined, link_username: undefined }}
           className="px-4 py-1.5 text-sm font-medium bg-blue-600 hover:bg-blue-700 text-white rounded-lg no-underline transition-colors"
         >
           Sign in

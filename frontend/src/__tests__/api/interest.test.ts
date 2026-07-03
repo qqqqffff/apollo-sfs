@@ -34,8 +34,11 @@ describe('submitInterestForm', () => {
       name: 'Alice',
       email: 'alice@example.com',
       desired_storage_gb: 100,
+      storage_type: 'nvme' as const,
+      plan_id: '128gb',
       use_case: 'backup',
       captcha_token: 'cf-token',
+      deposit_order_id: 'order-123',
     }
     const result = await submitInterestForm(payload)
     const [url, init] = lastCall()

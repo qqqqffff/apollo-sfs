@@ -13,7 +13,11 @@ type Folder struct {
 	ID       uuid.UUID  `json:"id" db:"id"`
 	UserID   uuid.UUID  `json:"user_id" db:"user_id"`
 	ParentID *uuid.UUID `json:"parent_id" db:"parent_id"` // NULL means root folder
-	Name     string     `json:"name" db:"name"`
+	// DriveID optionally pins uploads into this folder to a specific drive,
+	// overriding the dynamic primary-first/least-full routing. NULL preserves
+	// today's behavior exactly.
+	DriveID *uuid.UUID `json:"drive_id" db:"drive_id"`
+	Name    string     `json:"name" db:"name"`
 	// Kind is "regular" or "media". A media folder is a top-level picture/video
 	// collection; folders nested beneath it act as subcollections.
 	Kind string `json:"kind" db:"kind"`

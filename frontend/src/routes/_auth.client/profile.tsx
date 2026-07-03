@@ -1,10 +1,20 @@
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
-import { useState } from 'react'
+import { useEffect, useRef, useCallback, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { MdCheck, MdClose, MdPhotoLibrary, MdRocketLaunch, MdKey } from 'react-icons/md'
-import { meQueryOptions, changePassword, preferencesQueryOptions, updatePreferences } from '../../api/me'
+import { MdCheck, MdClose, MdPhotoLibrary, MdRocketLaunch, MdKey, MdStorage, MdVpnKey, MdCloudUpload, MdSpeed, MdBolt, MdRefresh } from 'react-icons/md'
+import { FaApple } from 'react-icons/fa'
+import { meQueryOptions, changePassword, preferencesQueryOptions, updatePreferences, unlinkProvider } from '../../api/me'
 import { listRoot } from '../../api/folders'
 import { ApiError } from '../../api/client'
+import {
+  getStorageBreakdown,
+  listMyServers,
+  setPrimaryServer,
+  pingServer,
+  runSpeedTest,
+  type SpeedMetrics,
+  type MyServer,
+} from '../../api/storage'
 
 export const Route = createFileRoute('/_auth/client/profile')({
   component: RouteComponent,
@@ -49,6 +59,8 @@ function CheckItem({ ok, label }: { ok: boolean; label: string }) {
 function RouteComponent() {
   const { data: user, isLoading } = useQuery(meQueryOptions)
 
+  const [showUpgradeModal, setShowUpgradeModal] = useState(false)
+
   const [current, setCurrent] = useState('')
   const [newPw, setNewPw] = useState('')
   const [confirm, setConfirm] = useState('')
@@ -84,13 +96,13 @@ function RouteComponent() {
   const barColor = pct >= 90 ? 'bg-red-500' : pct >= 50 ? 'bg-amber-400' : 'bg-green-500'
 
   return (
-    <div className="max-w-lg space-y-6">
+    <div className="max-w-lg mx-auto space-y-6">
       <h2 className="text-lg font-semibold text-gray-900 mb-6 mt-0">Profile</h2>
 
       <div className="bg-white border border-gray-200 rounded-xl divide-y divide-gray-100">
         <Row label="Username" value={user.username} />
         <Row label="Email" value={user.email} />
-        <Row label="Account type" value={user.is_admin ? 'Admin' : 'User'} />
+        <Row label="Account type" value={user.is_admin ? 'Admin' : user.is_premium ? 'Premium' : 'User'} />
         <Row
           label="Member since"
           value={new Date(user.created_at).toLocaleDateString(undefined, {
@@ -121,7 +133,17 @@ function RouteComponent() {
         </div>
       </div>
 
-      <PremiumCard isPremium={user.is_premium} isAdmin={user.is_admin} grantedAt={user.premium_granted_at} />
+      <StorageInfraCard />
+
+      <LinkedAccountsCard linkedProviders={user.linked_providers} />
+
+      <PremiumCard
+        isPremium={user.is_premium}
+        isAdmin={user.is_admin}
+        grantedAt={user.premium_granted_at}
+        onUpgrade={() => setShowUpgradeModal(true)}
+      />
+      {showUpgradeModal && <PremiumUpgradeModal onClose={() => setShowUpgradeModal(false)} />}
 
       <MediaAutoUpload />
 
@@ -197,6 +219,314 @@ function RouteComponent() {
   )
 }
 
+const SPEED_RATE_LIMIT = 5
+
+function StorageInfraCard() {
+  const queryClient = useQueryClient()
+
+  const { data: breakdown, isLoading: breakdownLoading } = useQuery({
+    queryKey: ['storage', 'breakdown'],
+    queryFn: getStorageBreakdown,
+  })
+
+  const { data: myServers = [] } = useQuery({
+    queryKey: ['storage', 'my-servers'],
+    queryFn: listMyServers,
+  })
+
+  const [primaryPingMs, setPrimaryPingMs] = useState<number | null>(null)
+  const [primaryTesting, setPrimaryTesting] = useState(false)
+  const [settingPrimary, setSettingPrimary] = useState<string | null>(null)
+
+  const [speed, setSpeed] = useState<SpeedMetrics | null>(null)
+  const [speedLoading, setSpeedLoading] = useState(false)
+  const [speedError, setSpeedError] = useState<string | null>(null)
+  const speedCallsRef = useRef<number[]>([])
+  const [speedRemaining, setSpeedRemaining] = useState(SPEED_RATE_LIMIT)
+
+  const testPrimaryConnection = useCallback(async (servers: MyServer[]) => {
+    const primary = servers.find((s) => s.is_primary)
+    if (!primary) { setPrimaryPingMs(null); return }
+    setPrimaryTesting(true)
+    try {
+      setPrimaryPingMs(await pingServer(primary.ping_url))
+    } catch {
+      setPrimaryPingMs(null)
+    } finally {
+      setPrimaryTesting(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (myServers.length > 0) testPrimaryConnection(myServers)
+  }, [myServers, testPrimaryConnection])
+
+  const runSpeed = useCallback(async () => {
+    if (speedLoading) return
+    const now = Date.now()
+    speedCallsRef.current = speedCallsRef.current.filter((t) => now - t < 60_000)
+    const remaining = SPEED_RATE_LIMIT - speedCallsRef.current.length
+    setSpeedRemaining(remaining)
+    if (remaining <= 0) {
+      setSpeedError('Limit reached. Try again in a minute.')
+      return
+    }
+    setSpeedLoading(true)
+    setSpeedError(null)
+    speedCallsRef.current.push(Date.now())
+    setSpeedRemaining(SPEED_RATE_LIMIT - speedCallsRef.current.length)
+    const pingUrl = breakdown?.server?.ping_url ?? '/api/v1/storage/servers'
+    try {
+      const result = await runSpeedTest(pingUrl)
+      setSpeed(result)
+    } catch (e: any) {
+      if (e?.code === 'RATE_LIMITED') {
+        setSpeedError('Limit reached. Try again in a minute.')
+      } else {
+        setSpeedError('Speed test failed. Check your connection.')
+      }
+    } finally {
+      setSpeedLoading(false)
+      const t = Date.now()
+      speedCallsRef.current = speedCallsRef.current.filter((x) => t - x < 60_000)
+      setSpeedRemaining(SPEED_RATE_LIMIT - speedCallsRef.current.length)
+    }
+  }, [speedLoading, breakdown])
+
+  // Auto-run once when breakdown first loads
+  useEffect(() => {
+    if (breakdown && !speed && !speedLoading) runSpeed()
+  }, [breakdown]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleSelectPrimary = useCallback(async (srv: MyServer) => {
+    if (srv.is_primary || settingPrimary) return
+    setSettingPrimary(srv.server_id)
+    try {
+      await setPrimaryServer(srv.server_id)
+      queryClient.invalidateQueries({ queryKey: ['storage', 'my-servers'] })
+    } catch {
+      // keep previous selection on failure
+    } finally {
+      setSettingPrimary(null)
+    }
+  }, [settingPrimary, queryClient])
+
+  const allocatedBytes = breakdown?.quota_bytes ?? 0
+  const ownedTypes = new Set(myServers.map((s) => s.drive_type))
+  const showNvme = ownedTypes.size === 0 || ownedTypes.has('nvme')
+  const showHdd = ownedTypes.size === 0 || ownedTypes.has('hdd')
+  const nvmePct = breakdown && breakdown.quota_bytes > 0
+    ? Math.min((breakdown.nvme_bytes / breakdown.quota_bytes) * 100, 100) : 0
+  const hddPct = breakdown && breakdown.quota_bytes > 0
+    ? Math.min((breakdown.hdd_bytes / breakdown.quota_bytes) * 100, 100) : 0
+
+  return (
+    <>
+      {/* Storage + Servers card */}
+      <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
+        <div className="px-5 py-4">
+          <h3 className="text-sm font-semibold text-gray-800 mb-3">Infrastructure</h3>
+
+          {breakdownLoading && !breakdown ? (
+            <p className="text-sm text-gray-400">Loading…</p>
+          ) : breakdown ? (
+            <div className="flex flex-col gap-3">
+              {showNvme && (
+                <div className="flex items-center gap-3">
+                  <div className="w-7 h-7 rounded-lg bg-blue-50 flex items-center justify-center shrink-0">
+                    <MdBolt className="text-blue-600 text-sm" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex justify-between text-xs mb-1.5">
+                      <span className="text-gray-500">Fast storage (NVMe)</span>
+                      <span className="text-gray-700 font-medium">{formatSize(breakdown.nvme_bytes)}</span>
+                    </div>
+                    <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                      <div className="h-full rounded-full bg-blue-500 transition-all" style={{ width: `${nvmePct}%` }} />
+                    </div>
+                  </div>
+                </div>
+              )}
+              {showHdd && (
+                <div className="flex items-center gap-3">
+                  <div className="w-7 h-7 rounded-lg bg-amber-50 flex items-center justify-center shrink-0">
+                    <MdStorage className="text-amber-500 text-sm" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex justify-between text-xs mb-1.5">
+                      <span className="text-gray-500">Standard storage (HDD)</span>
+                      <span className="text-gray-700 font-medium">{formatSize(breakdown.hdd_bytes)}</span>
+                    </div>
+                    <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                      <div className="h-full rounded-full bg-amber-400 transition-all" style={{ width: `${hddPct}%` }} />
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          ) : (
+            <p className="text-xs text-gray-400">Could not load storage info.</p>
+          )}
+        </div>
+
+        {myServers.length > 0 && (
+          <>
+            <div className="border-t border-gray-100" />
+            <div className="px-5 py-4">
+              <h3 className="text-sm font-semibold text-gray-800 mb-2">Servers</h3>
+              {myServers.length > 1 && (
+                <p className="text-xs text-gray-400 mb-3">
+                  Uploads go to your primary server, falling back to the least-full one when it's full.
+                </p>
+              )}
+              <div className="divide-y divide-gray-100">
+                {myServers.map((srv) => (
+                  <button
+                    key={srv.server_id}
+                    onClick={() => handleSelectPrimary(srv)}
+                    disabled={srv.is_primary || settingPrimary !== null}
+                    className={`flex items-center gap-3 py-3 text-left w-full bg-transparent border-0 transition-colors ${
+                      !srv.is_primary && settingPrimary === null
+                        ? 'cursor-pointer hover:bg-gray-50'
+                        : 'cursor-default'
+                    }`}
+                  >
+                    <div className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 ${
+                      srv.drive_type === 'nvme' ? 'bg-blue-50' : 'bg-amber-50'
+                    }`}>
+                      {srv.drive_type === 'nvme'
+                        ? <MdBolt className="text-blue-600 text-sm" />
+                        : <MdStorage className="text-amber-500 text-sm" />}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 mb-1.5">
+                        <span className="text-sm font-medium text-gray-800">{srv.name}</span>
+                        <span className={`px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider rounded ${
+                          srv.drive_type === 'nvme' ? 'bg-blue-50 text-blue-600' : 'bg-amber-50 text-amber-600'
+                        }`}>
+                          {srv.drive_type === 'nvme' ? 'Fast' : 'Standard'}
+                        </span>
+                        {srv.is_primary && (
+                          <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider bg-blue-50 text-blue-600 rounded">
+                            Primary
+                          </span>
+                        )}
+                      </div>
+                      <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden mb-1.5">
+                        <div
+                          className={`h-full rounded-full transition-all ${srv.drive_type === 'nvme' ? 'bg-blue-500' : 'bg-amber-400'}`}
+                          style={{ width: `${allocatedBytes > 0 ? Math.min((srv.used_bytes / allocatedBytes) * 100, 100) : 0}%` }}
+                        />
+                      </div>
+                      <p className="text-xs text-gray-400 m-0">
+                        {formatSize(srv.used_bytes)} used of {formatSize(allocatedBytes)}
+                        {srv.is_primary && (
+                          primaryTesting
+                            ? ' · Testing…'
+                            : primaryPingMs != null
+                              ? ` · ${primaryPingMs} ms`
+                              : ''
+                        )}
+                      </p>
+                    </div>
+                    <div className="shrink-0">
+                      {settingPrimary === srv.server_id ? (
+                        <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+                      ) : srv.is_primary ? (
+                        <MdCheck className="text-blue-600 text-lg" />
+                      ) : (
+                        <div className="w-4 h-4 rounded-full border-2 border-gray-300" />
+                      )}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* Connection card */}
+      {breakdown?.server && (
+        <div className="bg-white border border-gray-200 rounded-xl px-5 py-4">
+          <div className="flex items-center justify-between mb-3">
+            <div className="min-w-0">
+              <h3 className="text-sm font-semibold text-gray-800">Connection</h3>
+              <p className="text-xs text-gray-400 m-0 mt-0.5 truncate">
+                Testing to <span className="font-medium text-gray-500">{breakdown.server.name}</span>
+              </p>
+            </div>
+            <button
+              onClick={runSpeed}
+              disabled={speedLoading || speedRemaining <= 0}
+              title="Re-run speed test"
+              className={`w-7 h-7 rounded-lg flex items-center justify-center transition-colors ${
+                speedLoading || speedRemaining <= 0
+                  ? 'bg-gray-100 text-gray-300 cursor-not-allowed'
+                  : 'bg-blue-50 text-blue-600 hover:bg-blue-100 cursor-pointer'
+              }`}
+            >
+              <MdRefresh className={`text-base ${speedLoading ? 'animate-spin' : ''}`} />
+            </button>
+          </div>
+
+          {speedRemaining < SPEED_RATE_LIMIT && !speedLoading && (
+            <p className="text-xs text-gray-400 mb-3">
+              {speedRemaining > 0
+                ? `${speedRemaining} refresh${speedRemaining !== 1 ? 'es' : ''} remaining this minute`
+                : 'Limit reached — try again in a minute'}
+            </p>
+          )}
+
+          {speedError && <p className="text-xs text-red-500 mb-3">{speedError}</p>}
+
+          <div className="grid grid-cols-3 divide-x divide-gray-100 mt-1">
+            <div className="flex flex-col items-center py-2">
+              <span className="text-2xl font-bold text-gray-900 leading-none">
+                {speedLoading ? '—' : speed?.ping_ms != null ? speed.ping_ms : '—'}
+              </span>
+              <span className="text-xs text-gray-400 mt-0.5 h-4">
+                {!speedLoading && speed?.ping_ms != null ? 'ms' : ''}
+              </span>
+              <span className="text-xs text-gray-500 mt-1">Ping</span>
+            </div>
+            <div className="flex flex-col items-center py-2">
+              <span className="text-2xl font-bold text-gray-900 leading-none">
+                {speedLoading ? '—' : speed?.download_mbps != null
+                  ? speed.download_mbps >= 1000
+                    ? (speed.download_mbps / 1000).toFixed(1)
+                    : speed.download_mbps.toFixed(1)
+                  : '—'}
+              </span>
+              <span className="text-xs text-gray-400 mt-0.5 h-4">
+                {!speedLoading && speed?.download_mbps != null
+                  ? speed.download_mbps >= 1000 ? 'Gbps' : 'Mbps'
+                  : ''}
+              </span>
+              <span className="text-xs text-gray-500 mt-1">Download</span>
+            </div>
+            <div className="flex flex-col items-center py-2">
+              <span className="text-2xl font-bold text-gray-900 leading-none">
+                {speedLoading ? '—' : speed?.upload_mbps != null
+                  ? speed.upload_mbps >= 1000
+                    ? (speed.upload_mbps / 1000).toFixed(1)
+                    : speed.upload_mbps.toFixed(1)
+                  : '—'}
+              </span>
+              <span className="text-xs text-gray-400 mt-0.5 h-4">
+                {!speedLoading && speed?.upload_mbps != null
+                  ? speed.upload_mbps >= 1000 ? 'Gbps' : 'Mbps'
+                  : ''}
+              </span>
+              <span className="text-xs text-gray-500 mt-1">Upload</span>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  )
+}
+
 function MediaAutoUpload() {
   const queryClient = useQueryClient()
   const { data: prefs } = useQuery(preferencesQueryOptions)
@@ -266,6 +596,75 @@ function MediaAutoUpload() {
   )
 }
 
+function GoogleIcon() {
+  return (
+    <svg viewBox="0 0 24 24" className="w-[18px] h-[18px]" aria-hidden="true">
+      <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
+      <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
+      <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z" />
+      <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" />
+    </svg>
+  )
+}
+
+function LinkedAccountsCard({ linkedProviders }: { linkedProviders: string[] }) {
+  const queryClient = useQueryClient()
+  const [unlinking, setUnlinking] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const providers = [
+    { key: 'google', label: 'Google', icon: <GoogleIcon /> },
+    { key: 'apple',  label: 'Apple',  icon: <FaApple className="text-gray-900 text-lg" /> },
+  ]
+
+  const handleUnlink = async (provider: string) => {
+    setUnlinking(provider)
+    setError(null)
+    try {
+      await unlinkProvider(provider)
+      queryClient.invalidateQueries({ queryKey: ['me'] })
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to unlink account')
+    } finally {
+      setUnlinking(null)
+    }
+  }
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-xl px-5 py-4">
+      <h3 className="text-sm font-semibold text-gray-800 mb-3">Linked accounts</h3>
+      <div className="flex flex-col divide-y divide-gray-100">
+        {providers.map(({ key, label, icon }) => {
+          const linked = linkedProviders.includes(key)
+          return (
+            <div key={key} className="flex items-center gap-3 py-3 first:pt-0 last:pb-0">
+              <span className="w-5 flex items-center justify-center shrink-0">{icon}</span>
+              <span className="text-sm text-gray-700 flex-1">{label}</span>
+              {linked ? (
+                <div className="flex items-center gap-2">
+                  <span className="flex items-center gap-1 text-xs font-medium text-green-600">
+                    <MdCheck className="shrink-0" /> Connected
+                  </span>
+                  <button
+                    onClick={() => handleUnlink(key)}
+                    disabled={unlinking !== null}
+                    className="text-xs text-gray-400 hover:text-red-500 transition-colors cursor-pointer disabled:opacity-50"
+                  >
+                    {unlinking === key ? 'Removing…' : 'Remove'}
+                  </button>
+                </div>
+              ) : (
+                <span className="text-xs text-gray-400">Not connected</span>
+              )}
+            </div>
+          )
+        })}
+      </div>
+      {error && <p className="text-xs text-red-500 mt-2">{error}</p>}
+    </div>
+  )
+}
+
 function Row({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex items-center justify-between px-5 py-3.5">
@@ -275,11 +674,9 @@ function Row({ label, value }: { label: string; value: string }) {
   )
 }
 
-// PremiumCard either invites the user to upgrade (free + non-admin) or shows
-// a "you're on Premium" confirmation with a deep link to API key management.
 function PremiumCard({
-  isPremium, isAdmin, grantedAt,
-}: { isPremium: boolean; isAdmin: boolean; grantedAt: string | null }) {
+  isPremium, isAdmin, grantedAt, onUpgrade,
+}: { isPremium: boolean; isAdmin: boolean; grantedAt: string | null; onUpgrade: () => void }) {
   const navigate = useNavigate()
   if (isPremium || isAdmin) {
     return (
@@ -315,11 +712,101 @@ function PremiumCard({
           </p>
         </div>
         <button
-          onClick={() => navigate({ to: '/premium' as never })}
+          onClick={onUpgrade}
           className="px-3 py-2 text-xs bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium cursor-pointer transition-colors"
         >
           Upgrade
         </button>
+      </div>
+    </div>
+  )
+}
+
+const PREMIUM_FEATURES = [
+  {
+    icon: MdStorage,
+    title: 'Expanded storage quota',
+    description: 'Get significantly more storage space for your files and media.',
+  },
+  {
+    icon: MdVpnKey,
+    title: 'Per-directory API keys',
+    description: 'Issue scoped API keys tied to specific folders for fine-grained access control.',
+  },
+  {
+    icon: MdCloudUpload,
+    title: 'S3-compatible API',
+    description: 'Access your files via an S3-like HTTP API — compatible with standard S3 clients and SDKs.',
+  },
+  {
+    icon: MdSpeed,
+    title: 'Priority support',
+    description: 'Jump to the front of the queue when you need help from the SFS team.',
+  },
+]
+
+function PremiumUpgradeModal({ onClose }: { onClose: () => void }) {
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    document.addEventListener('keydown', handler)
+    return () => document.removeEventListener('keydown', handler)
+  }, [onClose])
+
+  useEffect(() => {
+    document.body.style.overflow = 'hidden'
+    return () => { document.body.style.overflow = '' }
+  }, [])
+
+  const navigate = useNavigate()
+
+  return (
+    <div
+      onClick={onClose}
+      className="fixed inset-0 bg-black/60 flex items-center justify-center z-50"
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="bg-white rounded-xl shadow-xl w-120 max-w-[92vw] p-6 flex flex-col gap-5"
+      >
+        <div className="flex items-start gap-3">
+          <MdRocketLaunch className="text-amber-500 text-2xl shrink-0 mt-0.5" />
+          <div className="flex-1">
+            <h3 className="text-base font-semibold text-gray-900 m-0">Upgrade to Premium</h3>
+            <p className="text-sm text-gray-500 m-0 mt-1">One-time payment. No subscriptions.</p>
+          </div>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 cursor-pointer transition-colors">
+            <MdClose className="text-xl" />
+          </button>
+        </div>
+
+        <ul className="flex flex-col gap-3 m-0 p-0 list-none">
+          {PREMIUM_FEATURES.map(({ icon: Icon, title, description }) => (
+            <li key={title} className="flex items-start gap-3">
+              <div className="w-8 h-8 rounded-lg bg-amber-50 flex items-center justify-center shrink-0">
+                <Icon className="text-amber-500 text-base" />
+              </div>
+              <div>
+                <p className="text-sm font-medium text-gray-800 m-0">{title}</p>
+                <p className="text-xs text-gray-500 m-0 mt-0.5">{description}</p>
+              </div>
+            </li>
+          ))}
+        </ul>
+
+        <div className="flex justify-end gap-2 pt-1">
+          <button
+            onClick={onClose}
+            className="px-4 py-2 text-sm rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 cursor-pointer transition-colors"
+          >
+            Maybe later
+          </button>
+          <button
+            onClick={() => { onClose(); navigate({ to: '/premium' as never }) }}
+            className="px-4 py-2 text-sm rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-medium cursor-pointer transition-colors"
+          >
+            Get Premium
+          </button>
+        </div>
       </div>
     </div>
   )

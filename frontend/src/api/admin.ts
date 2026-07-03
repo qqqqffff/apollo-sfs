@@ -1,5 +1,5 @@
 import { del, get, patch, post, put } from './client'
-import type { AuditLog, BannedIP, FavoriteList, FolderContents, Invitation, InterestSubmission, InterestFormSettings, PageResult, User, UserBan } from '../types/api'
+import type { AuditLog, BannedIP, FavoriteList, FolderContents, Invitation, InterestSubmission, InterestFormSettings, PageResult, ServerExpansionRequest, User, UserBan } from '../types/api'
 
 // ── Admin user file browsing ───────────────────────────────────────────────────
 
@@ -42,6 +42,35 @@ export function logImpersonationAccess(username: string) {
   return post<{ ok: boolean }>(`/admin/users/${encodeURIComponent(username)}/audit-logs`, {})
 }
 
+// ── Per-user storage view ────────────────────────────────────────────────────
+
+export interface AdminUserStorageAllocation {
+  server_id: string
+  server_name: string
+  server_state: string
+  node_id: string
+  node_hostname: string
+  drive_id: string
+  drive_label: string
+  drive_type: 'nvme' | 'hdd'
+  capacity_bytes: number
+  used_bytes: number
+  is_primary: boolean
+}
+
+export interface AdminUserStorage {
+  quota_bytes: number
+  used_bytes: number
+  nvme_bytes: number
+  hdd_bytes: number
+  allocations: AdminUserStorageAllocation[]
+  active_request_count: number
+}
+
+export function getAdminUserStorage(username: string) {
+  return get<AdminUserStorage>(`/admin/users/${encodeURIComponent(username)}/storage`)
+}
+
 // ── Users ──────────────────────────────────────────────────────────────────────
 
 export function listUsers(cursor?: string, limit?: number) {
@@ -73,8 +102,14 @@ export function listInvitations(cursor?: string) {
   return get<PageResult<Invitation>>(`/admin/invitations${qs}`)
 }
 
-export function createInvitation(email: string, initialQuotaBytes: number, grantAdmin = false, grantPremium = false) {
-  return post<Invitation>('/admin/invitations', { email, initial_quota_bytes: initialQuotaBytes, grant_admin: grantAdmin, grant_premium: grantPremium })
+export function createInvitation(email: string, initialQuotaBytes: number, grantAdmin = false, grantPremium = false, initialDriveId?: string) {
+  return post<Invitation>('/admin/invitations', {
+    email,
+    initial_quota_bytes: initialQuotaBytes,
+    grant_admin: grantAdmin,
+    grant_premium: grantPremium,
+    ...(initialDriveId ? { initial_drive_id: initialDriveId } : {}),
+  })
 }
 
 export function revokeInvitation(id: string) {
@@ -87,6 +122,9 @@ export function resendInvitation(id: string) {
 
 // ── Metrics ────────────────────────────────────────────────────────────────────
 
+// MetricsSnapshot is the cluster-wide (manager uplink + app) snapshot. Hardware
+// fields (cpu_*, drive_temp) remain for backward compatibility but the per-node
+// view sources hardware from NodeFrame instead — see MetricsFrame.
 export interface MetricsSnapshot {
   id: string
   sampled_at: string
@@ -112,12 +150,123 @@ export interface MetricsSnapshot {
   speed_test_error?: string | null
 }
 
+// DriveFrame is one drive's live figures within a node, as reported by that
+// node's agent and resolved to its registered drive_id.
+export interface DriveFrame {
+  drive_id: string
+  label: string
+  drive_type: 'nvme' | 'hdd'
+  temp_celsius: number | null
+  total_bytes: number
+  used_bytes: number
+  free_bytes: number
+}
+
+// NodeFrame is one node's latest hardware state within a MetricsFrame. online is
+// false when the node's agent has stopped reporting (the UI then greys it out).
+export interface NodeFrame {
+  node_id: string
+  hostname: string
+  role: string
+  is_active: boolean
+  online: boolean
+  cpu_percent: number
+  cpu_temp_celsius: number | null
+  memory_used_bytes: number
+  memory_total_bytes: number
+  network_bytes_sent: number
+  network_bytes_recv: number
+  sampled_at: string
+  drives: DriveFrame[]
+  // Every physical disk the node reports, independent of logical drives — so a
+  // single disk in a pooled drive can be tracked (and run hot/fail) on its own.
+  disks: DiskFrame[]
+}
+
+// DiskFrame is one physical disk's live figures within a node, resolved to its
+// node_disks row (disk_id) so per-disk history can be fetched.
+export interface DiskFrame {
+  disk_id: string
+  label: string
+  device: string
+  temp_celsius: number | null
+  total_bytes: number
+  used_bytes: number
+  free_bytes: number
+}
+
+// MetricsFrame is the per-tick WebSocket payload: a cluster snapshot plus a
+// per-node hardware breakdown. Seed (historical) frames carry an empty nodes list.
+export interface MetricsFrame {
+  cluster: MetricsSnapshot
+  nodes: NodeFrame[]
+}
+
+// Per-node hardware history (downsampled), backing the per-node line graphs.
+export interface NodeMetricSnapshot {
+  id: string
+  node_id: string
+  cpu_percent: number
+  cpu_temp_celsius: number | null
+  memory_used_bytes: number
+  memory_total_bytes: number
+  network_bytes_sent: number
+  network_bytes_recv: number
+  sampled_at: string
+}
+
+// Per-drive temperature history (downsampled), backing the carousel graph.
+export interface DriveTempSnapshot {
+  id: string
+  drive_id: string
+  temp_celsius: number
+  sampled_at: string
+}
+
+// A physical disk's latest reported state (from GET .../nodes/:id/disks).
+export interface NodeDisk {
+  id: string
+  node_id: string
+  label: string
+  device: string
+  capacity_bytes: number
+  used_bytes: number
+  free_bytes: number
+  temp_celsius: number | null
+  last_seen_at: string
+  created_at: string
+}
+
+// Per-physical-disk temperature history (downsampled).
+export interface NodeDiskTempSnapshot {
+  id: string
+  disk_id: string
+  temp_celsius: number
+  sampled_at: string
+}
+
 export function getMetrics() {
   return get<MetricsSnapshot>('/admin/system/metrics')
 }
 
 export function getMetricsHistoryByHours(hours: number) {
   return get<MetricsSnapshot[]>(`/admin/system/metrics/history?hours=${hours}`)
+}
+
+export function getNodeMetricsHistory(nodeId: string, hours: number) {
+  return get<NodeMetricSnapshot[]>(`/admin/system/nodes/${nodeId}/metrics/history?hours=${hours}`)
+}
+
+export function getDriveTempsHistory(driveId: string, hours: number) {
+  return get<DriveTempSnapshot[]>(`/admin/system/drives/${driveId}/temps/history?hours=${hours}`)
+}
+
+export function getNodeDisks(nodeId: string) {
+  return get<NodeDisk[]>(`/admin/system/nodes/${nodeId}/disks`)
+}
+
+export function getNodeDiskTempsHistory(diskId: string, hours: number) {
+  return get<NodeDiskTempSnapshot[]>(`/admin/system/disks/${diskId}/temps/history?hours=${hours}`)
 }
 
 export async function pingServer(): Promise<number> {
@@ -128,11 +277,31 @@ export async function pingServer(): Promise<number> {
 
 // ── Infrastructure ─────────────────────────────────────────────────────────────
 
+export type NodeRole = 'manager' | 'worker' | 'storage'
+
+export interface NodeSummary {
+  node_id: string
+  server_id: string
+  server_name: string
+  server_state: string
+  server_is_active: boolean
+  hostname: string
+  role: NodeRole
+  address: string
+  is_active: boolean
+  created_at: string
+}
+
 export interface DriveSummary {
   drive_id: string
   server_id: string
   server_name: string
+  node_id: string | null
+  node_hostname: string
+  node_role: string
+  node_is_active: boolean
   drive_label: string
+  drive_type: 'nvme' | 'hdd'
   capacity_bytes: number
   minio_bucket: string
   allocated_quota_bytes: number
@@ -146,51 +315,57 @@ export interface CapacitySummary {
 }
 
 export function listInfrastructure() {
-  return get<{ drives: DriveSummary[] }>('/admin/system/infrastructure')
+  return get<{ nodes: NodeSummary[]; drives: DriveSummary[]; disks: NodeDisk[] }>('/admin/system/infrastructure')
+}
+
+// Rename the top-level cluster server (inline edit on the infrastructure card).
+export function renameServer(serverId: string, name: string) {
+  return patch<{ message: string }>(`/admin/system/servers/${serverId}`, { name })
+}
+
+// Live, per-drive view sourced from the owning node's agent push (keyed by
+// drive_id). online=false means no online node currently reports the drive (e.g.
+// the node is offline), in which case the UI falls back to stored DB capacity.
+export interface DriveStat {
+  label: string
+  total_bytes: number
+  used_bytes: number
+  free_bytes: number
+  temp_celsius: number | null
+  online: boolean
+}
+
+export function getDriveStats() {
+  return get<{ stats: Record<string, DriveStat> }>('/admin/system/drive-stats')
+}
+
+export const driveStatsQueryOptions = {
+  queryKey: ['admin', 'drive-stats'] as const,
+  queryFn: getDriveStats,
+  staleTime: 10_000,
+  refetchInterval: 10_000,
 }
 
 export function getCapacity() {
   return get<CapacitySummary>('/admin/system/capacity')
 }
 
-export function createServer(params: {
-  state: string
-  minio_endpoint: string
-  minio_use_ssl: boolean
-  access_key: string
-  secret_key: string
-}) {
-  return post<{ id: string; name: string }>('/admin/system/servers', params)
+// SyncSummary reports what the universal infrastructure sync indexed: the count
+// of servers, swarm nodes, and drives reconciled, plus how many stale rows were
+// retired (marked inactive).
+export interface SyncSummary {
+  servers: number
+  nodes: number
+  drives: number
+  pruned: number
 }
 
-export function updateServer(serverId: string, params: { is_active?: boolean }) {
-  return patch<{ message: string }>(`/admin/system/servers/${serverId}`, params)
-}
-
-export function addDrive(
-  serverId: string,
-  params: { label: string; minio_bucket: string; capacity_bytes: number },
-) {
-  return post<DriveSummary>(`/admin/system/servers/${serverId}/drives`, params)
-}
-
-export function updateDrive(
-  serverId: string,
-  driveId: string,
-  params: { label?: string; capacity_bytes?: number; is_active?: boolean },
-) {
-  return patch<DriveSummary>(
-    `/admin/system/servers/${serverId}/drives/${driveId}`,
-    params,
-  )
-}
-
-export function deleteDrive(serverId: string, driveId: string) {
-  return del<{ message: string }>(`/admin/system/servers/${serverId}/drives/${driveId}`)
-}
-
-export function syncDriveCapacity(driveId: string) {
-  return post<{ id: string; label: string; capacity_bytes: number }>(`/admin/system/drives/${driveId}/sync-capacity`)
+// syncInfrastructure indexes the live Docker Swarm and the configured MinIO
+// instances, reconciling the servers → nodes → drives topology automatically
+// (manager/worker roles, drive capacity, fast/standard classification). It is
+// idempotent and replaces the former manual add/edit/remove controls.
+export function syncInfrastructure() {
+  return post<SyncSummary>('/admin/system/sync')
 }
 
 export const infrastructureQueryOptions = {
@@ -296,24 +471,6 @@ export const interestFormSettingsQueryOptions = {
   queryFn: getInterestFormSettings,
 }
 
-// ── Drive temperatures ─────────────────────────────────────────────────────────
-
-export interface DriveTemp {
-  name: string
-  temp_celsius: number
-}
-
-export function getDriveTemps() {
-  return get<DriveTemp[]>('/admin/system/drive-temps')
-}
-
-export const driveTempsQueryOptions = {
-  queryKey: ['admin', 'drive-temps'] as const,
-  queryFn: getDriveTemps,
-  staleTime: 10_000,
-  refetchInterval: 10_000,
-}
-
 // ── Speed test ─────────────────────────────────────────────────────────────────
 
 export interface SpeedTestResult {
@@ -368,43 +525,93 @@ export function shutdownServer() {
   return post<{ message: string }>('/admin/system/shutdown')
 }
 
-// ── Alarm settings ─────────────────────────────────────────────────────────────
+// ── Alarm subscriptions ──────────────────────────────────────────────────────
 
 export type AlarmType =
   | 'cpu_usage'
   | 'cpu_temp'
+  | 'memory'
+  | 'network_traffic'
   | 'drive_temp'
   | 'drive_load'
-  | 'network_traffic'
   | 'api_error_rate'
 
-export interface AlarmSettings {
-  cpu_usage_emails: string[]
-  cpu_usage_last_fired_at: string | null
-  cpu_temp_emails: string[]
-  cpu_temp_last_fired_at: string | null
-  drive_temp_emails: string[]
-  drive_temp_last_fired_at: string | null
-  drive_load_emails: string[]
-  drive_load_last_fired_at: string | null
-  network_traffic_emails: string[]
-  network_traffic_last_fired_at: string | null
-  api_error_rate_emails: string[]
-  api_error_rate_last_fired_at: string | null
-  updated_at: string
+// AlarmScope is the target dimension each alarm type is configured against.
+export type AlarmScope = 'node' | 'drive' | 'cluster'
+
+export const ALARM_SCOPE: Record<AlarmType, AlarmScope> = {
+  cpu_usage:       'node',
+  cpu_temp:        'node',
+  memory:          'node',
+  network_traffic: 'node',
+  drive_temp:      'drive',
+  drive_load:      'drive',
+  api_error_rate:  'cluster',
 }
 
-export function getAlarmSettings() {
-  return get<AlarmSettings>('/admin/system/alarm/settings')
+// Default thresholds offered when a subscriber first enables an alarm. Mirrors
+// the Default*Threshold constants in api/routes/services/alarm.go.
+export const ALARM_DEFAULT_THRESHOLD: Record<AlarmType, number> = {
+  cpu_usage:       90,
+  cpu_temp:        75,
+  memory:          90,
+  network_traffic: 90,
+  drive_temp:      50,
+  drive_load:      90,
+  api_error_rate:  5,
 }
 
-export function toggleAlarmSubscription(alarmType: AlarmType, subscribed: boolean) {
-  return post<AlarmSettings>('/admin/system/alarm/subscribe', { alarm_type: alarmType, subscribed })
+// Unit suffix shown next to a threshold input, by alarm type.
+export const ALARM_UNIT: Record<AlarmType, string> = {
+  cpu_usage:       '%',
+  cpu_temp:        '°C',
+  memory:          '%',
+  network_traffic: '% of capacity',
+  drive_temp:      '°C',
+  drive_load:      '% of capacity',
+  api_error_rate:  '%',
 }
 
-export const alarmSettingsQueryOptions = {
-  queryKey: ['admin', 'alarm', 'settings'] as const,
-  queryFn: getAlarmSettings,
+export interface AlarmSubscription {
+  id: string
+  email: string
+  alarm_type: AlarmType
+  node_id: string | null
+  drive_id: string | null
+  threshold: number
+  last_fired_at: string | null
+  node_hostname?: string
+  node_role?: string
+  drive_label?: string
+  server_name?: string
+}
+
+export interface AlarmSubscriptionTarget {
+  alarm_type: AlarmType
+  node_id?: string | null
+  drive_id?: string | null
+  threshold?: number
+  username?: string
+}
+
+export function getAlarmSubscriptions(username?: string) {
+  const qs = username ? `?username=${encodeURIComponent(username)}` : ''
+  return get<AlarmSubscription[]>(`/admin/system/alarm/subscriptions${qs}`)
+}
+
+export function upsertAlarmSubscription(body: AlarmSubscriptionTarget) {
+  return put<AlarmSubscription>('/admin/system/alarm/subscriptions', body)
+}
+
+export function deleteAlarmSubscription(body: AlarmSubscriptionTarget) {
+  return del<{ ok: boolean }>('/admin/system/alarm/subscriptions', body)
+}
+
+export function alarmSubscriptionsQueryOptions(username?: string) {
+  return {
+    queryKey: ['admin', 'alarm', 'subscriptions', username ?? 'self'] as const,
+    queryFn: () => getAlarmSubscriptions(username),
+  }
 }
 
 // ── Query options ──────────────────────────────────────────────────────────────
@@ -432,3 +639,37 @@ export const adminMetricsQueryOptions = {
   queryFn: getMetrics,
   refetchInterval: 10_000,
 }
+
+// ── Expansion requests ─────────────────────────────────────────────────────────
+
+export interface ExpansionRequestFilter {
+  status?: string
+  server_id?: string
+  from?: string
+  to?: string
+  cursor?: string
+}
+
+export function listExpansionRequests(filter: ExpansionRequestFilter = {}) {
+  const params = new URLSearchParams()
+  if (filter.status)    params.set('status',    filter.status)
+  if (filter.server_id) params.set('server_id', filter.server_id)
+  if (filter.from)      params.set('from',       filter.from)
+  if (filter.to)        params.set('to',         filter.to)
+  if (filter.cursor)    params.set('cursor',     filter.cursor)
+  const qs = params.toString()
+  return get<PageResult<ServerExpansionRequest>>(`/admin/expansion-requests${qs ? '?' + qs : ''}`)
+}
+
+export function fulfillExpansionRequest(id: string) {
+  return post<{ new_quota_bytes: number }>(`/admin/expansion-requests/${id}/fulfill`, {})
+}
+
+export function cancelExpansionRequest(id: string, reason: string) {
+  return post<{ refund_id: string }>(`/admin/expansion-requests/${id}/cancel`, { reason })
+}
+
+export const expansionRequestsQueryOptions = (filter: ExpansionRequestFilter = {}) => ({
+  queryKey: ['admin', 'expansion-requests', filter] as const,
+  queryFn: () => listExpansionRequests(filter),
+})

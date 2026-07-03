@@ -116,7 +116,7 @@ describe('_auth layout nav', () => {
     renderNav({ username: 'admin', is_admin: true })
     expect(screen.getByRole('link', { name: 'Users' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Invitations' })).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: 'Interest' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Requests' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Bans & Suspensions' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Metrics' })).toBeInTheDocument()
   })

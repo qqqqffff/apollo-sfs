@@ -39,6 +39,20 @@ func ExtractImageTakenAt(data []byte) *time.Time {
 	return &t
 }
 
+// ExtractImageLocation returns the GPS latitude and longitude embedded in the
+// image EXIF, or (nil, nil) when absent or unparseable.
+func ExtractImageLocation(data []byte) (lat *float64, lng *float64) {
+	x, err := exif.Decode(bytes.NewReader(data))
+	if err != nil {
+		return nil, nil
+	}
+	la, lo, err := x.LatLong()
+	if err != nil {
+		return nil, nil
+	}
+	return &la, &lo
+}
+
 // ExtractVideoTakenAt returns the container creation_time tag of the video at
 // path, or nil when ffprobe is unavailable or the tag is missing/unparseable.
 func (m *MetadataService) ExtractVideoTakenAt(ctx context.Context, path string) *time.Time {

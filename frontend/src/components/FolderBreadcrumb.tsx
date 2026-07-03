@@ -13,7 +13,7 @@ interface Props {
 }
 
 // FolderBreadcrumb renders the clickable path from root → current folder.
-// The leading "." is always the root sentinel. When the path doesn't fit
+// The leading "root" is always the root sentinel. When the path doesn't fit
 // the available width, the leftmost segments collapse into a single ".."
 // button that navigates to the immediate parent of the current folder.
 export function FolderBreadcrumb({ folderId, onNavigate, trailing }: Props) {
@@ -46,7 +46,7 @@ export function FolderBreadcrumb({ folderId, onNavigate, trailing }: Props) {
   // enough to avoid overflow on the cramped end of the spectrum without
   // being so pessimistic that the breadcrumb collapses unnecessarily.
   const segments = isRoot ? [] : ancestors
-  const totalChars = segments.reduce((n, f) => n + f.name.length + 3, 0) + 16 // 16 = leading "."
+  const totalChars = segments.reduce((n, f) => n + f.name.length + 3, 0) + 19 // 19 = leading "root"
   const fits = available === 0 || totalChars * 10 <= available
 
   // Tail = always show: current folder. Beyond that, fit as many as we can
@@ -57,7 +57,7 @@ export function FolderBreadcrumb({ folderId, onNavigate, trailing }: Props) {
     const minTail = 1 // always keep the current folder
     let keep = minTail
     const leaf = segments[segments.length - 1]
-    let chars = 16 + (leaf ? leaf.name.length : 0) + 6 // "." + leaf + ".." section
+    let chars = 19 + (leaf ? leaf.name.length : 0) + 6 // "root" + leaf + ".." section
     for (let i = segments.length - 2; i >= 0; i--) {
       chars += segments[i].name.length + 3
       if (chars * 10 > available) break
@@ -75,7 +75,7 @@ export function FolderBreadcrumb({ folderId, onNavigate, trailing }: Props) {
       className="flex items-center gap-1 text-sm text-gray-600 mb-5 min-w-0"
     >
       <Crumb
-        label="."
+        label="root"
         title="Root"
         clickable={!isRoot}
         onClick={() => onNavigate(undefined)}

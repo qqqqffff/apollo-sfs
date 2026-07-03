@@ -1,23 +1,67 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { Turnstile } from '@marsidev/react-turnstile'
 import type { TurnstileInstance } from '@marsidev/react-turnstile'
-import { submitInterestForm, publicConfigQueryOptions } from '../api/interest'
+import {
+  submitInterestForm,
+  createInterestDepositOrder,
+  captureInterestDepositOrder,
+  validateApplePayMerchantForDeposit,
+  createApplePayInterestDeposit,
+  createGooglePayInterestDeposit,
+  publicConfigQueryOptions,
+  type StorageType,
+} from '../api/interest'
 import { ApiError } from '../api/client'
 
 export const Route = createFileRoute('/interest')({
   component: RouteComponent,
 })
 
-const STORAGE_MIN_GB = 1
-const STORAGE_MAX_GB = 100
-const STORAGE_STEP = 1
+const APPLE_PAY_MERCHANT_ID = 'merchant.com.apollosfs'
+const PAYPAL_MERCHANT_ID = 'HH4449WYNCH5C'
 
-const GB_PRESETS = [1, 5, 10, 25, 50, 100]
+const GOOGLE_PAY_ALLOWED_METHODS = [{
+  type: 'CARD',
+  parameters: {
+    allowedAuthMethods: ['PAN_ONLY', 'CRYPTOGRAM_3DS'],
+    allowedCardNetworks: ['AMEX', 'DISCOVER', 'MASTERCARD', 'VISA'],
+  },
+  tokenizationSpecification: {
+    type: 'PAYMENT_GATEWAY',
+    parameters: { gateway: 'paypal', gatewayMerchantId: PAYPAL_MERCHANT_ID },
+  },
+}]
 
-function formatGB(gb: number) {
-  return `${gb} GB`
+interface Plan {
+  id: string
+  label: string
+  storageGB: number
+  price: Record<StorageType, string>
+  amount: Record<StorageType, string>
+}
+
+const PLANS: Plan[] = [
+  { id: '64gb',  label: '64 GB',  storageGB: 64,   price: { nvme: '$30',  hdd: '$20'  }, amount: { nvme: '30.00',  hdd: '20.00'  } },
+  { id: '128gb', label: '128 GB', storageGB: 128,  price: { nvme: '$50',  hdd: '$30'  }, amount: { nvme: '50.00',  hdd: '30.00'  } },
+  { id: '256gb', label: '256 GB', storageGB: 256,  price: { nvme: '$80',  hdd: '$50'  }, amount: { nvme: '80.00',  hdd: '50.00'  } },
+  { id: '512gb', label: '512 GB', storageGB: 512,  price: { nvme: '$150', hdd: '$80'  }, amount: { nvme: '150.00', hdd: '80.00'  } },
+  { id: '1tb',   label: '1 TB',   storageGB: 1024, price: { nvme: '$250', hdd: '$120' }, amount: { nvme: '250.00', hdd: '120.00' } },
+]
+
+function depositAmt(plan: Plan, storageType: StorageType) {
+  return (Math.round(parseFloat(plan.amount[storageType]) * 100 / 2) / 100).toFixed(2)
+}
+
+function depositDisplay(plan: Plan, storageType: StorageType) {
+  return `$${depositAmt(plan, storageType)}`
+}
+
+type FormStep = 'form' | 'pending' | 'awaiting' | 'verifying' | 'submitted'
+
+function RequiredStar() {
+  return <span className="text-red-500 ml-0.5" aria-hidden="true">*</span>
 }
 
 function RouteComponent() {
@@ -25,45 +69,180 @@ function RouteComponent() {
 
   const [name, setName] = useState('')
   const [email, setEmail] = useState('')
-  const [storageGB, setStorageGB] = useState(10)
+  const [storageType, setStorageType] = useState<StorageType>('nvme')
+  const [selectedPlanId, setSelectedPlanId] = useState<string | null>(null)
   const [useCase, setUseCase] = useState('')
   const [captchaToken, setCaptchaToken] = useState<string | null>(null)
-  const [submitted, setSubmitted] = useState(false)
+  const [step, setStep] = useState<FormStep>('form')
   const [error, setError] = useState<string | null>(null)
+  const [pendingOrderId, setPendingOrderId] = useState<string | null>(null)
+  const [canApplePay, setCanApplePay] = useState(false)
+  const [canGooglePay, setCanGooglePay] = useState(false)
   const turnstileRef = useRef<TurnstileInstance>(null)
 
-  const mutation = useMutation({
-    mutationFn: () =>
-      submitInterestForm({
+  const selectedPlan = PLANS.find((p) => p.id === selectedPlanId) ?? null
+
+  // Detect Apple Pay (Safari / WebKit only)
+  useEffect(() => {
+    const ApplePaySession = (window as any).ApplePaySession
+    if (ApplePaySession?.canMakePayments) {
+      try { setCanApplePay(ApplePaySession.canMakePayments(APPLE_PAY_MERCHANT_ID)) }
+      catch { /* not available */ }
+    }
+  }, [])
+
+  // Load Google Pay JS and detect availability
+  useEffect(() => {
+    if ((window as any).google?.payments?.api) {
+      checkGooglePay()
+      return
+    }
+    const script = document.createElement('script')
+    script.src = 'https://pay.google.com/gp/p/js/pay.js'
+    script.async = true
+    script.onload = () => checkGooglePay()
+    document.head.appendChild(script)
+
+    function checkGooglePay() {
+      try {
+        const client = new (window as any).google.payments.api.PaymentsClient({ environment: 'PRODUCTION' })
+        client.isReadyToPay({ apiVersion: 2, apiVersionMinor: 0, allowedPaymentMethods: GOOGLE_PAY_ALLOWED_METHODS })
+          .then((res: { result: boolean }) => setCanGooglePay(res.result))
+          .catch(() => {})
+      } catch { /* not available */ }
+    }
+  }, [])
+
+  const submitMutation = useMutation({
+    mutationFn: (depositOrderId: string) => {
+      const plan = PLANS.find((p) => p.id === selectedPlanId)!
+      return submitInterestForm({
         name: name.trim(),
         email: email.trim(),
-        desired_storage_gb: storageGB,
+        desired_storage_gb: plan.storageGB,
+        storage_type: storageType,
+        plan_id: selectedPlanId!,
         use_case: useCase.trim(),
         captcha_token: captchaToken!,
-      }),
-    onSuccess: () => {
-      setSubmitted(true)
-      setError(null)
+        deposit_order_id: depositOrderId,
+      })
     },
+    onSuccess: () => setStep('submitted'),
     onError: (err) => {
       setError(err instanceof ApiError ? err.message : 'Something went wrong — please try again.')
-      // Reset the widget so the user can retry.
+      setStep('form')
       turnstileRef.current?.reset()
       setCaptchaToken(null)
     },
   })
 
-  function handleSubmit(e: React.FormEvent) {
-    e.preventDefault()
-    if (!captchaToken) {
-      setError('Please complete the security check.')
-      return
-    }
-    setError(null)
-    mutation.mutate()
+  function validateForm(): boolean {
+    if (captchaRequired && !captchaToken) { setError('Please complete the security check.'); return false }
+    if (!selectedPlanId) { setError('Please select a storage plan.'); return false }
+    return true
   }
 
-  if (submitted) {
+  // ── PayPal / Card ────────────────────────────────────────────────────────────
+
+  async function handleRedirectPay(method: 'paypal' | 'card') {
+    if (!validateForm()) return
+    setError(null)
+    setStep('pending')
+    try {
+      const { order_id, approve_url } = await createInterestDepositOrder(selectedPlanId!, storageType, method)
+      setPendingOrderId(order_id)
+      window.open(approve_url, '_blank', 'noopener,noreferrer')
+      setStep('awaiting')
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not start payment — please try again.')
+      setStep('form')
+    }
+  }
+
+  async function handleVerifyDeposit() {
+    if (!pendingOrderId) return
+    setStep('verifying')
+    try {
+      await captureInterestDepositOrder(pendingOrderId)
+      submitMutation.mutate(pendingOrderId)
+    } catch {
+      setError('Payment not found. If you completed checkout, please try again.')
+      setStep('awaiting')
+    }
+  }
+
+  // ── Apple Pay ────────────────────────────────────────────────────────────────
+
+  function handleApplePay(e: React.MouseEvent) {
+    e.preventDefault()
+    if (!validateForm() || !selectedPlan) return
+    setError(null)
+    const ApplePaySession = (window as any).ApplePaySession
+    const amount = depositAmt(selectedPlan, storageType)
+    const session = new ApplePaySession(3, {
+      countryCode: 'US',
+      currencyCode: 'USD',
+      supportedNetworks: ['visa', 'masterCard', 'amex', 'discover'],
+      merchantCapabilities: ['supports3DS'],
+      total: { label: 'Apollo SFS Storage Deposit', amount },
+    })
+    session.onvalidatemerchant = async (event: any) => {
+      try {
+        const merchantSession = await validateApplePayMerchantForDeposit(event.validationURL)
+        session.completeMerchantValidation(merchantSession)
+      } catch {
+        session.abort()
+        setError('Apple Pay merchant validation failed.')
+      }
+    }
+    session.onpaymentauthorized = async (event: any) => {
+      try {
+        setStep('pending')
+        const token = JSON.stringify(event.payment.token)
+        const { order_id } = await createApplePayInterestDeposit(selectedPlanId!, storageType, token)
+        session.completePayment(ApplePaySession.STATUS_SUCCESS)
+        submitMutation.mutate(order_id)
+      } catch {
+        session.completePayment(ApplePaySession.STATUS_FAILURE)
+        setError('Apple Pay payment failed — please try another method.')
+        setStep('form')
+      }
+    }
+    session.oncancel = () => setStep('form')
+    session.begin()
+  }
+
+  // ── Google Pay ───────────────────────────────────────────────────────────────
+
+  async function handleGooglePay(e: React.MouseEvent) {
+    e.preventDefault()
+    if (!validateForm() || !selectedPlan) return
+    setError(null)
+    const amount = depositAmt(selectedPlan, storageType)
+    try {
+      const client = new (window as any).google.payments.api.PaymentsClient({ environment: 'PRODUCTION' })
+      const paymentData = await client.loadPaymentData({
+        apiVersion: 2,
+        apiVersionMinor: 0,
+        allowedPaymentMethods: GOOGLE_PAY_ALLOWED_METHODS,
+        merchantInfo: { merchantName: 'Apollo SFS' },
+        transactionInfo: { totalPriceStatus: 'FINAL', totalPrice: amount, currencyCode: 'USD', countryCode: 'US' },
+      })
+      setStep('pending')
+      const token = paymentData.paymentMethodData.tokenizationData.token
+      const { order_id } = await createGooglePayInterestDeposit(selectedPlanId!, storageType, token)
+      submitMutation.mutate(order_id)
+    } catch (err: any) {
+      if (err?.statusCode !== 'CANCELED') {
+        setError('Google Pay payment failed — please try another method.')
+      }
+      setStep('form')
+    }
+  }
+
+  // ── Submitted ────────────────────────────────────────────────────────────────
+
+  if (step === 'submitted') {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center px-4">
         <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-10 max-w-md w-full text-center">
@@ -74,25 +253,74 @@ function RouteComponent() {
           </div>
           <h2 className="text-lg font-semibold text-gray-900 mb-2">Request received</h2>
           <p className="text-sm text-gray-500">
-            Thanks for your interest in Apollo SFS. We'll be in touch if there's a spot available.
+            Thanks for your interest in Apollo SFS. Your deposit has been received and will be
+            refunded in full if your request is denied or expires. We'll be in touch if there's a
+            spot available.
           </p>
         </div>
       </div>
     )
   }
 
+  // ── PayPal / Card awaiting ────────────────────────────────────────────────────
+
+  if (step === 'awaiting' || step === 'verifying') {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center px-4">
+        <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-8 max-w-md w-full">
+          <h2 className="text-lg font-semibold text-gray-900 mb-1">Complete your deposit</h2>
+          <p className="text-sm text-gray-500 mb-6">
+            Payment opened in a new tab. Complete the{' '}
+            {selectedPlan ? depositDisplay(selectedPlan, storageType) : ''} deposit there, then
+            return here to confirm.
+          </p>
+          {error && <p className="text-sm text-red-500 mb-4">{error}</p>}
+          <button
+            type="button"
+            onClick={handleVerifyDeposit}
+            disabled={step === 'verifying'}
+            className="w-full px-4 py-2.5 text-sm font-medium bg-blue-600 hover:bg-blue-700 text-white rounded-lg disabled:opacity-50 transition-colors cursor-pointer mb-3"
+          >
+            {step === 'verifying' ? 'Verifying…' : "I've completed payment"}
+          </button>
+          <button
+            type="button"
+            onClick={() => { setStep('form'); setError(null) }}
+            disabled={step === 'verifying'}
+            className="w-full px-4 py-2.5 text-sm font-medium text-gray-500 hover:text-gray-700 rounded-lg disabled:opacity-50 transition-colors cursor-pointer"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  // ── Main form ─────────────────────────────────────────────────────────────────
+
+  const captchaRequired = !!config?.turnstile_site_key
+  // Buttons are disabled only until a plan is selected; captcha errors surface inline
+  const formReady = !!selectedPlanId
+  const isPending = step === 'pending'
+
   return (
     <div className="min-h-screen bg-gray-50 flex items-center justify-center px-4 py-12">
       <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-8 max-w-lg w-full">
         <h1 className="text-xl font-semibold text-gray-900 mb-1">Request access</h1>
-        <p className="text-sm text-gray-500 mb-6">
-          Apollo SFS is currently invite-only. Fill out this form and we'll reach out if a spot opens up.
+        <p className="text-sm text-gray-500 mb-1">
+          Apollo SFS is currently invite-only. Fill out this form and pay a refundable 50%
+          deposit to reserve your spot.
+        </p>
+        <p className="text-xs text-gray-400 mb-6">
+          Fields marked <span className="text-red-500">*</span> are required.
         </p>
 
-        <form onSubmit={handleSubmit} className="flex flex-col gap-5">
+        <div className="flex flex-col gap-5">
           {/* Name */}
           <div className="flex flex-col gap-1">
-            <label htmlFor="name" className="text-sm font-medium text-gray-700">Full name</label>
+            <label htmlFor="name" className="text-sm font-medium text-gray-700">
+              Full name<RequiredStar />
+            </label>
             <input
               id="name"
               type="text"
@@ -108,7 +336,9 @@ function RouteComponent() {
 
           {/* Email */}
           <div className="flex flex-col gap-1">
-            <label htmlFor="email" className="text-sm font-medium text-gray-700">Email address</label>
+            <label htmlFor="email" className="text-sm font-medium text-gray-700">
+              Email address<RequiredStar />
+            </label>
             <input
               id="email"
               type="email"
@@ -121,44 +351,81 @@ function RouteComponent() {
             />
           </div>
 
-          {/* Storage slider */}
+          {/* Storage type toggle */}
           <div className="flex flex-col gap-2">
-            <div className="flex items-center justify-between">
-              <label htmlFor="storage" className="text-sm font-medium text-gray-700">Desired storage</label>
-              <span className="text-sm font-semibold text-blue-600">{formatGB(storageGB)}</span>
-            </div>
-            <input
-              id="storage"
-              type="range"
-              min={STORAGE_MIN_GB}
-              max={STORAGE_MAX_GB}
-              step={STORAGE_STEP}
-              value={storageGB}
-              onChange={(e) => setStorageGB(Number(e.target.value))}
-              className="w-full accent-blue-600"
-            />
-            <div className="flex justify-between gap-1 flex-wrap">
-              {GB_PRESETS.map((gb) => (
+            <span className="text-sm font-medium text-gray-700">Storage type</span>
+            <div className="grid grid-cols-2 gap-2">
+              {(['nvme', 'hdd'] as StorageType[]).map((t) => (
                 <button
-                  key={gb}
+                  key={t}
                   type="button"
-                  onClick={() => setStorageGB(gb)}
-                  className={`flex-1 min-w-8 px-1 py-0.5 text-xs rounded border transition-colors cursor-pointer ${
-                    storageGB === gb
-                      ? 'bg-blue-600 text-white border-blue-600'
-                      : 'bg-white text-gray-500 border-gray-200 hover:border-gray-400'
+                  onClick={() => setStorageType(t)}
+                  className={`flex flex-col items-start px-4 py-3 rounded-xl border-2 transition-colors cursor-pointer text-left ${
+                    storageType === t
+                      ? 'border-blue-600 bg-blue-50'
+                      : 'border-gray-200 bg-white hover:border-gray-300'
                   }`}
                 >
-                  {gb} GB
+                  <span className={`text-sm font-semibold ${storageType === t ? 'text-blue-700' : 'text-gray-800'}`}>
+                    {t === 'nvme' ? 'Fast' : 'Standard'}
+                  </span>
+                  <span className={`text-xs ${storageType === t ? 'text-blue-500' : 'text-gray-400'}`}>
+                    {t === 'nvme' ? 'NVMe SSD' : 'HDD'}
+                  </span>
                 </button>
               ))}
             </div>
           </div>
 
+          {/* Plan cards */}
+          <div className="flex flex-col gap-2">
+            <span className="text-sm font-medium text-gray-700">
+              Storage plan<RequiredStar />
+            </span>
+            {PLANS.map((plan) => {
+              const sel = selectedPlanId === plan.id
+              return (
+                <button
+                  key={plan.id}
+                  type="button"
+                  onClick={() => setSelectedPlanId(plan.id)}
+                  className={`flex items-center justify-between px-4 py-3 rounded-xl border-2 transition-colors cursor-pointer text-left ${
+                    sel
+                      ? 'border-blue-600 bg-blue-50'
+                      : 'border-gray-200 bg-white hover:border-gray-300'
+                  }`}
+                >
+                  <span className={`text-sm font-semibold ${sel ? 'text-blue-700' : 'text-gray-800'}`}>
+                    {plan.label}
+                  </span>
+                  <div className="flex items-center gap-3">
+                    <span className={`text-sm font-semibold ${sel ? 'text-blue-600' : 'text-gray-500'}`}>
+                      {plan.price[storageType]}
+                    </span>
+                    <div className={`w-4 h-4 rounded-full border-2 flex items-center justify-center ${
+                      sel ? 'border-blue-600' : 'border-gray-300'
+                    }`}>
+                      {sel && <div className="w-2 h-2 rounded-full bg-blue-600" />}
+                    </div>
+                  </div>
+                </button>
+              )
+            })}
+          </div>
+
+          {/* Deposit notice */}
+          {selectedPlan && (
+            <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 text-sm text-amber-800">
+              A <span className="font-semibold">{depositDisplay(selectedPlan, storageType)} refundable deposit (50%)</span> is
+              required to reserve your spot. It will be returned automatically if your request is
+              denied or expires.
+            </div>
+          )}
+
           {/* Use case */}
           <div className="flex flex-col gap-1">
             <label htmlFor="use-case" className="text-sm font-medium text-gray-700">
-              Reason / use case
+              Reason / use case<RequiredStar />
             </label>
             <textarea
               id="use-case"
@@ -188,14 +455,73 @@ function RouteComponent() {
 
           {error && <p className="text-sm text-red-500">{error}</p>}
 
-          <button
-            type="submit"
-            disabled={mutation.isPending || !captchaToken}
-            className="px-4 py-2.5 text-sm font-medium bg-blue-600 hover:bg-blue-700 text-white rounded-lg disabled:opacity-50 transition-colors cursor-pointer"
-          >
-            {mutation.isPending ? 'Submitting…' : 'Submit request'}
-          </button>
-        </form>
+          {/* Payment buttons */}
+          <div className="flex flex-col gap-2">
+            {canApplePay && (
+              <button
+                type="button"
+                onClick={handleApplePay}
+                disabled={!formReady || isPending}
+                className="w-full flex items-center justify-center gap-2 px-4 py-3 text-sm font-semibold bg-black hover:bg-gray-900 text-white rounded-xl disabled:opacity-50 transition-colors cursor-pointer"
+              >
+                {isPending ? 'Processing…' : (
+                  <> Pay{selectedPlan ? ` ${depositDisplay(selectedPlan, storageType)}` : ''}</>
+                )}
+              </button>
+            )}
+
+            {canGooglePay && (
+              <button
+                type="button"
+                onClick={handleGooglePay}
+                disabled={!formReady || isPending}
+                className="w-full flex items-center justify-center gap-2 px-4 py-3 text-sm font-semibold bg-white hover:bg-gray-50 text-gray-800 border border-gray-300 rounded-xl disabled:opacity-50 transition-colors cursor-pointer"
+              >
+                <svg viewBox="0 0 41 17" className="h-4 fill-current" aria-hidden="true">
+                  <path d="M19.526 2.635v4.083h2.518c.6 0 1.096-.202 1.488-.605.403-.402.605-.882.605-1.437 0-.544-.202-1.018-.605-1.422-.392-.413-.888-.62-1.488-.62h-2.518zm0 5.52v4.736h-1.504V1.198h3.99c1.013 0 1.873.337 2.582 1.012.72.675 1.08 1.497 1.08 2.466 0 .991-.36 1.819-1.08 2.482-.697.652-1.559.978-2.583.978h-2.485zm7.668 2.287c0 .676.239 1.234.718 1.673.48.44 1.057.659 1.732.659.937 0 1.71-.352 2.32-1.056l.928.603c-.773 1.09-1.905 1.635-3.396 1.635-1.208 0-2.179-.39-2.914-1.172-.724-.78-1.086-1.763-1.086-2.948 0-1.17.362-2.146 1.086-2.927.735-.792 1.683-1.188 2.846-1.188 1.185 0 2.12.433 2.805 1.3.697.854 1.045 1.92 1.045 3.199l-.016.222h-5.068zm3.556-1.173c-.056-.658-.29-1.177-.7-1.557-.41-.38-.924-.57-1.544-.57-.62 0-1.145.19-1.576.57-.43.38-.682.9-.756 1.557h4.576zm-13.78 7.738h1.518l-5.555-14.96H11.44L5.872 16.994h1.518l1.483-4.013h5.68l1.419 4.013zm-5.695-5.47 2.262-6.11 2.262 6.11H11.275zm-8.96-8.52v3.58h2.327c.627 0 1.15-.214 1.568-.643.43-.44.645-.976.645-1.609 0-.62-.215-1.147-.645-1.581-.418-.43-.941-.644-1.568-.644H2.315V2.52H.8v14.474h1.515v-7.5h2.327c1.078 0 1.99-.378 2.735-1.133.745-.756 1.118-1.674 1.118-2.754 0-1.079-.373-1.997-1.118-2.753C6.632 2.1 5.72 1.722 4.642 1.722H2.315z" />
+                </svg>
+                {isPending ? 'Processing…' : `Pay${selectedPlan ? ` ${depositDisplay(selectedPlan, storageType)}` : ''}`}
+              </button>
+            )}
+
+            <button
+              type="button"
+              onClick={() => handleRedirectPay('card')}
+              disabled={!formReady || isPending}
+              className="w-full flex items-center justify-center gap-2 px-4 py-3 text-sm font-semibold bg-white hover:bg-gray-50 text-gray-800 border border-gray-300 rounded-xl disabled:opacity-50 transition-colors cursor-pointer"
+            >
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <rect x="1" y="4" width="22" height="16" rx="2" ry="2" />
+                <line x1="1" y1="10" x2="23" y2="10" />
+              </svg>
+              {isPending
+                ? 'Processing…'
+                : `Pay by Card${selectedPlan ? ` — ${depositDisplay(selectedPlan, storageType)}` : ''}`}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => handleRedirectPay('paypal')}
+              disabled={!formReady || isPending}
+              aria-label="PayPal"
+              className="w-full flex items-center justify-center gap-2 px-4 py-3 text-sm font-semibold bg-[#003087] hover:bg-[#002070] text-white rounded-xl disabled:opacity-50 transition-colors cursor-pointer"
+            >
+              <span className="font-light text-[#009cde] tracking-wide">Pay</span>
+              <span className="font-black text-[#009cde] tracking-wide -ml-1.5">Pal</span>
+              {selectedPlan && (
+                <span className="text-white/90 ml-1">
+                  — {depositDisplay(selectedPlan, storageType)}
+                </span>
+              )}
+            </button>
+
+            {!formReady && !error && (
+              <p className="text-xs text-gray-400 text-center">
+                Select a plan to enable payment.
+              </p>
+            )}
+          </div>
+        </div>
       </div>
     </div>
   )

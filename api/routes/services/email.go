@@ -131,6 +131,35 @@ func (s *EmailService) SendInvitation(
 	)
 }
 
+// SendShareNotification enqueues an email telling a recipient that ownerEmail
+// shared a file or folder with them. itemType is "file" or "folder";
+// permissionLabel is a human-readable summary e.g. "view and download";
+// shareURL must be the full URL including the share token.
+func (s *EmailService) SendShareNotification(
+	ctx context.Context,
+	toEmail string,
+	ownerEmail string,
+	itemName string,
+	itemType string,
+	permissionLabel string,
+	shareURL string,
+) error {
+	return s.enqueue(ctx, toEmail,
+		fmt.Sprintf("%s shared a %s with you on %s", ownerEmail, itemType, s.appName),
+		"share_notification",
+		map[string]any{
+			"AppName":         s.appName,
+			"AppURL":          s.appURL,
+			"Email":           toEmail,
+			"OwnerEmail":      ownerEmail,
+			"ItemName":        itemName,
+			"ItemType":        itemType,
+			"PermissionLabel": permissionLabel,
+			"ShareURL":        shareURL,
+		},
+	)
+}
+
 // SendQuotaWarning enqueues a storage warning email when a user crosses the
 // warning threshold (default 80%). usedPercent is the integer percentage (e.g. 83).
 // usedFormatted and quotaFormatted are pre-formatted strings e.g. "8.3 GB", "10 GB".
@@ -234,6 +263,77 @@ func (s *EmailService) SendAlarmNotification(
 		}
 	}
 	return nil
+}
+
+// SendExpansionRequestNotification notifies all admins that a user has
+// submitted a new server capacity expansion request.
+func (s *EmailService) SendExpansionRequestNotification(
+	ctx context.Context,
+	adminEmails []string,
+	username, userEmail, serverName, planLabel, depositFormatted, expiresAt string,
+) error {
+	adminURL := s.appURL + "/admin/requests/expansion"
+	for _, to := range adminEmails {
+		if err := s.enqueue(ctx, to,
+			fmt.Sprintf("New expansion request — %s", s.appName),
+			"expansion_request_admin",
+			map[string]any{
+				"AppName":          s.appName,
+				"AppURL":           s.appURL,
+				"Username":         username,
+				"UserEmail":        userEmail,
+				"ServerName":       serverName,
+				"PlanLabel":        planLabel,
+				"DepositFormatted": depositFormatted,
+				"ExpiresAt":        expiresAt,
+				"AdminURL":         adminURL,
+			},
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SendExpansionPaymentDue notifies the user that server capacity is ready and
+// the remaining balance must be paid within the given deadline.
+func (s *EmailService) SendExpansionPaymentDue(
+	ctx context.Context,
+	toEmail, serverName, planLabel, remainingFmt, paymentDueAt, paymentURL string,
+) error {
+	return s.enqueue(ctx, toEmail,
+		fmt.Sprintf("Your storage expansion is ready — pay now — %s", s.appName),
+		"expansion_payment_due",
+		map[string]any{
+			"AppName":      s.appName,
+			"AppURL":       s.appURL,
+			"ServerName":   serverName,
+			"PlanLabel":    planLabel,
+			"RemainingFmt": remainingFmt,
+			"PaymentDueAt": paymentDueAt,
+			"PaymentURL":   paymentURL,
+		},
+	)
+}
+
+// SendExpansionCancellation notifies the user that their expansion request was
+// cancelled and a deposit refund has been issued.
+func (s *EmailService) SendExpansionCancellation(
+	ctx context.Context,
+	toEmail, serverName, planLabel, refundFormatted, reason string,
+) error {
+	return s.enqueue(ctx, toEmail,
+		fmt.Sprintf("Your expansion request was cancelled — %s", s.appName),
+		"expansion_cancellation",
+		map[string]any{
+			"AppName":         s.appName,
+			"AppURL":          s.appURL,
+			"ServerName":      serverName,
+			"PlanLabel":       planLabel,
+			"RefundFormatted": refundFormatted,
+			"Reason":          reason,
+		},
+	)
 }
 
 // SendPasswordReset enqueues a password-reset email.

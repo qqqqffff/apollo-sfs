@@ -387,7 +387,7 @@ function StartScreen({
         <p className="mt-5 text-xs text-gray-400 flex items-center justify-center gap-1.5">
           <MdLock className="text-sm" />
           <span>
-            <Link to="/login" className="text-blue-600 hover:text-blue-800 no-underline">
+            <Link to="/login" search={{ social_error: undefined, link_provider: undefined, link_email: undefined, link_username: undefined }} className="text-blue-600 hover:text-blue-800 no-underline">
               Sign in
             </Link>{' '}
             to save your test scores to your account — otherwise they are kept only

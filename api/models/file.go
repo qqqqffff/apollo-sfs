@@ -21,7 +21,20 @@ type File struct {
 	Nonce          []byte     `json:"-" db:"nonce"`
 	// TakenAt is the capture date from media metadata (EXIF/container). Nil when
 	// unavailable; clients sort media by TakenAt, falling back to CreatedAt.
-	TakenAt   *time.Time `json:"taken_at" db:"taken_at"`
+	TakenAt *time.Time `json:"taken_at" db:"taken_at"`
+	// SHA256Hash is the hex-encoded SHA-256 of the plaintext bytes. Used by mobile
+	// clients for dedup: check before uploading identical content.
+	SHA256Hash *string `json:"sha256_hash,omitempty" db:"sha256_hash"`
+	// DeviceID links the file to the registered mobile device that uploaded it.
+	// Nil for files uploaded from the web.
+	DeviceID *uuid.UUID `json:"device_id,omitempty" db:"device_id"`
+	// Source records the upload origin: "web" | "device" | "google_drive" |
+	// "google_photos". Defaults to "web".
+	Source string `json:"source" db:"source"`
+	// Latitude and Longitude are the GPS coordinates extracted from image EXIF.
+	// Nil when the image has no GPS tags or the file is not an image.
+	Latitude  *float64 `json:"latitude,omitempty" db:"latitude"`
+	Longitude *float64 `json:"longitude,omitempty" db:"longitude"`
 	// Hidden excludes the file from collection listings unless explicitly shown.
 	Hidden    bool      `json:"hidden" db:"hidden"`
 	CreatedAt time.Time `json:"created_at" db:"created_at"`

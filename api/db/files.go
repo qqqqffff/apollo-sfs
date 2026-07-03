@@ -13,20 +13,12 @@ import (
 
 const fileColumns = `
 	id, user_id, folder_id, drive_id, name, mime_type,
-	size_bytes, minio_object_key, nonce, taken_at, hidden, created_at, updated_at`
+	size_bytes, minio_object_key, nonce, taken_at, sha256_hash, hidden, created_at, updated_at,
+	device_id, latitude, longitude, source`
 
-func scanFile(row *sql.Row) (*models.File, error) {
-	var f models.File
-	var folderID uuid.NullUUID
-	var driveID uuid.NullUUID
-	var takenAt sql.NullTime
-	err := row.Scan(
-		&f.ID, &f.UserID, &folderID, &driveID, &f.Name, &f.MimeType,
-		&f.SizeBytes, &f.MinIOObjectKey, &f.Nonce, &takenAt, &f.Hidden, &f.CreatedAt, &f.UpdatedAt,
-	)
-	if err != nil {
-		return nil, err
-	}
+// assignFileScan copies the nullable scan targets onto f. Shared by scanFile
+// and scanFileRow so the column order stays identical to fileColumns.
+func assignFileScan(f *models.File, folderID, driveID, deviceID uuid.NullUUID, takenAt sql.NullTime, sha256Hash sql.NullString, latitude, longitude sql.NullFloat64) {
 	if folderID.Valid {
 		f.FolderID = &folderID.UUID
 	}
@@ -36,30 +28,55 @@ func scanFile(row *sql.Row) (*models.File, error) {
 	if takenAt.Valid {
 		f.TakenAt = &takenAt.Time
 	}
+	if sha256Hash.Valid {
+		f.SHA256Hash = &sha256Hash.String
+	}
+	if deviceID.Valid {
+		f.DeviceID = &deviceID.UUID
+	}
+	if latitude.Valid {
+		v := latitude.Float64
+		f.Latitude = &v
+	}
+	if longitude.Valid {
+		v := longitude.Float64
+		f.Longitude = &v
+	}
+}
+
+func scanFile(row *sql.Row) (*models.File, error) {
+	var f models.File
+	var folderID, driveID, deviceID uuid.NullUUID
+	var takenAt sql.NullTime
+	var sha256Hash sql.NullString
+	var latitude, longitude sql.NullFloat64
+	err := row.Scan(
+		&f.ID, &f.UserID, &folderID, &driveID, &f.Name, &f.MimeType,
+		&f.SizeBytes, &f.MinIOObjectKey, &f.Nonce, &takenAt, &sha256Hash, &f.Hidden, &f.CreatedAt, &f.UpdatedAt,
+		&deviceID, &latitude, &longitude, &f.Source,
+	)
+	if err != nil {
+		return nil, err
+	}
+	assignFileScan(&f, folderID, driveID, deviceID, takenAt, sha256Hash, latitude, longitude)
 	return &f, nil
 }
 
 func scanFileRow(rows *sql.Rows) (*models.File, error) {
 	var f models.File
-	var folderID uuid.NullUUID
-	var driveID uuid.NullUUID
+	var folderID, driveID, deviceID uuid.NullUUID
 	var takenAt sql.NullTime
+	var sha256Hash sql.NullString
+	var latitude, longitude sql.NullFloat64
 	err := rows.Scan(
 		&f.ID, &f.UserID, &folderID, &driveID, &f.Name, &f.MimeType,
-		&f.SizeBytes, &f.MinIOObjectKey, &f.Nonce, &takenAt, &f.Hidden, &f.CreatedAt, &f.UpdatedAt,
+		&f.SizeBytes, &f.MinIOObjectKey, &f.Nonce, &takenAt, &sha256Hash, &f.Hidden, &f.CreatedAt, &f.UpdatedAt,
+		&deviceID, &latitude, &longitude, &f.Source,
 	)
 	if err != nil {
 		return nil, err
 	}
-	if folderID.Valid {
-		f.FolderID = &folderID.UUID
-	}
-	if driveID.Valid {
-		f.DriveID = &driveID.UUID
-	}
-	if takenAt.Valid {
-		f.TakenAt = &takenAt.Time
-	}
+	assignFileScan(&f, folderID, driveID, deviceID, takenAt, sha256Hash, latitude, longitude)
 	return &f, nil
 }
 
@@ -79,14 +96,35 @@ func (q *Queries) CreateFile(ctx context.Context, f *models.File) (*models.File,
 	if f.TakenAt != nil {
 		takenAt = sql.NullTime{Time: *f.TakenAt, Valid: true}
 	}
+	var sha256Hash sql.NullString
+	if f.SHA256Hash != nil {
+		sha256Hash = sql.NullString{String: *f.SHA256Hash, Valid: true}
+	}
+	var deviceID uuid.NullUUID
+	if f.DeviceID != nil {
+		deviceID = uuid.NullUUID{UUID: *f.DeviceID, Valid: true}
+	}
+	var latitude, longitude sql.NullFloat64
+	if f.Latitude != nil {
+		latitude = sql.NullFloat64{Float64: *f.Latitude, Valid: true}
+	}
+	if f.Longitude != nil {
+		longitude = sql.NullFloat64{Float64: *f.Longitude, Valid: true}
+	}
+	source := f.Source
+	if source == "" {
+		source = "web"
+	}
 	row := q.db.QueryRowContext(ctx, `
 		INSERT INTO files (
 			id, user_id, folder_id, drive_id, name, mime_type,
-			size_bytes, minio_object_key, nonce, taken_at, created_at, updated_at
-		) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
+			size_bytes, minio_object_key, nonce, taken_at, sha256_hash,
+			device_id, latitude, longitude, source, created_at, updated_at
+		) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW(), NOW())
 		RETURNING`+fileColumns,
 		f.UserID, folderID, driveID, f.Name, f.MimeType,
-		f.SizeBytes, f.MinIOObjectKey, f.Nonce, takenAt,
+		f.SizeBytes, f.MinIOObjectKey, f.Nonce, takenAt, sha256Hash,
+		deviceID, latitude, longitude, source,
 	)
 	out, err := scanFile(row)
 	if err != nil {
@@ -98,7 +136,8 @@ func (q *Queries) CreateFile(ctx context.Context, f *models.File) (*models.File,
 // GetFileByID returns a single file record. Returns sql.ErrNoRows if not found.
 func (q *Queries) GetFileByID(ctx context.Context, id uuid.UUID) (*models.File, error) {
 	row := q.db.QueryRowContext(ctx,
-		`SELECT`+fileColumns+`FROM files WHERE id = $1`, id)
+		`SELECT`+fileColumns+`
+		FROM files WHERE id = $1`, id)
 	f, err := scanFile(row)
 	if err != nil {
 		return nil, fmt.Errorf("GetFileByID %s: %w", id, err)
@@ -329,11 +368,16 @@ func (q *Queries) MoveFile(ctx context.Context, fileID, newFolderID uuid.UUID) (
 	return f, nil
 }
 
-// DeleteFile removes a file metadata row by id. The caller is responsible for
-// deleting the corresponding blob from MinIO before or after calling this.
-func (q *Queries) DeleteFile(ctx context.Context, id uuid.UUID) error {
-	_, err := q.db.ExecContext(ctx, `DELETE FROM files WHERE id = $1`, id)
-	if err != nil {
+// DeleteFile removes a file metadata row by id and writes a tombstone to
+// deleted_file_log so mobile delta-sync can notify clients of the deletion.
+// The caller is responsible for deleting the corresponding MinIO blob.
+func (q *Queries) DeleteFile(ctx context.Context, id, userID uuid.UUID) error {
+	if _, err := q.db.ExecContext(ctx,
+		`INSERT INTO deleted_file_log (id, user_id) VALUES ($1, $2)`, id, userID,
+	); err != nil {
+		return fmt.Errorf("DeleteFile tombstone %s: %w", id, err)
+	}
+	if _, err := q.db.ExecContext(ctx, `DELETE FROM files WHERE id = $1`, id); err != nil {
 		return fmt.Errorf("DeleteFile %s: %w", id, err)
 	}
 	return nil
@@ -493,6 +537,20 @@ func (q *Queries) SetFileTakenAt(ctx context.Context, id uuid.UUID, takenAt time
 	`, id, takenAt)
 	if err != nil {
 		return fmt.Errorf("SetFileTakenAt %s: %w", id, err)
+	}
+	return nil
+}
+
+// SetFileDriveID records which drive a file's blob physically lives on after
+// a drive migration has moved it. Runs outside the user-scoped transaction
+// (called from the background migration job), so it is intentionally not
+// gated by RLS — file ids are unguessable UUIDs.
+func (q *Queries) SetFileDriveID(ctx context.Context, id, driveID uuid.UUID) error {
+	_, err := q.db.ExecContext(ctx, `
+		UPDATE files SET drive_id = $2, updated_at = NOW() WHERE id = $1
+	`, id, driveID)
+	if err != nil {
+		return fmt.Errorf("SetFileDriveID %s: %w", id, err)
 	}
 	return nil
 }

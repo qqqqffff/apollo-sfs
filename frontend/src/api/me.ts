@@ -1,4 +1,4 @@
-import { get, post, put } from './client'
+import { get, post, put, del } from './client'
 import type { User, UserPreferences } from '../types/api'
 
 export function getMe() {
@@ -10,6 +10,10 @@ export function changePassword(currentPassword: string, newPassword: string) {
     current_password: currentPassword,
     new_password: newPassword,
   })
+}
+
+export function unlinkProvider(provider: string) {
+  return del<{ message: string }>('/me/social/unlink', { provider })
 }
 
 export function getPreferences() {

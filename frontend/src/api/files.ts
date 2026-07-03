@@ -46,11 +46,13 @@ export function uploadFile(
   file: globalThis.File,
   onProgress?: (loaded: number, total: number) => void,
   name?: string,
+  source?: string,
 ) {
   const form = new FormData()
   form.append('file', file)
   if (folderId) form.append('folder_id', folderId)
   if (name) form.append('name', name)
+  if (source) form.append('source', source)
   if (onProgress) return uploadWithProgress<UploadResponse>('/files/upload', form, onProgress)
   return upload<UploadResponse>('/files/upload', form)
 }
@@ -100,11 +102,13 @@ export function presignUpload(
   name: string,
   size: number,
   folderId: string | null,
+  ignoreRedirect?: boolean,
 ): Promise<PresignUploadResponse> {
   return post<PresignUploadResponse>('/files/upload/presign', {
     name,
     size,
     folder_id: folderId ?? undefined,
+    ignore_redirect: ignoreRedirect || undefined,
   })
 }
 
@@ -120,12 +124,14 @@ export function presignChunkedUpload(
   totalChunks: number,
   totalSize: number,
   folderId: string | null,
+  ignoreRedirect?: boolean,
 ): Promise<PresignChunkedUploadResponse> {
   return post<PresignChunkedUploadResponse>('/files/upload/presign/init', {
     name,
     total_chunks: totalChunks,
     total_size: totalSize,
     folder_id: folderId ?? undefined,
+    ignore_redirect: ignoreRedirect || undefined,
   })
 }
 

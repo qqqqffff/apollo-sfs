@@ -1,0 +1,29 @@
+# Internal node-metrics ingest service. Runs manager-only in Swarm, isolated
+# from the public api service; per-node agents (node-agent) push to it.
+#   docker buildx build --platform linux/amd64 \
+#     -f api/Dockerfile.node-metrics-ingest -t <registry>/apollo-sfs_node-metrics-ingest:latest api/ --push
+
+# ── Stage 1: Build ────────────────────────────────────────────────────────────
+FROM golang:1.26.2-alpine AS builder
+
+WORKDIR /build
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build \
+      -ldflags="-s -w" \
+      -o /build/node-metrics-ingest \
+      ./cmd/node-metrics-ingest
+
+# ── Stage 2: Runtime ──────────────────────────────────────────────────────────
+FROM alpine:3.21
+
+RUN apk add --no-cache ca-certificates tzdata
+
+WORKDIR /app
+
+COPY --from=builder /build/node-metrics-ingest .
+
+ENTRYPOINT ["/app/node-metrics-ingest"]

@@ -1,10 +1,11 @@
-import { createFileRoute, useNavigate } from '@tanstack/react-router'
-import { useRef, useState } from 'react'
+import { createFileRoute, useNavigate, Link } from '@tanstack/react-router'
+import { Fragment, useRef, useState } from 'react'
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { MdCheck, MdClose, MdEdit, MdInfoOutline, MdBlock, MdLockClock, MdLockOpen } from 'react-icons/md'
+import { MdCheck, MdClose, MdEdit, MdInfoOutline, MdBlock, MdLockClock, MdLockOpen, MdStorage, MdOpenInNew, MdDns, MdExpandMore, MdExpandLess } from 'react-icons/md'
 import {
   adminUsersInfiniteQueryOptions,
   getAdminAuditLogs,
+  getAdminUserStorage,
   logImpersonationAccess,
   updateUserQuota,
   updateUsername,
@@ -12,6 +13,7 @@ import {
   suspendUser,
   pardonUser,
 } from '../../api/admin'
+import type { AdminUserStorageAllocation } from '../../api/admin'
 import { ApiError } from '../../api/client'
 import { meQueryOptions } from '../../api/me'
 import type { AuditLog, User, UserBan } from '../../types/api'
@@ -146,6 +148,143 @@ function AuditLogModal({ username, onClose }: { username: string; onClose: () =>
   )
 }
 
+// ── Role badge ────────────────────────────────────────────────────────────────
+
+function RoleBadge({ user }: { user: User }) {
+  if (user.is_admin) {
+    return (
+      <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-purple-100 text-purple-700">
+        Admin
+      </span>
+    )
+  }
+  if (user.is_premium) {
+    return (
+      <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-blue-100 text-blue-700">
+        Premium
+      </span>
+    )
+  }
+  return (
+    <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-gray-100 text-gray-500">
+      Standard
+    </span>
+  )
+}
+
+// ── Per-user storage detail (expandable subtable) ─────────────────────────────
+
+function fmtGB(bytes: number): string {
+  return `${(bytes / GB).toFixed(2)} GB`
+}
+
+const TIER: Record<'nvme' | 'hdd', { label: string; chip: string; bar: string }> = {
+  nvme: { label: 'Fast',     chip: 'bg-emerald-100 text-emerald-700', bar: 'bg-emerald-500' },
+  hdd:  { label: 'Standard', chip: 'bg-sky-100 text-sky-700',         bar: 'bg-sky-500' },
+}
+
+// StorageDetails renders inline below a user row: their allocation (quota) vs
+// what they've used, grouped by server → node, with the tier on each node's
+// drive. Whole-server/physical-drive fullness is intentionally not shown.
+function StorageDetails({ username }: { username: string }) {
+  const { data: s, isLoading, error } = useQuery({
+    queryKey: ['admin', 'user-storage', username],
+    queryFn: () => getAdminUserStorage(username),
+  })
+
+  if (isLoading) return <p className="text-sm text-gray-400 px-5 py-4">Loading storage…</p>
+  if (error || !s) return <p className="text-sm text-red-500 px-5 py-4">Failed to load storage details.</p>
+
+  // Group allocations by server; each server lists the node(s) holding the user's space.
+  const servers = new Map<string, { name: string; state: string; isPrimary: boolean; nodes: AdminUserStorageAllocation[] }>()
+  for (const a of s.allocations) {
+    const g = servers.get(a.server_id) ?? { name: a.server_name, state: a.server_state, isPrimary: false, nodes: [] }
+    g.nodes.push(a)
+    if (a.is_primary) g.isPrimary = true
+    servers.set(a.server_id, g)
+  }
+  const allocated = s.quota_bytes
+
+  return (
+    <div className="px-5 py-4 bg-gray-50/70 space-y-4">
+      {/* Active expansion requests → quick link to the requests page */}
+      {s.active_request_count > 0 && (
+        <Link
+          to="/admin/interest"
+          search={{ tab: 'expansion' }}
+          className="flex items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2.5 no-underline hover:bg-amber-100 transition-colors"
+        >
+          <span className="text-sm font-medium text-amber-800">
+            {s.active_request_count} active expansion request{s.active_request_count === 1 ? '' : 's'}
+          </span>
+          <span className="inline-flex items-center gap-1 text-xs font-semibold text-amber-700 whitespace-nowrap">
+            View requests <MdOpenInNew className="text-sm" />
+          </span>
+        </Link>
+      )}
+
+      {/* Allocation summary */}
+      <div className="flex flex-wrap gap-x-6 gap-y-1 text-xs text-gray-600">
+        <span>Allocated: <span className="font-semibold text-gray-800">{fmtGB(allocated)}</span></span>
+        <span>Used: <span className="font-semibold text-gray-800">{fmtGB(s.used_bytes)}</span></span>
+        <span className="text-emerald-700">Fast (NVMe): <span className="font-semibold">{fmtGB(s.nvme_bytes)}</span></span>
+        <span className="text-sky-700">Standard (HDD): <span className="font-semibold">{fmtGB(s.hdd_bytes)}</span></span>
+      </div>
+
+      {s.allocations.length === 0 ? (
+        <p className="text-sm text-gray-400">No storage allocated to this user.</p>
+      ) : (
+        <div className="space-y-3">
+          {[...servers.values()].map((srv) => (
+            <div key={srv.name} className="rounded-lg border border-gray-200 bg-white overflow-hidden">
+              {/* Server that has storage allocated to the user */}
+              <div className="flex items-center gap-2 px-4 py-2 border-b border-gray-100 bg-gray-50">
+                <MdDns className="text-gray-400 text-base shrink-0" />
+                <span className="text-sm font-semibold text-gray-800">{srv.name}</span>
+                <span className="text-xs text-gray-400">{srv.state}</span>
+                {srv.isPrimary && (
+                  <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider bg-blue-50 text-blue-600 rounded">
+                    Primary
+                  </span>
+                )}
+              </div>
+
+              {/* Node(s) owning the allocated space, with tier + allocation vs used */}
+              <div className="divide-y divide-gray-50">
+                {srv.nodes.map((n) => {
+                  const tier = TIER[n.drive_type]
+                  const pct = allocated > 0 ? Math.min(100, Math.round((n.used_bytes / allocated) * 100)) : 0
+                  return (
+                    <div key={n.drive_id} className="px-4 py-2.5">
+                      <div className="flex items-center justify-between gap-3 mb-1.5">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span className="text-xs text-gray-400 shrink-0">Node</span>
+                          <span className="text-sm text-gray-700 truncate">
+                            {n.node_hostname || <span className="text-gray-300">unassigned</span>}
+                          </span>
+                          <span className={`text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded ${tier.chip}`}>
+                            {tier.label}
+                          </span>
+                        </div>
+                        <span className="text-xs text-gray-500 whitespace-nowrap">
+                          {fmtGB(n.used_bytes)} used of {fmtGB(allocated)}
+                        </span>
+                      </div>
+                      <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                        <div className={`h-full rounded-full ${tier.bar}`} style={{ width: `${pct}%` }} />
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Ban status badge ──────────────────────────────────────────────────────────
 
 function BanBadge({ ban }: { ban: UserBan | null | undefined }) {
@@ -178,6 +317,7 @@ function RouteComponent() {
   const { data: me } = useQuery(meQueryOptions)
 
   const [auditUser, setAuditUser] = useState<string | null>(null)
+  const [expandedUser, setExpandedUser] = useState<string | null>(null)
   const [banModal, setBanModal] = useState<BanModal | null>(null)
 
   function viewUserFiles(u: User) {
@@ -308,7 +448,7 @@ function RouteComponent() {
         <table className="w-full min-w-225 text-sm border-collapse">
           <thead>
             <tr className="bg-gray-50 border-b border-gray-200">
-              {['Username', 'Email', 'Used', 'Quota', 'Admin', 'Status', 'Last seen', ''].map((h) => (
+              {['Username', 'Email', 'Used', 'Quota', 'Role', 'Status', 'Last seen', ''].map((h) => (
                 <th key={h} className="text-left px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wider">
                   {h}
                 </th>
@@ -324,7 +464,8 @@ function RouteComponent() {
               const isSuspended = ban?.ban_type === 'suspended'
 
               return (
-                <tr key={u.username} className={`hover:bg-gray-50 transition-colors ${isBanned ? 'bg-red-50/40' : isSuspended ? 'bg-amber-50/40' : ''}`}>
+                <Fragment key={u.username}>
+                <tr className={`hover:bg-gray-50 transition-colors ${isBanned ? 'bg-red-50/40' : isSuspended ? 'bg-amber-50/40' : ''}`}>
                   <td className="px-4 py-3 font-medium text-gray-900">
                     {editing ? (
                       <div className="flex flex-col gap-1">
@@ -386,8 +527,8 @@ function RouteComponent() {
                   <td className="px-4 py-3 text-gray-500">{u.email}</td>
                   <td className="px-4 py-3 text-gray-600">{(u.storage_used_bytes / GB).toFixed(2)} GB</td>
                   <td className="px-4 py-3 text-gray-600">{(u.storage_quota_bytes / GB).toFixed(0)} GB</td>
-                  <td className="px-4 py-3 text-blue-500">
-                    {u.is_admin ? <MdCheck className="text-base" /> : null}
+                  <td className="px-4 py-3">
+                    <RoleBadge user={u} />
                   </td>
                   <td className="px-4 py-3">
                     <div className="flex flex-col gap-1">
@@ -404,6 +545,18 @@ function RouteComponent() {
                   </td>
                   <td className="px-4 py-3">
                     <div className="flex items-center gap-1.5">
+                      <button
+                        onClick={() => setExpandedUser((cur) => (cur === u.username ? null : u.username))}
+                        title={editing ? undefined : 'Storage details'}
+                        className={`inline-flex items-center gap-0.5 cursor-pointer bg-transparent border-0 p-0 transition-colors ${
+                          expandedUser === u.username ? 'text-blue-600' : 'text-gray-400 hover:text-blue-600'
+                        }`}
+                      >
+                        <MdStorage className="text-base" />
+                        {expandedUser === u.username
+                          ? <MdExpandLess className="text-base" />
+                          : <MdExpandMore className="text-base" />}
+                      </button>
                       <button
                         onClick={() => setAuditUser(u.username)}
                         title="View audit log"
@@ -464,6 +617,14 @@ function RouteComponent() {
                     </div>
                   </td>
                 </tr>
+                {expandedUser === u.username && (
+                  <tr>
+                    <td colSpan={8} className="p-0 border-t border-gray-100">
+                      <StorageDetails username={u.username} />
+                    </td>
+                  </tr>
+                )}
+                </Fragment>
               )
             })}
           </tbody>

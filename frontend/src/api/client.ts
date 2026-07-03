@@ -56,8 +56,11 @@ export function put<T>(path: string, body: unknown) {
   return request<T>(path, { method: 'PUT', body: JSON.stringify(body) })
 }
 
-export function del<T>(path: string) {
-  return request<T>(path, { method: 'DELETE' })
+export function del<T>(path: string, body?: unknown) {
+  return request<T>(path, {
+    method: 'DELETE',
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  })
 }
 
 export async function upload<T>(path: string, form: FormData): Promise<T> {

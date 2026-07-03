@@ -1,0 +1,65 @@
+{{/*
+  Template name : "expansion_cancellation"
+  Trigger       : Admin cancels a server expansion request and issues a refund
+  Data fields   :
+    AppName          string
+    AppURL           string
+    ServerName       string
+    PlanLabel        string  — e.g. "256 GB NVMe"
+    RefundFormatted  string  — e.g. "$50.00"
+    Reason           string  — admin's cancellation reason
+*/}}
+{{define "expansion_cancellation"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <title>Your expansion request was cancelled — {{.AppName}}</title>
+</head>
+<body>
+  <div class="email-wrapper">
+    <div class="email-card">
+
+      {{template "header" .}}
+
+      <div class="email-body">
+        <h1>Expansion request cancelled</h1>
+        <p>
+          Your server capacity expansion request on <strong>{{.AppName}}</strong>
+          has been cancelled by our team. A full refund of your deposit has been
+          initiated and should appear within 3–5 business days.
+        </p>
+
+        <table style="width:100%;border-collapse:collapse;margin:20px 0;">
+          <tr>
+            <td style="padding:8px 12px;font-weight:600;color:#374151;width:40%;border-bottom:1px solid #e5e7eb;">Server</td>
+            <td style="padding:8px 12px;color:#111827;border-bottom:1px solid #e5e7eb;">{{.ServerName}}</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 12px;font-weight:600;color:#374151;border-bottom:1px solid #e5e7eb;">Plan</td>
+            <td style="padding:8px 12px;color:#111827;border-bottom:1px solid #e5e7eb;">{{.PlanLabel}}</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 12px;font-weight:600;color:#374151;border-bottom:1px solid #e5e7eb;">Refund amount</td>
+            <td style="padding:8px 12px;color:#111827;border-bottom:1px solid #e5e7eb;">{{.RefundFormatted}}</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 12px;font-weight:600;color:#374151;vertical-align:top;">Reason</td>
+            <td style="padding:8px 12px;color:#111827;">{{.Reason}}</td>
+          </tr>
+        </table>
+
+        <p style="font-size:14px;color:#6b7280;">
+          If you have questions about this decision, please contact support.
+        </p>
+      </div>
+
+      {{template "footer" .}}
+
+    </div>
+  </div>
+</body>
+</html>
+{{end}}

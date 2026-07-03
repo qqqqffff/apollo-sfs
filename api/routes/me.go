@@ -53,6 +53,9 @@ type meResponse struct {
 	LastSeenAt        *time.Time `json:"last_seen_at"`
 	CreatedAt         time.Time  `json:"created_at"`
 	IsAdmin           bool       `json:"is_admin"`
+	IsPremium         bool       `json:"is_premium"`
+	PremiumGrantedAt  *time.Time `json:"premium_granted_at"`
+	LinkedProviders   []string   `json:"linked_providers"`
 }
 
 // Me handles GET /api/v1/me.
@@ -128,6 +131,13 @@ func (h *Handler) Me(c *gin.Context) {
 		usedPct = float64(user.StorageUsedBytes) / float64(user.StorageQuotaBytes) * 100
 	}
 
+	linkedProviders := []string{}
+	if h.auth != nil {
+		if lp, err := h.auth.GetLinkedProviders(ctx, c.GetString("userID")); err == nil {
+			linkedProviders = lp
+		}
+	}
+
 	c.JSON(http.StatusOK, meResponse{
 		Username:          user.Username,
 		Email:             user.Email,
@@ -137,7 +147,86 @@ func (h *Handler) Me(c *gin.Context) {
 		LastSeenAt:        user.LastSeenAt,
 		CreatedAt:         user.CreatedAt,
 		IsAdmin:           isAdmin,
+		IsPremium:         user.IsPremium,
+		PremiumGrantedAt:  user.PremiumGrantedAt,
+		LinkedProviders:   linkedProviders,
 	})
+}
+
+type socialLinkRequest struct {
+	Provider       string `json:"provider"        binding:"required"`
+	Token          string `json:"token"`
+	ServerAuthCode string `json:"server_auth_code"`
+}
+
+type socialUnlinkRequest struct {
+	Provider string `json:"provider" binding:"required"`
+}
+
+// LinkSocial handles POST /api/v1/me/social/link.
+// Links an Apple or Google identity to the authenticated user's account.
+func (h *Handler) LinkSocial(c *gin.Context) {
+	userID := c.GetString("userID")
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	var req socialLinkRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "provider is required"})
+		return
+	}
+	if req.Provider != "apple" && req.Provider != "google" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "provider must be apple or google"})
+		return
+	}
+
+	token := req.Token
+	if req.Provider == "google" && req.ServerAuthCode != "" {
+		idToken, err := h.auth.ExchangeGoogleServerAuthCode(c.Request.Context(), req.ServerAuthCode)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "google auth code exchange failed: " + err.Error()})
+			return
+		}
+		token = idToken
+	}
+	if token == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "token or server_auth_code is required"})
+		return
+	}
+
+	if err := h.auth.LinkSocialIdentity(c.Request.Context(), userID, req.Provider, token); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "identity linked"})
+}
+
+// UnlinkSocial handles DELETE /api/v1/me/social/unlink.
+// Removes an Apple or Google identity link from the authenticated user's account.
+func (h *Handler) UnlinkSocial(c *gin.Context) {
+	userID := c.GetString("userID")
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	var req socialUnlinkRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "provider is required"})
+		return
+	}
+	if req.Provider != "apple" && req.Provider != "google" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "provider must be apple or google"})
+		return
+	}
+
+	if err := h.auth.UnlinkSocialIdentity(c.Request.Context(), userID, req.Provider); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "identity unlinked"})
 }
 
 // clientIP extracts the real client IP from the request, preferring

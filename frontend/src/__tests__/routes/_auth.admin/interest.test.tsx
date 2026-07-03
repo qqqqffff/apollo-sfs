@@ -30,6 +30,9 @@ jest.mock('../../../api/admin', () => ({
   capacityQueryOptions:               { queryKey: ['admin', 'capacity'],           queryFn: jest.fn() },
   updateInterestFormSettings:          jest.fn(),
   provisionInterestSubmission:         jest.fn(),
+  listExpansionRequests:               jest.fn(),
+  fulfillExpansionRequest:             jest.fn(),
+  cancelExpansionRequest:              jest.fn(),
 }))
 
 jest.mock('../../../api/client', () => ({
@@ -79,7 +82,7 @@ describe('Admin Interest submissions page', () => {
 
   test('renders Interest submissions heading', () => {
     setup()
-    expect(screen.getByRole('heading', { name: /interest submissions/i })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: /requests/i })).toBeInTheDocument()
   })
 
   test('shows loading state', () => {

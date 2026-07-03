@@ -12,10 +12,7 @@ import {
   pingServer,
   listInfrastructure,
   getCapacity,
-  createServer,
-  updateServer,
-  addDrive,
-  updateDrive,
+  syncInfrastructure,
   listBannedIPs,
   unbanIP,
   extendBan,
@@ -32,11 +29,10 @@ import {
   speedTestQueryOptions,
   adminInterestInfiniteQueryOptions,
   interestFormSettingsQueryOptions,
-  getAlarmSettings,
-  toggleAlarmSubscription,
-  alarmSettingsQueryOptions,
-  getDriveTemps,
-  driveTempsQueryOptions,
+  getAlarmSubscriptions,
+  upsertAlarmSubscription,
+  deleteAlarmSubscription,
+  alarmSubscriptionsQueryOptions,
 } from '../../api/admin'
 import type { InterestSubmission, PageResult } from '../../types/api'
 
@@ -217,49 +213,13 @@ describe('getCapacity', () => {
   })
 })
 
-describe('createServer', () => {
-  it('POSTs to /admin/system/servers', async () => {
-    mockFetch(200, { id: 'srv-1', name: 'NH-1' })
-    await createServer({
-      state: 'NH',
-      minio_endpoint: 'minio:9000',
-      minio_use_ssl: false,
-      access_key: 'key',
-      secret_key: 'secret',
-    })
-    expect(lastUrl()).toBe('/api/v1/admin/system/servers')
+describe('syncInfrastructure', () => {
+  it('POSTs to /admin/system/sync and returns the summary', async () => {
+    mockFetch(200, { servers: 2, nodes: 2, drives: 2, pruned: 0 })
+    const summary = await syncInfrastructure()
+    expect(lastUrl()).toBe('/api/v1/admin/system/sync')
     expect(lastInit().method).toBe('POST')
-    expect(lastBody()).toMatchObject({ state: 'NH', minio_use_ssl: false })
-  })
-})
-
-describe('updateServer', () => {
-  it('PATCHes /admin/system/servers/:id', async () => {
-    mockFetch(200, { message: 'updated' })
-    await updateServer('srv-1', { is_active: false })
-    expect(lastUrl()).toBe('/api/v1/admin/system/servers/srv-1')
-    expect(lastInit().method).toBe('PATCH')
-    expect(lastBody()).toEqual({ is_active: false })
-  })
-})
-
-describe('addDrive', () => {
-  it('POSTs to /admin/system/servers/:id/drives', async () => {
-    mockFetch(200, { drive_id: 'd1' })
-    await addDrive('srv-1', { label: 'nvme-02', minio_bucket: 'bucket2', capacity_bytes: 2000 })
-    expect(lastUrl()).toBe('/api/v1/admin/system/servers/srv-1/drives')
-    expect(lastInit().method).toBe('POST')
-    expect(lastBody()).toEqual({ label: 'nvme-02', minio_bucket: 'bucket2', capacity_bytes: 2000 })
-  })
-})
-
-describe('updateDrive', () => {
-  it('PATCHes /admin/system/servers/:id/drives/:driveId', async () => {
-    mockFetch(200, { drive_id: 'd1' })
-    await updateDrive('srv-1', 'd1', { is_active: false })
-    expect(lastUrl()).toBe('/api/v1/admin/system/servers/srv-1/drives/d1')
-    expect(lastInit().method).toBe('PATCH')
-    expect(lastBody()).toEqual({ is_active: false })
+    expect(summary).toEqual({ servers: 2, nodes: 2, drives: 2, pruned: 0 })
   })
 })
 
@@ -466,118 +426,52 @@ describe('shutdownServer', () => {
   })
 })
 
-// ── Alarm settings ─────────────────────────────────────────────────────────────
+// ── Alarm subscriptions ────────────────────────────────────────────────────────
 
-const ALARM_DEFAULTS = {
-  cpu_usage_emails: [] as string[],
-  cpu_usage_last_fired_at: null,
-  cpu_temp_emails: [] as string[],
-  cpu_temp_last_fired_at: null,
-  drive_temp_emails: [] as string[],
-  drive_temp_last_fired_at: null,
-  drive_load_emails: [] as string[],
-  drive_load_last_fired_at: null,
-  network_traffic_emails: [] as string[],
-  network_traffic_last_fired_at: null,
-  api_error_rate_emails: [] as string[],
-  api_error_rate_last_fired_at: null,
-  updated_at: '2026-01-01T00:00:00Z',
-}
-
-describe('getAlarmSettings', () => {
-  it('GETs /admin/system/alarm/settings', async () => {
-    mockFetch(200, ALARM_DEFAULTS)
-    const result = await getAlarmSettings()
-    expect(lastUrl()).toBe('/api/v1/admin/system/alarm/settings')
-    expect(lastInit().method).toBeUndefined()
-    expect(result).toEqual(ALARM_DEFAULTS)
-  })
-})
-
-describe('toggleAlarmSubscription', () => {
-  it('POSTs /admin/system/alarm/subscribe with subscribe=true', async () => {
-    mockFetch(200, ALARM_DEFAULTS)
-    await toggleAlarmSubscription('cpu_usage', true)
-    expect(lastUrl()).toBe('/api/v1/admin/system/alarm/subscribe')
-    expect(lastInit().method).toBe('POST')
-    expect(lastBody()).toEqual({ alarm_type: 'cpu_usage', subscribed: true })
-  })
-
-  it('POSTs /admin/system/alarm/subscribe with subscribe=false', async () => {
-    mockFetch(200, ALARM_DEFAULTS)
-    await toggleAlarmSubscription('cpu_temp', false)
-    expect(lastBody()).toEqual({ alarm_type: 'cpu_temp', subscribed: false })
-  })
-
-  it('sends correct alarm_type for each type', async () => {
-    const types = [
-      'cpu_usage', 'cpu_temp', 'drive_temp',
-      'drive_load', 'network_traffic', 'api_error_rate',
-    ] as const
-    for (const t of types) {
-      mockFetch(200, ALARM_DEFAULTS)
-      await toggleAlarmSubscription(t, true)
-      expect(lastBody().alarm_type).toBe(t)
-    }
-  })
-})
-
-describe('alarmSettingsQueryOptions', () => {
-  it('has correct queryKey', () => {
-    expect(alarmSettingsQueryOptions.queryKey).toEqual(['admin', 'alarm', 'settings'])
-  })
-
-  it('queryFn calls getAlarmSettings', () => {
-    mockFetch(200, ALARM_DEFAULTS)
-    alarmSettingsQueryOptions.queryFn()
-    expect(lastUrl()).toBe('/api/v1/admin/system/alarm/settings')
-  })
-})
-
-// ── Drive temperatures ─────────────────────────────────────────────────────────
-
-const DRIVE_TEMPS = [
-  { name: 'nvme-pci-0100 Composite', temp_celsius: 38.5 },
-  { name: 'nvme-pci-0200 Composite', temp_celsius: 52.0 },
-]
-
-describe('getDriveTemps', () => {
-  it('GETs /admin/system/drive-temps', async () => {
-    mockFetch(200, DRIVE_TEMPS)
-    await getDriveTemps()
-    expect(lastUrl()).toBe('/api/v1/admin/system/drive-temps')
-    expect(lastInit().method).toBeUndefined()
-  })
-
-  it('returns the array of drive temps', async () => {
-    mockFetch(200, DRIVE_TEMPS)
-    const result = await getDriveTemps()
-    expect(result).toEqual(DRIVE_TEMPS)
-  })
-
-  it('returns an empty array when no sensors are available', async () => {
+describe('getAlarmSubscriptions', () => {
+  it('GETs /admin/system/alarm/subscriptions for the current user', async () => {
     mockFetch(200, [])
-    const result = await getDriveTemps()
-    expect(result).toEqual([])
+    await getAlarmSubscriptions()
+    expect(lastUrl()).toBe('/api/v1/admin/system/alarm/subscriptions')
+    expect(lastInit().method).toBeUndefined()
+  })
+
+  it('appends ?username when reviewing another user', async () => {
+    mockFetch(200, [])
+    await getAlarmSubscriptions('alice')
+    expect(lastUrl()).toBe('/api/v1/admin/system/alarm/subscriptions?username=alice')
   })
 })
 
-describe('driveTempsQueryOptions', () => {
-  it('has correct queryKey', () => {
-    expect(driveTempsQueryOptions.queryKey).toEqual(['admin', 'drive-temps'])
+describe('upsertAlarmSubscription', () => {
+  it('PUTs the subscription target and threshold', async () => {
+    mockFetch(200, {})
+    await upsertAlarmSubscription({ alarm_type: 'cpu_usage', node_id: 'n1', threshold: 85 })
+    expect(lastUrl()).toBe('/api/v1/admin/system/alarm/subscriptions')
+    expect(lastInit().method).toBe('PUT')
+    expect(lastBody()).toEqual({ alarm_type: 'cpu_usage', node_id: 'n1', threshold: 85 })
+  })
+})
+
+describe('deleteAlarmSubscription', () => {
+  it('DELETEs with the target body', async () => {
+    mockFetch(200, { ok: true })
+    await deleteAlarmSubscription({ alarm_type: 'api_error_rate' })
+    expect(lastUrl()).toBe('/api/v1/admin/system/alarm/subscriptions')
+    expect(lastInit().method).toBe('DELETE')
+    expect(lastBody()).toEqual({ alarm_type: 'api_error_rate' })
+  })
+})
+
+describe('alarmSubscriptionsQueryOptions', () => {
+  it('keys by the target user (self by default)', () => {
+    expect(alarmSubscriptionsQueryOptions().queryKey).toEqual(['admin', 'alarm', 'subscriptions', 'self'])
+    expect(alarmSubscriptionsQueryOptions('alice').queryKey).toEqual(['admin', 'alarm', 'subscriptions', 'alice'])
   })
 
-  it('has staleTime of 10 seconds', () => {
-    expect(driveTempsQueryOptions.staleTime).toBe(10_000)
-  })
-
-  it('has refetchInterval of 10 seconds', () => {
-    expect(driveTempsQueryOptions.refetchInterval).toBe(10_000)
-  })
-
-  it('queryFn calls getDriveTemps', () => {
-    mockFetch(200, DRIVE_TEMPS)
-    driveTempsQueryOptions.queryFn()
-    expect(lastUrl()).toBe('/api/v1/admin/system/drive-temps')
+  it('queryFn fetches subscriptions', () => {
+    mockFetch(200, [])
+    alarmSubscriptionsQueryOptions().queryFn()
+    expect(lastUrl()).toBe('/api/v1/admin/system/alarm/subscriptions')
   })
 })

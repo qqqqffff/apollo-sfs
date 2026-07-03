@@ -33,14 +33,14 @@ afterEach(() => {
   jest.useRealTimers()
 })
 
-const SNAP = { cpu_percent: 10, memory_used_bytes: 100, sampled_at: '2024-01-01T00:00:00Z' }
+const SNAP = { cluster: { cpu_percent: 10, memory_used_bytes: 100, sampled_at: '2024-01-01T00:00:00Z' }, nodes: [] }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 describe('useMetricsStream', () => {
   it('starts with empty snapshots and connected=false', () => {
     const { result } = renderHook(() => useMetricsStream())
-    expect(result.current.snapshots).toEqual([])
+    expect(result.current.frames).toEqual([])
     expect(result.current.connected).toBe(false)
   })
 
@@ -61,19 +61,19 @@ describe('useMetricsStream', () => {
       MockWebSocket.last!._open()
       MockWebSocket.last!._message(JSON.stringify(SNAP))
     })
-    expect(result.current.snapshots).toHaveLength(1)
-    expect(result.current.snapshots[0].cpu_percent).toBe(10)
+    expect(result.current.frames).toHaveLength(1)
+    expect(result.current.frames[0].cluster.cpu_percent).toBe(10)
   })
 
   it('accumulates multiple snapshots', () => {
     const { result } = renderHook(() => useMetricsStream())
     act(() => {
       MockWebSocket.last!._open()
-      MockWebSocket.last!._message(JSON.stringify({ ...SNAP, cpu_percent: 1 }))
-      MockWebSocket.last!._message(JSON.stringify({ ...SNAP, cpu_percent: 2 }))
-      MockWebSocket.last!._message(JSON.stringify({ ...SNAP, cpu_percent: 3 }))
+      MockWebSocket.last!._message(JSON.stringify({ ...SNAP, cluster: { ...SNAP.cluster, cpu_percent: 1 } }))
+      MockWebSocket.last!._message(JSON.stringify({ ...SNAP, cluster: { ...SNAP.cluster, cpu_percent: 2 } }))
+      MockWebSocket.last!._message(JSON.stringify({ ...SNAP, cluster: { ...SNAP.cluster, cpu_percent: 3 } }))
     })
-    expect(result.current.snapshots).toHaveLength(3)
+    expect(result.current.frames).toHaveLength(3)
   })
 
   it('caps the snapshot buffer at 720 entries', () => {
@@ -81,12 +81,12 @@ describe('useMetricsStream', () => {
     act(() => {
       MockWebSocket.last!._open()
       for (let i = 0; i < 730; i++) {
-        MockWebSocket.last!._message(JSON.stringify({ ...SNAP, cpu_percent: i }))
+        MockWebSocket.last!._message(JSON.stringify({ ...SNAP, cluster: { ...SNAP.cluster, cpu_percent: i } }))
       }
     })
-    expect(result.current.snapshots).toHaveLength(720)
+    expect(result.current.frames).toHaveLength(720)
     // The oldest entries were trimmed — the last value should be 729
-    expect(result.current.snapshots[719].cpu_percent).toBe(729)
+    expect(result.current.frames[719].cluster.cpu_percent).toBe(729)
   })
 
   it('sets connected=false when the socket closes', () => {
@@ -120,7 +120,7 @@ describe('useMetricsStream', () => {
       MockWebSocket.last!._open()
       MockWebSocket.last!._message('not-valid-json{{')
     })
-    expect(result.current.snapshots).toHaveLength(0)
+    expect(result.current.frames).toHaveLength(0)
   })
 
   it('closes the socket and stops reconnecting on unmount', () => {

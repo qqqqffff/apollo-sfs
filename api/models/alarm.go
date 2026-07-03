@@ -1,22 +1,47 @@
 package models
 
-import "time"
+import (
+	"time"
 
-// AlarmSettings mirrors the `alarm_settings` table (single row, id=1).
-// Each alarm type has its own subscriber list (non-empty = enabled) and a
-// last_fired_at timestamp that is persisted so the admin UI can display it.
-type AlarmSettings struct {
-	CPUUsageEmails            []string   `json:"cpu_usage_emails"              db:"cpu_usage_emails"`
-	CPUUsageLastFiredAt       *time.Time `json:"cpu_usage_last_fired_at"       db:"cpu_usage_last_fired_at"`
-	CPUTempEmails             []string   `json:"cpu_temp_emails"               db:"cpu_temp_emails"`
-	CPUTempLastFiredAt        *time.Time `json:"cpu_temp_last_fired_at"        db:"cpu_temp_last_fired_at"`
-	DriveTempEmails           []string   `json:"drive_temp_emails"             db:"drive_temp_emails"`
-	DriveTempLastFiredAt      *time.Time `json:"drive_temp_last_fired_at"      db:"drive_temp_last_fired_at"`
-	DriveLoadEmails           []string   `json:"drive_load_emails"             db:"drive_load_emails"`
-	DriveLoadLastFiredAt      *time.Time `json:"drive_load_last_fired_at"      db:"drive_load_last_fired_at"`
-	NetworkTrafficEmails      []string   `json:"network_traffic_emails"        db:"network_traffic_emails"`
-	NetworkTrafficLastFiredAt *time.Time `json:"network_traffic_last_fired_at" db:"network_traffic_last_fired_at"`
-	APIErrorRateEmails        []string   `json:"api_error_rate_emails"         db:"api_error_rate_emails"`
-	APIErrorRateLastFiredAt   *time.Time `json:"api_error_rate_last_fired_at"  db:"api_error_rate_last_fired_at"`
-	UpdatedAt                 time.Time  `json:"updated_at"                    db:"updated_at"`
+	"github.com/google/uuid"
+)
+
+// AlarmType enumerates the supported alarm metrics. Each type implies a target
+// scope (see AlarmSubscription) and a threshold unit:
+//
+//	cpu_usage        node    percent
+//	cpu_temp         node    degrees Celsius
+//	memory           node    percent
+//	network_traffic  node    percent of the last speed test
+//	drive_temp       drive   degrees Celsius
+//	drive_load       drive   percent of capacity
+//	api_error_rate   cluster percent
+const (
+	AlarmCPUUsage       = "cpu_usage"
+	AlarmCPUTemp        = "cpu_temp"
+	AlarmMemory         = "memory"
+	AlarmNetworkTraffic = "network_traffic"
+	AlarmDriveTemp      = "drive_temp"
+	AlarmDriveLoad      = "drive_load"
+	AlarmAPIErrorRate   = "api_error_rate"
+)
+
+// AlarmSubscription mirrors a row of the `alarm_subscriptions` table: one
+// subscriber's alarm on one target (a node, a drive, or the whole cluster) with
+// its own threshold. The DisplayName fields are populated by LEFT JOINs against
+// nodes / drives / servers for the firing email and the admin/metrics UIs.
+type AlarmSubscription struct {
+	ID          uuid.UUID  `json:"id"            db:"id"`
+	Email       string     `json:"email"         db:"email"`
+	AlarmType   string     `json:"alarm_type"    db:"alarm_type"`
+	NodeID      *uuid.UUID `json:"node_id"       db:"node_id"`
+	DriveID     *uuid.UUID `json:"drive_id"      db:"drive_id"`
+	Threshold   float64    `json:"threshold"     db:"threshold"`
+	LastFiredAt *time.Time `json:"last_fired_at" db:"last_fired_at"`
+
+	// Join-only display fields (not persisted on this table).
+	NodeHostname string `json:"node_hostname,omitempty" db:"-"`
+	NodeRole     string `json:"node_role,omitempty"     db:"-"`
+	DriveLabel   string `json:"drive_label,omitempty"   db:"-"`
+	ServerName   string `json:"server_name,omitempty"   db:"-"`
 }

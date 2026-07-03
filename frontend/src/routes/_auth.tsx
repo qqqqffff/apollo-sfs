@@ -1,7 +1,7 @@
 import { createFileRoute, Link, Outlet, redirect, useNavigate } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState, useEffect, useRef } from 'react'
-import { MdMenu, MdClose, MdBlock, MdLockClock, MdLockOpen, MdPerson } from 'react-icons/md'
+import { MdMenu, MdClose, MdBlock, MdLockClock, MdLockOpen, MdPerson, MdKeyboardArrowDown } from 'react-icons/md'
 import { AppIcon } from '../components/AppIcon'
 import { meQueryOptions } from '../api/me'
 import { logout } from '../api/auth'
@@ -15,6 +15,9 @@ import type { UserBan } from '../types/api'
 export const Route = createFileRoute('/_auth')({
   beforeLoad: async ({ context }) => {
     const result = await context.auth.validateAuth()
+    if (!result) {
+      throw redirect({ to: '/login', search: { social_error: undefined, link_provider: undefined, link_email: undefined, link_username: undefined } })
+    }
     if (result === 'banned' || result === 'suspended') {
       throw redirect({ to: '/suspended' })
     }
@@ -32,15 +35,17 @@ function RouteComponent() {
   const { impersonatedUser, clearImpersonation } = useImpersonation()
   const { notify } = useNotification()
   const [menuOpen, setMenuOpen] = useState(false)
+  const [adminMenuOpen, setAdminMenuOpen] = useState(false)
   const [banModal, setBanModal] = useState<BanModalMode | null>(null)
   const menuRef = useRef<HTMLDivElement>(null)
+  const adminMenuRef = useRef<HTMLDivElement>(null)
 
   const logoutMutation = useMutation({
     mutationFn: logout,
     onSettled: async () => {
       clearSkipDeleteCookie()
       queryClient.clear()
-      navigate({ to: '/login' })
+      navigate({ to: '/login', search: { social_error: undefined, link_provider: undefined, link_email: undefined, link_username: undefined } })
     },
   })
 
@@ -90,7 +95,7 @@ function RouteComponent() {
     }
   }
 
-  // Close dropdown when clicking outside
+  // Close mobile menu when clicking outside
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
@@ -100,6 +105,17 @@ function RouteComponent() {
     if (menuOpen) document.addEventListener('mousedown', handleClickOutside)
     return () => document.removeEventListener('mousedown', handleClickOutside)
   }, [menuOpen])
+
+  // Close admin dropdown when clicking outside
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (adminMenuRef.current && !adminMenuRef.current.contains(e.target as Node)) {
+        setAdminMenuOpen(false)
+      }
+    }
+    if (adminMenuOpen) document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [adminMenuOpen])
 
   function closeMenu() { setMenuOpen(false) }
 
@@ -123,19 +139,31 @@ function RouteComponent() {
           <div className="hidden xl:flex items-center gap-1">
             <NavLink to="/client" exact onClick={closeMenu}>Files</NavLink>
             <NavLink to="/client/favorites" onClick={closeMenu}>Favorites</NavLink>
+            <NavLink to="/client/shared" onClick={closeMenu}>Shared</NavLink>
             {(user?.is_premium || user?.is_admin) && (
               <NavLink to={'/settings/api-keys' as never} onClick={closeMenu}>API Keys</NavLink>
             )}
             {user?.is_admin && (
-              <>
-                <NavLink to="/admin/users" onClick={closeMenu}>Users</NavLink>
-                <NavLink to="/admin/invitations" onClick={closeMenu}>Invitations</NavLink>
-                <NavLink to="/admin/interest" onClick={closeMenu}>Interest</NavLink>
-                <NavLink to="/admin/emails" onClick={closeMenu}>Emails</NavLink>
-                <NavLink to="/admin/bans" onClick={closeMenu}>Bans & Suspensions</NavLink>
-                <NavLink to="/admin/metrics" onClick={closeMenu}>Metrics</NavLink>
-                <NavLink to="/admin/alarm" onClick={closeMenu}>Alarms</NavLink>
-              </>
+              <div className="relative" ref={adminMenuRef}>
+                <button
+                  onClick={() => setAdminMenuOpen(o => !o)}
+                  className="flex items-center gap-0.5 px-3 py-1.5 rounded-md text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-100 transition-colors cursor-pointer"
+                >
+                  Admin
+                  <MdKeyboardArrowDown className={`text-base transition-transform duration-150 ${adminMenuOpen ? 'rotate-180' : ''}`} />
+                </button>
+                {adminMenuOpen && (
+                  <div className="absolute left-0 top-full mt-1 w-48 bg-white border border-gray-200 rounded-lg shadow-lg py-1 z-50">
+                    <AdminDropdownLink to="/admin/users" onClick={() => setAdminMenuOpen(false)}>Users</AdminDropdownLink>
+                    <AdminDropdownLink to="/admin/invitations" onClick={() => setAdminMenuOpen(false)}>Invitations</AdminDropdownLink>
+                    <AdminDropdownLink to="/admin/interest" onClick={() => setAdminMenuOpen(false)}>Requests</AdminDropdownLink>
+                    <AdminDropdownLink to="/admin/emails" onClick={() => setAdminMenuOpen(false)}>Emails</AdminDropdownLink>
+                    <AdminDropdownLink to="/admin/bans" onClick={() => setAdminMenuOpen(false)}>Bans & Suspensions</AdminDropdownLink>
+                    <AdminDropdownLink to="/admin/metrics" onClick={() => setAdminMenuOpen(false)}>Metrics</AdminDropdownLink>
+                    <AdminDropdownLink to="/admin/alarm" onClick={() => setAdminMenuOpen(false)}>Alarms</AdminDropdownLink>
+                  </div>
+                )}
+              </div>
             )}
           </div>
         </div>
@@ -231,14 +259,16 @@ function RouteComponent() {
         >
           <MobileNavLink to="/client" exact onClick={closeMenu}>Files</MobileNavLink>
           <MobileNavLink to="/client/favorites" onClick={closeMenu}>Favorites</MobileNavLink>
+          <MobileNavLink to="/client/shared" onClick={closeMenu}>Shared</MobileNavLink>
           {(user?.is_premium || user?.is_admin) && (
             <MobileNavLink to={'/settings/api-keys' as never} onClick={closeMenu}>API Keys</MobileNavLink>
           )}
           {user?.is_admin && (
             <>
+              <div className="pt-1 pb-0.5 px-3 text-xs font-semibold text-gray-400 uppercase tracking-wider">Admin</div>
               <MobileNavLink to="/admin/users" onClick={closeMenu}>Users</MobileNavLink>
               <MobileNavLink to="/admin/invitations" onClick={closeMenu}>Invitations</MobileNavLink>
-              <MobileNavLink to="/admin/interest" onClick={closeMenu}>Interest</MobileNavLink>
+              <MobileNavLink to="/admin/interest" onClick={closeMenu}>Requests</MobileNavLink>
               <MobileNavLink to="/admin/emails" onClick={closeMenu}>Emails</MobileNavLink>
               <MobileNavLink to="/admin/bans" onClick={closeMenu}>Bans & Suspensions</MobileNavLink>
               <MobileNavLink to="/admin/metrics" onClick={closeMenu}>Metrics</MobileNavLink>
@@ -304,6 +334,19 @@ function MobileNavLink({ to, exact, onClick, children }: NavLinkProps) {
       onClick={onClick}
       className="px-3 py-2 rounded-md text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-100 transition-colors"
       activeProps={{ className: 'px-3 py-2 rounded-md text-sm text-blue-600 bg-blue-50 font-medium' }}
+    >
+      {children}
+    </Link>
+  )
+}
+
+function AdminDropdownLink({ to, onClick, children }: NavLinkProps) {
+  return (
+    <Link
+      to={to}
+      onClick={onClick}
+      className="block px-4 py-2 text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-50 transition-colors"
+      activeProps={{ className: 'block px-4 py-2 text-sm text-blue-600 bg-blue-50 font-medium' }}
     >
       {children}
     </Link>

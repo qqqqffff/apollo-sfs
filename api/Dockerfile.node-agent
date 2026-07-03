@@ -1,0 +1,32 @@
+# Per-node metrics agent. Deployed in Docker Swarm "global" mode (one per node);
+# reads host hardware sensors + drive mounts and pushes them to the API.
+# Build for both amd64 (manager) and arm64 (Pi 5 worker):
+#   docker buildx build --platform linux/amd64,linux/arm64 \
+#     -f api/Dockerfile.node-agent -t <registry>/apollo-sfs-node-agent:latest api/ --push
+
+# ── Stage 1: Build ────────────────────────────────────────────────────────────
+FROM golang:1.26.2-alpine AS builder
+
+WORKDIR /build
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build \
+      -ldflags="-s -w" \
+      -o /build/node-agent \
+      ./cmd/node-agent
+
+# ── Stage 2: Runtime ──────────────────────────────────────────────────────────
+FROM alpine:3.21
+
+RUN apk add --no-cache ca-certificates tzdata
+
+WORKDIR /app
+
+COPY --from=builder /build/node-agent .
+
+# Runs as root: reading /sys hardware sensors and host drive mounts requires it.
+# Mount /sys, /dev/disk/by-label, and the storage mounts read-only from the host.
+ENTRYPOINT ["/app/node-agent"]

@@ -1,0 +1,1167 @@
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  ActivityIndicator,
+  Alert,
+  Modal,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+} from 'react-native';
+import WebView from 'react-native-webview';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { CameraRoll } from '@react-native-camera-roll/camera-roll';
+import SyncPreviewModal from '../components/SyncPreviewModal';
+import StorageUpgradeModal from '../components/StorageUpgradeModal';
+import GoogleBackupModal from '../components/GoogleBackupModal';
+import GoogleServiceSelectModal, { type GoogleServiceSelection } from '../components/GoogleServiceSelectModal';
+import {
+  listGoogleDriveFiles,
+  createPhotosPickerSession,
+  getPhotosPickerSession,
+  listPickedPhotos,
+  deletePhotosPickerSession,
+  trashGoogleDriveFiles,
+  uploadGoogleEntries,
+  type BackupEntry,
+  type GoogleBackupItem,
+} from '../services/GoogleBackupService';
+import { notifyBackupComplete } from '../services/notifications';
+import { type PreviewItem } from '../services/SyncService';
+import { GoogleSignin, statusCodes } from '@react-native-google-signin/google-signin';
+import { useFocusEffect, useNavigation } from '@react-navigation/native';
+import {
+  Check,
+  CheckCircle2,
+  ChevronDown,
+  Cloud,
+  CloudUpload,
+  FileText,
+  FolderUp,
+  GalleryHorizontalEnd,
+  Image,
+  Lock,
+  Music,
+  Plus,
+  Star,
+  Trash2,
+  Video,
+} from 'lucide-react-native';
+import DocumentPicker from 'react-native-document-picker';
+import { registerDevice } from '../api/sync';
+import {
+  getPreferences,
+  listFavorites,
+  listRoot,
+  unfavoriteFile,
+  updatePreferences,
+  uploadFile,
+  type ApiFolder,
+} from '../api/files';
+import { registerBackgroundSync } from '../tasks/backgroundSync';
+import { useSync } from '../context/SyncContext';
+import { useAuth } from '../context/AuthContext';
+import { getAllDoneItems } from '../services/UploadQueue';
+import { colors, radius, shadow, spacing } from '../theme';
+
+const DEVICE_ID_KEY = 'apollo_device_id';
+const FILES_DEST_KEY = 'apollo_files_dest_folder_id';
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024 ** 3) return `${(bytes / 1024 / 1024).toFixed(0)} MB`;
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GB`;
+}
+
+interface FavoriteFile {
+  id: string;
+  name: string;
+  mime_type: string;
+  size_bytes: number;
+}
+
+function formatEta(seconds: number): string {
+  if (seconds < 60) return `${seconds}s remaining`;
+  const m = Math.round(seconds / 60);
+  if (m < 60) return `~${m} min remaining`;
+  const h = Math.floor(m / 60);
+  const rem = m % 60;
+  return rem > 0 ? `~${h}h ${rem}m remaining` : `~${h}h remaining`;
+}
+
+function formatSyncDate(d: Date): string {
+  const now = new Date();
+  const isToday = d.toDateString() === now.toDateString();
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+  const isYesterday = d.toDateString() === yesterday.toDateString();
+  const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  if (isToday) return `Today ${time}`;
+  if (isYesterday) return `Yesterday ${time}`;
+  return `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${time}`;
+}
+
+function fileMimeIcon(mimeType: string) {
+  if (mimeType.startsWith('image/')) return Image;
+  if (mimeType.startsWith('video/')) return Video;
+  if (mimeType.startsWith('audio/')) return Music;
+  return FileText;
+}
+
+export default function HomeScreen() {
+  const navigation = useNavigation<any>();
+  const { profile, refreshProfile } = useAuth();
+  const { pendingCount, syncedCount, inProgressFiles, lastSyncedAt, isSyncing, lastError, etaSeconds, scanForPreview, confirmSync } = useSync();
+  const [favorites, setFavorites] = useState<FavoriteFile[]>([]);
+  const [favLoading, setFavLoading] = useState(true);
+  const [statusExpanded, setStatusExpanded] = useState(false);
+  const [upgradeVisible, setUpgradeVisible] = useState(false);
+
+  const [autouploadFolderID, setAutouploadFolderID] = useState<string | null>(null);
+  const [filesDestFolderID, setFilesDestFolderID] = useState<string | null>(null);
+  const [mediaFolders, setMediaFolders] = useState<ApiFolder[]>([]);
+  // 'camera' = camera roll picker, 'files' = files app picker, null = closed
+  const [pickerMode, setPickerMode] = useState<'camera' | 'files' | null>(null);
+  const [pickerSaving, setPickerSaving] = useState(false);
+
+  const [filesUploading, setFilesUploading] = useState(false);
+  const [filesUploadProgress, setFilesUploadProgress] = useState<{ done: number; total: number } | null>(null);
+
+  const [googleBackupItems, setGoogleBackupItems]   = useState<GoogleBackupItem[] | null>(null);
+  const [googleAccessToken, setGoogleAccessToken]   = useState('');
+  const [googleBackupLoading, setGoogleBackupLoading] = useState(false);
+  const [serviceSelectVisible, setServiceSelectVisible] = useState(false);
+
+  // Background backup progress shown on the Google Backup card. running=false
+  // with a non-null state means the run has finished (summary + cleanup shown).
+  const [backupState, setBackupState] = useState<{
+    running: boolean;
+    done: number;
+    total: number;
+    uploaded: number;
+    duplicates: number;
+    errors: number;
+    driveIds: string[];
+  } | null>(null);
+
+  // In-app Photos Picker WebView state
+  const [photosPickerVisible, setPhotosPickerVisible] = useState(false);
+  const [photosPickerUrl, setPhotosPickerUrl]         = useState('');
+  const photosPickerCancelRef = useRef<(() => void) | null>(null);
+
+  const [previewItems, setPreviewItems] = useState<PreviewItem[] | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+
+  const handleSyncNow = async () => {
+    if (isSyncing || previewLoading) return;
+    setPreviewLoading(true);
+    try {
+      const items = await scanForPreview();
+      if (items.length === 0) {
+        Alert.alert('Up to date', 'No new photos to sync.');
+        return;
+      }
+      setPreviewItems(items);
+    } catch (e: any) {
+      Alert.alert('Scan failed', e.message);
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
+  const handlePreviewConfirm = async (selected: PreviewItem[]) => {
+    setPreviewItems(null);
+    await confirmSync(selected);
+  };
+
+  useEffect(() => {
+    (async () => {
+      const existing = await AsyncStorage.getItem(DEVICE_ID_KEY);
+      if (!existing) {
+        try {
+          const device = await registerDevice(
+            Platform.OS === 'ios' ? 'My iPhone' : 'My Android',
+            Platform.OS === 'ios' ? 'ios' : 'android',
+          );
+          await AsyncStorage.setItem(DEVICE_ID_KEY, device.id);
+        } catch {
+          // device registration is best-effort
+        }
+      }
+      await registerBackgroundSync();
+    })();
+  }, []);
+
+  // Load preferences + media folder list + files destination. Runs on every
+  // focus so the reroute lock reflects changes made on the Profile screen.
+  useFocusEffect(
+    useCallback(() => {
+      (async () => {
+        try {
+          const [prefs, root, savedFilesDest] = await Promise.all([
+            getPreferences(),
+            listRoot(),
+            AsyncStorage.getItem(FILES_DEST_KEY),
+          ]);
+          setAutouploadFolderID(prefs.media_autoupload_folder_id);
+          setMediaFolders((root.subfolders?.items ?? []).filter((f) => f.kind === 'media'));
+          setFilesDestFolderID(savedFilesDest);
+        } catch {
+          // best-effort
+        }
+      })();
+    }, []),
+  );
+
+  const loadFavorites = useCallback(async () => {
+    setFavLoading(true);
+    try {
+      const data = await listFavorites();
+      setFavorites(data.files ?? []);
+    } catch {
+      setFavorites([]);
+    } finally {
+      setFavLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { loadFavorites(); }, [loadFavorites]);
+
+  const handleUnfavorite = async (fileID: string) => {
+    try {
+      await unfavoriteFile(fileID);
+      setFavorites((prev) => prev.filter((f) => f.id !== fileID));
+    } catch {}
+  };
+
+  const handleSelectDestination = async (folderID: string | null) => {
+    setPickerSaving(true);
+    try {
+      if (pickerMode === 'camera') {
+        await updatePreferences({ media_autoupload_folder_id: folderID });
+        setAutouploadFolderID(folderID);
+      } else {
+        await AsyncStorage.setItem(FILES_DEST_KEY, folderID ?? '');
+        setFilesDestFolderID(folderID);
+      }
+      setPickerMode(null);
+    } catch {
+      // keep picker open on failure
+    } finally {
+      setPickerSaving(false);
+    }
+  };
+
+  const handleCleanupSynced = async () => {
+    try {
+      const items = await getAllDoneItems();
+      const uris = items.map((i) => i.local_uri).filter((u) => u.startsWith('ph://'));
+      if (uris.length === 0) {
+        Alert.alert('Nothing to clean up', 'No synced photos found on this device.');
+        return;
+      }
+      Alert.alert(
+        'Clean Up Device',
+        `Remove ${uris.length} backed-up photo${uris.length !== 1 ? 's' : ''} from this device? They are safely stored in Apollo SFS.`,
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: `Delete ${uris.length} Photo${uris.length !== 1 ? 's' : ''}`,
+            style: 'destructive',
+            onPress: async () => {
+              try {
+                await CameraRoll.deletePhotos(uris);
+              } catch (e: any) {
+                Alert.alert('Error', e.message);
+              }
+            },
+          },
+        ],
+      );
+    } catch (e: any) {
+      Alert.alert('Error', e.message);
+    }
+  };
+
+  // Opens the Photos Picker in an in-app WebView. Polls the session in the
+  // background and resolves when the user finishes selecting or cancels.
+  // Sharing Safari cookies (sharedCookiesEnabled) means the user's existing
+  // Google session is re-used without another sign-in prompt.
+  const pickGooglePhotos = (accessToken: string): Promise<GoogleBackupItem[]> =>
+    new Promise(async (resolve) => {
+      let settled = false;
+      const finish = async (items: GoogleBackupItem[]) => {
+        if (settled) return;
+        settled = true;
+        photosPickerCancelRef.current = null;
+        setPhotosPickerVisible(false);
+        resolve(items);
+      };
+
+      let session;
+      try {
+        session = await createPhotosPickerSession(accessToken);
+      } catch {
+        finish([]);
+        return;
+      }
+
+      photosPickerCancelRef.current = () => finish([]);
+      setPhotosPickerUrl(session.pickerUri);
+      setPhotosPickerVisible(true);
+
+      // Poll while WebView is shown; stop immediately if user closes it.
+      const deadline = Date.now() + session.timeoutMs;
+      let current = session;
+      while (!current.mediaItemsSet && Date.now() < deadline) {
+        await new Promise<void>((r) => setTimeout(r, current.pollIntervalMs));
+        if (settled) return;
+        try { current = await getPhotosPickerSession(session.id, accessToken); } catch { break; }
+      }
+
+      if (settled) return;
+
+      if (current.mediaItemsSet) {
+        try {
+          const picked = await listPickedPhotos(session.id, accessToken);
+          await deletePhotosPickerSession(session.id, accessToken);
+          finish(picked);
+        } catch { finish([]); }
+      } else {
+        await deletePhotosPickerSession(session.id, accessToken).catch(() => {});
+        finish([]);
+      }
+    });
+
+  // Fetch step, run after the user has chosen which services to back up. Only
+  // the picked services are touched: no Photos picker if Photos is off, no Drive
+  // listing if Drive is off.
+  const handleServiceContinue = async (selection: GoogleServiceSelection) => {
+    setServiceSelectVisible(false);
+    setGoogleBackupLoading(true);
+    try {
+      await GoogleSignin.hasPlayServices();
+      // Try silent sign-in first so already-approved scopes don't prompt again.
+      // Fall back to interactive sign-in only when the session has lapsed.
+      try {
+        await GoogleSignin.signInSilently();
+      } catch {
+        await GoogleSignin.signIn();
+      }
+      const tokens = await GoogleSignin.getTokens();
+      setGoogleAccessToken(tokens.accessToken);
+
+      const driveItems = selection.drive ? await listGoogleDriveFiles(tokens.accessToken) : [];
+      const photoItems = selection.photos ? await pickGooglePhotos(tokens.accessToken) : [];
+      if (driveItems.length + photoItems.length === 0) {
+        Alert.alert('Nothing to back up', 'No files were found or selected.');
+        return;
+      }
+      setGoogleBackupItems([...driveItems, ...photoItems]);
+    } catch (e: any) {
+      if (e.code !== statusCodes.SIGN_IN_CANCELLED) {
+        console.error('[GoogleBackup]', e);
+        Alert.alert('Google access failed', e.message ?? 'Could not access Google. Try again later.');
+      }
+    } finally {
+      setGoogleBackupLoading(false);
+    }
+  };
+
+  // Runs a backup off-modal: closes the picker and uploads while progress shows
+  // on the Google Backup card. Posts an OS notification on completion when the
+  // user has that setting enabled.
+  const startBackgroundBackup = (entries: BackupEntry[], token: string, notify: boolean) => {
+    setGoogleBackupItems(null);
+    const driveIds = entries
+      .filter((e) => e.googleItem.source === 'drive')
+      .map((e) => e.googleItem.id);
+    setBackupState({ running: true, done: 0, total: entries.length, uploaded: 0, duplicates: 0, errors: 0, driveIds });
+
+    uploadGoogleEntries(entries, token, (done, total) =>
+      setBackupState((s) => (s ? { ...s, done, total } : s)),
+    ).then(({ uploaded, duplicates, errors }) => {
+      setBackupState((s) => (s ? { ...s, running: false, uploaded, duplicates, errors } : s));
+      refreshProfile().catch(() => {});
+      if (notify) notifyBackupComplete(uploaded, duplicates, errors);
+    });
+  };
+
+  const handleBackupCleanup = (driveIds: string[]) => {
+    const n = driveIds.length;
+    Alert.alert(
+      'Delete from Google Drive?',
+      `Move ${n} Drive file${n !== 1 ? 's' : ''} to your Google Drive trash? They are safely backed up in Apollo SFS.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Trash',
+          style: 'destructive',
+          onPress: async () => {
+            const { failed } = await trashGoogleDriveFiles(driveIds, googleAccessToken);
+            Alert.alert(
+              'Done',
+              failed === 0
+                ? `${n} file${n !== 1 ? 's' : ''} moved to Google Drive trash.`
+                : `${n - failed} of ${n} moved to trash. ${failed} failed.`,
+            );
+          },
+        },
+      ],
+    );
+  };
+
+  const handleFilesAppSync = async () => {
+    const destIsMediaCollection = filesDestFolderID !== null;
+    try {
+      const results = await DocumentPicker.pick({
+        allowMultiSelection: true,
+        presentationStyle: 'pageSheet',
+        copyTo: 'cachesDirectory',
+        ...(destIsMediaCollection && { type: ['image/*'] }),
+      });
+
+      if (results.length === 0) return;
+      setFilesUploading(true);
+      setFilesUploadProgress({ done: 0, total: results.length });
+
+      let done = 0;
+      for (const file of results) {
+        try {
+          await uploadFile(
+            file.fileCopyUri ?? file.uri,
+            file.name ?? 'upload',
+            file.type ?? 'application/octet-stream',
+            filesDestFolderID ?? undefined,
+          );
+        } catch {
+          // continue with remaining files
+        }
+        done += 1;
+        setFilesUploadProgress({ done, total: results.length });
+      }
+    } catch (e: any) {
+      if (!DocumentPicker.isCancel(e)) {
+        Alert.alert('Upload failed', e.message);
+      }
+    } finally {
+      setFilesUploading(false);
+      setFilesUploadProgress(null);
+    }
+  };
+
+  const destinationLabel =
+    autouploadFolderID == null
+      ? '/'
+      : (mediaFolders.find((f) => f.id === autouploadFolderID)?.name ?? '/');
+
+  // Non-null only when a media auto-upload folder is configured: photos/videos
+  // are redirected there server-side, so the backup modal surfaces it.
+  const redirectFolderName =
+    autouploadFolderID == null
+      ? null
+      : (mediaFolders.find((f) => f.id === autouploadFolderID)?.name ?? 'Root');
+
+  const filesDestLabel =
+    !filesDestFolderID
+      ? '/'
+      : (mediaFolders.find((f) => f.id === filesDestFolderID)?.name ?? '/');
+
+  const usedBytes = profile?.storage_used_bytes ?? 0;
+  const [localQuotaBytes, setLocalQuotaBytes] = useState<number | null>(null);
+  const quotaBytes = localQuotaBytes ?? (profile?.storage_quota_bytes ?? 0);
+  const usedPct = quotaBytes > 0 ? (usedBytes / quotaBytes) * 100 : 0;
+  const barColor = usedPct > 90 ? colors.error : usedPct > 70 ? colors.warning : colors.primary;
+
+  return (
+    <View style={styles.container}>
+      {/* Sync status bar */}
+      {isSyncing && (
+        <View>
+          <TouchableOpacity
+            style={styles.statusBar}
+            onPress={() => setStatusExpanded((v) => !v)}
+            activeOpacity={0.85}
+          >
+            <View style={styles.statusBarLeft}>
+              <ActivityIndicator size="small" color={colors.primary} style={{ marginRight: 8 }} />
+              <Text style={styles.statusBarText}>
+                {inProgressFiles.length > 0
+                  ? `Uploading ${inProgressFiles.length} file${inProgressFiles.length !== 1 ? 's' : ''}…`
+                  : 'Scanning camera roll…'}
+                {etaSeconds != null ? `  ·  ${formatEta(etaSeconds)}` : ''}
+              </Text>
+            </View>
+            <ChevronDown
+              size={14}
+              color={colors.textSecondary}
+              style={statusExpanded ? { transform: [{ rotate: '180deg' }] } : undefined}
+            />
+          </TouchableOpacity>
+          {statusExpanded && inProgressFiles.length > 0 && (
+            <View style={styles.statusDropdown}>
+              {inProgressFiles.map((name) => (
+                <Text key={name} style={styles.statusDropdownItem} numberOfLines={1}>· {name}</Text>
+              ))}
+            </View>
+          )}
+        </View>
+      )}
+
+      <ScrollView contentContainerStyle={styles.content}>
+      {/* Storage card */}
+      <View style={styles.card}>
+        <View style={styles.cardHeader}>
+          <Text style={[styles.cardLabel, { marginBottom: 0 }]}>Storage</Text>
+          <TouchableOpacity onPress={() => setUpgradeVisible(true)} hitSlop={8}>
+            <Plus size={18} color={colors.primary} strokeWidth={2.5} />
+          </TouchableOpacity>
+        </View>
+        <View style={styles.storageRow}>
+          <Text style={styles.storageValue}>{formatBytes(usedBytes)}</Text>
+          <Text style={styles.storageQuota}> / {formatBytes(quotaBytes)}</Text>
+        </View>
+        <View style={styles.barTrack}>
+          <View style={[styles.barFill, { width: `${Math.min(usedPct, 100)}%` as any, backgroundColor: barColor }]} />
+        </View>
+        <Text style={styles.barLabel}>{usedPct.toFixed(1)}% used</Text>
+      </View>
+
+      {/* Camera Roll Backup card */}
+      <View style={styles.card}>
+        <View style={styles.cardHeader}>
+          <Text style={[styles.cardLabel, { marginBottom: 0 }]}>Camera Roll Backup</Text>
+          {/* Reroute lock — visible while a media reroute policy is active. Taps
+              jump to Profile to update or disable the reroute. */}
+          {autouploadFolderID != null && (
+            <TouchableOpacity
+              style={styles.lockBtn}
+              onPress={() => navigation.navigate('Profile')}
+              hitSlop={8}
+            >
+              <Lock size={13} color={colors.mediaAccent} strokeWidth={2} />
+            </TouchableOpacity>
+          )}
+        </View>
+
+        <TouchableOpacity style={styles.destinationRow} onPress={() => setPickerMode('camera')} activeOpacity={0.7}>
+          <Text style={styles.destinationLabel}>Destination</Text>
+          <View style={styles.destinationRight}>
+            <Text style={styles.destinationValue}>{destinationLabel}</Text>
+            <ChevronDown size={14} color={colors.primary} style={styles.destinationChevron} />
+          </View>
+        </TouchableOpacity>
+
+        {(syncedCount > 0 || lastSyncedAt) && (
+          <View style={styles.syncSummaryRow}>
+            <View style={styles.syncSummaryLeft}>
+              <CheckCircle2 size={13} color={colors.success} style={{ marginRight: 5 }} />
+              <Text style={styles.syncSummaryCount}>
+                {syncedCount.toLocaleString()} photo{syncedCount !== 1 ? 's' : ''} synced
+              </Text>
+            </View>
+            {lastSyncedAt && (
+              <Text style={styles.syncSummaryDate}>
+                {formatSyncDate(lastSyncedAt)}
+              </Text>
+            )}
+          </View>
+        )}
+
+        {pendingCount > 0 && (
+          <View style={styles.statusRow}>
+            <View style={[styles.statusDot, { backgroundColor: colors.warning }]} />
+            <Text style={styles.statusText}>{pendingCount} photo{pendingCount !== 1 ? 's' : ''} waiting to upload</Text>
+          </View>
+        )}
+
+        {lastError && (
+          <View style={styles.errorBox}>
+            <Text style={styles.errorBoxText}>{lastError}</Text>
+          </View>
+        )}
+
+        <TouchableOpacity
+          style={[styles.syncButton, (isSyncing || previewLoading) && styles.syncButtonDisabled]}
+          onPress={handleSyncNow}
+          disabled={isSyncing || previewLoading}
+        >
+          {isSyncing || previewLoading ? (
+            <ActivityIndicator color={colors.surface} size="small" />
+          ) : (
+            <>
+              <CloudUpload size={18} color={colors.surface} strokeWidth={2} style={styles.syncIcon} />
+              <Text style={styles.syncButtonText}>Sync Now</Text>
+            </>
+          )}
+        </TouchableOpacity>
+
+        {syncedCount > 0 && (
+          <TouchableOpacity style={styles.cleanupButton} onPress={handleCleanupSynced}>
+            <Trash2 size={15} color={colors.error} strokeWidth={1.5} style={{ marginRight: 6 }} />
+            <Text style={styles.cleanupButtonText}>
+              Free up device space ({syncedCount.toLocaleString()} synced)
+            </Text>
+          </TouchableOpacity>
+        )}
+      </View>
+
+      {/* Files App card */}
+      <View style={styles.card}>
+        <Text style={styles.cardLabel}>On Device Files</Text>
+
+        <TouchableOpacity style={styles.destinationRow} onPress={() => setPickerMode('files')} activeOpacity={0.7}>
+          <Text style={styles.destinationLabel}>Destination</Text>
+          <View style={styles.destinationRight}>
+            <Text style={styles.destinationValue}>{filesDestLabel}</Text>
+            <ChevronDown size={14} color={colors.primary} style={styles.destinationChevron} />
+          </View>
+        </TouchableOpacity>
+
+        {/* Reroute notice — image/video uploads are redirected by the media policy. */}
+        {autouploadFolderID != null && (
+          <View style={styles.rerouteNote}>
+            <GalleryHorizontalEnd size={13} color={colors.mediaAccent} strokeWidth={1.5} style={{ marginRight: 6 }} />
+            <Text style={styles.rerouteNoteText} numberOfLines={2}>
+              Photos &amp; videos reroute to “{redirectFolderName}”
+            </Text>
+          </View>
+        )}
+
+        {filesUploadProgress && (
+          <View style={styles.progressRow}>
+            <View style={styles.progressTrack}>
+              <View
+                style={[
+                  styles.progressFill,
+                  { width: `${Math.round((filesUploadProgress.done / filesUploadProgress.total) * 100)}%` as any },
+                ]}
+              />
+            </View>
+            <Text style={styles.progressLabel}>
+              {filesUploadProgress.done} / {filesUploadProgress.total}
+            </Text>
+          </View>
+        )}
+
+        <TouchableOpacity
+          style={[styles.syncButton, styles.filesButton, filesUploading && styles.syncButtonDisabled]}
+          onPress={handleFilesAppSync}
+          disabled={filesUploading}
+        >
+          {filesUploading ? (
+            <ActivityIndicator color={colors.surface} size="small" />
+          ) : (
+            <>
+              <FolderUp size={18} color={colors.surface} strokeWidth={2} style={styles.syncIcon} />
+              <Text style={styles.syncButtonText}>Pick Files to Upload</Text>
+            </>
+          )}
+        </TouchableOpacity>
+      </View>
+
+      {/* Google Backup card — users with Google linked */}
+      {(profile?.is_premium || profile?.is_admin) && profile?.linked_providers?.includes('google') && (
+        <View style={styles.card}>
+          <Text style={styles.cardLabel}>Google Backup</Text>
+          <Text style={styles.icloudDesc}>
+            Back up files from Google Drive and Google Photos to your SFS account.
+          </Text>
+
+          {backupState?.running && (
+            <>
+              <View style={styles.progressRow}>
+                <View style={styles.progressTrack}>
+                  <View
+                    style={[
+                      styles.progressFill,
+                      { width: `${backupState.total > 0 ? Math.round((backupState.done / backupState.total) * 100) : 0}%` as any },
+                    ]}
+                  />
+                </View>
+                <Text style={styles.progressLabel}>{backupState.done} / {backupState.total}</Text>
+              </View>
+              <View style={styles.statusRow}>
+                <ActivityIndicator size="small" color={colors.success} style={{ marginRight: 8 }} />
+                <Text style={styles.statusText}>Backing up in the background…</Text>
+              </View>
+            </>
+          )}
+
+          {backupState && !backupState.running && (
+            <>
+              <View style={styles.syncSummaryRow}>
+                <View style={styles.syncSummaryLeft}>
+                  <CheckCircle2 size={13} color={backupState.errors > 0 ? colors.warning : colors.success} style={{ marginRight: 5 }} />
+                  <Text style={[styles.syncSummaryCount, backupState.errors > 0 && { color: colors.warning }]}>
+                    {[
+                      `${backupState.uploaded} backed up`,
+                      backupState.duplicates > 0 ? `${backupState.duplicates} duplicate${backupState.duplicates !== 1 ? 's' : ''}` : null,
+                      backupState.errors > 0 ? `${backupState.errors} failed` : null,
+                    ].filter(Boolean).join(' · ')}
+                  </Text>
+                </View>
+                <TouchableOpacity onPress={() => setBackupState(null)} hitSlop={8}>
+                  <Text style={styles.destinationValue}>Dismiss</Text>
+                </TouchableOpacity>
+              </View>
+              {backupState.driveIds.length > 0 && (
+                <TouchableOpacity style={styles.cleanupButton} onPress={() => handleBackupCleanup(backupState.driveIds)}>
+                  <Trash2 size={15} color={colors.error} strokeWidth={1.5} style={{ marginRight: 6 }} />
+                  <Text style={styles.cleanupButtonText}>
+                    Delete {backupState.driveIds.length} Drive file{backupState.driveIds.length !== 1 ? 's' : ''} from Google
+                  </Text>
+                </TouchableOpacity>
+              )}
+            </>
+          )}
+
+          <TouchableOpacity
+            style={[styles.syncButton, styles.googleButton, (googleBackupLoading || backupState?.running) && styles.syncButtonDisabled]}
+            onPress={() => setServiceSelectVisible(true)}
+            disabled={googleBackupLoading || backupState?.running}
+          >
+            {googleBackupLoading ? (
+              <ActivityIndicator color={colors.surface} size="small" />
+            ) : (
+              <>
+                <Cloud size={18} color={colors.surface} strokeWidth={1.5} style={styles.syncIcon} />
+                <Text style={styles.syncButtonText}>Fetch Google Files</Text>
+              </>
+            )}
+          </TouchableOpacity>
+        </View>
+      )}
+
+      {/* Favorites card */}
+      <View style={styles.card}>
+        <View style={styles.cardHeader}>
+          <Text style={styles.cardLabel}>Favorites</Text>
+          {favLoading && <ActivityIndicator size="small" color={colors.primary} />}
+        </View>
+
+        {!favLoading && favorites.length === 0 && (
+          <View style={styles.emptyState}>
+            <Star size={32} color={colors.textMuted} strokeWidth={1} />
+            <Text style={styles.emptyText}>No favorites yet</Text>
+          </View>
+        )}
+
+        {favorites.map((item, index) => {
+          const FileIcon = fileMimeIcon(item.mime_type);
+          return (
+            <View key={item.id}>
+              {index > 0 && <View style={styles.separator} />}
+              <View style={styles.favRow}>
+                <View style={styles.iconWrap}>
+                  <FileIcon size={18} color={colors.primary} strokeWidth={1.5} />
+                </View>
+                <View style={styles.favInfo}>
+                  <Text style={styles.favName} numberOfLines={1}>{item.name}</Text>
+                  <Text style={styles.favMeta}>{item.mime_type.split('/')[1]?.toUpperCase()}</Text>
+                </View>
+                <TouchableOpacity onPress={() => handleUnfavorite(item.id)} style={styles.favAction}>
+                  <Star size={18} color={colors.warning} fill={colors.warning} strokeWidth={0} />
+                </TouchableOpacity>
+              </View>
+            </View>
+          );
+        })}
+      </View>
+
+      {/* Destination picker modal — shared by camera roll and files app */}
+      <Modal
+        visible={pickerMode !== null}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setPickerMode(null)}
+      >
+        <Pressable style={styles.overlay} onPress={() => !pickerSaving && setPickerMode(null)}>
+          <Pressable style={styles.sheet} onPress={(e) => e.stopPropagation()}>
+            <Text style={styles.sheetTitle}>
+              {pickerMode === 'camera' ? 'Camera Roll Destination' : 'Files Upload Destination'}
+            </Text>
+
+            {(() => {
+              const selectedID = pickerMode === 'camera' ? autouploadFolderID : filesDestFolderID;
+              return (
+                <>
+                  <TouchableOpacity
+                    style={styles.sheetRow}
+                    onPress={() => handleSelectDestination(null)}
+                    disabled={pickerSaving}
+                  >
+                    <View style={styles.sheetIconWrap}>
+                      <GalleryHorizontalEnd size={18} color={colors.textSecondary} strokeWidth={1.5} />
+                    </View>
+                    <Text style={styles.sheetRowText}>/  (root)</Text>
+                    {!selectedID && <Check size={18} color={colors.primary} strokeWidth={2.5} />}
+                  </TouchableOpacity>
+
+                  {mediaFolders.map((folder) => (
+                    <TouchableOpacity
+                      key={folder.id}
+                      style={styles.sheetRow}
+                      onPress={() => handleSelectDestination(folder.id)}
+                      disabled={pickerSaving}
+                    >
+                      <View style={[styles.sheetIconWrap, styles.sheetMediaIconWrap]}>
+                        <GalleryHorizontalEnd size={18} color={colors.mediaAccent} strokeWidth={1.5} />
+                      </View>
+                      <Text style={styles.sheetRowText} numberOfLines={1}>{folder.name}</Text>
+                      {selectedID === folder.id && <Check size={18} color={colors.primary} strokeWidth={2.5} />}
+                    </TouchableOpacity>
+                  ))}
+
+                  {mediaFolders.length === 0 && (
+                    <Text style={styles.sheetEmptyText}>
+                      No media collections yet. Create one in Files to organize your uploads.
+                    </Text>
+                  )}
+                </>
+              );
+            })()}
+
+            {pickerSaving && (
+              <ActivityIndicator style={styles.sheetSpinner} color={colors.primary} />
+            )}
+          </Pressable>
+        </Pressable>
+      </Modal>
+      </ScrollView>
+
+      <SyncPreviewModal
+        visible={previewItems !== null}
+        items={previewItems ?? []}
+        quotaBytes={quotaBytes}
+        usedBytes={usedBytes}
+        onConfirm={handlePreviewConfirm}
+        onCancel={() => setPreviewItems(null)}
+        onStoragePurchased={(newQuota) => {
+          setLocalQuotaBytes(newQuota);
+          refreshProfile().catch(() => {});
+        }}
+      />
+
+      <GoogleServiceSelectModal
+        visible={serviceSelectVisible}
+        onCancel={() => setServiceSelectVisible(false)}
+        onContinue={handleServiceContinue}
+      />
+
+      <GoogleBackupModal
+        visible={googleBackupItems !== null}
+        items={googleBackupItems ?? []}
+        accessToken={googleAccessToken}
+        quotaBytes={quotaBytes}
+        usedBytes={usedBytes}
+        redirectFolderName={redirectFolderName}
+        onClose={() => setGoogleBackupItems(null)}
+        onDone={() => {
+          setGoogleBackupItems(null);
+          refreshProfile().catch(() => {});
+        }}
+        onStartBackground={startBackgroundBackup}
+        onStoragePurchased={(newQuota) => {
+          setLocalQuotaBytes(newQuota);
+          refreshProfile().catch(() => {});
+        }}
+      />
+
+      <StorageUpgradeModal
+        visible={upgradeVisible}
+        quotaBytes={quotaBytes}
+        usedBytes={usedBytes}
+        onPurchased={(newQuota) => {
+          setLocalQuotaBytes(newQuota);
+          setUpgradeVisible(false);
+          refreshProfile().catch(() => {});
+        }}
+        onClose={() => setUpgradeVisible(false)}
+      />
+
+      {/* In-app Google Photos Picker.
+          iOS: sharedCookiesEnabled reuses the user's Safari/Google session.
+          Android: thirdPartyCookiesEnabled is required for Google auth within the WebView. */}
+      <Modal
+        visible={photosPickerVisible}
+        animationType="slide"
+        presentationStyle="pageSheet"
+        onRequestClose={() => photosPickerCancelRef.current?.()}
+      >
+        <View style={styles.webPickerRoot}>
+          <View style={styles.webPickerHeader}>
+            <TouchableOpacity
+              onPress={() => photosPickerCancelRef.current?.()}
+              style={styles.webPickerClose}
+              hitSlop={12}
+            >
+              <Text style={styles.webPickerCloseText}>Cancel</Text>
+            </TouchableOpacity>
+            <Text style={styles.webPickerTitle}>Select Photos</Text>
+            <View style={styles.webPickerClose} />
+          </View>
+          {photosPickerUrl ? (
+            <WebView
+              source={{ uri: photosPickerUrl }}
+              sharedCookiesEnabled
+              thirdPartyCookiesEnabled
+              style={styles.webPickerView}
+            />
+          ) : null}
+        </View>
+      </Modal>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: colors.background },
+  content: { padding: spacing.md, paddingBottom: spacing.xl },
+
+  statusBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.md,
+    paddingVertical: 10,
+    backgroundColor: colors.surface,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+  },
+  statusBarLeft: { flexDirection: 'row', alignItems: 'center', flex: 1 },
+  statusBarText: { fontSize: 13, color: colors.textSecondary },
+  statusDropdown: {
+    backgroundColor: colors.surface,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+    paddingHorizontal: spacing.md,
+    paddingBottom: spacing.sm,
+  },
+  statusDropdownItem: { fontSize: 12, color: colors.textMuted, paddingVertical: 2 },
+
+  card: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    padding: spacing.md,
+    marginBottom: spacing.md,
+    ...shadow.md,
+  },
+  cardHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: spacing.sm },
+  cardLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: colors.textMuted,
+    textTransform: 'uppercase',
+    letterSpacing: 0.8,
+    marginBottom: spacing.sm,
+  },
+
+  destinationRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: spacing.sm,
+    paddingVertical: spacing.xs,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.divider,
+  },
+  destinationLabel: { fontSize: 13, color: colors.textSecondary },
+  destinationRight: { flexDirection: 'row', alignItems: 'center' },
+  destinationValue: { fontSize: 13, fontWeight: '600', color: colors.primary },
+  destinationChevron: { marginLeft: 4 },
+
+  lockBtn: {
+    width: 26, height: 26, borderRadius: radius.sm,
+    backgroundColor: colors.mediaAccentLighter,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  rerouteNote: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.mediaAccentLighter,
+    borderRadius: radius.md,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 8,
+    marginBottom: spacing.sm,
+  },
+  rerouteNoteText: { flex: 1, fontSize: 12, color: colors.mediaAccent, fontWeight: '500', lineHeight: 16 },
+
+  storageRow: { flexDirection: 'row', alignItems: 'baseline', marginBottom: spacing.sm },
+  storageValue: { fontSize: 28, fontWeight: '700', color: colors.textPrimary },
+  storageQuota: { fontSize: 16, color: colors.textSecondary },
+
+  barTrack: {
+    height: 8,
+    backgroundColor: colors.border,
+    borderRadius: radius.xl,
+    overflow: 'hidden',
+    marginBottom: spacing.xs,
+  },
+  barFill: { height: '100%', borderRadius: radius.xl },
+  barLabel: { fontSize: 12, color: colors.textSecondary },
+
+  syncSummaryRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: spacing.xs,
+  },
+  syncSummaryLeft: { flexDirection: 'row', alignItems: 'center' },
+  syncSummaryCount: { fontSize: 13, color: colors.success, fontWeight: '500' },
+  syncSummaryDate: { fontSize: 12, color: colors.textMuted },
+
+  statusRow: { flexDirection: 'row', alignItems: 'center', marginBottom: spacing.xs },
+  statusDot: { width: 7, height: 7, borderRadius: 4, marginRight: spacing.sm },
+  statusIcon: { marginRight: spacing.sm },
+  statusText: { fontSize: 14, color: colors.textSecondary },
+
+  errorBox: {
+    backgroundColor: colors.errorBg,
+    borderRadius: radius.sm,
+    padding: spacing.sm,
+    marginBottom: spacing.sm,
+  },
+  errorBoxText: { fontSize: 13, color: colors.error },
+
+  syncButton: {
+    flexDirection: 'row',
+    backgroundColor: colors.primary,
+    borderRadius: radius.md,
+    padding: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: spacing.sm,
+  },
+  filesButton: { backgroundColor: colors.mediaAccent },
+  syncButtonDisabled: { opacity: 0.6 },
+  cleanupButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: spacing.sm,
+    paddingVertical: 9,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.error,
+  },
+  cleanupButtonText: { fontSize: 13, color: colors.error, fontWeight: '500' },
+  syncIcon: { marginRight: spacing.sm },
+  syncButtonText: { color: colors.surface, fontWeight: '600', fontSize: 15 },
+
+
+  progressRow: { flexDirection: 'row', alignItems: 'center', marginBottom: spacing.sm, gap: spacing.sm },
+  progressTrack: {
+    flex: 1,
+    height: 6,
+    backgroundColor: colors.border,
+    borderRadius: radius.xl,
+    overflow: 'hidden',
+  },
+  progressFill: { height: '100%', backgroundColor: colors.mediaAccent, borderRadius: radius.xl },
+  progressLabel: { fontSize: 12, color: colors.textSecondary, minWidth: 36, textAlign: 'right' },
+
+  emptyState: { alignItems: 'center', paddingVertical: spacing.lg },
+  emptyText: { marginTop: spacing.sm, fontSize: 14, color: colors.textMuted },
+
+  separator: { height: 1, backgroundColor: colors.divider, marginLeft: 48 },
+  favRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 8 },
+  iconWrap: {
+    width: 32,
+    height: 32,
+    borderRadius: radius.sm,
+    backgroundColor: colors.primaryLighter,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: spacing.sm,
+  },
+  favInfo: { flex: 1 },
+  favName: { fontSize: 14, fontWeight: '500', color: colors.textPrimary },
+  favMeta: { fontSize: 12, color: colors.textSecondary, marginTop: 1 },
+  favAction: { padding: spacing.xs },
+
+  // Modal / sheet
+  overlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.4)',
+    justifyContent: 'flex-end',
+  },
+  sheet: {
+    backgroundColor: colors.surface,
+    borderTopLeftRadius: radius.lg,
+    borderTopRightRadius: radius.lg,
+    paddingHorizontal: spacing.md,
+    paddingTop: spacing.md,
+    paddingBottom: spacing.xl + spacing.md,
+  },
+  sheetTitle: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: colors.textMuted,
+    textTransform: 'uppercase',
+    letterSpacing: 0.8,
+    marginBottom: spacing.sm,
+  },
+  sheetRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.divider,
+  },
+  sheetIconWrap: {
+    width: 32,
+    height: 32,
+    borderRadius: radius.sm,
+    backgroundColor: colors.divider,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: spacing.sm,
+  },
+  sheetMediaIconWrap: { backgroundColor: colors.mediaAccentLighter },
+  sheetRowText: { flex: 1, fontSize: 15, color: colors.textPrimary },
+  sheetEmptyText: {
+    fontSize: 13,
+    color: colors.textMuted,
+    lineHeight: 19,
+    paddingVertical: spacing.md,
+    textAlign: 'center',
+  },
+  sheetSpinner: { marginTop: spacing.sm },
+
+  icloudDesc: { fontSize: 13, color: colors.textSecondary, marginBottom: spacing.sm, lineHeight: 18 },
+  icloudButton:  { backgroundColor: colors.info },
+  googleButton:  { backgroundColor: colors.success },
+
+  demoRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: spacing.sm,
+    marginBottom: spacing.sm,
+    borderTopWidth: 1,
+    borderTopColor: colors.divider,
+  },
+  demoRowLeft: { flex: 1, marginRight: spacing.sm },
+  demoRowLabel: { fontSize: 14, fontWeight: '500', color: colors.textPrimary },
+  demoRowSub: { fontSize: 12, color: colors.textMuted, marginTop: 2 },
+
+  // In-app Google Photos Picker WebView
+  webPickerRoot: { flex: 1, backgroundColor: colors.background },
+  webPickerHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.md,
+    paddingVertical: 14,
+    backgroundColor: colors.surface,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+  },
+  webPickerClose: { width: 60 },
+  webPickerCloseText: { fontSize: 16, color: colors.primary },
+  webPickerTitle: { fontSize: 17, fontWeight: '600', color: colors.textPrimary },
+  webPickerView: { flex: 1 },
+});

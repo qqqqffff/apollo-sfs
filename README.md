@@ -5,16 +5,24 @@ A self-hosted encrypted file storage service. Files are encrypted at rest with p
 ## Architecture
 
 ```
-Internet → Cloudflare (proxy) → Host nginx (TLS termination)
-                                      ├── :3000 → frontend container (React/Vite)
-                                      └── :8080 → api container (Go/Gin)
-                                                       ├── db-app (PostgreSQL)
-                                                       ├── keycloak (OIDC/auth)
-                                                       ├── minio (encrypted blobs)
-                                                       └── postfix (SMTP relay)
+Internet → Cloudflare (proxy) → Host nginx (TLS termination, host process)
+                                      ├── :3000 → frontend  (React/Vite)
+                                      └── :8080 → api       (Go/Gin)
+                                                       ├── db-app    (PostgreSQL)
+                                                       ├── keycloak  (OIDC/auth)
+                                                       ├── postfix   (SMTP relay)
+                                                       ├── minio-standard  (8 TB HDD, cold storage)
+                                                       └── minio-fast      (Pi 5 NVMe pool, hot storage)
 ```
 
-nginx runs **on the host**, not in Docker. All other services run in Docker Compose on an internal bridge network.
+### Production — Two-Node Docker Swarm
+
+| Node | Hardware | Swarm role | Label | Workloads |
+|------|----------|-----------|-------|-----------|
+| **Manager** | Ryzen, amd64, 8 TB HDD | manager | `tier=standard` | API, frontend, Keycloak, Postfix, DDNS, both databases, standard-tier MinIO |
+| **Worker (Pi 5)** | ARM64, dual NVMe (mergerfs pool) | worker | `tier=fast` | Fast-tier MinIO only |
+
+nginx and fail2ban run **on the manager host**, not inside Docker. All application services run as Docker Swarm services on the `app-network` overlay network. No service ports are exposed directly to the internet.
 
 ---
 
@@ -293,7 +301,305 @@ Once logged in as admin, go to **Invitations** in the nav. Enter an email addres
 
 ---
 
-## Day-2 operations
+---
+
+## Docker Swarm — Deploying and Redeploying
+
+This section covers production deployments to the two-node Swarm. For local development, use the Docker Compose commands in the next section instead.
+
+### Initial Swarm Setup (one time)
+
+```bash
+# On the manager node — initialize the swarm
+docker swarm init
+
+# On the Pi 5 — join as a worker (use the token printed by the command above)
+docker swarm join --token <worker-token> <manager-ip>:2377
+
+# Back on the manager — assign placement labels
+docker node update --label-add tier=standard <manager-node-id>
+docker node update --label-add tier=fast <pi5-node-id>
+
+# Confirm labels are set
+docker node ls
+docker node inspect <node-id> --format '{{ .Spec.Labels }}'
+```
+
+### Private Registry Setup (one time)
+
+Every node needs each custom service's image (`api`, `frontend`, `node-agent`) for
+its own architecture. Rather than building on each node, build once on the manager
+and push to a private registry that all nodes pull from. This is the scalable
+workflow — adding a node requires no builds on it. **See
+[docs/registry_setup.md](docs/registry_setup.md) for the full guide** (rationale,
+maintenance, adding nodes, troubleshooting). The essential one-time steps:
+
+**1. Start a persistent registry on the manager:**
+
+```bash
+docker run -d --name registry --restart=always \
+  -p 5000:5000 -v /srv/registry:/var/lib/registry registry:2
+curl -s http://127.0.0.1:5000/v2/_catalog    # -> {"repositories":[]}
+```
+
+The `-v` volume is required — without it a registry restart drops all images and the
+next deploy can't pull.
+
+**2. The registry is addressed by the manager's static LAN IP** — `192.168.68.57:5000`
+(an IP needs no name resolution, so it works identically from every node and the
+buildx builder; this is `deploy.sh`'s and `docker-stack.yml`'s default, so you don't
+normally need to set `REGISTRY` yourself).
+
+**3. Trust the insecure (HTTP) registry on every node.** On the manager and every
+worker, merge into `/etc/docker/daemon.json`, then `sudo systemctl restart docker`:
+
+```json
+{
+  "insecure-registries": ["192.168.68.57:5000"]
+}
+```
+
+**4. Enable multi-arch builds on the manager** (the cluster mixes amd64 + arm64):
+
+```bash
+# QEMU emulators (re-run after reboot) — without this, arm64 builds fail with
+# "exec /bin/sh: exec format error"
+docker run --privileged --rm tonistiigi/binfmt --install all
+
+# A container-driver builder on the host network that trusts the insecure registry.
+# network=host avoids the buildx "no such host" push failure; the toml avoids the
+# "HTTP response to HTTPS client" failure. deploy.sh creates this automatically the
+# first time it needs it, but you can also do it up front:
+cat > /tmp/buildkitd.toml <<'EOF'
+[registry."192.168.68.57:5000"]
+  http = true
+  insecure = true
+EOF
+docker buildx create --name apollo-builder --driver docker-container \
+  --driver-opt network=host --config /tmp/buildkitd.toml --bootstrap --use
+```
+
+### Building and Deploying Images
+
+> **Use `./deploy.sh`.** It automates everything below — build, push, and
+> `docker stack deploy` — behind an interactive checklist (up/down to move, space
+> to select `frontend`/`api`/`node-agent`, enter to confirm). Tags default to
+> `git rev-parse --short HEAD`; for services you don't select, it asks the running
+> Swarm what tag they're already on and redeploys them unchanged. See
+> [docs/registry_setup.md](docs/registry_setup.md#automated-deploy-script) for
+> flags (`--services`, `--tag`, `--deploy-only`, `--dry-run`, …). Just run it:
+> ```bash
+> ./deploy.sh
+> ```
+> The manual commands below are what it runs under the hood — useful for the very
+> first deploy, or if you want to see exactly what's happening.
+
+All three custom images are built on the manager and **pushed to the registry** so
+every node pulls them — no per-node builds. Each image is versioned by its **own**
+tag variable (`API_TAG`, `FRONTEND_TAG`, `NODE_AGENT_TAG`) rather than one shared
+`TAG`. That's deliberate: a single shared tag across all three images means
+redeploying just one of them points the *others* at a tag that was never built for
+them, and the deploy fails with something like:
+
+```
+image <registry>/apollo-sfs-node-agent:<tag> could not be accessed on a registry
+to record its digest. Each node will access ... independently, possibly leading
+to different nodes running different versions.
+```
+
+So for a service you're **not** rebuilding, its variable must be set to whatever
+tag is already deployed — found with `docker service inspect`:
+
+```bash
+docker service inspect --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' apollo-sfs_api | sed 's/.*://'
+```
+
+### Initial Stack Deployment
+
+The first deployment has nothing running yet to inspect, so build + push all three
+and deploy with all three set directly:
+
+```bash
+NEW_TAG=$(git rev-parse --short HEAD)
+
+docker buildx build --platform linux/amd64,linux/arm64 \
+  -t 192.168.68.57:5000/apollo-sfs_api:${NEW_TAG} api/ --push
+docker buildx build --platform linux/amd64 \
+  -t 192.168.68.57:5000/apollo-sfs_frontend:${NEW_TAG} frontend/ --push
+docker buildx build --platform linux/amd64,linux/arm64 \
+  -f api/Dockerfile.node-agent \
+  -t 192.168.68.57:5000/apollo-sfs-node-agent:${NEW_TAG} api/ --push
+
+export API_TAG=${NEW_TAG} FRONTEND_TAG=${NEW_TAG} NODE_AGENT_TAG=${NEW_TAG}
+set -a && source .env && set +a
+docker stack deploy -c docker-stack.yml apollo-sfs
+
+# Watch services come up
+docker stack services apollo-sfs
+docker stack ps apollo-sfs
+```
+
+(Or just: `./deploy.sh --services frontend,api,node-agent`.)
+
+### Redeploying After a Code Change
+
+Re-build and push **only the image(s) that changed** under a new tag; for
+everything else, resolve its currently-deployed tag live so it redeploys
+unchanged. `./deploy.sh --services <name>` (or the bare interactive checklist)
+does exactly this — the manual form for, e.g., just the frontend:
+
+```bash
+NEW_TAG=$(git rev-parse --short HEAD)
+docker buildx build --platform linux/amd64 \
+  -t 192.168.68.57:5000/apollo-sfs_frontend:${NEW_TAG} frontend/ --push
+
+export FRONTEND_TAG=${NEW_TAG}
+export API_TAG=$(docker service inspect --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' apollo-sfs_api | sed 's/.*://')
+export NODE_AGENT_TAG=$(docker service inspect --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' apollo-sfs_node-agent-standard | sed 's/.*://')
+set -a && source .env && set +a
+docker stack deploy -c docker-stack.yml apollo-sfs
+```
+
+Swap `FRONTEND_TAG`/`frontend/`/`apollo-sfs_frontend` for `API_TAG`/`api/`/
+`apollo-sfs_api` or `NODE_AGENT_TAG`/`api/ -f api/Dockerfile.node-agent`/
+`apollo-sfs-node-agent` to redeploy the API or node-agent instead. To redeploy
+everything at once, build + push all three and set all three variables directly
+(no inspecting needed — see *Initial Stack Deployment* above).
+
+`docker stack deploy` compares each service's spec against what's currently running. Because a changed variable's tag differs from what's running, Swarm detects the new image reference and rolls out only the affected services — Keycloak, MinIO, and other unchanged services (including any of `api`/`frontend`/`node-agent` you didn't rebuild) are left alone. See [docs/registry_setup.md](docs/registry_setup.md) for the full rationale and troubleshooting.
+
+#### Redeploy Any Other Service
+
+```bash
+# General pattern (public images pulled from a registry — no --resolve-image flag needed)
+docker service update --image <image>:<tag> apollo-sfs_<service-name>
+
+# Examples
+docker service update --image quay.io/keycloak/keycloak:26.0.7 apollo-sfs_keycloak
+docker service update --image minio/minio:latest apollo-sfs_minio-standard
+docker service update --image minio/minio:latest apollo-sfs_minio
+```
+
+#### Restart a Service Without an Image Change
+
+```bash
+docker service update --force apollo-sfs_api
+```
+
+Useful after changing secrets or environment variables that don't require a new image.
+
+### Running PostgreSQL Migrations
+
+The initial schema (`db/00_extensions.sql` through `db/32_node_disks.sql`) is applied automatically by PostgreSQL on first boot via the `docker-entrypoint-initdb.d` mount — it is **skipped on subsequent starts** once the data volume exists.
+
+Incremental schema changes live in `db/migrations/NNN_name.sql` and must be applied manually to any existing database using the provided script:
+
+```bash
+# Apply all migrations to the running Swarm db-app container
+# (reads POSTGRES_APP_USER and POSTGRES_APP_DB from .env automatically,
+# and finds the apollo-sfs_db-app container via `docker ps`)
+./db/apply-migrations.sh
+
+# Also wired into deploy.sh — pass --migrate to run this before build/deploy
+./deploy.sh --migrate
+
+# Apply against a specific database instead (direct psql, or a docker-compose
+# dev stack) by overriding $PSQL
+PSQL="psql postgresql://user:pw@host/db" ./db/apply-migrations.sh
+PSQL="docker compose exec -T db-app psql" ./db/apply-migrations.sh
+```
+
+The script applies every file in `db/migrations/` in numeric order. All migrations use idempotent SQL (`IF NOT EXISTS`, `IF EXISTS`, `ON CONFLICT DO NOTHING`, etc.) so re-running the script against an already-migrated database is safe.
+
+### Monitoring the Swarm
+
+```bash
+# List all services and their replica counts
+docker stack services apollo-sfs
+
+# Show which tasks are running on which node
+docker stack ps apollo-sfs
+
+# Show only failed or pending tasks
+docker stack ps apollo-sfs --filter "desired-state=running" --no-trunc
+
+# Tail logs for a service (across all replicas)
+docker service logs apollo-sfs_api --follow
+docker service logs apollo-sfs_frontend --follow
+docker service logs apollo-sfs_keycloak --follow
+docker service logs apollo-sfs_minio --follow          # fast tier (Pi)
+docker service logs apollo-sfs_minio-standard --follow # standard tier (manager)
+docker service logs apollo-sfs_node-agent-standard --follow
+docker service logs apollo-sfs_node-agent-fast --follow
+
+# Inspect a specific service
+docker service inspect apollo-sfs_api --pretty
+```
+
+### Rolling Back a Deployment
+
+Swarm remembers the previous service spec and can roll back instantly:
+
+```bash
+docker service rollback apollo-sfs_api
+docker service rollback apollo-sfs_frontend
+```
+
+To roll back to a specific git SHA tag (the image must still be in the registry),
+set that service's tag variable to the old SHA and redeploy — nodes pull that
+version back. Resolve the other services' variables live so they're left as-is:
+
+```bash
+export API_TAG=<previous-git-sha>   # e.g. a663b28
+export FRONTEND_TAG=$(docker service inspect --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' apollo-sfs_frontend | sed 's/.*://')
+export NODE_AGENT_TAG=$(docker service inspect --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' apollo-sfs_node-agent-standard | sed 's/.*://')
+set -a && source .env && set +a
+docker stack deploy -c docker-stack.yml apollo-sfs
+```
+
+### Troubleshooting Failed Updates
+
+#### "No suitable node (N nodes not available)" warning during a rolling update
+
+Expected when using `mode: host` port bindings on a single-node placement constraint. The old task holds the host port, so Swarm briefly has no valid slot for the new task until the old one stops. The `update_config` in `docker-stack.yml` sets `order: stop-first` explicitly to avoid ambiguity, and `failure_action: rollback` so a crash auto-reverts instead of leaving the service paused.
+
+#### "update paused due to failure or early termination of task"
+
+The new container started but exited before becoming healthy. Diagnose with:
+
+```bash
+# Show all tasks for the service with full error messages
+docker service ps apollo-sfs_api --no-trunc
+
+# Tail the service logs to see the crash output
+docker service logs apollo-sfs_api --tail 50
+
+# Inspect a specific failed task by its ID
+docker inspect <task-id>
+```
+
+Once the underlying issue is fixed, either rollback or retry:
+
+```bash
+# Rollback to the previous image
+docker service rollback apollo-sfs_api
+
+# Or retry with a fresh stack deploy after rebuilding + pushing
+./deploy.sh --services api
+```
+
+### Tearing Down the Stack
+
+```bash
+# Remove all services (data volumes are preserved)
+docker stack rm apollo-sfs
+```
+
+---
+
+## Day-2 Operations (Development / Single-Node)
+
+These commands apply to the local development environment (`docker-compose.yml`). For production, use the Docker Swarm commands above.
 
 ### View logs
 

@@ -24,12 +24,18 @@ type UploadSession struct {
 	TotalChunks int
 	TotalSize   int64
 
+	// IgnoreRedirect, when true, skips auto-routing this upload into the user's
+	// media auto-upload folder even if it turns out to be an image or video.
+	// Set by the handler after Create, before any chunks are dispatched.
+	IgnoreRedirect bool
+
 	// Set by FileService.BeginChunkedUpload before any chunks are dispatched.
 	FileID        uuid.UUID
 	ObjectKey     string
 	MinioUploadID string
 	UserKey       []byte // zeroed by Zero() when the session is finalised or deleted
 	MimeType      string // detected from the first chunk; set by EncryptAndUploadPart
+	SHA256Hash    string // hex SHA-256 of plaintext, supplied by mobile clients for dedup
 	DriveID       uuid.UUID
 	MinIOStorage  *MinIOService
 

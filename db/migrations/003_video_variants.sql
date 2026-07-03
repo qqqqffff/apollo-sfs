@@ -2,7 +2,7 @@
 -- status: 'pending' (queued/running), 'ready' (streamable), 'failed' (transcode error).
 -- Rows are cascade-deleted when the parent files row is removed.
 
-CREATE TABLE video_variants (
+CREATE TABLE IF NOT EXISTS video_variants (
     id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
     file_id          UUID        NOT NULL REFERENCES files(id) ON DELETE CASCADE,
     quality          TEXT        NOT NULL,
@@ -14,4 +14,4 @@ CREATE TABLE video_variants (
     UNIQUE (file_id, quality)
 );
 
-CREATE INDEX video_variants_file_id_idx ON video_variants (file_id);
+CREATE INDEX IF NOT EXISTS video_variants_file_id_idx ON video_variants (file_id);

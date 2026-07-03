@@ -21,6 +21,11 @@ type Config struct {
 	MinIOAccessKey  string
 	MinIOSecretKey  string
 	MinIOBucketName string
+	MinIOUseSSL     bool
+	// MinIOStandardEndpoint is the standard-tier MinIO endpoint, reachable with the
+	// same root credentials. Empty for single-instance deployments (e.g. local dev).
+	// Used only by the on-demand infrastructure sync.
+	MinIOStandardEndpoint string
 
 	CookieDomain string
 	CookieSecure bool
@@ -34,6 +39,7 @@ type Config struct {
 	KeyEncryptionKey         string
 	QuotaWarningThresholdPct int
 	DiskStatsPath            string
+	DiskStatsDriveLabel      string
 
 	// SessionKey is the secret used to sign and encrypt the session cookie.
 	// Must be 32 or 64 bytes (AES-128 or AES-256). Set via SESSION_KEY env var.
@@ -94,11 +100,23 @@ type Config struct {
 	// signature, so this shared secret guards the public endpoint. Empty
 	// disables the check (only safe behind a trusted network).
 	SendgridWebhookSecret string
+
+	// GoogleWebClientID / GoogleWebClientSecret are the web OAuth 2.0 credentials
+	// used to exchange a mobile serverAuthCode for a Google id_token on the backend.
+	// The resulting id_token has aud = web client ID, which Keycloak's Google IdP
+	// accepts during token exchange. Set via GOOGLE_WEB_CLIENT_ID / GOOGLE_WEB_CLIENT_SECRET.
+	GoogleWebClientID     string
+	GoogleWebClientSecret string
 }
 
 func loadConfig() Config {
 	quotaPct, _ := strconv.Atoi(getEnv("QUOTA_WARNING_THRESHOLD_PERCENT", "80"))
 	premiumPrice, _ := strconv.Atoi(getEnv("PREMIUM_TIER_PRICE_CENTS", "999"))
+
+	paypalEnv          := getEnv("PAYPAL_ENV", "sandbox")
+	paypalClientID     := getEnv("PAYPAL_CLIENT_ID", "")
+	paypalClientSecret := getEnv("PAYPAL_CLIENT_SECRET", "")
+	paypalWebhookID    := getEnv("PAYPAL_WEBHOOK_ID", "")
 
 	return Config{
 		Port: getEnv("PORT", "8080"),
@@ -116,10 +134,12 @@ func loadConfig() Config {
 		KeycloakClientID:     requireEnv("KEYCLOAK_CLIENT_ID"),
 		KeycloakClientSecret: requireEnv("KEYCLOAK_CLIENT_SECRET"),
 
-		MinIOEndpoint:   requireEnv("MINIO_ENDPOINT"),
-		MinIOAccessKey:  requireEnv("MINIO_ROOT_USER"),
-		MinIOSecretKey:  requireEnv("MINIO_ROOT_PASSWORD"),
-		MinIOBucketName: requireEnv("MINIO_BUCKET_NAME"),
+		MinIOEndpoint:         requireEnv("MINIO_ENDPOINT"),
+		MinIOAccessKey:        requireEnv("MINIO_ROOT_USER"),
+		MinIOSecretKey:        requireEnv("MINIO_ROOT_PASSWORD"),
+		MinIOBucketName:       requireEnv("MINIO_BUCKET_NAME"),
+		MinIOUseSSL:           os.Getenv("MINIO_USE_SSL") == "true",
+		MinIOStandardEndpoint: getEnv("MINIO_STANDARD_ENDPOINT", ""),
 
 		CookieDomain: requireEnv("COOKIE_DOMAIN"),
 		CookieSecure: os.Getenv("COOKIE_SECURE") == "true",
@@ -133,6 +153,7 @@ func loadConfig() Config {
 		KeyEncryptionKey:         requireEnv("KEY_ENCRYPTION_KEY"),
 		QuotaWarningThresholdPct: quotaPct,
 		DiskStatsPath:            getEnv("DISK_STATS_PATH", "/mnt/data"),
+		DiskStatsDriveLabel:      getEnv("DISK_STATS_DRIVE_LABEL", ""),
 
 		SessionKey: requireEnv("SESSION_KEY"),
 
@@ -147,15 +168,18 @@ func loadConfig() Config {
 		FrontendE2EURL:  getEnv("FRONTEND_E2E_URL", ""),
 
 		SFSAPIKeyPepper:       requireEnv("SFS_API_KEY_PEPPER"),
-		PayPalClientID:        getEnv("PAYPAL_CLIENT_ID", ""),
-		PayPalClientSecret:    getEnv("PAYPAL_CLIENT_SECRET", ""),
-		PayPalWebhookID:       getEnv("PAYPAL_WEBHOOK_ID", ""),
-		PayPalEnvironment:     getEnv("PAYPAL_ENV", "sandbox"),
+		PayPalClientID:        paypalClientID,
+		PayPalClientSecret:    paypalClientSecret,
+		PayPalWebhookID:       paypalWebhookID,
+		PayPalEnvironment:     paypalEnv,
 		PremiumTierPriceCents: premiumPrice,
 		PremiumTierCurrency:   getEnv("PREMIUM_TIER_CURRENCY", "USD"),
 
 		EmailStoragePath:      getEnv("EMAIL_STORAGE_PATH", "/home/app/service-worker-email"),
 		SendgridWebhookSecret: getEnv("SENDGRID_WEBHOOK_SECRET", ""),
+
+		GoogleWebClientID:     getEnv("GOOGLE_WEB_CLIENT_ID", ""),
+		GoogleWebClientSecret: getEnv("GOOGLE_WEB_CLIENT_SECRET", ""),
 	}
 }
 

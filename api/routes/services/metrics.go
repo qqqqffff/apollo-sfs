@@ -3,16 +3,19 @@ package services
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/shirou/gopsutil/v4/cpu"
 	psdisk "github.com/shirou/gopsutil/v4/disk"
 	"github.com/shirou/gopsutil/v4/mem"
@@ -168,13 +171,17 @@ func (h *Hub) ClientCount() int {
 // snapshot to the DB, and broadcasts it to all active WebSocket clients. A
 // separate daily goroutine prunes rows older than 7 days.
 type MetricsService struct {
-	queries          *db.Queries
-	hub              *Hub
-	diskStatsPath    string
-	ping             *pingCollector
-	speedTestMu      sync.RWMutex
-	speedTestStream  SpeedTestStreamProvider
+	queries         *db.Queries
+	hub             *Hub
+	diskStatsPath   string
+	ping            *pingCollector
+	speedTestMu     sync.RWMutex
+	speedTestStream SpeedTestStreamProvider
 }
+
+// nodeStaleAfter is how long after a node's last push it is still considered
+// online. Agents push every ~5s, so 20s tolerates a few missed samples.
+const nodeStaleAfter = 20 * time.Second
 
 // NewMetricsService constructs a MetricsService.
 // diskStatsPath is the filesystem path used to report disk capacity — it should
@@ -234,6 +241,133 @@ func (s *MetricsService) GetHistoryByDate(ctx context.Context, date string, page
 	return s.queries.ListSnapshotsByDate(ctx, date, page)
 }
 
+// GetNodeHistoryByHours returns ~120 evenly-distributed hardware snapshots for
+// one node from the past hours hours, oldest-first. Backs the per-node graphs.
+func (s *MetricsService) GetNodeHistoryByHours(ctx context.Context, nodeID uuid.UUID, hours int) ([]models.NodeMetricSnapshot, error) {
+	return s.queries.ListNodeSnapshotsByHours(ctx, nodeID, hours, 120)
+}
+
+// GetDriveTempHistoryByHours returns ~120 evenly-distributed temperature
+// readings for one drive from the past hours hours, oldest-first. Backs the
+// drive-temperature carousel graph.
+func (s *MetricsService) GetDriveTempHistoryByHours(ctx context.Context, driveID uuid.UUID, hours int) ([]models.DriveTempSnapshot, error) {
+	return s.queries.ListDriveTempsByHours(ctx, driveID, hours, 120)
+}
+
+// GetNodeDisks returns every physical disk currently reported for a node.
+func (s *MetricsService) GetNodeDisks(ctx context.Context, nodeID uuid.UUID) ([]models.NodeDisk, error) {
+	return s.queries.ListNodeDisks(ctx, nodeID)
+}
+
+// GetNodeDiskTempHistoryByHours returns ~120 evenly-distributed temperature
+// readings for one physical disk from the past hours hours, oldest-first. Backs
+// the per-disk temperature history graph.
+func (s *MetricsService) GetNodeDiskTempHistoryByHours(ctx context.Context, diskID uuid.UUID, hours int) ([]models.NodeDiskTempSnapshot, error) {
+	return s.queries.ListNodeDiskTempsByHours(ctx, diskID, hours, 120)
+}
+
+// ── Per-node hardware aggregation ──────────────────────────────────────────────
+// Ingestion (POST /internal/node-metrics) runs in a separate service
+// (cmd/node-metrics-ingest, services.NodeIngestService) so it can be deployed
+// and scaled independently of the public API. This service only reads the
+// resulting rows back to assemble the live per-node view.
+
+// NodeStates returns a stable, hostname-sorted snapshot of every node that has
+// reported at least once, sourced fresh from Postgres. Online is derived from
+// each node's latest sample age so a node whose agent has gone silent still
+// appears (with Online=false) for the UI.
+func (s *MetricsService) NodeStates(ctx context.Context) ([]models.NodeFrame, error) {
+	summaries, err := s.queries.GetNodeSummaries(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("NodeStates: node summaries: %w", err)
+	}
+	snapshots, err := s.queries.GetLatestNodeSnapshots(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("NodeStates: latest snapshots: %w", err)
+	}
+	disks, err := s.queries.ListAllNodeDisks(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("NodeStates: node disks: %w", err)
+	}
+	driveSummaries, err := s.queries.GetDriveSummaries(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("NodeStates: drive summaries: %w", err)
+	}
+
+	disksByNode := make(map[uuid.UUID][]models.NodeDisk)
+	for _, d := range disks {
+		disksByNode[d.NodeID] = append(disksByNode[d.NodeID], d)
+	}
+	drivesByNode := make(map[uuid.UUID][]models.DriveSummary)
+	for _, ds := range driveSummaries {
+		if ds.NodeID != nil {
+			drivesByNode[*ds.NodeID] = append(drivesByNode[*ds.NodeID], ds)
+		}
+	}
+
+	now := time.Now().UTC()
+	out := make([]models.NodeFrame, 0, len(summaries))
+	for _, n := range summaries {
+		snap, hasSnap := snapshots[n.NodeID]
+		if !hasSnap {
+			// Never reported — omit rather than showing an all-zero frame.
+			continue
+		}
+
+		nodeDisks := disksByNode[n.NodeID]
+		diskFrames := make([]models.DiskFrame, 0, len(nodeDisks))
+		diskByLabel := make(map[string]models.NodeDisk, len(nodeDisks))
+		for _, d := range nodeDisks {
+			diskByLabel[d.Label] = d
+			diskFrames = append(diskFrames, models.DiskFrame{
+				DiskID:      d.ID,
+				Label:       d.Label,
+				Device:      d.Device,
+				TempCelsius: d.TempCelsius,
+				TotalBytes:  d.CapacityBytes,
+				UsedBytes:   d.UsedBytes,
+				FreeBytes:   d.FreeBytes,
+			})
+		}
+
+		driveFrames := make([]models.DriveFrame, 0, len(drivesByNode[n.NodeID]))
+		for _, ds := range drivesByNode[n.NodeID] {
+			d, ok := diskByLabel[ds.DriveLabel]
+			if !ok {
+				continue
+			}
+			driveFrames = append(driveFrames, models.DriveFrame{
+				DriveID:     ds.DriveID,
+				Label:       ds.DriveLabel,
+				DriveType:   ds.DriveType,
+				TempCelsius: d.TempCelsius,
+				TotalBytes:  d.CapacityBytes,
+				UsedBytes:   d.UsedBytes,
+				FreeBytes:   d.FreeBytes,
+			})
+		}
+
+		out = append(out, models.NodeFrame{
+			NodeID:           n.NodeID,
+			Hostname:         n.Hostname,
+			Role:             n.Role,
+			IsActive:         n.IsActive,
+			Online:           now.Sub(snap.SampledAt) < nodeStaleAfter,
+			CPUPercent:       snap.CPUPercent,
+			CPUTempCelsius:   snap.CPUTempCelsius,
+			MemoryUsedBytes:  snap.MemoryUsedBytes,
+			MemoryTotalBytes: snap.MemoryTotalBytes,
+			NetworkBytesSent: snap.NetworkBytesSent,
+			NetworkBytesRecv: snap.NetworkBytesRecv,
+			SampledAt:        snap.SampledAt,
+			Drives:           driveFrames,
+			Disks:            diskFrames,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Hostname < out[j].Hostname })
+	return out, nil
+}
+
 // ── Goroutines ────────────────────────────────────────────────────────────────
 
 func (s *MetricsService) runSampler(ctx context.Context) {
@@ -267,8 +401,16 @@ func (s *MetricsService) runSampler(ctx context.Context) {
 				log.Printf("metrics: insert: %v", err)
 				continue
 			}
+			// Broadcast the combined frame: cluster snapshot + the latest per-node
+			// hardware pushed by each node's agent.
 			if s.hub.ClientCount() > 0 {
-				if msg, err := json.Marshal(snap); err == nil {
+				nodes, err := s.NodeStates(ctx)
+				if err != nil {
+					log.Printf("metrics: node states: %v", err)
+					nodes = nil
+				}
+				frame := models.MetricsFrame{Cluster: snap, Nodes: nodes}
+				if msg, err := json.Marshal(frame); err == nil {
 					s.hub.Broadcast(msg)
 				}
 			}
@@ -288,6 +430,15 @@ func (s *MetricsService) runPruner(ctx context.Context) {
 			cutoff := time.Now().UTC().Add(-metricsRetention)
 			if err := s.queries.PruneOldSnapshots(ctx, cutoff); err != nil {
 				log.Printf("metrics: prune: %v", err)
+			}
+			if err := s.queries.PruneOldNodeSnapshots(ctx, cutoff); err != nil {
+				log.Printf("metrics: prune node snapshots: %v", err)
+			}
+			if err := s.queries.PruneOldDriveTemps(ctx, cutoff); err != nil {
+				log.Printf("metrics: prune drive temps: %v", err)
+			}
+			if err := s.queries.PruneOldNodeDiskTemps(ctx, cutoff); err != nil {
+				log.Printf("metrics: prune node disk temps: %v", err)
 			}
 		}
 	}

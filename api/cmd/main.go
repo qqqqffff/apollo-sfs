@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -20,9 +21,12 @@ import (
 	"apollo-sfs.com/api/routes/admin"
 	"apollo-sfs.com/api/routes/auth"
 	"apollo-sfs.com/api/routes/middleware"
+	"apollo-sfs.com/api/routes/billing"
+	"apollo-sfs.com/api/routes/expansion"
 	"apollo-sfs.com/api/routes/payments"
 	"apollo-sfs.com/api/routes/services"
 	"apollo-sfs.com/api/routes/sfs"
+	storageroutes "apollo-sfs.com/api/routes/storage"
 )
 
 func main() {
@@ -78,18 +82,35 @@ func main() {
 	rotationSvc := services.NewKeyRotationService(queries, encSvc, 0) // 0 = default 30-day age
 
 	authSvc := services.NewAuthService(queries, services.AuthServiceConfig{
-		KeycloakURL:          cfg.KeycloakInternalURL,
-		KeycloakRealm:        cfg.KeycloakRealm,
-		KeycloakClientID:     cfg.KeycloakClientID,
-		KeycloakClientSecret: cfg.KeycloakClientSecret,
-		AppBaseURL:           cfg.AppBaseURL,
+		KeycloakURL:           cfg.KeycloakInternalURL,
+		KeycloakRealm:         cfg.KeycloakRealm,
+		KeycloakClientID:      cfg.KeycloakClientID,
+		KeycloakClientSecret:  cfg.KeycloakClientSecret,
+		AppBaseURL:            cfg.AppBaseURL,
+		GoogleWebClientID:     cfg.GoogleWebClientID,
+		GoogleWebClientSecret: cfg.GoogleWebClientSecret,
 	})
 	authSvc.ProvisionUserKey = encSvc.ProvisionUserKey
 
 	// ── MinIO registry ────────────────────────────────────────────────────────
 	// Seed the servers/drives tables on first boot, then build the registry from DB.
-	if err := seedDefaultServer(context.Background(), queries, cfg, encSvc.KEK()); err != nil {
+	if err := seedDefaultServer(context.Background(), queries, cfg, encSvc.KEK(), cfg.DiskStatsDriveLabel); err != nil {
 		log.Fatalf("startup seed: %v", err)
+	}
+
+	// Sync capacity_bytes for all drives from the real disk on every startup so
+	// the value is always current (not just when a drive is first added).
+	if cfg.DiskStatsPath != "" {
+		if usage, err := psdisk.Usage(cfg.DiskStatsPath); err == nil {
+			total := int64(usage.Used) + int64(usage.Free)
+			if err := queries.SyncAllDriveCapacities(context.Background(), total); err != nil {
+				log.Printf("warning: sync drive capacities: %v", err)
+			} else {
+				log.Printf("startup: synced all drives to %d bytes capacity", total)
+			}
+		} else {
+			log.Printf("warning: could not read disk stats for sync: %v", err)
+		}
 	}
 
 	registry, err := services.NewMinIORegistry(context.Background(), queries, encSvc.KEK())
@@ -228,8 +249,21 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	h := routes.NewHandler(queries, fileSvc, folderSvc, inviteSvc, favSvc, authSvc, uploadStore, emailSvc, presignSvc, cfg.TurnstileSecretKey)
 	routes.SetAPIKeyService(h, apiKeySvc)
 	routes.SetMathGameService(h, services.NewMathGameService(queries))
-	authHandler := auth.NewHandler(authSvc)
-	adminHandler := admin.NewHandler(queries, inviteSvc, metricsSvc, authSvc, fileSvc, registry, geoReader, cfg.DiskStatsPath, cfg.BackendTestURL, cfg.AppDir, cfg.FrontendTestURL, cfg.FrontendE2EURL, shutdownCh)
+	routes.SetShareService(h, services.NewShareService(queries, emailSvc, cfg.AppBaseURL))
+	authHandler := auth.NewHandler(authSvc, cfg.CookieDomain, cfg.CookieSecure)
+	adminHandler := admin.NewHandler(queries, inviteSvc, metricsSvc, authSvc, fileSvc, registry, geoReader, cfg.DiskStatsPath, cfg.DiskStatsDriveLabel, cfg.BackendTestURL, cfg.AppDir, cfg.FrontendTestURL, cfg.FrontendE2EURL, shutdownCh)
+	// Configure the on-demand infrastructure sync (POST /system/sync): discover
+	// swarm nodes via the Docker socket and drives/capacity via the MinIO admin API.
+	adminHandler.ConfigureInfraSync(admin.InfraSyncConfig{
+		Swarm:            services.NewSwarmInspector(),
+		Storage:          services.NewStorageInspector(),
+		MinIOEndpoint:    cfg.MinIOEndpoint,
+		MinIOAccessKey:   cfg.MinIOAccessKey,
+		MinIOSecretKey:   cfg.MinIOSecretKey,
+		MinIOUseSSL:      cfg.MinIOUseSSL,
+		MinIOBucketName:  cfg.MinIOBucketName,
+		StandardEndpoint: cfg.MinIOStandardEndpoint,
+	})
 	sfsHandler := sfs.NewHandler(queries, fileSvc, presignSvc, apiKeySvc)
 	inboundEmailHandler := admin.NewInboundEmailHandler(inboundEmailSvc, cfg.SendgridWebhookSecret)
 
@@ -245,6 +279,19 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		Currency:    cfg.PremiumTierCurrency,
 		AppBaseURL:  cfg.AppBaseURL,
 	})
+	storageHandler := storageroutes.NewHandler(queries)
+	billingHandler := billing.NewHandler(paypalClient, queries, billing.Config{
+		Currency:  cfg.PremiumTierCurrency,
+		ReturnURL: "apollosfs://billing/storage/complete",
+		CancelURL: "apollosfs://billing/storage/cancel",
+	})
+	expansionHandler := expansion.NewHandler(paypalClient, emailSvc, queries, expansion.Config{
+		Currency:  cfg.PremiumTierCurrency,
+		ReturnURL: "apollosfs://billing/expansion/complete",
+		CancelURL: "apollosfs://billing/expansion/cancel",
+		AppURL:    cfg.AppBaseURL,
+	})
+	expansionHandler.StartExpiryLoop(context.Background())
 	metricsSvc.SetSpeedTestProvider(adminHandler)
 	go adminHandler.SpeedTestLoop(context.Background())
 
@@ -266,6 +313,9 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 
 	// ── SendGrid Inbound Parse webhook (no auth — guarded by ?token= secret) ──
 	v1.POST("/webhooks/email-inbound", inboundEmailHandler.InboundEmailWebhook)
+
+	// Internal node-agent ingest lives in its own service (cmd/node-metrics-ingest)
+	// so it is deployed, scaled, and isolated independently of this API.
 
 	// ── Presigned file endpoints (token auth, no session cookie required) ────
 	v1.GET("/files/:file_id/download/p", h.DownloadFilePresigned)
@@ -300,6 +350,18 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		authGroup.POST("/refresh", authHandler.Refresh)
 		authGroup.POST("/forgot_password", authHandler.ForgotPassword)
 		authGroup.POST("/reset_password", authHandler.ResetPassword)
+		authGroup.GET("/social/callback", authHandler.SocialCallback)
+		authGroup.POST("/social/link", authHandler.SocialLinkConfirm)
+	}
+
+	// ── Mobile auth — token-based (no session cookie) ─────────────────────
+	mobileAuthGroup := v1.Group("/mobile/auth")
+	mobileAuthGroup.Use(mw.RateLimit())
+	{
+		mobileAuthGroup.POST("/login", authHandler.MobileLogin)
+		mobileAuthGroup.POST("/refresh", authHandler.MobileRefresh)
+		mobileAuthGroup.POST("/apple", authHandler.MobileAppleLogin)
+		mobileAuthGroup.POST("/google", authHandler.MobileGoogleLogin)
 	}
 
 	// ── Protected — valid JWT cookie required on every request ───────────────
@@ -312,9 +374,23 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	})
 	{
 		protected.GET("/me", h.Me)
+		// Provisions the app-side user record after a brokered (Keycloak IdP)
+		// login. Lives here (not in mobileAuthGroup) because it requires a valid
+		// brokered access token, which RequireAuth validates.
+		protected.POST("/mobile/auth/session", authHandler.MobileSession)
 		protected.POST("/me/password", h.ChangePassword)
 		protected.GET("/me/preferences", h.GetPreferences)
 		// PUT /me/preferences is premium-only (media auto-upload); registered below.
+		protected.POST("/me/social/link", h.LinkSocial)
+		protected.DELETE("/me/social/unlink", h.UnlinkSocial)
+
+		// Devices (mobile sync)
+		protected.POST("/devices", h.RegisterDevice)
+		protected.DELETE("/devices/:device_id", h.DeleteDevice)
+
+		// Sync delta (mobile)
+		protected.GET("/sync/delta", h.DeltaSync)
+		protected.POST("/sync/check-hash", h.CheckHash)
 
 		// Files — single upload (small files ≤ 5 MB)
 		protected.POST("/files/upload", h.UploadFile)
@@ -341,6 +417,21 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		// Search
 		protected.GET("/search", h.Search)
 
+		// Shares — user-to-user sharing of files and folders. The share token
+		// alone grants nothing: every endpoint requires the caller to be logged
+		// in as the share's recipient (or owner).
+		protected.POST("/shares", h.CreateShare)
+		protected.GET("/shares", h.ListMyShares)
+		protected.GET("/shares/shared-with-me", h.ListSharedWithMe)
+		protected.GET("/shares/resolve/:token", h.ResolveShareToken)
+		protected.GET("/shares/:share_id", h.GetShare)
+		protected.DELETE("/shares/:share_id", h.RevokeShare)
+		protected.GET("/shares/:share_id/contents", h.GetSharedContents)
+		protected.GET("/shares/:share_id/file", h.GetSharedFile)
+		protected.GET("/shares/:share_id/file/preview", h.PreviewSharedFile)
+		protected.GET("/shares/:share_id/file/download", h.DownloadSharedFile)
+		protected.POST("/shares/:share_id/upload", h.UploadToShare)
+
 		// Favorites
 		protected.GET("/favorites", h.ListFavorites)
 		protected.POST("/favorites/files/:file_id", h.FavoriteFile)
@@ -360,6 +451,10 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		protected.PATCH("/folders/:folder_id", h.UpdateFolder)
 		protected.PATCH("/folders/:folder_id/move", h.MoveFolder)
 		protected.DELETE("/folders/:folder_id", h.DeleteFolder)
+		// Per-folder storage tier/server change (moves the folder's direct files
+		// to a different drive as a background job; rate-limited).
+		protected.POST("/folders/:folder_id/drive-migrations", h.RequestFolderDriveMigration)
+		protected.GET("/folders/:folder_id/drive-migrations/latest", h.GetLatestFolderDriveMigration)
 
 		// API key management for the SFS S3-like API. Premium users only;
 		// non-premium callers receive 402 from the handler.
@@ -370,6 +465,38 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		// Premium upgrade — create + capture a one-time PayPal order.
 		protected.POST("/payments/orders", paymentsHandler.CreateOrder)
 		protected.POST("/payments/orders/:order_id/capture", paymentsHandler.CaptureOrder)
+
+		// User-facing storage info — separate from admin routes for security.
+		protected.GET("/storage/servers", storageHandler.ListServers)
+		protected.GET("/storage/servers/:server_id/ping", storageHandler.PingServer)
+		protected.GET("/storage/breakdown", storageHandler.GetBreakdown)
+		protected.GET("/storage/my-servers", storageHandler.ListMyServers)
+		protected.PUT("/storage/primary-server", storageHandler.SetPrimaryServer)
+		protected.GET("/storage/speed/download", storageHandler.SpeedTestDownload)
+		protected.POST("/storage/speed/upload", storageHandler.SpeedTestUpload)
+
+		// Storage add-on billing — four payment methods, each backed by PayPal.
+		protected.POST("/billing/storage/order", billingHandler.CreateWalletOrder)
+		protected.POST("/billing/storage/order/:order_id/capture", billingHandler.CaptureWalletOrder)
+		protected.POST("/billing/storage/hosted-card", billingHandler.CaptureHostedCard)
+		protected.POST("/billing/storage/card", billingHandler.ChargeCard)
+		protected.POST("/billing/storage/apple-pay", billingHandler.ChargeApplePay)
+		protected.POST("/billing/storage/google-pay", billingHandler.ChargeGooglePay)
+
+		// Expansion deposit billing — when a tier is unavailable, user pays a 50% deposit.
+		protected.POST("/billing/storage/expansion/order", expansionHandler.CreateWalletOrder)
+		protected.POST("/billing/storage/expansion/order/:order_id/capture", expansionHandler.CaptureWalletOrder)
+		protected.POST("/billing/storage/expansion/hosted-card", expansionHandler.CaptureHostedCardExpansion)
+		protected.POST("/billing/storage/expansion/card", expansionHandler.ChargeCardExpansion)
+		protected.POST("/billing/storage/expansion/apple-pay", expansionHandler.ChargeApplePayExpansion)
+		protected.POST("/billing/storage/expansion/google-pay", expansionHandler.ChargeGooglePayExpansion)
+
+		// Pay remaining balance after admin marks server capacity as expanded.
+		protected.POST("/billing/storage/expansion/:id/pay-remaining/order", expansionHandler.PayRemainingWalletOrder)
+		protected.POST("/billing/storage/expansion/:id/pay-remaining/order/:order_id/capture", expansionHandler.CapturePayRemainingWallet)
+		protected.POST("/billing/storage/expansion/:id/pay-remaining/card", expansionHandler.PayRemainingCard)
+		protected.POST("/billing/storage/expansion/:id/pay-remaining/apple-pay", expansionHandler.PayRemainingApplePay)
+		protected.POST("/billing/storage/expansion/:id/pay-remaining/google-pay", expansionHandler.PayRemainingGooglePay)
 
 		// ── Premium-only: media collections ──────────────────────────────────
 		premiumGroup := protected.Group("")
@@ -390,6 +517,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 			adminGroup.GET("/users/:user_id", adminHandler.GetUser)
 			adminGroup.PATCH("/users/:user_id/quota", adminHandler.UpdateUserQuota)
 			adminGroup.PATCH("/users/:user_id/username", adminHandler.UpdateUsername)
+			adminGroup.GET("/users/:user_id/storage", h.AdminGetUserStorage)
 			adminGroup.GET("/users/:user_id/folders", h.AdminListUserFolders)
 			adminGroup.GET("/users/:user_id/folders/:folder_id", h.AdminGetUserFolder)
 			adminGroup.GET("/users/:user_id/favorites", h.AdminGetUserFavorites)
@@ -407,9 +535,18 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 			adminGroup.GET("/system/ping", adminHandler.PingServer)
 
 			adminGroup.GET("/system/infrastructure", adminHandler.GetInfrastructure)
+			adminGroup.POST("/system/sync", adminHandler.SyncInfrastructure)
 			adminGroup.GET("/system/capacity", adminHandler.GetCapacity)
+			adminGroup.GET("/system/drive-stats", adminHandler.GetDriveStats)
+			adminGroup.GET("/system/nodes/:node_id/metrics/history", adminHandler.GetNodeMetricsHistory)
+			adminGroup.GET("/system/nodes/:node_id/disks", adminHandler.GetNodeDisks)
+			adminGroup.GET("/system/drives/:drive_id/temps/history", adminHandler.GetDriveTempsHistory)
+			adminGroup.GET("/system/disks/:disk_id/temps/history", adminHandler.GetNodeDiskTempsHistory)
 			adminGroup.POST("/system/servers", adminHandler.CreateServer)
 			adminGroup.PATCH("/system/servers/:server_id", adminHandler.UpdateServer)
+			adminGroup.POST("/system/servers/:server_id/nodes", adminHandler.CreateNode)
+			adminGroup.PATCH("/system/servers/:server_id/nodes/:node_id", adminHandler.UpdateNode)
+			adminGroup.DELETE("/system/servers/:server_id/nodes/:node_id", adminHandler.DeleteNode)
 			adminGroup.POST("/system/servers/:server_id/drives", adminHandler.AddDrive)
 			adminGroup.PATCH("/system/servers/:server_id/drives/:drive_id", adminHandler.UpdateDrive)
 			adminGroup.DELETE("/system/servers/:server_id/drives/:drive_id", adminHandler.DeleteDrive)
@@ -424,6 +561,10 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 			adminGroup.POST("/users/:user_id/pardon", adminHandler.PardonUser)
 			adminGroup.GET("/bans", adminHandler.ListUserBans)
 
+			adminGroup.GET("/expansion-requests", expansionHandler.ListRequests)
+			adminGroup.POST("/expansion-requests/:id/fulfill", expansionHandler.MarkExpanded)
+			adminGroup.POST("/expansion-requests/:id/cancel", expansionHandler.CancelRequest)
+
 			adminGroup.GET("/interest", adminHandler.ListInterestSubmissions)
 			adminGroup.GET("/interest/settings", adminHandler.GetInterestFormSettings)
 			adminGroup.PUT("/interest/settings", adminHandler.UpdateInterestFormSettings)
@@ -435,10 +576,9 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 			adminGroup.GET("/system/speed-test", adminHandler.GetSpeedTest)
 			adminGroup.POST("/system/speed-test", adminHandler.TriggerSpeedTest)
 
-			adminGroup.GET("/system/drive-temps", adminHandler.GetDriveTemps)
-
-			adminGroup.GET("/system/alarm/settings", adminHandler.GetAlarmSettings)
-			adminGroup.POST("/system/alarm/subscribe", adminHandler.ToggleAlarmSubscription)
+			adminGroup.GET("/system/alarm/subscriptions", adminHandler.GetAlarmSubscriptions)
+			adminGroup.PUT("/system/alarm/subscriptions", adminHandler.UpsertAlarmSubscription)
+			adminGroup.DELETE("/system/alarm/subscriptions", adminHandler.DeleteAlarmSubscription)
 
 			adminGroup.GET("/emails/workers", inboundEmailHandler.ListEmailWorkers)
 			adminGroup.GET("/emails", inboundEmailHandler.ListEmails)
@@ -455,7 +595,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 // It creates a server + drive record from the existing env-var MinIO credentials,
 // auto-detects drive capacity from the disk stats path, backfills files.drive_id,
 // and allocates all existing users to the new drive.
-func seedDefaultServer(ctx context.Context, queries *db.Queries, cfg Config, kek []byte) error {
+func seedDefaultServer(ctx context.Context, queries *db.Queries, cfg Config, kek []byte, driveLabel string) error {
 	servers, err := queries.ListServers(ctx)
 	if err != nil {
 		return fmt.Errorf("list servers: %w", err)
@@ -497,11 +637,34 @@ func seedDefaultServer(ctx context.Context, queries *db.Queries, cfg Config, kek
 		return fmt.Errorf("create server: %w", err)
 	}
 
+	// Every server owns at least one node (the manager host itself). Drives are
+	// mounted on a node, so create a default node and attach the seeded drive.
+	node, err := queries.CreateNode(ctx, db.CreateNodeParams{
+		ServerID: server.ID,
+		Hostname: server.Name + "-node-1",
+		Role:     "manager",
+	})
+	if err != nil {
+		return fmt.Errorf("create node: %w", err)
+	}
+
+	label := driveLabel
+	if label == "" {
+		label = "nvme-01"
+	}
+	// The bootstrap drive is the primary NVMe/fast tier; infer the tier from the
+	// label to match AddDrive's classification.
+	driveType := "hdd"
+	if strings.Contains(strings.ToLower(label), "nvme") {
+		driveType = "nvme"
+	}
 	drive, err := queries.CreateDrive(ctx, db.CreateDriveParams{
 		ServerID:      server.ID,
-		Label:         "nvme-01",
+		NodeID:        &node.ID,
+		Label:         label,
 		CapacityBytes: capacityBytes,
 		MinioBucket:   cfg.MinIOBucketName,
+		DriveType:     driveType,
 	})
 	if err != nil {
 		return fmt.Errorf("create drive: %w", err)

@@ -104,11 +104,13 @@ type createFolderRequest struct {
 	Name     string  `json:"name"      binding:"required,max=255"`
 	ParentID *string `json:"parent_id"` // omit or null → root
 	Kind     string  `json:"kind"`      // "regular" (default) or "media"
+	DriveID  *string `json:"drive_id"`  // omit or null → dynamic routing (default)
 }
 
 // CreateFolder handles POST /api/v1/folders.
-// Body: {"name": "Documents", "parent_id": "<uuid>|null"}.
-// Omitting parent_id creates a root-level folder.
+// Body: {"name": "Documents", "parent_id": "<uuid>|null", "drive_id": "<uuid>|null"}.
+// Omitting parent_id creates a root-level folder. Omitting drive_id leaves the
+// folder's uploads on the existing dynamic primary-first/least-full routing.
 func (h *Handler) CreateFolder(c *gin.Context) {
 	var req createFolderRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -123,6 +125,7 @@ func (h *Handler) CreateFolder(c *gin.Context) {
 	}
 
 	userID, _ := uuid.Parse(c.GetString("userID"))
+	username := c.GetString("username")
 
 	var parentID *uuid.UUID
 	if req.ParentID != nil && *req.ParentID != "" {
@@ -134,20 +137,31 @@ func (h *Handler) CreateFolder(c *gin.Context) {
 		parentID = &pid
 	}
 
-	folder, err := h.folders.Create(c.Request.Context(), userID, parentID, req.Name, req.Kind)
+	var driveID *uuid.UUID
+	if req.DriveID != nil && *req.DriveID != "" {
+		did, err := uuid.Parse(*req.DriveID)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "drive_id must be a valid UUID"})
+			return
+		}
+		driveID = &did
+	}
+
+	folder, err := h.folders.Create(c.Request.Context(), userID, parentID, req.Name, req.Kind, username, driveID)
 	if err != nil {
 		switch {
 		case errors.Is(err, services.ErrFolderNotFound):
 			c.JSON(http.StatusNotFound, gin.H{"error": "parent folder not found"})
 		case errors.Is(err, services.ErrDuplicateFolderName):
 			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		case errors.Is(err, services.ErrDriveNotAllocated):
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		default:
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "could not create folder"})
 		}
 		return
 	}
 
-	username := c.GetString("username")
 	h.logAudit(db.AuditInput{
 		TargetUsername: username,
 		ActorUsername:  username,
@@ -290,6 +304,96 @@ func (h *Handler) DeleteFolder(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "folder deleted"})
+}
+
+// ── RequestFolderDriveMigration ───────────────────────────────────────────────
+
+type requestFolderDriveMigrationRequest struct {
+	DriveID string `json:"drive_id" binding:"required"`
+}
+
+// RequestFolderDriveMigration handles POST /api/v1/folders/:folder_id/drive-migrations.
+// Body: {"drive_id": "<uuid>"}.
+// Moves the folder's direct files (not recursively into subfolders) onto the
+// given drive as a background job and returns the created tracking row
+// immediately. Returns 400 if drive_id is not one of the user's allocations,
+// 409 if a migration for this folder is already pending/in_progress, and 429
+// if the folder has hit the rolling rate limit.
+func (h *Handler) RequestFolderDriveMigration(c *gin.Context) {
+	folderID, err := uuid.Parse(c.Param("folder_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid folder_id"})
+		return
+	}
+
+	var req requestFolderDriveMigrationRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "drive_id is required"})
+		return
+	}
+	driveID, err := uuid.Parse(req.DriveID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "drive_id must be a valid UUID"})
+		return
+	}
+
+	userID, _ := uuid.Parse(c.GetString("userID"))
+	username := c.GetString("username")
+
+	migration, err := h.files.RequestDriveMigration(c.Request.Context(), userID, username, folderID, driveID)
+	if err != nil {
+		switch {
+		case errors.Is(err, services.ErrFolderNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"error": "folder not found"})
+		case errors.Is(err, services.ErrDriveNotAllocated):
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		case errors.Is(err, services.ErrMigrationAlreadyRunning):
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		case errors.Is(err, services.ErrMigrationRateLimited):
+			c.JSON(http.StatusTooManyRequests, gin.H{"error": err.Error()})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "could not start storage change"})
+		}
+		return
+	}
+
+	h.logAudit(db.AuditInput{
+		TargetUsername: username,
+		ActorUsername:  username,
+		Action:         "folder_drive_migration_requested",
+		ResourceType:   strPtr("folder"),
+		ResourceID:     &folderID,
+	})
+
+	c.JSON(http.StatusAccepted, migration)
+}
+
+// ── GetLatestFolderDriveMigration ─────────────────────────────────────────────
+
+// GetLatestFolderDriveMigration handles GET /api/v1/folders/:folder_id/drive-migrations/latest.
+// Returns the folder's most recent migration row (if any) plus eligibility
+// info (recent_count, limit, window_days, next_eligible_at), so the frontend
+// can show/disable the "change" action without a second round trip.
+func (h *Handler) GetLatestFolderDriveMigration(c *gin.Context) {
+	folderID, err := uuid.Parse(c.Param("folder_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid folder_id"})
+		return
+	}
+
+	userID, _ := uuid.Parse(c.GetString("userID"))
+
+	status, err := h.files.GetLatestDriveMigration(c.Request.Context(), userID, folderID)
+	if err != nil {
+		if errors.Is(err, services.ErrFolderNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "folder not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not retrieve storage-change status"})
+		return
+	}
+
+	c.JSON(http.StatusOK, status)
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

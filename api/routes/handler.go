@@ -53,6 +53,8 @@ type FileServicer interface {
 	BeginChunkedUpload(ctx context.Context, sess *services.UploadSession) error
 	EncryptAndUploadPart(ctx context.Context, sess *services.UploadSession, index int, data []byte)
 	FinalizeChunkedUpload(ctx context.Context, sess *services.UploadSession) (*models.File, error)
+	RequestDriveMigration(ctx context.Context, userID uuid.UUID, username string, folderID, toDriveID uuid.UUID) (*models.FolderDriveMigration, error)
+	GetLatestDriveMigration(ctx context.Context, userID, folderID uuid.UUID) (*services.DriveMigrationStatus, error)
 }
 
 // FolderServicer is the subset of *services.FolderService used by route handlers.
@@ -60,7 +62,7 @@ type FolderServicer interface {
 	ListRoot(ctx context.Context, userID uuid.UUID, folderPage, filePage db.PageInput) (*services.FolderContents, error)
 	GetContents(ctx context.Context, folderID, userID uuid.UUID, folderPage, filePage db.PageInput) (*services.FolderContents, error)
 	GetMediaContents(ctx context.Context, folderID, userID uuid.UUID, sort db.MediaSort, hidden db.HiddenFilter, folderPage, filePage db.PageInput) (*services.FolderContents, error)
-	Create(ctx context.Context, userID uuid.UUID, parentID *uuid.UUID, name string, kind string) (*models.Folder, error)
+	Create(ctx context.Context, userID uuid.UUID, parentID *uuid.UUID, name, kind, username string, driveID *uuid.UUID) (*models.Folder, error)
 	Rename(ctx context.Context, folderID, userID uuid.UUID, name string) (*models.Folder, error)
 	Move(ctx context.Context, folderID, targetID, userID uuid.UUID) (*models.Folder, error)
 	Delete(ctx context.Context, folderID, userID uuid.UUID) error
@@ -89,6 +91,7 @@ type Handler struct {
 	email           *services.EmailService
 	presign         *services.PresignService
 	apiKeys         *services.APIKeyService
+	shares          *services.ShareService
 	turnstileSecret string
 	// verifyCaptcha overrides the real Turnstile HTTP call. When nil the
 	// production verifyTurnstile function is used.
@@ -124,6 +127,13 @@ func SetVerifyCaptcha(h *Handler, fn func(secret, token, ip string) (bool, error
 // causes the management endpoints to return 503 (configured, not crash).
 func SetAPIKeyService(h *Handler, svc *services.APIKeyService) {
 	h.apiKeys = svc
+}
+
+// SetShareService installs the sharing service on an existing Handler.
+// Wired from main once the service is constructed; nil is tolerated and
+// causes the share endpoints to return 503 (configured, not crash).
+func SetShareService(h *Handler, svc *services.ShareService) {
+	h.shares = svc
 }
 
 // SetMathGameService installs the math game score service on an existing

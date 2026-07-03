@@ -17,10 +17,13 @@ ALTER TABLE files   FORCE  ROW LEVEL SECURITY;
 ALTER TABLE folders ENABLE ROW LEVEL SECURITY;
 ALTER TABLE folders FORCE  ROW LEVEL SECURITY;
 
+-- CREATE POLICY has no IF NOT EXISTS form, so drop first to stay idempotent.
+DROP POLICY IF EXISTS files_owned_by_current_user ON files;
 CREATE POLICY files_owned_by_current_user ON files
     USING      (user_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid)
     WITH CHECK (user_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid);
 
+DROP POLICY IF EXISTS folders_owned_by_current_user ON folders;
 CREATE POLICY folders_owned_by_current_user ON folders
     USING      (user_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid)
     WITH CHECK (user_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid);

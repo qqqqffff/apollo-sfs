@@ -17,6 +17,7 @@ import { getMediaFolder, createFolder } from '../api/folders'
 import { hideFile, unhideFile, previewUrl } from '../api/files'
 import { copyToCollection, removeFromCollection } from '../api/collections'
 import { meQueryOptions } from '../api/me'
+import { listMyServers, resolveDrive } from '../api/storage'
 import { useNotification } from '../context/NotificationContext'
 import { useFileUpload } from '../hooks/useFileUpload'
 import { UploadModal } from './UploadModal'
@@ -57,6 +58,8 @@ export function MediaCollectionView({ folderId, folder, readOnly, onBack, onOpen
   const queryClient = useQueryClient()
   const { notify } = useNotification()
   const { data: user } = useQuery(meQueryOptions)
+  const { data: myServers } = useQuery({ queryKey: ['storage', 'my-servers'], queryFn: listMyServers })
+  const { drive: uploadDrive, isPinned: uploadDriveIsPinned } = resolveDrive(folder.drive_id, myServers)
   const [sort, setSort] = useState<MediaSort>('taken_at')
   const [hidden, setHidden] = useState<HiddenMode>('hide')
   const [creating, setCreating] = useState(false)
@@ -255,6 +258,7 @@ export function MediaCollectionView({ folderId, folder, readOnly, onBack, onOpen
         <UploadModal
           files={pendingFiles}
           folderName={folder.name}
+          location={uploadDrive ? { name: uploadDrive.name, tier: uploadDrive.drive_type, isPinned: uploadDriveIsPinned } : undefined}
           user={user}
           onConfirm={() => {
             const filesToUpload = pendingFiles

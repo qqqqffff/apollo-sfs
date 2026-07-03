@@ -1,0 +1,71 @@
+{{/*
+  Template name : "expansion_payment_due"
+  Trigger       : Admin marks a server expansion as ready; user must pay remaining balance
+  Data fields   :
+    AppName          string
+    AppURL           string
+    ServerName       string
+    PlanLabel        string  — e.g. "256 GB NVMe"
+    RemainingFmt     string  — e.g. "$50.00"
+    PaymentDueAt     string  — human-readable deadline, e.g. "Mon, 18 Jun 2026"
+    PaymentURL       string  — deep link or web URL to complete payment
+*/}}
+{{define "expansion_payment_due"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <title>Your storage expansion is ready — pay now — {{.AppName}}</title>
+</head>
+<body>
+  <div class="email-wrapper">
+    <div class="email-card">
+
+      {{template "header" .}}
+
+      <div class="email-body">
+        <h1>Your server capacity is ready!</h1>
+        <p>
+          Great news — we've expanded the capacity on <strong>{{.ServerName}}</strong> for your
+          <strong>{{.PlanLabel}}</strong> storage upgrade. To receive your additional storage,
+          please pay the remaining balance below.
+        </p>
+
+        <table style="width:100%;border-collapse:collapse;margin:20px 0;">
+          <tr>
+            <td style="padding:8px 12px;font-weight:600;color:#374151;width:40%;border-bottom:1px solid #e5e7eb;">Server</td>
+            <td style="padding:8px 12px;color:#111827;border-bottom:1px solid #e5e7eb;">{{.ServerName}}</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 12px;font-weight:600;color:#374151;border-bottom:1px solid #e5e7eb;">Plan</td>
+            <td style="padding:8px 12px;color:#111827;border-bottom:1px solid #e5e7eb;">{{.PlanLabel}}</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 12px;font-weight:600;color:#374151;border-bottom:1px solid #e5e7eb;">Amount due</td>
+            <td style="padding:8px 12px;color:#111827;font-weight:700;border-bottom:1px solid #e5e7eb;">{{.RemainingFmt}}</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 12px;font-weight:600;color:#374151;">Pay by</td>
+            <td style="padding:8px 12px;color:#dc2626;font-weight:600;">{{.PaymentDueAt}}</td>
+          </tr>
+        </table>
+
+        <p style="font-size:14px;color:#6b7280;">
+          If payment is not received by <strong>{{.PaymentDueAt}}</strong>, your expansion request
+          will expire and your original deposit will <strong>not</strong> be refunded.
+        </p>
+
+        <div class="btn-wrapper">
+          <a href="{{.PaymentURL}}" class="btn-primary">Pay {{.RemainingFmt}} now</a>
+        </div>
+      </div>
+
+      {{template "footer" .}}
+
+    </div>
+  </div>
+</body>
+</html>
+{{end}}

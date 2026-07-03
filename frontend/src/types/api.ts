@@ -9,6 +9,7 @@ export interface User {
   is_premium: boolean
   premium_granted_at: string | null
   active_ban?: UserBan | null
+  linked_providers: string[]
 }
 
 export type APIKeyOperation = 'read' | 'write' | 'delete' | 'list'
@@ -76,8 +77,38 @@ export interface Folder {
   // Recursive sum of all file sizes under this folder. Populated by listing
   // endpoints; 0 on bare single-folder responses (create/rename/move).
   size_bytes: number
+  // Optional pin to a specific drive for this folder's direct uploads. Null
+  // means dynamic primary-first/least-full routing (today's default behavior).
+  drive_id: string | null
   created_at: string
   updated_at: string
+}
+
+export type FolderDriveMigrationStatus = 'pending' | 'in_progress' | 'completed' | 'failed'
+
+// FolderDriveMigration tracks a single job moving a folder's direct files
+// from one drive to another (potentially across servers/tiers).
+export interface FolderDriveMigration {
+  id: string
+  folder_id: string
+  status: FolderDriveMigrationStatus
+  total_files: number
+  files_moved: number
+  total_bytes: number
+  bytes_moved: number
+  error_message: string | null
+  created_at: string
+  completed_at: string | null
+}
+
+// DriveMigrationEligibility bundles the most recent migration for a folder
+// with rate-limit bookkeeping (3 changes per folder per rolling 30 days).
+export interface DriveMigrationEligibility {
+  migration: FolderDriveMigration | null
+  recent_count: number
+  limit: number
+  window_days: number
+  next_eligible_at: string | null
 }
 
 export interface UserPreferences {
@@ -113,6 +144,32 @@ export interface Invitation {
   grant_admin: boolean
   grant_premium: boolean
   invitation_url?: string
+}
+
+// Share mirrors the backend ShareInfo: a grant giving one recipient (matched
+// by account email) access to a single file or a folder subtree.
+export interface Share {
+  id: string
+  owner_user_id: string
+  recipient_email: string
+  file_id: string | null
+  folder_id: string | null
+  // Files: recipient may download (viewing is always allowed).
+  // Folders: recipient may download contained files.
+  can_download: boolean
+  // Folders only: recipient may upload into the folder.
+  can_upload: boolean
+  // Folders only: the share covers all descendant folders.
+  include_children: boolean
+  revoked_at: string | null
+  created_at: string
+  item_type: 'file' | 'folder'
+  item_name: string
+  item_size_bytes: number
+  item_mime_type?: string
+  // Present on recipient-facing listings.
+  owner_email?: string
+  share_url: string
 }
 
 export interface UploadResponse {
@@ -188,6 +245,33 @@ export interface AccountRestriction {
   comments: string
   banned_at: string
   expires_at?: string | null
+}
+
+export interface ServerExpansionRequest {
+  id: string
+  username: string
+  server_id: string
+  plan_id: string
+  storage_type: 'nvme' | 'hdd'
+  bytes_requested: number
+  deposit_amount_cents: number
+  full_price_cents: number
+  currency: string
+  payment_method: string
+  paypal_order_id: string
+  paypal_capture_id: string | null
+  status: 'opened' | 'expanded' | 'completed' | 'expired' | 'refunded'
+  pre_quota_bytes: number
+  post_quota_bytes: number | null
+  expires_at: string
+  created_at: string
+  completed_at: string | null
+  refund_id: string | null
+  cancellation_reason: string | null
+  payment_due_at: string | null
+  server_name: string
+  server_state: string
+  user_email: string
 }
 
 export const VIOLATION_CODES: Record<string, string> = {

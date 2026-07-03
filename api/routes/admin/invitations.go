@@ -21,10 +21,11 @@ type invitationResponse struct {
 }
 
 type createInvitationRequest struct {
-	Email             string `json:"email" binding:"required,email,max=254"`
-	InitialQuotaBytes int64  `json:"initial_quota_bytes"`
-	GrantAdmin        bool   `json:"grant_admin"`
-	GrantPremium      bool   `json:"grant_premium"`
+	Email             string     `json:"email" binding:"required,email,max=254"`
+	InitialQuotaBytes int64      `json:"initial_quota_bytes"`
+	GrantAdmin        bool       `json:"grant_admin"`
+	GrantPremium      bool       `json:"grant_premium"`
+	InitialDriveID    *uuid.UUID `json:"initial_drive_id"`
 }
 
 // CreateInvitation handles POST /api/v1/admin/invitations.
@@ -45,7 +46,16 @@ func (h *Handler) CreateInvitation(c *gin.Context) {
 		return
 	}
 
-	inv, err := h.invites.Create(c.Request.Context(), userID, invitedByUsername.(string), req.Email, req.InitialQuotaBytes, req.GrantAdmin, req.GrantPremium)
+	// Validate the pinned drive if one was specified.
+	if req.InitialDriveID != nil {
+		drive, err := h.queries.GetDrive(c.Request.Context(), *req.InitialDriveID)
+		if err != nil || drive == nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "specified drive not found"})
+			return
+		}
+	}
+
+	inv, err := h.invites.Create(c.Request.Context(), userID, invitedByUsername.(string), req.Email, req.InitialQuotaBytes, req.GrantAdmin, req.GrantPremium, req.InitialDriveID)
 	if err != nil {
 		if errors.Is(err, services.ErrInviteAlreadyPending) {
 			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})

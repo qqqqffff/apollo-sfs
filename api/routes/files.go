@@ -60,6 +60,17 @@ func (h *Handler) UploadFile(c *gin.Context) {
 		folderID = &parsed
 	}
 
+	var deviceID *uuid.UUID
+	if raw := c.PostForm("device_id"); raw != "" {
+		parsed, err := uuid.Parse(raw)
+		if err == nil {
+			deviceID = &parsed
+		}
+	}
+
+	// Upload origin tag (defaults to "web" in the service when blank).
+	source := c.PostForm("source")
+
 	name := sanitize.Name(c.PostForm("name"), 255)
 	if name == "" {
 		name = sanitize.Name(fileHeader.Filename, 255)
@@ -84,6 +95,8 @@ func (h *Handler) UploadFile(c *gin.Context) {
 		Username: username,
 		UserID:   userID,
 		FolderID: folderID,
+		DeviceID: deviceID,
+		Source:   source,
 		Name:     name,
 		MimeType: fileHeader.Header.Get("Content-Type"),
 		Reader:   src,
@@ -201,6 +214,13 @@ func (h *Handler) serveDecrypted(c *gin.Context, inline bool) {
 		return
 	}
 
+	writePlaintext(c, file, plaintext, inline)
+}
+
+// writePlaintext writes decrypted file bytes with the appropriate Content-Type
+// and Content-Disposition. inline=true renders browser-safe types in place
+// (unknown types fall back to attachment); inline=false always attaches.
+func writePlaintext(c *gin.Context, file *models.File, plaintext []byte, inline bool) {
 	mimeType := file.MimeType
 	if inline {
 		switch {
@@ -855,28 +875,7 @@ func (h *Handler) servePresigned(c *gin.Context, inline bool) {
 		return
 	}
 
-	mimeType := file.MimeType
-	if inline {
-		switch {
-		case strings.HasPrefix(mimeType, "image/"),
-			strings.HasPrefix(mimeType, "video/"),
-			strings.HasPrefix(mimeType, "audio/"),
-			mimeType == "application/pdf":
-		case strings.HasPrefix(mimeType, "text/"):
-			mimeType = "text/plain; charset=utf-8"
-		default:
-			inline = false
-		}
-	}
-
-	if inline {
-		c.Header("Content-Disposition", "inline")
-	} else {
-		c.Header("Content-Disposition",
-			fmt.Sprintf(`attachment; filename="%s"`, sanitize.ContentDispositionFilename(file.Name)))
-	}
-
-	c.Data(http.StatusOK, mimeType, plaintext)
+	writePlaintext(c, file, plaintext, inline)
 }
 
 // PresignUpload handles POST /api/v1/files/upload/presign.
@@ -884,9 +883,10 @@ func (h *Handler) servePresigned(c *gin.Context, inline bool) {
 // Body: { "name", "size", "folder_id" (optional) }
 func (h *Handler) PresignUpload(c *gin.Context) {
 	var req struct {
-		Name     string  `json:"name"     binding:"required"`
-		Size     int64   `json:"size"     binding:"required,min=1,max=107374182400"`
-		FolderID *string `json:"folder_id"`
+		Name           string  `json:"name"     binding:"required"`
+		Size           int64   `json:"size"     binding:"required,min=1,max=107374182400"`
+		FolderID       *string `json:"folder_id"`
+		IgnoreRedirect bool    `json:"ignore_redirect"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -920,7 +920,7 @@ func (h *Handler) PresignUpload(c *gin.Context) {
 		folderIDStr = req.FolderID
 	}
 
-	token, expiresAt, err := h.presign.IssueForUpload(userID, username, folderIDStr, req.Size, presignedUploadTTL)
+	token, expiresAt, err := h.presign.IssueForUpload(userID, username, folderIDStr, req.Size, req.IgnoreRedirect, presignedUploadTTL)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not generate upload token"})
 		return
@@ -998,12 +998,13 @@ func (h *Handler) UploadFilePresigned(c *gin.Context) {
 	defer src.Close()
 
 	file, err := h.files.Upload(c.Request.Context(), services.UploadInput{
-		Username: claim.Username,
-		UserID:   userID,
-		FolderID: folderID,
-		Name:     name,
-		MimeType: fileHeader.Header.Get("Content-Type"),
-		Reader:   src,
+		Username:       claim.Username,
+		UserID:         userID,
+		FolderID:       folderID,
+		Name:           name,
+		MimeType:       fileHeader.Header.Get("Content-Type"),
+		IgnoreRedirect: claim.IgnoreRedirect,
+		Reader:         src,
 	})
 	if err != nil {
 		if errors.Is(err, services.ErrQuotaExceeded) {
@@ -1049,10 +1050,11 @@ func (h *Handler) UploadFilePresigned(c *gin.Context) {
 // Body: same as InitUpload.
 func (h *Handler) PresignChunkedUpload(c *gin.Context) {
 	var req struct {
-		Name        string  `json:"name"         binding:"required"`
-		TotalChunks int     `json:"total_chunks" binding:"required,min=1"`
-		TotalSize   int64   `json:"total_size"   binding:"required,min=1,max=107374182400"`
-		FolderID    *string `json:"folder_id"`
+		Name           string  `json:"name"         binding:"required"`
+		TotalChunks    int     `json:"total_chunks" binding:"required,min=1"`
+		TotalSize      int64   `json:"total_size"   binding:"required,min=1,max=107374182400"`
+		FolderID       *string `json:"folder_id"`
+		IgnoreRedirect bool    `json:"ignore_redirect"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -1092,6 +1094,7 @@ func (h *Handler) PresignChunkedUpload(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not create upload session"})
 		return
 	}
+	sess.IgnoreRedirect = req.IgnoreRedirect
 
 	if err := h.files.BeginChunkedUpload(c.Request.Context(), sess); err != nil {
 		h.uploads.Delete(sess.ID)

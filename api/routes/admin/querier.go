@@ -2,7 +2,6 @@ package admin
 
 import (
 	"context"
-	"time"
 
 	"github.com/google/uuid"
 
@@ -40,17 +39,39 @@ type AdminQuerier interface {
 	CountServersByState(ctx context.Context, state string) (int, error)
 	CreateServer(ctx context.Context, p db.CreateServerParams) (*models.Server, error)
 	SetServerActive(ctx context.Context, id uuid.UUID, active bool) error
+	RenameServer(ctx context.Context, id uuid.UUID, name string) error
 	GetServer(ctx context.Context, id uuid.UUID) (*models.Server, error)
+	GetServerByEndpoint(ctx context.Context, endpoint string) (*models.Server, error)
+	ListServers(ctx context.Context) ([]models.Server, error)
+	DeleteServer(ctx context.Context, id uuid.UUID) error
 	GetDrive(ctx context.Context, id uuid.UUID) (*models.Drive, error)
+	ListDrives(ctx context.Context, serverID uuid.UUID) ([]models.Drive, error)
 	CreateDrive(ctx context.Context, p db.CreateDriveParams) (*models.Drive, error)
 	UpdateDrive(ctx context.Context, id uuid.UUID, p db.UpdateDriveParams) (*models.Drive, error)
+	UpsertDrive(ctx context.Context, p db.UpsertDriveParams) (*models.Drive, error)
+	AdoptNodeDrive(ctx context.Context, serverID, nodeID uuid.UUID, p db.UpsertDriveParams) (*models.Drive, error)
+	ReassignDriveToServer(ctx context.Context, driveID, serverID uuid.UUID, nodeID *uuid.UUID) error
 	DeleteDrive(ctx context.Context, id uuid.UUID) error
+	DeactivateMissingDrives(ctx context.Context, serverID uuid.UUID, keepIDs []uuid.UUID) error
 	UpdateDriveCapacity(ctx context.Context, id uuid.UUID, capacityBytes int64) (*models.Drive, error)
+	AutoSyncDriveCapacities(ctx context.Context, capacityBytes int64) error
+	ListAllNodeDisks(ctx context.Context) ([]models.NodeDisk, error)
 
-	// Alarm settings
-	GetAlarmSettings(ctx context.Context) (*models.AlarmSettings, error)
-	SetAlarmSubscription(ctx context.Context, alarmType, email string, subscribe bool) (*models.AlarmSettings, error)
-	ListSnapshotsWindow(ctx context.Context, window time.Duration) ([]models.ServerMetricSnapshot, error)
+	// Nodes (storage-node layer between servers and drives)
+	GetNodeSummaries(ctx context.Context) ([]models.NodeSummary, error)
+	GetNode(ctx context.Context, id uuid.UUID) (*models.Node, error)
+	CreateNode(ctx context.Context, p db.CreateNodeParams) (*models.Node, error)
+	UpdateNode(ctx context.Context, id uuid.UUID, p db.UpdateNodeParams) (*models.Node, error)
+	UpsertNode(ctx context.Context, p db.CreateNodeParams, isActive bool) (*models.Node, error)
+	DeleteNode(ctx context.Context, id uuid.UUID) error
+	DeactivateMissingNodes(ctx context.Context, serverID uuid.UUID, keepIDs []uuid.UUID) error
+	AssignDriveToNode(ctx context.Context, driveID uuid.UUID, nodeID *uuid.UUID) error
+
+	// Alarm subscriptions
+	ListAlarmSubscriptions(ctx context.Context) ([]models.AlarmSubscription, error)
+	ListAlarmSubscriptionsByEmail(ctx context.Context, email string) ([]models.AlarmSubscription, error)
+	UpsertAlarmSubscription(ctx context.Context, email, alarmType string, nodeID, driveID *uuid.UUID, threshold float64) (*models.AlarmSubscription, error)
+	DeleteAlarmSubscription(ctx context.Context, email, alarmType string, nodeID, driveID *uuid.UUID) error
 
 	// Interest form
 	ListInterestSubmissions(ctx context.Context, in db.PageInput) (*db.PageResult[models.InterestSubmission], error)
@@ -62,7 +83,7 @@ type AdminQuerier interface {
 
 // AdminInviteService is the subset of *services.InviteService used by admin handlers.
 type AdminInviteService interface {
-	Create(ctx context.Context, invitedByUserID uuid.UUID, invitedByUsername, email string, initialQuotaBytes int64, grantAdmin bool, grantPremium bool) (*models.Invitation, error)
+	Create(ctx context.Context, invitedByUserID uuid.UUID, invitedByUsername, email string, initialQuotaBytes int64, grantAdmin bool, grantPremium bool, initialDriveID *uuid.UUID) (*models.Invitation, error)
 	List(ctx context.Context, page db.PageInput) (*db.PageResult[models.Invitation], error)
 	InvitationURL(token string) string
 	Resend(ctx context.Context, id uuid.UUID, byUsername string) error
@@ -77,6 +98,11 @@ type MetricsServicer interface {
 	GetHistory(ctx context.Context, page db.PageInput) (*db.PageResult[models.ServerMetricSnapshot], error)
 	GetHistoryByHours(ctx context.Context, hours int) ([]models.ServerMetricSnapshot, error)
 	GetHistoryByDate(ctx context.Context, date string, page db.PageInput) (*db.PageResult[models.ServerMetricSnapshot], error)
+	GetNodeHistoryByHours(ctx context.Context, nodeID uuid.UUID, hours int) ([]models.NodeMetricSnapshot, error)
+	GetDriveTempHistoryByHours(ctx context.Context, driveID uuid.UUID, hours int) ([]models.DriveTempSnapshot, error)
+	GetNodeDisks(ctx context.Context, nodeID uuid.UUID) ([]models.NodeDisk, error)
+	GetNodeDiskTempHistoryByHours(ctx context.Context, diskID uuid.UUID, hours int) ([]models.NodeDiskTempSnapshot, error)
+	NodeStates(ctx context.Context) ([]models.NodeFrame, error)
 	Hub() *services.Hub
 }
 

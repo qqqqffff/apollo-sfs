@@ -128,12 +128,100 @@ func (q *Queries) CreateServer(ctx context.Context, p CreateServerParams) (*mode
 	return s, nil
 }
 
+// ServerCapacity holds aggregated capacity info for a single active server.
+type ServerCapacity struct {
+	ServerID           uuid.UUID
+	Name               string
+	State              string
+	TotalCapacityBytes int64
+	AvailableBytes     int64
+	// DriveType is "nvme" if any active drive label contains "nvme" (case-insensitive), otherwise "hdd".
+	DriveType string
+}
+
+// ListServerCapacities returns capacity aggregated across active drives for
+// every active server, ordered by name.
+func (q *Queries) ListServerCapacities(ctx context.Context) ([]ServerCapacity, error) {
+	rows, err := q.db.QueryContext(ctx, `
+		SELECT
+			s.id, s.name, s.state,
+			COALESCE(SUM(d.capacity_bytes), 0)                                     AS total_capacity_bytes,
+			COALESCE(SUM(GREATEST(d.capacity_bytes - COALESCE(sub.allocated, 0), 0)), 0) AS available_bytes,
+			CASE WHEN COALESCE(BOOL_OR(d.drive_type = 'nvme'), false) THEN 'nvme' ELSE 'hdd' END AS drive_type
+		FROM servers s
+		LEFT JOIN drives d ON d.server_id = s.id AND d.is_active = true
+		LEFT JOIN (
+			SELECT uda.drive_id, SUM(u.storage_quota_bytes) AS allocated
+			FROM user_drive_allocations uda
+			JOIN users u ON u.username = uda.user_id
+			GROUP BY uda.drive_id
+		) sub ON sub.drive_id = d.id
+		WHERE s.is_active = true
+		GROUP BY s.id
+		ORDER BY s.name ASC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("ListServerCapacities: %w", err)
+	}
+	defer rows.Close()
+
+	var out []ServerCapacity
+	for rows.Next() {
+		var sc ServerCapacity
+		if err := rows.Scan(&sc.ServerID, &sc.Name, &sc.State,
+			&sc.TotalCapacityBytes, &sc.AvailableBytes, &sc.DriveType); err != nil {
+			return nil, fmt.Errorf("ListServerCapacities scan: %w", err)
+		}
+		out = append(out, sc)
+	}
+	return out, rows.Err()
+}
+
+// GetServerByEndpoint fetches a server by its MinIO endpoint. Returns nil if no
+// server is registered for that endpoint. Used by the infrastructure sync to
+// upsert servers keyed by their MinIO endpoint.
+func (q *Queries) GetServerByEndpoint(ctx context.Context, endpoint string) (*models.Server, error) {
+	row := q.db.QueryRowContext(ctx, `
+		SELECT`+serverColumns+`
+		FROM servers WHERE minio_endpoint = $1
+	`, endpoint)
+	s, err := scanServer(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("GetServerByEndpoint: %w", err)
+	}
+	return s, nil
+}
+
 // SetServerActive toggles a server's is_active flag.
 func (q *Queries) SetServerActive(ctx context.Context, id uuid.UUID, active bool) error {
 	_, err := q.db.ExecContext(ctx,
 		`UPDATE servers SET is_active = $2 WHERE id = $1`, id, active)
 	if err != nil {
 		return fmt.Errorf("SetServerActive: %w", err)
+	}
+	return nil
+}
+
+// RenameServer updates the display name of a server.
+func (q *Queries) RenameServer(ctx context.Context, id uuid.UUID, name string) error {
+	_, err := q.db.ExecContext(ctx,
+		`UPDATE servers SET name = $2 WHERE id = $1`, id, name)
+	if err != nil {
+		return fmt.Errorf("RenameServer: %w", err)
+	}
+	return nil
+}
+
+// DeleteServer removes a server row. Its nodes (and their node_disks) cascade via
+// the FK; drives FK-restrict, so the caller must first reassign or remove every
+// drive of the server. Used by the sync to retire stale per-tier servers once the
+// cluster has been collapsed onto a single server.
+func (q *Queries) DeleteServer(ctx context.Context, id uuid.UUID) error {
+	if _, err := q.db.ExecContext(ctx, `DELETE FROM servers WHERE id = $1`, id); err != nil {
+		return fmt.Errorf("DeleteServer: %w", err)
 	}
 	return nil
 }

@@ -3,13 +3,14 @@ name: apollo-sfs
 # All services run on app-network (internal Docker bridge).
 # Only the API port is bound to 127.0.0.1 so Nginx on the host can proxy to it.
 #
-# MinIO is the only service whose data is bind-mounted to the NVMe drive.
-# Create that directory before running `docker compose up` for the first time:
-#
-#   sudo mkdir -p /minio/nvme-1/data
+# MinIO is the only service whose data is bind-mounted to NVMe storage. Its data
+# lives on the mergerfs pool that unions nvme-01 + nvme-02 into one JBOD volume
+# (capacity, no redundancy). The pool must be mounted before the first
+# `docker compose up` — it is mounted at boot via /etc/fstab. Full drive + pool
+# setup is documented in docs/nvme_capacity_expansion.md.
 #
 # All other persistent data (PostgreSQL) uses standard named Docker volumes
-# managed under the Docker data root (/minio/nvme-1/docker if you've moved it there).
+# managed under the Docker data root.
 #
 # Place the Keycloak realm import JSON at ./keycloak/import/realm-export.json
 # before first boot — Keycloak imports it once, then skips on subsequent starts.
@@ -141,6 +142,7 @@ services:
       SENDGRID_WEBHOOK_SECRET: ${SENDGRID_WEBHOOK_SECRET:-}
       QUOTA_WARNING_THRESHOLD_PERCENT: ${QUOTA_WARNING_THRESHOLD_PERCENT:-80}
       DISK_STATS_PATH: /data
+      DISK_STATS_DRIVE_LABEL: nvme-pool
       # Cloudflare Turnstile — bot protection for the interest form
       CLOUDFLARE_TURNSTILE_SECRET_KEY: ${CLOUDFLARE_TURNSTILE_SECRET_KEY}
       CLOUDFLARE_TURNSTILE_SITE_KEY: ${CLOUDFLARE_TURNSTILE_SITE_KEY}
@@ -155,6 +157,13 @@ services:
       PAYPAL_CLIENT_SECRET: ${PAYPAL_CLIENT_SECRET:-}
       PAYPAL_WEBHOOK_ID: ${PAYPAL_WEBHOOK_ID:-}
       PAYPAL_ENV: ${PAYPAL_ENV:-sandbox}
+      # Aliases used by binaries built before the SANDBOX_* → PAYPAL_* rename.
+      # Safe to remove after all containers have been rebuilt with the new config.
+      SANDBOX_PAYPAL_CLIENT_ID: ${PAYPAL_CLIENT_ID:-}
+      SANDBOX_PAYPAL_SECRET_KEY: ${PAYPAL_CLIENT_SECRET:-}
+      SANDBOX_PAYPAL_WEBHOOK_ID: ${PAYPAL_WEBHOOK_ID:-}
+      GOOGLE_WEB_CLIENT_ID: ${GOOGLE_WEB_CLIENT_ID:-}
+      GOOGLE_WEB_CLIENT_SECRET: ${GOOGLE_WEB_OAUTH_CLIENT_SECRET:-}
       PREMIUM_TIER_PRICE_CENTS: ${PREMIUM_TIER_PRICE_CENTS:-999}
       PREMIUM_TIER_CURRENCY: ${PREMIUM_TIER_CURRENCY:-USD}
       # Test runners — point at the sidecar containers on the Docker bridge.
@@ -162,7 +171,31 @@ services:
       FRONTEND_TEST_URL: http://frontend-tests:9229/run-tests
       FRONTEND_E2E_URL: http://frontend-tests:9229/run-e2e
     volumes:
-      - /home/apollo/apollo-sfs/minio/nvme-01:/data:ro
+      # Read-only mount of the mergerfs pool (nvme-01 + nvme-02) so the API's
+      # disk-stats reader reports COMBINED capacity. See docs/nvme_capacity_expansion.md.
+      - /home/apollo/apollo-sfs/minio/pool:/data:ro
+      # Per-drive live stats (metrics page → Infrastructure). The drive-stats
+      # endpoint auto-discovers each drive's mount by its filesystem label and
+      # reads live capacity/used/free. For that to work for drives OTHER than the
+      # pool, the API must see the host's individual drive mounts and the
+      # /dev/disk/by-label symlinks the discovery resolves labels through.
+      #
+      # 1) Storage tree mounted read-only at the SAME host path so each drive's
+      #    mount point exists in the container and statfs works. rslave
+      #    propagation lets the container observe drives mounted/unmounted on the
+      #    host after start (otherwise only mounts present at container start are
+      #    visible — fine for boot-time fstab mounts).
+      - type: bind
+        source: /home/apollo/apollo-sfs/minio
+        target: /home/apollo/apollo-sfs/minio
+        read_only: true
+        bind:
+          propagation: rslave
+      # 2) Filesystem-label symlinks (label → block device) used to map a drive's
+      #    label to its mount. The block-device targets resolve via the host /dev
+      #    that `privileged: true` already exposes. Drives whose label/mount can't
+      #    be resolved simply report online=false and fall back to stored capacity.
+      - /dev/disk/by-label:/dev/disk/by-label:ro
       - /var/lib/GeoIP:/var/lib/GeoIP:ro
       - /var/run/docker.sock:/var/run/docker.sock
       # Inbound email store — host dir persists messages across container rebuilds.
@@ -188,9 +221,74 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # ── Node metrics ingest ────────────────────────────────────────────────────
+  # Dev equivalent of the Swarm node-metrics-ingest service: the internal
+  # ingest endpoint per-node agents push to, isolated from the api service.
+  node-metrics-ingest:
+    build:
+      context: ./api
+      dockerfile: Dockerfile.node-metrics-ingest
+    platform: linux/arm64
+    container_name: apollo-sfs-node-metrics-ingest
+    restart: unless-stopped
+    environment:
+      POSTGRES_APP_HOST: db-app
+      POSTGRES_APP_PORT: 5432
+      POSTGRES_APP_USER: ${POSTGRES_APP_USER}
+      POSTGRES_APP_PASSWORD: ${POSTGRES_APP_PASSWORD}
+      POSTGRES_APP_DB: ${POSTGRES_APP_DB}
+      NODE_AGENT_TOKEN: ${NODE_AGENT_TOKEN:-dev-node-agent-token}
+    depends_on:
+      db-app:
+        condition: service_healthy
+    networks:
+      - app-network
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ── Node metrics agent ─────────────────────────────────────────────────────
+  # Single-node dev equivalent of the Swarm "global" node-agent. Reads this
+  # host's CPU/memory/network/drive sensors and pushes them to the API so the
+  # admin metrics page shows a populated per-node view in local development.
+  node-agent:
+    build:
+      context: ./api
+      dockerfile: Dockerfile.node-agent
+    platform: linux/arm64
+    container_name: apollo-sfs-node-agent
+    restart: unless-stopped
+    environment:
+      NODE_HOSTNAME: ${NODE_HOSTNAME:-apollo-sfs-dev-node-1}
+      NODE_METRICS_INGEST_URL: http://node-metrics-ingest:8080
+      NODE_AGENT_TOKEN: ${NODE_AGENT_TOKEN:-dev-node-agent-token}
+    volumes:
+      - /sys:/sys:ro
+      - /dev/disk/by-label:/dev/disk/by-label:ro
+      - type: bind
+        source: /home/apollo/apollo-sfs/minio
+        target: /home/apollo/apollo-sfs/minio
+        read_only: true
+        bind:
+          propagation: rslave
+    depends_on:
+      node-metrics-ingest:
+        condition: service_started
+    networks:
+      - app-network
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   # ── MinIO object storage ───────────────────────────────────────────────────
-  # Encrypted file blobs are stored here. Data is bind-mounted directly to the
-  # NVMe drive at /minio/nvme-1/data so uploaded files land on fast storage.
+  # Encrypted file blobs are stored here. Data is bind-mounted to the mergerfs
+  # pool at /home/apollo/apollo-sfs/minio/pool, which unions nvme-01 + nvme-02
+  # into one JBOD volume (capacity, no redundancy). See
+  # docs/nvme_capacity_expansion.md for the drive/pool setup.
   # Port 9000 is internal only — accessed by the API on the Docker network.
   # Port 9001 (MinIO console) is NOT exposed to the host; access via SSH tunnel
   # during setup if needed: ssh -L 9001:localhost:9001 <pi>
@@ -244,12 +342,17 @@ services:
       KC_HTTP_PORT: 8180
       KC_HTTPS_ENABLED: "false"
       KC_HEALTH_ENABLED: "true"
-      # Full URL including protocol — KC 26 requires this, not a bare hostname
-      KC_HOSTNAME: ${APP_BASE_URL}
+      # Full URL including protocol — KC 26 requires this, not a bare hostname.
+      # Keycloak has its own hostname so the admin console and realm endpoints are
+      # served at their native paths (see the auth.apollo-sfs.com nginx vhost).
+      KC_HOSTNAME: ${KEYCLOAK_PUBLIC_URL}
       KC_HOSTNAME_STRICT: "true"
-      KC_HOSTNAME_ADMIN: http://localhost:8180
       # Trust X-Forwarded-* headers set by Nginx
       KC_PROXY_HEADERS: xforwarded
+      # No KC_FEATURES needed: all social login (web + mobile, Google + Apple) uses
+      # identity-provider brokering (standard OIDC Authorization Code flow), not the
+      # deprecated token-exchange grant. Re-add KC_FEATURES only if a future feature
+      # requires it.
       # Bootstrap admin credentials (Keycloak 26+)
       KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN}
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
@@ -258,6 +361,11 @@ services:
     volumes:
       # Realm JSON files are imported on first boot, then skipped if realm exists
       - ./keycloak/import:/opt/keycloak/data/import:ro
+      # Third-party identity provider JARs — mounted into Keycloak's providers dir
+      - ./keycloak/providers:/opt/keycloak/providers:ro
+      # Custom login + email theme (apollo-sfs). Read at runtime; restart Keycloak
+      # to pick up changes (themes are cached in the start/production profile).
+      - ./keycloak/themes:/opt/keycloak/themes:ro
     depends_on:
       db-keycloak:
         condition: service_healthy
@@ -321,7 +429,8 @@ services:
       - no-new-privileges:true
     environment:
       CF_API_TOKEN: ${CLOUDFLARE_API_TOKEN}
-      DOMAINS: ${CLOUDFLARE_RECORD_NAME}
+      # Apex plus the Keycloak subdomain — both A records track the dynamic IP.
+      DOMAINS: ${CLOUDFLARE_RECORD_NAME},${KEYCLOAK_PUBLIC_HOST}
       PROXIED: "true"
       IP6_PROVIDER: "none"
     networks:
@@ -390,13 +499,13 @@ networks:
     driver: bridge
 
 volumes:
-  # Bind-mounted to the NVMe drive — this is where uploaded file blobs live.
-  # The host directory must exist before `docker compose up`:
-  #   sudo mkdir -p /minio/nvme-1/data
+  # Bind-mounted to the mergerfs pool (nvme-01 + nvme-02) — this is where
+  # uploaded file blobs live. The pool must be mounted before `docker compose up`
+  # (it is mounted at boot via /etc/fstab). See docs/nvme_capacity_expansion.md.
   minio-data:
     driver: local
     driver_opts:
       type: none
       o: bind
-      device: /home/apollo/apollo-sfs/minio/nvme-01/data
+      device: /home/apollo/apollo-sfs/minio/pool
 

@@ -199,7 +199,7 @@ func (h *Handler) runSpeedTest(ctx context.Context) *SpeedTestResult {
 		if !d.DriveIsActive || !d.ServerIsActive {
 			continue
 		}
-		client, ok := h.registry.Client(d.ServerID)
+		client, ok := h.registry.ClientForDrive(d.ServerID, d.NodeID, d.NodeHasMinIO)
 		if !ok {
 			continue
 		}

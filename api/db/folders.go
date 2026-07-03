@@ -10,13 +10,13 @@ import (
 	"apollo-sfs.com/api/models"
 )
 
-const folderColumns = `id, user_id, parent_id, name, kind, created_at, updated_at`
+const folderColumns = `id, user_id, parent_id, drive_id, name, kind, created_at, updated_at`
 
 // folderListSelect projects every column needed by the folder listing endpoints,
 // including a recursive descendant-size aggregate. LATERAL lets the inner CTE
 // reference each row's id while RLS on files keeps the sum scoped to the user.
 const folderListSelect = `
-SELECT f.id, f.user_id, f.parent_id, f.name, f.kind, f.created_at, f.updated_at,
+SELECT f.id, f.user_id, f.parent_id, f.drive_id, f.name, f.kind, f.created_at, f.updated_at,
        COALESCE(s.total, 0) AS size_bytes
 FROM folders f
 LEFT JOIN LATERAL (
@@ -31,26 +31,32 @@ LEFT JOIN LATERAL (
 
 func scanFolder(row *sql.Row) (*models.Folder, error) {
 	var f models.Folder
-	var parentID uuid.NullUUID
-	err := row.Scan(&f.ID, &f.UserID, &parentID, &f.Name, &f.Kind, &f.CreatedAt, &f.UpdatedAt)
+	var parentID, driveID uuid.NullUUID
+	err := row.Scan(&f.ID, &f.UserID, &parentID, &driveID, &f.Name, &f.Kind, &f.CreatedAt, &f.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
 	if parentID.Valid {
 		f.ParentID = &parentID.UUID
+	}
+	if driveID.Valid {
+		f.DriveID = &driveID.UUID
 	}
 	return &f, nil
 }
 
 func scanFolderRow(rows *sql.Rows) (*models.Folder, error) {
 	var f models.Folder
-	var parentID uuid.NullUUID
-	err := rows.Scan(&f.ID, &f.UserID, &parentID, &f.Name, &f.Kind, &f.CreatedAt, &f.UpdatedAt)
+	var parentID, driveID uuid.NullUUID
+	err := rows.Scan(&f.ID, &f.UserID, &parentID, &driveID, &f.Name, &f.Kind, &f.CreatedAt, &f.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
 	if parentID.Valid {
 		f.ParentID = &parentID.UUID
+	}
+	if driveID.Valid {
+		f.DriveID = &driveID.UUID
 	}
 	return &f, nil
 }
@@ -59,13 +65,16 @@ func scanFolderRow(rows *sql.Rows) (*models.Folder, error) {
 // size_bytes (the recursive descendant-content size).
 func scanFolderListRow(rows *sql.Rows) (*models.Folder, error) {
 	var f models.Folder
-	var parentID uuid.NullUUID
-	err := rows.Scan(&f.ID, &f.UserID, &parentID, &f.Name, &f.Kind, &f.CreatedAt, &f.UpdatedAt, &f.SizeBytes)
+	var parentID, driveID uuid.NullUUID
+	err := rows.Scan(&f.ID, &f.UserID, &parentID, &driveID, &f.Name, &f.Kind, &f.CreatedAt, &f.UpdatedAt, &f.SizeBytes)
 	if err != nil {
 		return nil, err
 	}
 	if parentID.Valid {
 		f.ParentID = &parentID.UUID
+	}
+	if driveID.Valid {
+		f.DriveID = &driveID.UUID
 	}
 	return &f, nil
 }
@@ -77,11 +86,15 @@ func (q *Queries) CreateFolder(ctx context.Context, f *models.Folder) (*models.F
 	if kind == "" {
 		kind = models.FolderKindRegular
 	}
+	var driveID uuid.NullUUID
+	if f.DriveID != nil {
+		driveID = uuid.NullUUID{UUID: *f.DriveID, Valid: true}
+	}
 	row := q.db.QueryRowContext(ctx, `
-		INSERT INTO folders (id, user_id, parent_id, name, kind, created_at, updated_at)
-		VALUES (gen_random_uuid(), $1, $2, $3, $4, NOW(), NOW())
+		INSERT INTO folders (id, user_id, parent_id, drive_id, name, kind, created_at, updated_at)
+		VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, NOW(), NOW())
 		RETURNING `+folderColumns+`
-	`, f.UserID, f.ParentID, f.Name, kind)
+	`, f.UserID, f.ParentID, driveID, f.Name, kind)
 	out, err := scanFolder(row)
 	if err != nil {
 		return nil, fmt.Errorf("CreateFolder: %w", err)
@@ -301,6 +314,20 @@ func (q *Queries) UpdateFolderParent(ctx context.Context, id uuid.UUID, parentID
 	return f, nil
 }
 
+// SetFolderDriveID updates a folder's drive pin after a successful drive
+// migration has finished moving its direct files. Runs outside the
+// user-scoped transaction (called from the background migration job), so it
+// is intentionally not gated by RLS — folder ids are unguessable UUIDs.
+func (q *Queries) SetFolderDriveID(ctx context.Context, id, driveID uuid.UUID) error {
+	_, err := q.db.ExecContext(ctx, `
+		UPDATE folders SET drive_id = $2, updated_at = NOW() WHERE id = $1
+	`, id, driveID)
+	if err != nil {
+		return fmt.Errorf("SetFolderDriveID %s: %w", id, err)
+	}
+	return nil
+}
+
 // GetFolderAncestors returns the chain of folders from root → leaf ending at
 // folderID, owned by userID. Used by the breadcrumb UI and by SFS path
 // resolution. A single recursive CTE call replaces N round-trips that walking
@@ -309,14 +336,14 @@ func (q *Queries) UpdateFolderParent(ctx context.Context, id uuid.UUID, parentID
 func (q *Queries) GetFolderAncestors(ctx context.Context, userID, folderID uuid.UUID) ([]models.Folder, error) {
 	rows, err := q.db.QueryContext(ctx, `
 		WITH RECURSIVE chain AS (
-			SELECT id, user_id, parent_id, name, kind, created_at, updated_at, 0 AS depth
+			SELECT id, user_id, parent_id, drive_id, name, kind, created_at, updated_at, 0 AS depth
 			FROM folders WHERE id = $2 AND user_id = $1
 			UNION ALL
-			SELECT f.id, f.user_id, f.parent_id, f.name, f.kind, f.created_at, f.updated_at, c.depth + 1
+			SELECT f.id, f.user_id, f.parent_id, f.drive_id, f.name, f.kind, f.created_at, f.updated_at, c.depth + 1
 			FROM folders f JOIN chain c ON f.id = c.parent_id
 			WHERE f.user_id = $1
 		)
-		SELECT id, user_id, parent_id, name, kind, created_at, updated_at
+		SELECT id, user_id, parent_id, drive_id, name, kind, created_at, updated_at
 		FROM chain ORDER BY depth DESC
 	`, userID, folderID)
 	if err != nil {
@@ -382,4 +409,28 @@ func (q *Queries) FolderWouldCreateCycle(ctx context.Context, folderID, targetID
 		return false, fmt.Errorf("FolderWouldCreateCycle: %w", err)
 	}
 	return would, nil
+}
+
+// IsFolderDescendant returns true if candidateID lies strictly inside the
+// subtree rooted at ancestorID (candidateID == ancestorID returns true as the
+// trivial case). Walks candidateID's ancestor chain upward with a recursive
+// CTE. Must be called on a Queries returned by ForUser so RLS confines the
+// walk to the owner's folders.
+func (q *Queries) IsFolderDescendant(ctx context.Context, ancestorID, candidateID uuid.UUID) (bool, error) {
+	if ancestorID == candidateID {
+		return true, nil
+	}
+	var is bool
+	err := q.db.QueryRowContext(ctx, `
+		WITH RECURSIVE chain AS (
+			SELECT id, parent_id FROM folders WHERE id = $2
+			UNION ALL
+			SELECT f.id, f.parent_id FROM folders f JOIN chain c ON f.id = c.parent_id
+		)
+		SELECT EXISTS(SELECT 1 FROM chain WHERE id = $1)
+	`, ancestorID, candidateID).Scan(&is)
+	if err != nil {
+		return false, fmt.Errorf("IsFolderDescendant: %w", err)
+	}
+	return is, nil
 }

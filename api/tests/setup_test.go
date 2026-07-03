@@ -132,6 +132,27 @@ func (s *stubQuerier) ListAuditLogsForUser(_ context.Context, _ string, _ db.Pag
 	return &db.PageResult[models.AuditLog]{Items: []models.AuditLog{}}, nil
 }
 
+// Device / sync stubs (mobile)
+func (s *stubQuerier) CreateDevice(_ context.Context, userID uuid.UUID, name, platform string, pushToken *string) (*db.Device, error) {
+	return &db.Device{ID: uuid.New(), UserID: userID, Name: name, Platform: platform}, nil
+}
+func (s *stubQuerier) GetDevice(_ context.Context, id uuid.UUID) (*db.Device, error) {
+	return &db.Device{ID: id}, nil
+}
+func (s *stubQuerier) UpdateDeviceLastSeen(_ context.Context, _ uuid.UUID, _ *string) error {
+	return nil
+}
+func (s *stubQuerier) DeleteDevice(_ context.Context, _ uuid.UUID) error { return nil }
+func (s *stubQuerier) DeltaSyncFiles(_ context.Context, _ uuid.UUID, _ time.Time) ([]models.File, error) {
+	return []models.File{}, nil
+}
+func (s *stubQuerier) DeltaSyncDeleted(_ context.Context, _ uuid.UUID, _ time.Time) ([]uuid.UUID, error) {
+	return []uuid.UUID{}, nil
+}
+func (s *stubQuerier) FindFileByHash(_ context.Context, _ uuid.UUID, _ string) (*models.File, error) {
+	return nil, nil
+}
+
 // ── Stub InviteService (routes package) ───────────────────────────────────────
 
 type stubInviteValidator struct {
@@ -146,28 +167,28 @@ func (s *stubInviteValidator) Validate(_ context.Context, _ string) (*services.I
 // ── Stub AdminQuerier ─────────────────────────────────────────────────────────
 
 type stubAdminQuerier struct {
-	users            []models.User
-	user             *models.User
-	userErr          error
-	submissions      []models.InterestSubmission
-	submissionsErr   error
-	singleSub        *models.InterestSubmission
-	singleSubErr     error
-	settings         *models.InterestFormSettings
-	settingsErr      error
-	updatedSettings  *models.InterestFormSettings
+	users              []models.User
+	user               *models.User
+	userErr            error
+	submissions        []models.InterestSubmission
+	submissionsErr     error
+	singleSub          *models.InterestSubmission
+	singleSubErr       error
+	settings           *models.InterestFormSettings
+	settingsErr        error
+	updatedSettings    *models.InterestFormSettings
 	updatedSettingsErr error
-	provisionErr     error
+	provisionErr       error
 	// drive / quota fields
-	userDrive        *models.UserDriveAllocation
-	userDriveErr     error
-	driveAvail       int64
-	driveAvailErr    error
-	updateQuotaErr   error
-	// alarm settings fields
-	alarmSettings           *models.AlarmSettings
-	alarmSettingsErr        error
-	subscriptionErr         error
+	userDrive      *models.UserDriveAllocation
+	userDriveErr   error
+	driveAvail     int64
+	driveAvailErr  error
+	updateQuotaErr error
+	// alarm subscription fields
+	alarmSubs       []models.AlarmSubscription
+	alarmSubsErr    error
+	subscriptionErr error
 }
 
 func (s *stubAdminQuerier) ListUsers(_ context.Context, _ db.PageInput) (*db.PageResult[models.User], error) {
@@ -192,8 +213,8 @@ func (s *stubAdminQuerier) GetDriveAvailableBytes(_ context.Context, _ uuid.UUID
 func (s *stubAdminQuerier) ListBannedIPs(_ context.Context, _ bool, _ db.PageInput) (*db.PageResult[models.BannedIP], error) {
 	return &db.PageResult[models.BannedIP]{Items: []models.BannedIP{}}, nil
 }
-func (s *stubAdminQuerier) UnbanIP(_ context.Context, _ int64) error        { return nil }
-func (s *stubAdminQuerier) ExtendBan(_ context.Context, _ int64) error      { return nil }
+func (s *stubAdminQuerier) UnbanIP(_ context.Context, _ int64) error         { return nil }
+func (s *stubAdminQuerier) ExtendBan(_ context.Context, _ int64) error       { return nil }
 func (s *stubAdminQuerier) AddBannedIP(_ context.Context, _, _ string) error { return nil }
 func (s *stubAdminQuerier) CreateBan(_ context.Context, _ db.CreateBanParams) (*models.UserBan, error) {
 	return &models.UserBan{}, nil
@@ -216,7 +237,11 @@ func (s *stubAdminQuerier) CreateServer(_ context.Context, _ db.CreateServerPara
 	return nil, nil
 }
 func (s *stubAdminQuerier) SetServerActive(_ context.Context, _ uuid.UUID, _ bool) error { return nil }
+func (s *stubAdminQuerier) RenameServer(_ context.Context, _ uuid.UUID, _ string) error  { return nil }
 func (s *stubAdminQuerier) GetServer(_ context.Context, _ uuid.UUID) (*models.Server, error) {
+	return nil, nil
+}
+func (s *stubAdminQuerier) GetServerByEndpoint(_ context.Context, _ string) (*models.Server, error) {
 	return nil, nil
 }
 func (s *stubAdminQuerier) GetDrive(_ context.Context, _ uuid.UUID) (*models.Drive, error) {
@@ -228,42 +253,80 @@ func (s *stubAdminQuerier) CreateDrive(_ context.Context, _ db.CreateDriveParams
 func (s *stubAdminQuerier) UpdateDrive(_ context.Context, _ uuid.UUID, _ db.UpdateDriveParams) (*models.Drive, error) {
 	return nil, nil
 }
+func (s *stubAdminQuerier) UpsertDrive(_ context.Context, _ db.UpsertDriveParams) (*models.Drive, error) {
+	return &models.Drive{ID: uuid.New()}, nil
+}
 func (s *stubAdminQuerier) DeleteDrive(_ context.Context, _ uuid.UUID) error { return nil }
+func (s *stubAdminQuerier) DeactivateMissingDrives(_ context.Context, _ uuid.UUID, _ []uuid.UUID) error {
+	return nil
+}
 func (s *stubAdminQuerier) UpdateDriveCapacity(_ context.Context, _ uuid.UUID, _ int64) (*models.Drive, error) {
 	return nil, nil
 }
-// Alarm settings
-func (s *stubAdminQuerier) GetAlarmSettings(_ context.Context) (*models.AlarmSettings, error) {
-	if s.alarmSettings == nil && s.alarmSettingsErr == nil {
-		return &models.AlarmSettings{
-			CPUUsageEmails:       []string{},
-			CPUTempEmails:        []string{},
-			DriveTempEmails:      []string{},
-			DriveLoadEmails:      []string{},
-			NetworkTrafficEmails: []string{},
-			APIErrorRateEmails:   []string{},
-		}, nil
-	}
-	return s.alarmSettings, s.alarmSettingsErr
+func (s *stubAdminQuerier) AutoSyncDriveCapacities(_ context.Context, _ int64) error { return nil }
+func (s *stubAdminQuerier) ListServers(_ context.Context) ([]models.Server, error) {
+	return nil, nil
 }
-func (s *stubAdminQuerier) SetAlarmSubscription(_ context.Context, _, _ string, _ bool) (*models.AlarmSettings, error) {
+func (s *stubAdminQuerier) DeleteServer(_ context.Context, _ uuid.UUID) error { return nil }
+func (s *stubAdminQuerier) ListDrives(_ context.Context, _ uuid.UUID) ([]models.Drive, error) {
+	return nil, nil
+}
+func (s *stubAdminQuerier) AdoptNodeDrive(_ context.Context, _, _ uuid.UUID, _ db.UpsertDriveParams) (*models.Drive, error) {
+	return nil, nil
+}
+func (s *stubAdminQuerier) ReassignDriveToServer(_ context.Context, _, _ uuid.UUID, _ *uuid.UUID) error {
+	return nil
+}
+func (s *stubAdminQuerier) ListAllNodeDisks(_ context.Context) ([]models.NodeDisk, error) {
+	return nil, nil
+}
+
+// Nodes
+func (s *stubAdminQuerier) GetNodeSummaries(_ context.Context) ([]models.NodeSummary, error) {
+	return []models.NodeSummary{}, nil
+}
+func (s *stubAdminQuerier) GetNode(_ context.Context, _ uuid.UUID) (*models.Node, error) {
+	return nil, nil
+}
+func (s *stubAdminQuerier) CreateNode(_ context.Context, _ db.CreateNodeParams) (*models.Node, error) {
+	return nil, nil
+}
+func (s *stubAdminQuerier) UpdateNode(_ context.Context, _ uuid.UUID, _ db.UpdateNodeParams) (*models.Node, error) {
+	return nil, nil
+}
+func (s *stubAdminQuerier) UpsertNode(_ context.Context, p db.CreateNodeParams, isActive bool) (*models.Node, error) {
+	return &models.Node{ID: uuid.New(), ServerID: p.ServerID, Hostname: p.Hostname, Role: p.Role, Address: p.Address, IsActive: isActive}, nil
+}
+func (s *stubAdminQuerier) DeleteNode(_ context.Context, _ uuid.UUID) error { return nil }
+func (s *stubAdminQuerier) DeactivateMissingNodes(_ context.Context, _ uuid.UUID, _ []uuid.UUID) error {
+	return nil
+}
+func (s *stubAdminQuerier) AssignDriveToNode(_ context.Context, _ uuid.UUID, _ *uuid.UUID) error {
+	return nil
+}
+
+// Alarm subscriptions
+func (s *stubAdminQuerier) ListAlarmSubscriptions(_ context.Context) ([]models.AlarmSubscription, error) {
+	return s.alarmSubs, s.alarmSubsErr
+}
+func (s *stubAdminQuerier) ListAlarmSubscriptionsByEmail(_ context.Context, _ string) ([]models.AlarmSubscription, error) {
+	return s.alarmSubs, s.alarmSubsErr
+}
+func (s *stubAdminQuerier) UpsertAlarmSubscription(_ context.Context, email, alarmType string, nodeID, driveID *uuid.UUID, threshold float64) (*models.AlarmSubscription, error) {
 	if s.subscriptionErr != nil {
 		return nil, s.subscriptionErr
 	}
-	if s.alarmSettings != nil {
-		return s.alarmSettings, nil
-	}
-	return &models.AlarmSettings{
-		CPUUsageEmails:       []string{},
-		CPUTempEmails:        []string{},
-		DriveTempEmails:      []string{},
-		DriveLoadEmails:      []string{},
-		NetworkTrafficEmails: []string{},
-		APIErrorRateEmails:   []string{},
+	return &models.AlarmSubscription{
+		ID:        uuid.New(),
+		Email:     email,
+		AlarmType: alarmType,
+		NodeID:    nodeID,
+		DriveID:   driveID,
+		Threshold: threshold,
 	}, nil
 }
-func (s *stubAdminQuerier) ListSnapshotsWindow(_ context.Context, _ time.Duration) ([]models.ServerMetricSnapshot, error) {
-	return []models.ServerMetricSnapshot{}, nil
+func (s *stubAdminQuerier) DeleteAlarmSubscription(_ context.Context, _, _ string, _, _ *uuid.UUID) error {
+	return s.subscriptionErr
 }
 
 func (s *stubAdminQuerier) ListInterestSubmissions(_ context.Context, _ db.PageInput) (*db.PageResult[models.InterestSubmission], error) {
@@ -301,14 +364,14 @@ func (s *stubAdminQuerier) MarkInterestSubmissionProvisioned(_ context.Context, 
 // ── Stub AdminInviteService ───────────────────────────────────────────────────
 
 type stubAdminInviteService struct {
-	inv    *models.Invitation
-	invErr error
-	invs   []models.Invitation
+	inv       *models.Invitation
+	invErr    error
+	invs      []models.Invitation
 	resendErr error
 	revokeErr error
 }
 
-func (s *stubAdminInviteService) Create(_ context.Context, _ uuid.UUID, _, _ string, _ int64, _ bool, _ bool) (*models.Invitation, error) {
+func (s *stubAdminInviteService) Create(_ context.Context, _ uuid.UUID, _, _ string, _ int64, _ bool, _ bool, _ *uuid.UUID) (*models.Invitation, error) {
 	return s.inv, s.invErr
 }
 func (s *stubAdminInviteService) List(_ context.Context, _ db.PageInput) (*db.PageResult[models.Invitation], error) {
@@ -331,9 +394,11 @@ func (s *stubAdminInviteService) Revoke(_ context.Context, _ uuid.UUID) error {
 // ── Stub FileServicer ─────────────────────────────────────────────────────────
 
 type stubFileService struct {
-	file    *models.File
-	fileErr error
-	deleted bool
+	file      *models.File
+	fileErr   error
+	deleted   bool
+	migration *models.FolderDriveMigration
+	migStatus *services.DriveMigrationStatus
 }
 
 func (s *stubFileService) Upload(_ context.Context, _ services.UploadInput) (*models.File, error) {
@@ -383,6 +448,12 @@ func (s *stubFileService) FinalizeChunkedUpload(_ context.Context, _ *services.U
 	return s.file, s.fileErr
 }
 func (s *stubFileService) AdminDeleteAllFiles(_ context.Context, _ string) error { return s.fileErr }
+func (s *stubFileService) RequestDriveMigration(_ context.Context, _ uuid.UUID, _ string, _, _ uuid.UUID) (*models.FolderDriveMigration, error) {
+	return s.migration, s.fileErr
+}
+func (s *stubFileService) GetLatestDriveMigration(_ context.Context, _, _ uuid.UUID) (*services.DriveMigrationStatus, error) {
+	return s.migStatus, s.fileErr
+}
 
 // ── Stub FolderServicer ───────────────────────────────────────────────────────
 
@@ -427,7 +498,7 @@ func (s *stubFolderService) GetMediaContents(_ context.Context, _, _ uuid.UUID, 
 		Files:      &db.PageResult[models.File]{Items: []models.File{}},
 	}, nil
 }
-func (s *stubFolderService) Create(_ context.Context, _ uuid.UUID, _ *uuid.UUID, _ string, _ string) (*models.Folder, error) {
+func (s *stubFolderService) Create(_ context.Context, _ uuid.UUID, _ *uuid.UUID, _, _, _ string, _ *uuid.UUID) (*models.Folder, error) {
 	return s.folder, s.folderErr
 }
 func (s *stubFolderService) Rename(_ context.Context, _, _ uuid.UUID, _ string) (*models.Folder, error) {
@@ -481,26 +552,35 @@ func newFolderHandler(folderSvc routes.FolderServicer) *routes.Handler {
 
 // newAdminHandler builds an admin.Handler with only querier and invite service set.
 func newAdminHandler(q admin.AdminQuerier, inv admin.AdminInviteService) *admin.Handler {
-	return admin.NewHandler(q, inv, nil, nil, nil, nil, nil, "", "", "", "", "", nil)
+	return admin.NewHandler(q, inv, nil, nil, nil, nil, nil, "", "", "", "", "", "", nil)
 }
 
 // newMetricsAdminHandler builds an admin.Handler wired with the given metrics stub.
 func newMetricsAdminHandler(q admin.AdminQuerier, m admin.MetricsServicer) *admin.Handler {
-	return admin.NewHandler(q, &stubAdminInviteService{}, m, nil, nil, nil, nil, "", "", "", "", "", nil)
+	return admin.NewHandler(q, &stubAdminInviteService{}, m, nil, nil, nil, nil, "", "", "", "", "", "", nil)
 }
 
 // newAdminHandlerWithFiles builds an admin.Handler wired with the given file service stub.
 func newAdminHandlerWithFiles(q admin.AdminQuerier, fileSvc routes.FileServicer) *admin.Handler {
-	return admin.NewHandler(q, &stubAdminInviteService{}, nil, nil, fileSvc, nil, nil, "", "", "", "", "", nil)
+	return admin.NewHandler(q, &stubAdminInviteService{}, nil, nil, fileSvc, nil, nil, "", "", "", "", "", "", nil)
 }
 
 // ── Stub MetricsService ───────────────────────────────────────────────────────
 
 type stubMetricsService struct {
-	latest     *models.ServerMetricSnapshot
-	latestErr  error
-	history    []models.ServerMetricSnapshot
-	historyErr error
+	latest           *models.ServerMetricSnapshot
+	latestErr        error
+	history          []models.ServerMetricSnapshot
+	historyErr       error
+	nodeHistory      []models.NodeMetricSnapshot
+	nodeHistoryErr   error
+	driveTemps       []models.DriveTempSnapshot
+	driveTempsErr    error
+	nodeDisks        []models.NodeDisk
+	nodeDisksErr     error
+	nodeDiskTemps    []models.NodeDiskTempSnapshot
+	nodeDiskTempsErr error
+	nodeStates       []models.NodeFrame
 }
 
 func (s *stubMetricsService) GetLatest(_ context.Context) (*models.ServerMetricSnapshot, error) {
@@ -523,7 +603,22 @@ func (s *stubMetricsService) GetHistoryByDate(_ context.Context, _ string, _ db.
 	}
 	return &db.PageResult[models.ServerMetricSnapshot]{Items: items}, s.historyErr
 }
-func (s *stubMetricsService) Hub() *services.Hub { return nil }
+func (s *stubMetricsService) GetNodeHistoryByHours(_ context.Context, _ uuid.UUID, _ int) ([]models.NodeMetricSnapshot, error) {
+	return s.nodeHistory, s.nodeHistoryErr
+}
+func (s *stubMetricsService) GetDriveTempHistoryByHours(_ context.Context, _ uuid.UUID, _ int) ([]models.DriveTempSnapshot, error) {
+	return s.driveTemps, s.driveTempsErr
+}
+func (s *stubMetricsService) GetNodeDisks(_ context.Context, _ uuid.UUID) ([]models.NodeDisk, error) {
+	return s.nodeDisks, s.nodeDisksErr
+}
+func (s *stubMetricsService) GetNodeDiskTempHistoryByHours(_ context.Context, _ uuid.UUID, _ int) ([]models.NodeDiskTempSnapshot, error) {
+	return s.nodeDiskTemps, s.nodeDiskTempsErr
+}
+func (s *stubMetricsService) NodeStates(_ context.Context) ([]models.NodeFrame, error) {
+	return s.nodeStates, nil
+}
+func (s *stubMetricsService) Hub() *services.Hub             { return nil }
 
 // ── Stub FavServicer ──────────────────────────────────────────────────────────
 
@@ -541,9 +636,9 @@ func (s *stubFavService) List(_ context.Context, _ uuid.UUID) (*services.Favorit
 		Folders: []models.Folder{},
 	}, s.listErr
 }
-func (s *stubFavService) AddFile(_ context.Context, _, _ uuid.UUID) error    { return nil }
-func (s *stubFavService) RemoveFile(_ context.Context, _, _ uuid.UUID) error { return nil }
-func (s *stubFavService) AddFolder(_ context.Context, _, _ uuid.UUID) error  { return nil }
+func (s *stubFavService) AddFile(_ context.Context, _, _ uuid.UUID) error      { return nil }
+func (s *stubFavService) RemoveFile(_ context.Context, _, _ uuid.UUID) error   { return nil }
+func (s *stubFavService) AddFolder(_ context.Context, _, _ uuid.UUID) error    { return nil }
 func (s *stubFavService) RemoveFolder(_ context.Context, _, _ uuid.UUID) error { return nil }
 
 // newAdminBrowseHandler builds a routes.Handler wired for admin browse tests.

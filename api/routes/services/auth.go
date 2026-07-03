@@ -33,6 +33,12 @@ type AuthServiceConfig struct {
 	KeycloakClientID     string
 	KeycloakClientSecret string
 	AppBaseURL           string // public-facing base URL, e.g. "https://files.example.com"
+
+	// GoogleWebClientID / GoogleWebClientSecret are used to exchange a mobile
+	// server auth code for a Google id_token whose audience is the web client ID,
+	// which Keycloak's Google IdP accepts during token exchange.
+	GoogleWebClientID     string
+	GoogleWebClientSecret string
 }
 
 // TokenPair is returned on successful login, registration, and token refresh.
@@ -79,13 +85,15 @@ type kcUserResult struct {
 // AuthService handles all authentication operations: login, registration,
 // logout, token refresh, and password-reset email triggering.
 type AuthService struct {
-	queries    *db.Queries
-	kcURL      string
-	kcRealm    string
-	kcClientID string
-	kcSecret   string
-	appBaseURL string
-	http       *http.Client
+	queries       *db.Queries
+	kcURL         string
+	kcRealm       string
+	kcClientID    string
+	kcSecret      string
+	appBaseURL    string
+	http          *http.Client
+	googleClientID string
+	googleSecret   string
 
 	// ProvisionUserKey is called during registration to generate and wrap the
 	// user's per-file AES key with the current master key. When nil (before the
@@ -97,17 +105,225 @@ type AuthService struct {
 // NewAuthService constructs an AuthService with a 10-second HTTP timeout.
 func NewAuthService(q *db.Queries, cfg AuthServiceConfig) *AuthService {
 	return &AuthService{
-		queries:    q,
-		kcURL:      cfg.KeycloakURL,
-		kcRealm:    cfg.KeycloakRealm,
-		kcClientID: cfg.KeycloakClientID,
-		kcSecret:   cfg.KeycloakClientSecret,
-		appBaseURL: strings.TrimRight(cfg.AppBaseURL, "/"),
-		http:       &http.Client{Timeout: 10 * time.Second},
+		queries:        q,
+		kcURL:          cfg.KeycloakURL,
+		kcRealm:        cfg.KeycloakRealm,
+		kcClientID:     cfg.KeycloakClientID,
+		kcSecret:       cfg.KeycloakClientSecret,
+		appBaseURL:     strings.TrimRight(cfg.AppBaseURL, "/"),
+		http:           &http.Client{Timeout: 10 * time.Second},
+		googleClientID: cfg.GoogleWebClientID,
+		googleSecret:   cfg.GoogleWebClientSecret,
 	}
 }
 
 // ── Public methods ────────────────────────────────────────────────────────────
+
+// AppBaseURL returns the public-facing base URL of the application.
+func (s *AuthService) AppBaseURL() string { return s.appBaseURL }
+
+// AuthCodeExchange exchanges a Keycloak authorization code for a token pair
+// using the authorization_code grant. redirectURI must match the value used
+// when the authorization request was initiated.
+//
+// If the social identity's email already belongs to an existing app account
+// under a different username, an *ErrEmailConflict is returned instead of
+// provisioning a duplicate. The caller should surface the linking flow.
+func (s *AuthService) AuthCodeExchange(ctx context.Context, code, redirectURI, provider string) (*TokenPair, error) {
+	body := url.Values{
+		"grant_type":    {"authorization_code"},
+		"client_id":     {s.kcClientID},
+		"client_secret": {s.kcSecret},
+		"code":          {code},
+		"redirect_uri":  {redirectURI},
+	}
+	tokens, err := s.tokenRequest(ctx, body)
+	if err != nil {
+		return nil, fmt.Errorf("auth code exchange: %w", err)
+	}
+
+	if err := s.checkEmailConflict(ctx, tokens.AccessToken, provider); err != nil {
+		return nil, err
+	}
+
+	if s.ProvisionUserKey != nil {
+		if err := s.ensureUserProvisioned(ctx, tokens.AccessToken); err != nil {
+			return nil, fmt.Errorf("auth code exchange: provision user: %w", err)
+		}
+	}
+	return tokens, nil
+}
+
+// checkEmailConflict decodes the KC access token, and if the token's email
+// already belongs to an existing app account that would not be found by the
+// KC preferred_username, returns an *ErrEmailConflict. Email is the sole
+// deduplication key; usernames are not compared.
+func (s *AuthService) checkEmailConflict(ctx context.Context, accessToken, provider string) error {
+	claims, err := decodeTokenClaims(accessToken)
+	if err != nil || claims.Email == "" {
+		return nil
+	}
+	// If this KC user already has an app DB record, no conflict.
+	_, err = s.queries.GetUserByUsername(ctx, claims.PreferredUsername)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return nil // unexpected DB error — let provisioning handle it
+	}
+	// KC user has no app record yet. Check if the email belongs to another account.
+	existing, err := s.queries.GetUserByEmail(ctx, claims.Email)
+	if err != nil {
+		return nil // email not found — no conflict
+	}
+	return &ErrEmailConflict{
+		Email:            claims.Email,
+		ExistingUsername: existing.Username,
+		PendingKcUserID:  claims.Sub,
+		Provider:         provider,
+	}
+}
+
+// LinkSocialAccount links a social identity (whose temp KC user is identified by
+// pendingKcUserID) to the existing app account verified by username + password.
+// On success it returns tokens for the existing account and cleans up the
+// temporary Keycloak user that was created for the social identity.
+func (s *AuthService) LinkSocialAccount(ctx context.Context, existingUsername, password, pendingKcUserID, provider string) (*TokenPair, error) {
+	// Verify the existing credentials to ensure the user owns the account.
+	tokens, err := s.Login(ctx, existingUsername, password)
+	if err != nil {
+		return nil, fmt.Errorf("link social: %w", err)
+	}
+
+	adminToken, err := s.adminToken(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("link social: admin token: %w", err)
+	}
+
+	// Find the existing user's Keycloak ID.
+	existingKcID, err := s.kcFindUserByUsername(ctx, adminToken, existingUsername)
+	if err != nil || existingKcID == "" {
+		return nil, fmt.Errorf("link social: existing KC user not found")
+	}
+
+	// Fetch the federated identities from the temporary social KC user.
+	fedIDs, err := s.kcGetFederatedIdentities(ctx, adminToken, pendingKcUserID)
+	if err != nil {
+		return nil, fmt.Errorf("link social: fetch federated identities: %w", err)
+	}
+
+	// Link each federated identity from the temp user to the existing user.
+	for _, fid := range fedIDs {
+		if fid.IdentityProvider != provider {
+			continue
+		}
+		if err := s.kcAddFederatedIdentity(ctx, adminToken, existingKcID, fid); err != nil {
+			return nil, fmt.Errorf("link social: add federated identity: %w", err)
+		}
+	}
+
+	// Delete the temporary social Keycloak user now that its identity is linked.
+	if err := s.kcDeleteUser(ctx, adminToken, pendingKcUserID); err != nil {
+		// Non-fatal: log but continue — the link succeeded and the orphan
+		// can be cleaned up manually if needed.
+		fmt.Printf("link social: warning: could not delete temp KC user %s: %v\n", pendingKcUserID, err)
+	}
+
+	return tokens, nil
+}
+
+// GetLinkedProviders returns the list of Keycloak IdP aliases linked to the given user.
+func (s *AuthService) GetLinkedProviders(ctx context.Context, kcUserID string) ([]string, error) {
+	adminToken, err := s.adminToken(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("get linked providers: admin token: %w", err)
+	}
+	fids, err := s.kcGetFederatedIdentities(ctx, adminToken, kcUserID)
+	if err != nil {
+		return nil, err
+	}
+	providers := make([]string, 0, len(fids))
+	for _, f := range fids {
+		providers = append(providers, f.IdentityProvider)
+	}
+	return providers, nil
+}
+
+// kcFederatedIdentity is a single entry from Keycloak's federated-identity API.
+type kcFederatedIdentity struct {
+	IdentityProvider string `json:"identityProvider"`
+	UserID           string `json:"userId"`
+	UserName         string `json:"userName"`
+}
+
+// kcGetFederatedIdentities returns the list of federated identities for a KC user.
+func (s *AuthService) kcGetFederatedIdentities(ctx context.Context, adminToken, kcUserID string) ([]kcFederatedIdentity, error) {
+	endpoint := fmt.Sprintf("%s/admin/realms/%s/users/%s/federated-identity",
+		s.kcURL, s.kcRealm, kcUserID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+
+	resp, err := s.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("keycloak request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("keycloak returned %s", resp.Status)
+	}
+	var ids []kcFederatedIdentity
+	if err := json.NewDecoder(resp.Body).Decode(&ids); err != nil {
+		return nil, fmt.Errorf("decode response: %w", err)
+	}
+	return ids, nil
+}
+
+// kcAddFederatedIdentity links one federated identity to a KC user.
+func (s *AuthService) kcAddFederatedIdentity(ctx context.Context, adminToken, kcUserID string, fid kcFederatedIdentity) error {
+	body, _ := json.Marshal(fid)
+	endpoint := fmt.Sprintf("%s/admin/realms/%s/users/%s/federated-identity/%s",
+		s.kcURL, s.kcRealm, kcUserID, fid.IdentityProvider)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(string(body)))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+
+	resp, err := s.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("keycloak request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusCreated {
+		return fmt.Errorf("keycloak returned %s", resp.Status)
+	}
+	return nil
+}
+
+// kcDeleteUser deletes a Keycloak user by their KC UUID.
+func (s *AuthService) kcDeleteUser(ctx context.Context, adminToken, kcUserID string) error {
+	endpoint := fmt.Sprintf("%s/admin/realms/%s/users/%s", s.kcURL, s.kcRealm, kcUserID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, endpoint, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+
+	resp, err := s.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("keycloak request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("keycloak returned %s", resp.Status)
+	}
+	return nil
+}
 
 // Login performs a Keycloak ROPC grant and returns the token pair on success.
 // Returns a non-nil error if credentials are invalid or Keycloak is unreachable.
@@ -169,6 +385,171 @@ func (s *AuthService) ensureUserProvisioned(ctx context.Context, accessToken str
 	})
 }
 
+// ErrInvitationRequired is returned by ProvisionBrokeredUser when a new (social)
+// user has no valid invitation. The handler maps it to 403 so the app can prompt
+// for an invite, distinct from a 500 on an internal failure.
+var ErrInvitationRequired = errors.New("a valid invitation is required")
+
+// validateInvitation looks up a pending invitation by token and verifies it
+// matches the email and has not expired. Shared by password registration and
+// brokered (social) first-login.
+func (s *AuthService) validateInvitation(ctx context.Context, token, email string) (*models.Invitation, error) {
+	inv, err := s.queries.GetInvitationByToken(ctx, token)
+	if err != nil {
+		return nil, fmt.Errorf("invalid or expired invitation")
+	}
+	if inv.Email != email {
+		return nil, fmt.Errorf("email does not match invitation")
+	}
+	if time.Now().After(inv.TokenExpiresAt) {
+		return nil, fmt.Errorf("invitation has expired")
+	}
+	return inv, nil
+}
+
+// provisionInvitedAppUser performs the app-side provisioning shared by password
+// registration and brokered first-login, for a user whose invitation has already
+// been validated and whose Keycloak account (kcUserID) already exists. It grants
+// the invitation's realm roles, provisions the encryption key, selects and
+// allocates a drive, creates the app DB record, and marks the invitation accepted.
+func (s *AuthService) provisionInvitedAppUser(
+	ctx context.Context,
+	adminToken, kcUserID, username, email, inviteToken string,
+	inv *models.Invitation,
+) error {
+	// Grant realm roles requested by the invitation. Non-fatal — the account is
+	// still usable and an admin can grant roles manually.
+	if inv.GrantAdmin || inv.GrantPremium {
+		var names []string
+		if inv.GrantAdmin {
+			names = append(names, "admin")
+		}
+		if inv.GrantPremium || inv.GrantAdmin {
+			// admins implicitly receive premium at the app layer, but we also
+			// grant it explicitly so the Keycloak JWT carries the role.
+			names = append(names, "premium")
+		}
+		var rolesToGrant []kcRoleRef
+		for _, roleName := range names {
+			role, roleErr := s.kcGetRealmRole(ctx, adminToken, roleName)
+			if roleErr != nil {
+				continue
+			}
+			rolesToGrant = append(rolesToGrant, *role)
+		}
+		if len(rolesToGrant) > 0 {
+			if grantErr := s.kcGrantRealmRoles(ctx, adminToken, kcUserID, rolesToGrant); grantErr != nil {
+				_ = grantErr // non-fatal
+			}
+		}
+	}
+
+	// Provision encryption key.
+	if s.ProvisionUserKey == nil {
+		return fmt.Errorf("encryption service not wired")
+	}
+	encKey, nonce, masterKeyVer, err := s.ProvisionUserKey(ctx)
+	if err != nil {
+		return fmt.Errorf("provision key: %w", err)
+	}
+
+	// Quota + drive from the invitation; fall back to the server default quota
+	// for invitations that pre-date the quota field.
+	quotaBytes := inv.InitialQuotaBytes
+	if quotaBytes <= 0 {
+		quotaBytes = defaultQuotaBytes
+	}
+	var drive *models.Drive
+	if inv.InitialDriveID != nil {
+		drive, err = s.queries.GetDrive(ctx, *inv.InitialDriveID)
+		if err != nil || drive == nil {
+			return fmt.Errorf("pinned drive not found")
+		}
+	} else {
+		drive, err = s.queries.SelectDriveForQuota(ctx, quotaBytes)
+		if err != nil {
+			if errors.Is(err, db.ErrNoCapacity) {
+				return fmt.Errorf("no drive has sufficient capacity for the requested quota")
+			}
+			return fmt.Errorf("select drive: %w", err)
+		}
+	}
+
+	if err := s.queries.CreateUser(ctx, &models.User{
+		Username:          username,
+		Email:             email,
+		EncryptedKey:      encKey,
+		KeyNonce:          nonce,
+		MasterKeyVersion:  masterKeyVer,
+		StorageUsedBytes:  0,
+		StorageQuotaBytes: quotaBytes,
+	}); err != nil {
+		return fmt.Errorf("create db user: %w", err)
+	}
+	if err := s.queries.AllocateUserToDrive(ctx, username, drive.ID); err != nil {
+		return fmt.Errorf("allocate drive: %w", err)
+	}
+
+	// Accept invitation. Non-fatal: the account already exists.
+	if err := s.queries.AcceptInvitation(ctx, inviteToken); err != nil {
+		_ = err
+	}
+	return nil
+}
+
+// ProvisionBrokeredUser handles app-side provisioning after a brokered (Keycloak
+// identity-provider) first login. Existing users — those that already have an app
+// DB record — are ordinary logins and need no invitation. A new user must present
+// a valid invitation; since Keycloak's first-broker-login flow already created the
+// Keycloak account, that account is rolled back (deleted) when the invitation is
+// missing or invalid, so social login cannot bypass the invite gate.
+func (s *AuthService) ProvisionBrokeredUser(ctx context.Context, accessToken, inviteToken string) error {
+	if s.ProvisionUserKey == nil {
+		return nil
+	}
+	claims, err := decodeTokenClaims(accessToken)
+	if err != nil {
+		return fmt.Errorf("decode token claims: %w", err)
+	}
+
+	// Existing user → ordinary login, no invitation required.
+	if _, err := s.queries.GetUserByUsername(ctx, claims.PreferredUsername); err == nil {
+		return nil
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("check user: %w", err)
+	}
+
+	adminToken, err := s.adminToken(ctx)
+	if err != nil {
+		return fmt.Errorf("get admin token: %w", err)
+	}
+
+	// New user → require a valid invitation. Validation happens before any app DB
+	// writes, so on failure we delete the just-created Keycloak account cleanly.
+	inv, err := s.validateInvitation(ctx, inviteToken, claims.Email)
+	if err != nil {
+		s.rollbackBrokeredUser(ctx, adminToken, claims.Sub)
+		return fmt.Errorf("%w: %v", ErrInvitationRequired, err)
+	}
+
+	// Past this point the invitation is accepted and partial app state may be
+	// created; on failure we leave the Keycloak account in place (matching
+	// Register) rather than risk orphaning an app DB record.
+	if err := s.provisionInvitedAppUser(ctx, adminToken, claims.Sub, claims.PreferredUsername, claims.Email, inviteToken, inv); err != nil {
+		return err
+	}
+	return nil
+}
+
+// rollbackBrokeredUser deletes a Keycloak account that first-broker-login created
+// for an un-invited social login. Best-effort.
+func (s *AuthService) rollbackBrokeredUser(ctx context.Context, adminToken, kcUserID string) {
+	if kcUserID == "" {
+		return
+	}
+	_ = s.kcDeleteUser(ctx, adminToken, kcUserID)
+}
+
 // Register creates a user in Keycloak via the Admin API, provisions an app DB
 // record, validates and marks the invitation token used, then logs the user in.
 //
@@ -176,15 +557,9 @@ func (s *AuthService) ensureUserProvisioned(ctx context.Context, accessToken str
 // the given email address.
 func (s *AuthService) Register(ctx context.Context, username, email, password, inviteToken string) (*TokenPair, error) {
 	// 1. Validate invitation.
-	inv, err := s.queries.GetInvitationByToken(ctx, inviteToken)
+	inv, err := s.validateInvitation(ctx, inviteToken, email)
 	if err != nil {
-		return nil, fmt.Errorf("register: invalid or expired invitation")
-	}
-	if inv.Email != email {
-		return nil, fmt.Errorf("register: email does not match invitation")
-	}
-	if time.Now().After(inv.TokenExpiresAt) {
-		return nil, fmt.Errorf("register: invitation has expired")
+		return nil, fmt.Errorf("register: %w", err)
 	}
 
 	// 2. Create user in Keycloak.
@@ -197,85 +572,13 @@ func (s *AuthService) Register(ctx context.Context, username, email, password, i
 		return nil, fmt.Errorf("register: create keycloak user: %w", err)
 	}
 
-	// 2a. Grant realm roles if the invitation requests them.
-	// Non-fatal — account is still usable; admin can grant roles manually.
-	if inv.GrantAdmin || inv.GrantPremium {
-		var rolesToGrant []kcRoleRef
-		for _, roleName := range func() []string {
-			var names []string
-			if inv.GrantAdmin {
-				names = append(names, "admin")
-			}
-			if inv.GrantPremium || inv.GrantAdmin {
-				// admins implicitly receive premium at the app layer, but we
-				// also grant it explicitly so the Keycloak JWT carries the role.
-				names = append(names, "premium")
-			}
-			return names
-		}() {
-			role, roleErr := s.kcGetRealmRole(ctx, adminToken, roleName)
-			if roleErr != nil {
-				continue
-			}
-			rolesToGrant = append(rolesToGrant, *role)
-		}
-		if len(rolesToGrant) > 0 {
-			if grantErr := s.kcGrantRealmRoles(ctx, adminToken, kcUserID, rolesToGrant); grantErr != nil {
-				// Log but do not fail registration.
-				_ = grantErr
-			}
-		}
+	// 3. Provision the app-side account: invitation roles, encryption key, drive
+	// selection/allocation, DB record, and invitation accept.
+	if err := s.provisionInvitedAppUser(ctx, adminToken, kcUserID, username, email, inviteToken, inv); err != nil {
+		return nil, fmt.Errorf("register: %w", err)
 	}
 
-	// 3. Provision encryption key.
-	if s.ProvisionUserKey == nil {
-		return nil, fmt.Errorf("register: encryption service not wired")
-	}
-	encKey, nonce, masterKeyVer, err := s.ProvisionUserKey(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("register: provision key: %w", err)
-	}
-
-	// 4. Create app DB record. Use the quota set on the invitation, falling back
-	// to the server default if the invitation pre-dates the quota field.
-	quotaBytes := inv.InitialQuotaBytes
-	if quotaBytes <= 0 {
-		quotaBytes = defaultQuotaBytes
-	}
-
-	// Select the best-fit drive before creating the user so we can fail fast
-	// if no drive has enough free capacity for the requested quota.
-	drive, err := s.queries.SelectDriveForQuota(ctx, quotaBytes)
-	if err != nil {
-		if errors.Is(err, db.ErrNoCapacity) {
-			return nil, fmt.Errorf("register: no drive has sufficient capacity for the requested quota")
-		}
-		return nil, fmt.Errorf("register: select drive: %w", err)
-	}
-
-	if err := s.queries.CreateUser(ctx, &models.User{
-		Username:          username,
-		Email:             email,
-		EncryptedKey:      encKey,
-		KeyNonce:          nonce,
-		MasterKeyVersion:  masterKeyVer,
-		StorageUsedBytes:  0,
-		StorageQuotaBytes: quotaBytes,
-	}); err != nil {
-		return nil, fmt.Errorf("register: create db user: %w", err)
-	}
-
-	if err := s.queries.AllocateUserToDrive(ctx, username, drive.ID); err != nil {
-		return nil, fmt.Errorf("register: allocate drive: %w", err)
-	}
-
-	// 5. Accept invitation.
-	if err := s.queries.AcceptInvitation(ctx, inviteToken); err != nil {
-		// Non-fatal: user and Keycloak account already created; log and continue.
-		_ = err
-	}
-
-	// 6. Auto-login.
+	// 4. Auto-login.
 	tokens, err := s.Login(ctx, username, password)
 	if err != nil {
 		return nil, fmt.Errorf("register: auto-login: %w", err)
@@ -642,8 +945,24 @@ func (s *AuthService) kcResetPassword(ctx context.Context, adminToken, userID, n
 
 // kcTokenClaims holds the subset of JWT claims needed for user provisioning.
 type kcTokenClaims struct {
+	Sub               string `json:"sub"` // Keycloak user UUID
 	PreferredUsername string `json:"preferred_username"`
 	Email             string `json:"email"`
+}
+
+// ErrEmailConflict is returned by AuthCodeExchange when the social login email
+// matches an existing app account with a different username. The caller should
+// store the PendingKcUserID and Provider in a short-lived session and redirect
+// the user to the account-linking UI.
+type ErrEmailConflict struct {
+	Email            string // email shared by both accounts
+	ExistingUsername string // existing app DB username
+	PendingKcUserID  string // KC user UUID of the new social-identity user
+	Provider         string // "google" or "apple"
+}
+
+func (e *ErrEmailConflict) Error() string {
+	return fmt.Sprintf("email conflict: %s already belongs to %s", e.Email, e.ExistingUsername)
 }
 
 // decodeTokenClaims base64-decodes the JWT payload without verifying the
@@ -813,6 +1132,146 @@ func (s *AuthService) kcFindUserByUsername(ctx context.Context, adminToken, user
 		return "", nil
 	}
 	return users[0].ID, nil
+}
+
+// ExchangeGoogleServerAuthCode exchanges a one-time server auth code (obtained by
+// the iOS app via GoogleSignin.signIn()) for a Google id_token whose audience is
+// the web client ID. This id_token can then be passed to SocialLogin, where Keycloak
+// validates it against the web client ID configured in its Google IdP.
+//
+// The id_token returned by the mobile SDK directly has aud = iOS client ID, which
+// Keycloak rejects. This two-step approach resolves the audience mismatch.
+func (s *AuthService) ExchangeGoogleServerAuthCode(ctx context.Context, serverAuthCode string) (string, error) {
+	if s.googleClientID == "" || s.googleSecret == "" {
+		return "", fmt.Errorf("google web client credentials not configured")
+	}
+	body := url.Values{
+		"code":          {serverAuthCode},
+		"client_id":     {s.googleClientID},
+		"client_secret": {s.googleSecret},
+		"redirect_uri":  {""},
+		"grant_type":    {"authorization_code"},
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		"https://oauth2.googleapis.com/token", strings.NewReader(body.Encode()))
+	if err != nil {
+		return "", fmt.Errorf("google token exchange: build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := s.http.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("google token exchange: request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var gr struct {
+		IDToken string `json:"id_token"`
+		Error   string `json:"error"`
+		ErrorDesc string `json:"error_description"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&gr); err != nil {
+		return "", fmt.Errorf("google token exchange: decode: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK || gr.IDToken == "" {
+		if gr.ErrorDesc != "" {
+			return "", fmt.Errorf("google token exchange: %s: %s", gr.Error, gr.ErrorDesc)
+		}
+		return "", fmt.Errorf("google token exchange: status %s, no id_token", resp.Status)
+	}
+	return gr.IDToken, nil
+}
+
+// LinkSocialIdentity links a provider identity to the Keycloak account identified
+// by kcUserID. provider must be the Keycloak IdP alias ("apple" or "google").
+// providerToken is the raw JWT from the provider.
+func (s *AuthService) LinkSocialIdentity(ctx context.Context, kcUserID, provider, providerToken string) error {
+	adminToken, err := s.adminToken(ctx)
+	if err != nil {
+		return fmt.Errorf("link social: admin token: %w", err)
+	}
+
+	// Decode the provider token claims to get the subject (provider user ID).
+	parts := strings.SplitN(providerToken, ".", 3)
+	if len(parts) != 3 {
+		return fmt.Errorf("link social: malformed provider token")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return fmt.Errorf("link social: decode payload: %w", err)
+	}
+	var claims struct {
+		Sub   string `json:"sub"`
+		Email string `json:"email"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return fmt.Errorf("link social: parse claims: %w", err)
+	}
+
+	type idpLink struct {
+		IdentityProvider string `json:"identityProvider"`
+		UserID           string `json:"userId"`
+		UserName         string `json:"userName"`
+	}
+	link := idpLink{
+		IdentityProvider: provider,
+		UserID:           claims.Sub,
+		UserName:         claims.Email,
+	}
+	body, err := json.Marshal(link)
+	if err != nil {
+		return err
+	}
+
+	endpoint := fmt.Sprintf("%s/admin/realms/%s/users/%s/federated-identity/%s",
+		s.kcURL, s.kcRealm, kcUserID, provider)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(string(body)))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+
+	resp, err := s.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("keycloak link identity: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusConflict {
+		return fmt.Errorf("provider identity already linked")
+	}
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusNoContent {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("keycloak link identity returned %s: %s", resp.Status, string(b))
+	}
+	return nil
+}
+
+// UnlinkSocialIdentity removes a provider link from the given Keycloak account.
+func (s *AuthService) UnlinkSocialIdentity(ctx context.Context, kcUserID, provider string) error {
+	adminToken, err := s.adminToken(ctx)
+	if err != nil {
+		return fmt.Errorf("unlink social: admin token: %w", err)
+	}
+
+	endpoint := fmt.Sprintf("%s/admin/realms/%s/users/%s/federated-identity/%s",
+		s.kcURL, s.kcRealm, kcUserID, provider)
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, endpoint, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+
+	resp, err := s.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("keycloak unlink identity: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("keycloak unlink identity returned %s: %s", resp.Status, string(b))
+	}
+	return nil
 }
 
 // kcUpdateUsername fetches the current Keycloak UserRepresentation, sets the new

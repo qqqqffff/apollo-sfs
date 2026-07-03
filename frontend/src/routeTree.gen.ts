@@ -9,8 +9,10 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
+import { Route as TermsRouteImport } from './routes/terms'
 import { Route as SuspendedRouteImport } from './routes/suspended'
 import { Route as RegisterRouteImport } from './routes/register'
+import { Route as PrivacyRouteImport } from './routes/privacy'
 import { Route as MathGameRouteImport } from './routes/math-game'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as InterestRouteImport } from './routes/interest'
@@ -19,6 +21,7 @@ import { Route as AuthRouteImport } from './routes/_auth'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AuthPremiumRouteImport } from './routes/_auth.premium'
 import { Route as AuthClientIndexRouteImport } from './routes/_auth.client/index'
+import { Route as AuthShareTokenRouteImport } from './routes/_auth.share.$token'
 import { Route as AuthSettingsApiKeysRouteImport } from './routes/_auth.settings/api-keys'
 import { Route as AuthClientProfileRouteImport } from './routes/_auth.client/profile'
 import { Route as AuthClientFavoritesRouteImport } from './routes/_auth.client/favorites'
@@ -30,7 +33,14 @@ import { Route as AuthAdminEmailsRouteImport } from './routes/_auth.admin/emails
 import { Route as AuthAdminBansRouteImport } from './routes/_auth.admin/bans'
 import { Route as AuthAdminBannedIpsRouteImport } from './routes/_auth.admin/banned-ips'
 import { Route as AuthAdminAlarmRouteImport } from './routes/_auth.admin/alarm'
+import { Route as AuthClientSharedIndexRouteImport } from './routes/_auth.client/shared.index'
+import { Route as AuthClientSharedShareIdRouteImport } from './routes/_auth.client/shared.$shareId'
 
+const TermsRoute = TermsRouteImport.update({
+  id: '/terms',
+  path: '/terms',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const SuspendedRoute = SuspendedRouteImport.update({
   id: '/suspended',
   path: '/suspended',
@@ -39,6 +49,11 @@ const SuspendedRoute = SuspendedRouteImport.update({
 const RegisterRoute = RegisterRouteImport.update({
   id: '/register',
   path: '/register',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const PrivacyRoute = PrivacyRouteImport.update({
+  id: '/privacy',
+  path: '/privacy',
   getParentRoute: () => rootRouteImport,
 } as any)
 const MathGameRoute = MathGameRouteImport.update({
@@ -78,6 +93,11 @@ const AuthPremiumRoute = AuthPremiumRouteImport.update({
 const AuthClientIndexRoute = AuthClientIndexRouteImport.update({
   id: '/client/',
   path: '/client/',
+  getParentRoute: () => AuthRoute,
+} as any)
+const AuthShareTokenRoute = AuthShareTokenRouteImport.update({
+  id: '/share/$token',
+  path: '/share/$token',
   getParentRoute: () => AuthRoute,
 } as any)
 const AuthSettingsApiKeysRoute = AuthSettingsApiKeysRouteImport.update({
@@ -135,6 +155,16 @@ const AuthAdminAlarmRoute = AuthAdminAlarmRouteImport.update({
   path: '/admin/alarm',
   getParentRoute: () => AuthRoute,
 } as any)
+const AuthClientSharedIndexRoute = AuthClientSharedIndexRouteImport.update({
+  id: '/client/shared/',
+  path: '/client/shared/',
+  getParentRoute: () => AuthRoute,
+} as any)
+const AuthClientSharedShareIdRoute = AuthClientSharedShareIdRouteImport.update({
+  id: '/client/shared/$shareId',
+  path: '/client/shared/$shareId',
+  getParentRoute: () => AuthRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -142,8 +172,10 @@ export interface FileRoutesByFullPath {
   '/interest': typeof InterestRoute
   '/login': typeof LoginRoute
   '/math-game': typeof MathGameRoute
+  '/privacy': typeof PrivacyRoute
   '/register': typeof RegisterRoute
   '/suspended': typeof SuspendedRoute
+  '/terms': typeof TermsRoute
   '/premium': typeof AuthPremiumRoute
   '/admin/alarm': typeof AuthAdminAlarmRoute
   '/admin/banned-ips': typeof AuthAdminBannedIpsRoute
@@ -156,7 +188,10 @@ export interface FileRoutesByFullPath {
   '/client/favorites': typeof AuthClientFavoritesRoute
   '/client/profile': typeof AuthClientProfileRoute
   '/settings/api-keys': typeof AuthSettingsApiKeysRoute
+  '/share/$token': typeof AuthShareTokenRoute
   '/client/': typeof AuthClientIndexRoute
+  '/client/shared/$shareId': typeof AuthClientSharedShareIdRoute
+  '/client/shared/': typeof AuthClientSharedIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -164,8 +199,10 @@ export interface FileRoutesByTo {
   '/interest': typeof InterestRoute
   '/login': typeof LoginRoute
   '/math-game': typeof MathGameRoute
+  '/privacy': typeof PrivacyRoute
   '/register': typeof RegisterRoute
   '/suspended': typeof SuspendedRoute
+  '/terms': typeof TermsRoute
   '/premium': typeof AuthPremiumRoute
   '/admin/alarm': typeof AuthAdminAlarmRoute
   '/admin/banned-ips': typeof AuthAdminBannedIpsRoute
@@ -178,7 +215,10 @@ export interface FileRoutesByTo {
   '/client/favorites': typeof AuthClientFavoritesRoute
   '/client/profile': typeof AuthClientProfileRoute
   '/settings/api-keys': typeof AuthSettingsApiKeysRoute
+  '/share/$token': typeof AuthShareTokenRoute
   '/client': typeof AuthClientIndexRoute
+  '/client/shared/$shareId': typeof AuthClientSharedShareIdRoute
+  '/client/shared': typeof AuthClientSharedIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -188,8 +228,10 @@ export interface FileRoutesById {
   '/interest': typeof InterestRoute
   '/login': typeof LoginRoute
   '/math-game': typeof MathGameRoute
+  '/privacy': typeof PrivacyRoute
   '/register': typeof RegisterRoute
   '/suspended': typeof SuspendedRoute
+  '/terms': typeof TermsRoute
   '/_auth/premium': typeof AuthPremiumRoute
   '/_auth/admin/alarm': typeof AuthAdminAlarmRoute
   '/_auth/admin/banned-ips': typeof AuthAdminBannedIpsRoute
@@ -202,7 +244,10 @@ export interface FileRoutesById {
   '/_auth/client/favorites': typeof AuthClientFavoritesRoute
   '/_auth/client/profile': typeof AuthClientProfileRoute
   '/_auth/settings/api-keys': typeof AuthSettingsApiKeysRoute
+  '/_auth/share/$token': typeof AuthShareTokenRoute
   '/_auth/client/': typeof AuthClientIndexRoute
+  '/_auth/client/shared/$shareId': typeof AuthClientSharedShareIdRoute
+  '/_auth/client/shared/': typeof AuthClientSharedIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -212,8 +257,10 @@ export interface FileRouteTypes {
     | '/interest'
     | '/login'
     | '/math-game'
+    | '/privacy'
     | '/register'
     | '/suspended'
+    | '/terms'
     | '/premium'
     | '/admin/alarm'
     | '/admin/banned-ips'
@@ -226,7 +273,10 @@ export interface FileRouteTypes {
     | '/client/favorites'
     | '/client/profile'
     | '/settings/api-keys'
+    | '/share/$token'
     | '/client/'
+    | '/client/shared/$shareId'
+    | '/client/shared/'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -234,8 +284,10 @@ export interface FileRouteTypes {
     | '/interest'
     | '/login'
     | '/math-game'
+    | '/privacy'
     | '/register'
     | '/suspended'
+    | '/terms'
     | '/premium'
     | '/admin/alarm'
     | '/admin/banned-ips'
@@ -248,7 +300,10 @@ export interface FileRouteTypes {
     | '/client/favorites'
     | '/client/profile'
     | '/settings/api-keys'
+    | '/share/$token'
     | '/client'
+    | '/client/shared/$shareId'
+    | '/client/shared'
   id:
     | '__root__'
     | '/'
@@ -257,8 +312,10 @@ export interface FileRouteTypes {
     | '/interest'
     | '/login'
     | '/math-game'
+    | '/privacy'
     | '/register'
     | '/suspended'
+    | '/terms'
     | '/_auth/premium'
     | '/_auth/admin/alarm'
     | '/_auth/admin/banned-ips'
@@ -271,7 +328,10 @@ export interface FileRouteTypes {
     | '/_auth/client/favorites'
     | '/_auth/client/profile'
     | '/_auth/settings/api-keys'
+    | '/_auth/share/$token'
     | '/_auth/client/'
+    | '/_auth/client/shared/$shareId'
+    | '/_auth/client/shared/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -281,12 +341,21 @@ export interface RootRouteChildren {
   InterestRoute: typeof InterestRoute
   LoginRoute: typeof LoginRoute
   MathGameRoute: typeof MathGameRoute
+  PrivacyRoute: typeof PrivacyRoute
   RegisterRoute: typeof RegisterRoute
   SuspendedRoute: typeof SuspendedRoute
+  TermsRoute: typeof TermsRoute
 }
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
+    '/terms': {
+      id: '/terms'
+      path: '/terms'
+      fullPath: '/terms'
+      preLoaderRoute: typeof TermsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/suspended': {
       id: '/suspended'
       path: '/suspended'
@@ -299,6 +368,13 @@ declare module '@tanstack/react-router' {
       path: '/register'
       fullPath: '/register'
       preLoaderRoute: typeof RegisterRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/privacy': {
+      id: '/privacy'
+      path: '/privacy'
+      fullPath: '/privacy'
+      preLoaderRoute: typeof PrivacyRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/math-game': {
@@ -355,6 +431,13 @@ declare module '@tanstack/react-router' {
       path: '/client'
       fullPath: '/client/'
       preLoaderRoute: typeof AuthClientIndexRouteImport
+      parentRoute: typeof AuthRoute
+    }
+    '/_auth/share/$token': {
+      id: '/_auth/share/$token'
+      path: '/share/$token'
+      fullPath: '/share/$token'
+      preLoaderRoute: typeof AuthShareTokenRouteImport
       parentRoute: typeof AuthRoute
     }
     '/_auth/settings/api-keys': {
@@ -434,6 +517,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthAdminAlarmRouteImport
       parentRoute: typeof AuthRoute
     }
+    '/_auth/client/shared/': {
+      id: '/_auth/client/shared/'
+      path: '/client/shared'
+      fullPath: '/client/shared/'
+      preLoaderRoute: typeof AuthClientSharedIndexRouteImport
+      parentRoute: typeof AuthRoute
+    }
+    '/_auth/client/shared/$shareId': {
+      id: '/_auth/client/shared/$shareId'
+      path: '/client/shared/$shareId'
+      fullPath: '/client/shared/$shareId'
+      preLoaderRoute: typeof AuthClientSharedShareIdRouteImport
+      parentRoute: typeof AuthRoute
+    }
   }
 }
 
@@ -450,7 +547,10 @@ interface AuthRouteChildren {
   AuthClientFavoritesRoute: typeof AuthClientFavoritesRoute
   AuthClientProfileRoute: typeof AuthClientProfileRoute
   AuthSettingsApiKeysRoute: typeof AuthSettingsApiKeysRoute
+  AuthShareTokenRoute: typeof AuthShareTokenRoute
   AuthClientIndexRoute: typeof AuthClientIndexRoute
+  AuthClientSharedShareIdRoute: typeof AuthClientSharedShareIdRoute
+  AuthClientSharedIndexRoute: typeof AuthClientSharedIndexRoute
 }
 
 const AuthRouteChildren: AuthRouteChildren = {
@@ -466,7 +566,10 @@ const AuthRouteChildren: AuthRouteChildren = {
   AuthClientFavoritesRoute: AuthClientFavoritesRoute,
   AuthClientProfileRoute: AuthClientProfileRoute,
   AuthSettingsApiKeysRoute: AuthSettingsApiKeysRoute,
+  AuthShareTokenRoute: AuthShareTokenRoute,
   AuthClientIndexRoute: AuthClientIndexRoute,
+  AuthClientSharedShareIdRoute: AuthClientSharedShareIdRoute,
+  AuthClientSharedIndexRoute: AuthClientSharedIndexRoute,
 }
 
 const AuthRouteWithChildren = AuthRoute._addFileChildren(AuthRouteChildren)
@@ -478,8 +581,10 @@ const rootRouteChildren: RootRouteChildren = {
   InterestRoute: InterestRoute,
   LoginRoute: LoginRoute,
   MathGameRoute: MathGameRoute,
+  PrivacyRoute: PrivacyRoute,
   RegisterRoute: RegisterRoute,
   SuspendedRoute: SuspendedRoute,
+  TermsRoute: TermsRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

@@ -2,6 +2,7 @@ package routes
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -15,6 +16,11 @@ import (
 type Querier interface {
 	// Me
 	GetUserByUsername(ctx context.Context, username string) (*models.User, error)
+
+	// Admin per-user storage view
+	GetUserStorageBreakdown(ctx context.Context, userID string) (db.UserStorageBreakdown, error)
+	GetUserStorageAllocations(ctx context.Context, username, userID string) ([]db.UserStorageAllocation, error)
+	CountActiveExpansionRequests(ctx context.Context, username string) (int, error)
 
 	// User preferences
 	GetUserPreferences(ctx context.Context, userID string) (*models.UserPreferences, error)
@@ -40,4 +46,15 @@ type Querier interface {
 	// Audit logs
 	InsertAuditLog(ctx context.Context, in db.AuditInput) error
 	ListAuditLogsForUser(ctx context.Context, username string, in db.PageInput) (*db.PageResult[models.AuditLog], error)
+
+	// Devices (mobile)
+	CreateDevice(ctx context.Context, userID uuid.UUID, name, platform string, pushToken *string) (*db.Device, error)
+	GetDevice(ctx context.Context, id uuid.UUID) (*db.Device, error)
+	UpdateDeviceLastSeen(ctx context.Context, id uuid.UUID, pushToken *string) error
+	DeleteDevice(ctx context.Context, id uuid.UUID) error
+
+	// Sync (mobile)
+	DeltaSyncFiles(ctx context.Context, userID uuid.UUID, since time.Time) ([]models.File, error)
+	DeltaSyncDeleted(ctx context.Context, userID uuid.UUID, since time.Time) ([]uuid.UUID, error)
+	FindFileByHash(ctx context.Context, userID uuid.UUID, hash string) (*models.File, error)
 }

@@ -67,6 +67,20 @@ func (q *Queries) GetUserByUsername(ctx context.Context, username string) (*mode
 	return u, nil
 }
 
+// GetUserByEmail returns a user by their email address.
+// Returns sql.ErrNoRows if no user has that email.
+func (q *Queries) GetUserByEmail(ctx context.Context, email string) (*models.User, error) {
+	row := q.db.QueryRowContext(ctx, `
+		SELECT`+userColumns+`
+		FROM users WHERE email = $1
+	`, email)
+	u, err := scanUser(row)
+	if err != nil {
+		return nil, fmt.Errorf("GetUserByEmail %q: %w", email, err)
+	}
+	return u, nil
+}
+
 // CreateUser inserts a new user row. The caller is responsible for generating
 // the encrypted_key and key_nonce before calling this.
 func (q *Queries) CreateUser(ctx context.Context, u *models.User) error {

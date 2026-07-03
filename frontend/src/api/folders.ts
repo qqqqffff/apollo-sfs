@@ -1,5 +1,5 @@
 import { del, get, patch, post } from './client'
-import type { Folder, FolderContents, FolderKind, HiddenMode, MediaSort } from '../types/api'
+import type { DriveMigrationEligibility, Folder, FolderContents, FolderDriveMigration, FolderKind, HiddenMode, MediaSort } from '../types/api'
 
 export interface FolderPageParams {
   folderCursor?: string
@@ -40,8 +40,8 @@ export function getMediaFolder(folderId: string, p: MediaPageParams = {}) {
   return get<FolderContents>(`/folders/${folderId}/media${qs}`)
 }
 
-export function createFolder(name: string, parent_id?: string, kind: FolderKind = 'regular') {
-  return post<Folder>('/folders', { name, parent_id: parent_id ?? null, kind })
+export function createFolder(name: string, parent_id?: string, kind: FolderKind = 'regular', drive_id?: string) {
+  return post<Folder>('/folders', { name, parent_id: parent_id ?? null, kind, drive_id: drive_id ?? null })
 }
 
 export function renameFolder(folderId: string, name: string) {
@@ -76,3 +76,16 @@ export const ancestorsQueryOptions = (folderId: string) => ({
   queryKey: ['folders', folderId, 'ancestors'] as const,
   queryFn: () => getAncestors(folderId),
 })
+
+// requestDriveMigration kicks off a background job moving a folder's direct
+// files to a different drive (potentially a different tier/server). Returns
+// the created migration row (202 Accepted — the move runs asynchronously).
+export function requestDriveMigration(folderId: string, driveId: string) {
+  return post<FolderDriveMigration>(`/folders/${folderId}/drive-migrations`, { drive_id: driveId })
+}
+
+// getLatestDriveMigration returns the most recent migration for a folder
+// plus rate-limit eligibility info (3 changes per folder per rolling 30 days).
+export function getLatestDriveMigration(folderId: string) {
+  return get<DriveMigrationEligibility>(`/folders/${folderId}/drive-migrations/latest`)
+}

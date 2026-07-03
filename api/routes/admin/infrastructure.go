@@ -16,14 +16,30 @@ import (
 )
 
 // GetInfrastructure handles GET /api/v1/admin/system/infrastructure.
-// Returns all servers with their drives and per-drive usage summaries.
+// Returns the server → node → drive topology: every node (with its parent
+// server's fields) and every drive (carrying its node_id and per-drive usage).
+// Nodes are returned even when they hold no drives so the metrics page can show
+// the full cluster layout.
 func (h *Handler) GetInfrastructure(c *gin.Context) {
-	summaries, err := h.queries.GetDriveSummaries(c.Request.Context())
+	ctx := c.Request.Context()
+	summaries, err := h.queries.GetDriveSummaries(ctx)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not retrieve infrastructure"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"drives": summaries})
+	nodes, err := h.queries.GetNodeSummaries(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not retrieve infrastructure"})
+		return
+	}
+	// Physical disks (per node) are nested under each node's logical drive so a
+	// pooled drive's individual disks (and the manager's HDD) are visible.
+	disks, err := h.queries.ListAllNodeDisks(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not retrieve infrastructure"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"nodes": nodes, "drives": summaries, "disks": disks})
 }
 
 // GetCapacity handles GET /api/v1/admin/system/capacity.
@@ -107,7 +123,8 @@ func (h *Handler) CreateServer(c *gin.Context) {
 }
 
 type updateServerRequest struct {
-	IsActive *bool `json:"is_active"`
+	IsActive *bool  `json:"is_active"`
+	Name     string `json:"name"`
 }
 
 // UpdateServer handles PATCH /api/v1/admin/system/servers/:server_id.
@@ -135,13 +152,26 @@ func (h *Handler) UpdateServer(c *gin.Context) {
 		}
 	}
 
+	if name := sanitize.String(req.Name); name != "" {
+		if err := h.queries.RenameServer(ctx, serverID, name); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "could not rename server"})
+			return
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{"message": "server updated"})
 }
 
 type addDriveRequest struct {
-	Label         string `json:"label" binding:"required"`
-	MinioBucket   string `json:"minio_bucket" binding:"required"`
-	CapacityBytes int64  `json:"capacity_bytes" binding:"required,min=1"`
+	Label       string `json:"label" binding:"required"`
+	MinioBucket string `json:"minio_bucket" binding:"required"`
+	// DriveType is the storage tier: "nvme" (fast) or "hdd" (standard). Optional
+	// for backward compatibility — when omitted it is inferred from the label
+	// (a label containing "nvme" → nvme, otherwise hdd).
+	DriveType string `json:"drive_type" binding:"omitempty,oneof=nvme hdd"`
+	// NodeID, when set, mounts the new drive on a specific node of this server.
+	// Omit to leave the drive unassigned.
+	NodeID string `json:"node_id"`
 }
 
 // AddDrive handles POST /api/v1/admin/system/servers/:server_id/drives.
@@ -166,7 +196,27 @@ func (h *Handler) AddDrive(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "server not found"})
 		return
 	}
-	client, ok := h.registry.Client(serverID)
+	// Resolve the optional node assignment, ensuring it belongs to this server.
+	// A node may override the server's MinIO endpoint, in which case the new
+	// drive's bucket must be created on the node's instance, not the server's.
+	var nodeID *uuid.UUID
+	nodeHasEndpoint := false
+	if req.NodeID != "" {
+		nid, err := uuid.Parse(req.NodeID)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid node_id"})
+			return
+		}
+		node, err := h.queries.GetNode(ctx, nid)
+		if err != nil || node == nil || node.ServerID != serverID {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "node not found on this server"})
+			return
+		}
+		nodeID = &nid
+		nodeHasEndpoint = node.MinioEndpoint != nil && *node.MinioEndpoint != ""
+	}
+
+	client, ok := h.registry.ClientForDrive(serverID, nodeID, nodeHasEndpoint)
 	if !ok {
 		c.JSON(http.StatusConflict, gin.H{"error": "server has no active MinIO client; re-activate it first"})
 		return
@@ -176,11 +226,24 @@ func (h *Handler) AddDrive(c *gin.Context) {
 		return
 	}
 
+	// Tier: use the explicit drive_type, else infer from the label for backward
+	// compatibility (callers that predate the field still classify correctly).
+	driveType := strings.ToLower(sanitize.String(req.DriveType))
+	if driveType == "" {
+		if strings.Contains(strings.ToLower(req.Label), "nvme") {
+			driveType = "nvme"
+		} else {
+			driveType = "hdd"
+		}
+	}
+
 	drive, err := h.queries.CreateDrive(ctx, db.CreateDriveParams{
 		ServerID:      serverID,
+		NodeID:        nodeID,
 		Label:         sanitize.String(req.Label),
-		CapacityBytes: req.CapacityBytes,
+		CapacityBytes: 0, // set by Sync once the drive is online
 		MinioBucket:   req.MinioBucket,
+		DriveType:     driveType,
 	})
 	if err != nil {
 		if strings.Contains(err.Error(), "unique") {
@@ -191,18 +254,35 @@ func (h *Handler) AddDrive(c *gin.Context) {
 		return
 	}
 
+	// Auto-detect capacity from disk if the stats path is configured.
+	if h.diskStatsPath != "" {
+		if usage, err := psdisk.Usage(h.diskStatsPath); err == nil {
+			if updated, err := h.queries.UpdateDriveCapacity(ctx, drive.ID, int64(usage.Used+usage.Free)); err == nil {
+				drive = updated
+			}
+		}
+	}
+
 	c.JSON(http.StatusCreated, drive)
 }
 
 type updateDriveRequest struct {
-	Label         string `json:"label"`
-	CapacityBytes int64  `json:"capacity_bytes"`
-	IsActive      *bool  `json:"is_active"`
+	Label    string `json:"label"`
+	IsActive *bool  `json:"is_active"`
+	// NodeID moves the drive to a different node. A pointer-to-pointer distinguishes
+	// "absent" (leave unchanged) from a null/empty value (detach from any node).
+	NodeID *string `json:"node_id"`
 }
 
 // UpdateDrive handles PATCH /api/v1/admin/system/servers/:server_id/drives/:drive_id.
+// Capacity is read-only via this endpoint; use the sync-capacity endpoint instead.
 func (h *Handler) UpdateDrive(c *gin.Context) {
 	ctx := c.Request.Context()
+	serverID, err := uuid.Parse(c.Param("server_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid server_id"})
+		return
+	}
 	driveID, err := uuid.Parse(c.Param("drive_id"))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid drive_id"})
@@ -225,18 +305,36 @@ func (h *Handler) UpdateDrive(c *gin.Context) {
 	if req.Label != "" {
 		label = sanitize.String(req.Label)
 	}
-	capacityBytes := existing.CapacityBytes
-	if req.CapacityBytes > 0 {
-		capacityBytes = req.CapacityBytes
-	}
 	isActive := existing.IsActive
 	if req.IsActive != nil {
 		isActive = *req.IsActive
 	}
 
+	// Apply a node reassignment when node_id is present in the request body.
+	if req.NodeID != nil {
+		var nodeID *uuid.UUID
+		if *req.NodeID != "" {
+			nid, err := uuid.Parse(*req.NodeID)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid node_id"})
+				return
+			}
+			node, err := h.queries.GetNode(ctx, nid)
+			if err != nil || node == nil || node.ServerID != serverID {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "node not found on this server"})
+				return
+			}
+			nodeID = &nid
+		}
+		if err := h.queries.AssignDriveToNode(ctx, driveID, nodeID); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "could not reassign drive"})
+			return
+		}
+	}
+
 	drive, err := h.queries.UpdateDrive(ctx, driveID, db.UpdateDriveParams{
 		Label:         label,
-		CapacityBytes: capacityBytes,
+		CapacityBytes: existing.CapacityBytes, // never changed here; only via SyncDriveCapacity
 		IsActive:      isActive,
 	})
 	if err != nil {

@@ -3,13 +3,7 @@ module.exports = {
   preset: 'ts-jest',
   testEnvironment: 'jest-environment-jsdom',
   transform: {
-    '^.+\\.tsx?$': ['ts-jest', {
-      tsconfig: 'tsconfig.jest.json',
-      // Suppress type-check errors during the test run — tsc --noEmit handles
-      // type correctness separately. This keeps the test output focused on
-      // test failures rather than type errors.
-      diagnostics: false,
-    }],
+    '^.+\\.tsx?$': '<rootDir>/jest-transform.cjs',
   },
   // react-icons v5 ships ESM — transform it through ts-jest so Jest can load it.
   transformIgnorePatterns: ['node_modules/(?!(react-icons)/)'],

@@ -5,6 +5,7 @@ import { MdContentCopy, MdCheck, MdRefresh } from 'react-icons/md'
 import {
   adminInvitationsInfiniteQueryOptions,
   capacityQueryOptions,
+  infrastructureQueryOptions,
   createInvitation,
   revokeInvitation,
   resendInvitation,
@@ -33,6 +34,16 @@ function RouteComponent() {
   const { data, isLoading, error, hasNextPage, isFetchingNextPage, fetchNextPage } =
     useInfiniteQuery(adminInvitationsInfiniteQueryOptions)
   const { data: capacity } = useQuery(capacityQueryOptions)
+  const { data: infraData } = useQuery(infrastructureQueryOptions)
+
+  // Group drives by node for the drive picker
+  const nodeMap = new Map<string, { hostname: string; drives: NonNullable<typeof infraData>['drives'][number][] }>()
+  for (const d of infraData?.drives ?? []) {
+    const key = d.node_hostname
+    if (!nodeMap.has(key)) nodeMap.set(key, { hostname: key, drives: [] })
+    nodeMap.get(key)!.drives.push(d)
+  }
+  const nodeGroups = Array.from(nodeMap.values())
 
   const [email, setEmail] = useState('')
   const [quotaBytes, setQuotaBytes] = useState(10 * GB)
@@ -40,6 +51,7 @@ function RouteComponent() {
   const [useCustom, setUseCustom] = useState(false)
   const [grantAdmin, setGrantAdmin] = useState(false)
   const [grantPremium, setGrantPremium] = useState(false)
+  const [selectedDriveId, setSelectedDriveId] = useState<string>('')
   const { notify } = useNotification()
   const [createError, setCreateError] = useState<string | null>(null)
   const [copiedId, setCopiedId] = useState<string | null>(null)
@@ -51,11 +63,12 @@ function RouteComponent() {
     : quotaBytes
 
   const createMutation = useMutation({
-    mutationFn: () => createInvitation(email, effectiveQuota, grantAdmin, grantPremium),
+    mutationFn: () => createInvitation(email, effectiveQuota, grantAdmin, grantPremium, selectedDriveId || undefined),
     onSuccess: () => {
       setEmail('')
       setGrantAdmin(false)
       setGrantPremium(false)
+      setSelectedDriveId('')
       setCreateError(null)
       queryClient.invalidateQueries({ queryKey: ['admin', 'invitations'] })
       notify('success', 'Invitation sent')
@@ -99,7 +112,12 @@ function RouteComponent() {
     return Math.max(0, RESEND_COOLDOWN_MS - (Date.now() - last))
   }
 
-  const maxAvailableBytes = capacity?.max_available_bytes ?? null
+  const selectedDriveSummary = infraData?.drives.find(d => d.drive_id === selectedDriveId)
+  const selectedDriveAvailableBytes = selectedDriveSummary
+    ? Math.max(0, selectedDriveSummary.capacity_bytes - selectedDriveSummary.allocated_quota_bytes)
+    : null
+
+  const maxAvailableBytes = selectedDriveAvailableBytes ?? capacity?.max_available_bytes ?? null
   const maxAvailableGb = maxAvailableBytes !== null ? maxAvailableBytes / GB : null
   const quotaExceedsCapacity = maxAvailableBytes !== null && effectiveQuota > maxAvailableBytes
 
@@ -114,7 +132,9 @@ function RouteComponent() {
 
       {maxAvailableGb !== null && (
         <div className="mb-4 flex items-center gap-2 text-xs text-gray-500">
-          <span className="font-medium text-gray-700">Max quota available:</span>
+          <span className="font-medium text-gray-700">
+            {selectedDriveSummary ? `Max quota on ${selectedDriveSummary.drive_label}:` : 'Max quota available:'}
+          </span>
           <span>{maxAvailableGb.toFixed(1)} GB</span>
           {quotaExceedsCapacity && (
             <span className="text-red-500 font-medium">
@@ -192,6 +212,43 @@ function RouteComponent() {
             </div>
           )}
         </div>
+        {nodeGroups.length > 0 && (
+          <div className="flex flex-col gap-1.5">
+            <span className="text-xs text-gray-500">Drive assignment:</span>
+            <div className="flex flex-wrap gap-4">
+              {nodeGroups.map(node => (
+                <div key={node.hostname} className="flex flex-col gap-1 min-w-36">
+                  <span className="text-xs font-medium text-gray-500">{node.hostname}</span>
+                  {node.drives.map(drive => (
+                    <button
+                      key={drive.drive_id}
+                      type="button"
+                      onClick={() => setSelectedDriveId(drive.drive_id === selectedDriveId ? '' : drive.drive_id)}
+                      className={`flex items-center gap-2 px-2.5 py-1.5 rounded-md border text-xs text-left transition-colors cursor-pointer ${
+                        selectedDriveId === drive.drive_id
+                          ? 'bg-blue-50 border-blue-400 text-blue-700'
+                          : 'bg-white border-gray-200 text-gray-700 hover:border-gray-400'
+                      }`}
+                    >
+                      <span className="flex-1 truncate">{drive.drive_label}</span>
+                      <span className={`shrink-0 px-1.5 py-0.5 rounded text-[10px] font-semibold ${
+                        drive.drive_type === 'nvme'
+                          ? 'bg-emerald-100 text-emerald-700'
+                          : 'bg-gray-100 text-gray-500'
+                      }`}>
+                        {drive.drive_type === 'nvme' ? 'Fast' : 'Slow'}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              ))}
+            </div>
+            {!selectedDriveId && (
+              <span className="text-xs text-gray-400">No drive selected — best-fit chosen automatically</span>
+            )}
+          </div>
+        )}
+
         <div className="flex flex-wrap gap-4">
           <label className="flex items-center gap-2 cursor-pointer select-none">
             <input

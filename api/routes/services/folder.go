@@ -18,7 +18,7 @@ import (
 // folder's own metadata with paginated lists of its direct children.
 // Folder is nil when listing the virtual root (parent_id IS NULL).
 type FolderContents struct {
-	Folder     *models.Folder              `json:"folder"`
+	Folder     *models.Folder                `json:"folder"`
 	Subfolders *db.PageResult[models.Folder] `json:"subfolders"`
 	Files      *db.PageResult[models.File]   `json:"files"`
 }
@@ -148,6 +148,14 @@ func (s *FolderService) GetContents(
 // kind is "regular" or "media"; an empty or unknown value defaults to regular.
 // A folder created beneath a media folder inherits the media kind so the whole
 // subtree behaves as a collection (its descendants are subcollections).
+// username is the preferred_username used to look up drive ownership (drive
+// allocations are keyed by username, not the Keycloak UUID) — required
+// whenever driveID is non-nil.
+// driveID optionally pins uploads into the new folder to a specific drive. When
+// non-nil it must be one of the user's current drive allocations, confirmed via
+// GetUserDrives; otherwise ErrDriveNotAllocated is returned. This is the
+// security-relevant check preventing a client from pinning a folder to storage
+// it doesn't own.
 // Returns ErrFolderNotFound if the parent does not belong to userID.
 // Returns ErrDuplicateFolderName if a sibling with the same name already exists
 // (enforced by the DB unique constraint on user_id, parent_id, name).
@@ -155,8 +163,8 @@ func (s *FolderService) Create(
 	ctx context.Context,
 	userID uuid.UUID,
 	parentID *uuid.UUID,
-	name string,
-	kind string,
+	name, kind, username string,
+	driveID *uuid.UUID,
 ) (*models.Folder, error) {
 	q, tx, err := s.queries.ForUser(ctx, userID)
 	if err != nil {
@@ -180,9 +188,20 @@ func (s *FolderService) Create(
 		}
 	}
 
+	if driveID != nil {
+		drives, err := s.queries.GetUserDrives(ctx, username, userID.String())
+		if err != nil {
+			return nil, fmt.Errorf("create folder: get user drives: %w", err)
+		}
+		if !driveIsAllocated(drives, *driveID) {
+			return nil, ErrDriveNotAllocated
+		}
+	}
+
 	folder, err := q.CreateFolder(ctx, &models.Folder{
 		UserID:   userID,
 		ParentID: parentID,
+		DriveID:  driveID,
 		Name:     name,
 		Kind:     kind,
 	})
@@ -193,6 +212,19 @@ func (s *FolderService) Create(
 		return nil, fmt.Errorf("create folder: %w", err)
 	}
 	return folder, tx.Commit()
+}
+
+// driveIsAllocated reports whether driveID appears among the user's current
+// drive allocations. Shared by folder creation and drive-migration requests
+// as the ownership check preventing a client from pinning/moving to storage
+// it doesn't own.
+func driveIsAllocated(drives []db.UserDriveInfo, driveID uuid.UUID) bool {
+	for _, d := range drives {
+		if d.DriveID == driveID {
+			return true
+		}
+	}
+	return false
 }
 
 // GetMediaContents returns a media folder's metadata, its direct subcollections,
@@ -444,7 +476,6 @@ func (s *FolderService) getOwned(ctx context.Context, q *db.Queries, folderID, u
 	return folder, nil
 }
 
-
 // isDuplicateKeyError checks whether a DB error is a PostgreSQL unique
 // constraint violation (SQLSTATE 23505).
 func isDuplicateKeyError(err error) bool {
@@ -469,6 +500,11 @@ func indexStr(s, sub string) int {
 // ErrFolderNotFound is returned when a folder does not exist or does not belong
 // to the requesting user. Using a single error prevents leaking folder existence.
 var ErrFolderNotFound = errors.New("folder not found")
+
+// ErrDriveNotAllocated is returned when a caller requests a drive pin (at
+// folder creation or via a drive-migration request) for a drive that is not
+// among the user's current allocations.
+var ErrDriveNotAllocated = errors.New("drive is not allocated to this user")
 
 // ErrFolderNotEmpty is returned when attempting to delete a folder that still
 // contains subfolders or files.

@@ -147,6 +147,19 @@ const FILES = [
   { id: 'fi2', name: 'note.txt',   size_bytes: 1024,       mime_type: 'text/plain' },
 ]
 
+// mockQuery is shared by every useQuery() call site in the component (me,
+// preferences, and the my-servers storage list), so it must branch on the
+// query key rather than returning one blanket value — otherwise e.g. the
+// my-servers query would receive the User mock object instead of an array.
+function mockQueryByKey(userOverride: typeof USER | null) {
+  mockQuery.mockImplementation((opts: { queryKey?: readonly unknown[] }) => {
+    const key = opts?.queryKey?.[0]
+    if (key === 'storage') return { data: [] }
+    if (key === 'preferences') return { data: undefined }
+    return { data: userOverride }
+  })
+}
+
 function setup(overrides: Partial<typeof mockContentsReturnValue> = {}, userOverride: typeof USER | null = USER) {
   mockContentsReturnValue = {
     folder: null,
@@ -159,7 +172,7 @@ function setup(overrides: Partial<typeof mockContentsReturnValue> = {}, userOver
     fetchNextPage: jest.fn(),
     ...overrides,
   }
-  mockQuery.mockReturnValue({ data: userOverride })
+  mockQueryByKey(userOverride)
   mockMutation.mockReturnValue({ mutate: jest.fn(), isPending: false })
   mockQueryClient.mockReturnValue({ invalidateQueries: jest.fn() })
   mockSearch = { file: undefined, folder: undefined }
@@ -235,7 +248,7 @@ describe('Client Files (index) page', () => {
       isFetchingNextPage: false,
       fetchNextPage: jest.fn(),
     }
-    mockQuery.mockReturnValue({ data: USER })
+    mockQueryByKey(USER)
     mockMutation.mockReturnValue({ mutate: jest.fn(), isPending: false })
     mockQueryClient.mockReturnValue({ invalidateQueries: jest.fn() })
     mockSearch = { file: undefined, folder: 'fold1' }

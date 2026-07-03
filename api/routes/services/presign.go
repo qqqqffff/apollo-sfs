@@ -83,35 +83,40 @@ func (s *PresignService) ValidateForFile(token, expectedAction string) (*FilePre
 // ── Single-file upload ────────────────────────────────────────────────────────
 
 type uploadClaim struct {
-	UserID    string  `json:"uid"`
-	Username  string  `json:"usr"`
-	FolderID  *string `json:"fid,omitempty"`
-	MaxBytes  int64   `json:"max"`
-	Action    string  `json:"act"`
-	ExpiresAt int64   `json:"exp"`
+	UserID         string  `json:"uid"`
+	Username       string  `json:"usr"`
+	FolderID       *string `json:"fid,omitempty"`
+	MaxBytes       int64   `json:"max"`
+	IgnoreRedirect bool    `json:"ir,omitempty"`
+	Action         string  `json:"act"`
+	ExpiresAt      int64   `json:"exp"`
 }
 
 // IssueForUpload returns a signed token that authorises a single-file upload
-// for userID/username into folderID (nil = root) up to maxBytes.
-func (s *PresignService) IssueForUpload(userID, username string, folderID *string, maxBytes int64, expiry time.Duration) (token string, expiresAt time.Time, err error) {
+// for userID/username into folderID (nil = root) up to maxBytes. When
+// ignoreRedirect is true, the upload bypasses the user's media auto-upload
+// folder redirect even if the file turns out to be an image or video.
+func (s *PresignService) IssueForUpload(userID, username string, folderID *string, maxBytes int64, ignoreRedirect bool, expiry time.Duration) (token string, expiresAt time.Time, err error) {
 	exp := time.Now().Add(expiry)
 	token, err = s.sign(uploadClaim{
-		UserID:    userID,
-		Username:  username,
-		FolderID:  folderID,
-		MaxBytes:  maxBytes,
-		Action:    PresignActionUpload,
-		ExpiresAt: exp.Unix(),
+		UserID:         userID,
+		Username:       username,
+		FolderID:       folderID,
+		MaxBytes:       maxBytes,
+		IgnoreRedirect: ignoreRedirect,
+		Action:         PresignActionUpload,
+		ExpiresAt:      exp.Unix(),
 	})
 	return token, exp, err
 }
 
 // UploadPresignClaim is the decoded result of ValidateForUpload.
 type UploadPresignClaim struct {
-	UserID   string
-	Username string
-	FolderID *string
-	MaxBytes int64
+	UserID         string
+	Username       string
+	FolderID       *string
+	MaxBytes       int64
+	IgnoreRedirect bool
 }
 
 // ValidateForUpload parses and verifies a single-file upload presign token.
@@ -124,10 +129,11 @@ func (s *PresignService) ValidateForUpload(token string) (*UploadPresignClaim, e
 		return nil, ErrPresignInvalid
 	}
 	return &UploadPresignClaim{
-		UserID:   c.UserID,
-		Username: c.Username,
-		FolderID: c.FolderID,
-		MaxBytes: c.MaxBytes,
+		UserID:         c.UserID,
+		Username:       c.Username,
+		FolderID:       c.FolderID,
+		MaxBytes:       c.MaxBytes,
+		IgnoreRedirect: c.IgnoreRedirect,
 	}, nil
 }
 

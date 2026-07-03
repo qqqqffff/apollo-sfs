@@ -17,14 +17,14 @@ import (
 // Handler serves the internal node-metrics ingest endpoint. token is the shared
 // secret each node agent must present in the X-Internal-Token header.
 type Handler struct {
-	metrics *services.MetricsService
-	token   string
+	ingest *services.NodeIngestService
+	token  string
 }
 
 // NewHandler constructs an internal Handler. An empty token disables ingest:
 // every request is rejected, so a misconfigured deployment fails closed.
-func NewHandler(metricsSvc *services.MetricsService, token string) *Handler {
-	return &Handler{metrics: metricsSvc, token: token}
+func NewHandler(ingestSvc *services.NodeIngestService, token string) *Handler {
+	return &Handler{ingest: ingestSvc, token: token}
 }
 
 // IngestNodeMetrics handles POST /api/v1/internal/node-metrics.
@@ -45,7 +45,7 @@ func (h *Handler) IngestNodeMetrics(c *gin.Context) {
 		return
 	}
 
-	if err := h.metrics.UpdateNodeMetrics(c.Request.Context(), &payload); err != nil {
+	if err := h.ingest.UpdateNodeMetrics(c.Request.Context(), &payload); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not ingest node metrics"})
 		return
 	}

@@ -57,7 +57,7 @@ func (h *Handler) CreateAPIKey(c *gin.Context) {
 			PathPrefix: s.PathPrefix,
 		})
 	}
-	userID, err := uuid.Parse(user.Username)
+	userID, err := uuid.Parse(c.GetString("userID"))
 	if err != nil {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "invalid user id"})
 		return
@@ -101,7 +101,7 @@ func (h *Handler) ListAPIKeys(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"items": []listAPIKeyEntry{}})
 		return
 	}
-	userID, err := uuid.Parse(user.Username)
+	userID, err := uuid.Parse(c.GetString("userID"))
 	if err != nil {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "invalid user id"})
 		return
@@ -129,8 +129,7 @@ func (h *Handler) RevokeAPIKey(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "api keys not configured"})
 		return
 	}
-	user, ok := h.loadCurrentUser(c)
-	if !ok {
+	if _, ok := h.loadCurrentUser(c); !ok {
 		return
 	}
 	id, err := uuid.Parse(c.Param("id"))
@@ -138,7 +137,7 @@ func (h *Handler) RevokeAPIKey(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid key id"})
 		return
 	}
-	userID, err := uuid.Parse(user.Username)
+	userID, err := uuid.Parse(c.GetString("userID"))
 	if err != nil {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "invalid user id"})
 		return

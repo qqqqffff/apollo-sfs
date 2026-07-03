@@ -141,8 +141,6 @@ services:
       EMAIL_STORAGE_PATH: /home/app/service-worker-email
       SENDGRID_WEBHOOK_SECRET: ${SENDGRID_WEBHOOK_SECRET:-}
       QUOTA_WARNING_THRESHOLD_PERCENT: ${QUOTA_WARNING_THRESHOLD_PERCENT:-80}
-      # Shared secret authenticating the node-agent's pushes to /api/v1/internal/*.
-      NODE_AGENT_TOKEN: ${NODE_AGENT_TOKEN:-dev-node-agent-token}
       DISK_STATS_PATH: /data
       DISK_STATS_DRIVE_LABEL: nvme-pool
       # Cloudflare Turnstile — bot protection for the interest form
@@ -223,6 +221,34 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # ── Node metrics ingest ────────────────────────────────────────────────────
+  # Dev equivalent of the Swarm node-metrics-ingest service: the internal
+  # ingest endpoint per-node agents push to, isolated from the api service.
+  node-metrics-ingest:
+    build:
+      context: ./api
+      dockerfile: Dockerfile.node-metrics-ingest
+    platform: linux/arm64
+    container_name: apollo-sfs-node-metrics-ingest
+    restart: unless-stopped
+    environment:
+      POSTGRES_APP_HOST: db-app
+      POSTGRES_APP_PORT: 5432
+      POSTGRES_APP_USER: ${POSTGRES_APP_USER}
+      POSTGRES_APP_PASSWORD: ${POSTGRES_APP_PASSWORD}
+      POSTGRES_APP_DB: ${POSTGRES_APP_DB}
+      NODE_AGENT_TOKEN: ${NODE_AGENT_TOKEN:-dev-node-agent-token}
+    depends_on:
+      db-app:
+        condition: service_healthy
+    networks:
+      - app-network
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   # ── Node metrics agent ─────────────────────────────────────────────────────
   # Single-node dev equivalent of the Swarm "global" node-agent. Reads this
   # host's CPU/memory/network/drive sensors and pushes them to the API so the
@@ -236,7 +262,7 @@ services:
     restart: unless-stopped
     environment:
       NODE_HOSTNAME: ${NODE_HOSTNAME:-apollo-sfs-dev-node-1}
-      API_INTERNAL_URL: http://api:8080
+      NODE_METRICS_INGEST_URL: http://node-metrics-ingest:8080
       NODE_AGENT_TOKEN: ${NODE_AGENT_TOKEN:-dev-node-agent-token}
     volumes:
       - /sys:/sys:ro
@@ -248,7 +274,7 @@ services:
         bind:
           propagation: rslave
     depends_on:
-      api:
+      node-metrics-ingest:
         condition: service_started
     networks:
       - app-network

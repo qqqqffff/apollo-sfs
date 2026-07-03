@@ -146,6 +146,32 @@ export interface Invitation {
   invitation_url?: string
 }
 
+// Share mirrors the backend ShareInfo: a grant giving one recipient (matched
+// by account email) access to a single file or a folder subtree.
+export interface Share {
+  id: string
+  owner_user_id: string
+  recipient_email: string
+  file_id: string | null
+  folder_id: string | null
+  // Files: recipient may download (viewing is always allowed).
+  // Folders: recipient may download contained files.
+  can_download: boolean
+  // Folders only: recipient may upload into the folder.
+  can_upload: boolean
+  // Folders only: the share covers all descendant folders.
+  include_children: boolean
+  revoked_at: string | null
+  created_at: string
+  item_type: 'file' | 'folder'
+  item_name: string
+  item_size_bytes: number
+  item_mime_type?: string
+  // Present on recipient-facing listings.
+  owner_email?: string
+  share_url: string
+}
+
 export interface UploadResponse {
   id: string
   name: string

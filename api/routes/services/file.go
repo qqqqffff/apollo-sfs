@@ -46,6 +46,9 @@ type UploadInput struct {
 	// MimeType is provided by the client. If empty the service detects it from
 	// the file contents. Always treat as a hint; server-detected type is preferred.
 	MimeType string
+	// IgnoreRedirect, when true, skips auto-routing this upload into the user's
+	// media auto-upload folder even if it turns out to be an image or video.
+	IgnoreRedirect bool
 	// DeviceID identifies the mobile device that triggered this upload. Nil for
 	// web uploads. Stored on the file row for "synced from this device" display.
 	DeviceID *uuid.UUID
@@ -343,7 +346,7 @@ func (s *FileService) Upload(ctx context.Context, in UploadInput) (*models.File,
 	}
 
 	// 2b. Auto-route image/video uploads to the user's media folder if configured.
-	in.FolderID = s.resolveUploadFolder(ctx, in.Username, in.FolderID, mimeType)
+	in.FolderID = s.resolveUploadFolder(ctx, in.Username, in.FolderID, mimeType, in.IgnoreRedirect)
 
 	// 2c. For images, extract the capture date and GPS coordinates now (plaintext
 	// is already in memory). Videos are probed asynchronously after the blob is stored.
@@ -496,9 +499,10 @@ func (s *FileService) Upload(ctx context.Context, in UploadInput) (*models.File,
 // user has configured a media auto-upload folder and the upload is an image or
 // video, every such upload is routed there — UNLESS the user is explicitly
 // uploading into a media folder already, in which case that destination wins
-// (so per-collection uploads land where the user dropped them).
-func (s *FileService) resolveUploadFolder(ctx context.Context, username string, requested *uuid.UUID, mimeType string) *uuid.UUID {
-	if !isMediaMime(mimeType) {
+// (so per-collection uploads land where the user dropped them), or ignoreRedirect
+// is set (the caller explicitly opted this upload out of the redirect).
+func (s *FileService) resolveUploadFolder(ctx context.Context, username string, requested *uuid.UUID, mimeType string, ignoreRedirect bool) *uuid.UUID {
+	if ignoreRedirect || !isMediaMime(mimeType) {
 		return requested
 	}
 	// Explicit upload into a media folder: respect it, skip redirect.
@@ -1321,7 +1325,7 @@ func (s *FileService) FinalizeChunkedUpload(ctx context.Context, sess *UploadSes
 	}
 
 	// Auto-route image/video uploads to the user's media folder if configured.
-	sess.FolderID = s.resolveUploadFolder(ctx, sess.Username, sess.FolderID, mimeType)
+	sess.FolderID = s.resolveUploadFolder(ctx, sess.Username, sess.FolderID, mimeType, sess.IgnoreRedirect)
 
 	// Read current usage before updating so we can compute threshold crossings below.
 	user, userErr := s.queries.GetUserByUsername(ctx, sess.Username)

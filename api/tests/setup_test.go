@@ -615,7 +615,9 @@ func (s *stubMetricsService) GetNodeDisks(_ context.Context, _ uuid.UUID) ([]mod
 func (s *stubMetricsService) GetNodeDiskTempHistoryByHours(_ context.Context, _ uuid.UUID, _ int) ([]models.NodeDiskTempSnapshot, error) {
 	return s.nodeDiskTemps, s.nodeDiskTempsErr
 }
-func (s *stubMetricsService) NodeStates() []models.NodeFrame { return s.nodeStates }
+func (s *stubMetricsService) NodeStates(_ context.Context) ([]models.NodeFrame, error) {
+	return s.nodeStates, nil
+}
 func (s *stubMetricsService) Hub() *services.Hub             { return nil }
 
 // ── Stub FavServicer ──────────────────────────────────────────────────────────

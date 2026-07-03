@@ -139,6 +139,7 @@ function RouteComponent() {
           <div className="hidden xl:flex items-center gap-1">
             <NavLink to="/client" exact onClick={closeMenu}>Files</NavLink>
             <NavLink to="/client/favorites" onClick={closeMenu}>Favorites</NavLink>
+            <NavLink to="/client/shared" onClick={closeMenu}>Shared</NavLink>
             {(user?.is_premium || user?.is_admin) && (
               <NavLink to={'/settings/api-keys' as never} onClick={closeMenu}>API Keys</NavLink>
             )}
@@ -258,6 +259,7 @@ function RouteComponent() {
         >
           <MobileNavLink to="/client" exact onClick={closeMenu}>Files</MobileNavLink>
           <MobileNavLink to="/client/favorites" onClick={closeMenu}>Favorites</MobileNavLink>
+          <MobileNavLink to="/client/shared" onClick={closeMenu}>Shared</MobileNavLink>
           {(user?.is_premium || user?.is_admin) && (
             <MobileNavLink to={'/settings/api-keys' as never} onClick={closeMenu}>API Keys</MobileNavLink>
           )}

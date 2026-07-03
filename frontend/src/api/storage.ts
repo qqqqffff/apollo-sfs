@@ -33,6 +33,19 @@ export interface MyServer {
   ping_url: string
 }
 
+// resolveDrive finds the drive a driveId (typically a folder's pin) actually
+// points to among a user's own allocations, falling back to their primary
+// drive when driveId is null (today's dynamic-routing default). Shared by the
+// folder drive-change UI and the upload modal's destination indicator.
+export function resolveDrive(
+  driveId: string | null | undefined,
+  servers: MyServer[] | undefined,
+): { drive?: MyServer; isPinned: boolean } {
+  const match = driveId ? servers?.find((s) => s.drive_id === driveId) : undefined
+  if (match) return { drive: match, isPinned: true }
+  return { drive: servers?.find((s) => s.is_primary), isPinned: false }
+}
+
 export async function getStorageBreakdown(): Promise<StorageBreakdown> {
   return get<StorageBreakdown>('/storage/breakdown')
 }

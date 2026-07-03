@@ -98,10 +98,11 @@ export function useFileUpload() {
     file: globalThis.File,
     folderId: string | null,
     itemIndex: number,
+    ignoreRedirect: boolean,
   ): Promise<void> {
     if (file.size <= CHUNK_SIZE) {
       // ── Presigned single-file upload ───────────────────────────────────────
-      const { url } = await presignUpload(file.name, file.size, folderId)
+      const { url } = await presignUpload(file.name, file.size, folderId, ignoreRedirect)
       await uploadFilePresigned(url, file, (xhrLoaded, xhrTotal) => {
         const scaled = xhrTotal > 0
           ? Math.min(Math.round((xhrLoaded / xhrTotal) * file.size), file.size)
@@ -118,6 +119,7 @@ export function useFileUpload() {
       totalChunks,
       file.size,
       folderId,
+      ignoreRedirect,
     )
 
     for (let ci = 0; ci < totalChunks; ci++) {
@@ -141,6 +143,7 @@ export function useFileUpload() {
     files: globalThis.File[],
     folderId: string | null,
     onAnySuccess: () => void,
+    ignoreRedirectIndices?: Set<number>,
   ) => {
     const items: FileUploadItem[] = files.map((f) => ({
       name: f.name,
@@ -167,7 +170,7 @@ export function useFileUpload() {
           await sleep(RETRY_DELAYS_MS[attempt - 1])
         }
         try {
-          await uploadSingleFile(file, folderId, i)
+          await uploadSingleFile(file, folderId, i, ignoreRedirectIndices?.has(i) ?? false)
           patchItem(i, { loaded: file.size, status: 'done' })
           succeededCount++
           liveRef.current = { ...liveRef.current, succeeded: succeededCount }

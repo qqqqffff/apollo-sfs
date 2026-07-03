@@ -14,8 +14,8 @@ apollo-sfs/
 ├── fail2ban/       # Fail2ban filter/jail/action for API scan detection
 ├── keycloak/       # Keycloak 26.0.7 realm, themes, and Apple IdP provider
 ├── docs/           # Architecture and setup documentation
-├── docker-compose.yml   # Single-node / development deployment
-└── docker-stack.yml     # Docker Swarm production deployment
+├── docker-compose.yml   # Single-node / development deployment (DEPRECATED — see note below)
+└── docker-stack.yml     # Docker Swarm production deployment (actively used)
 ```
 
 See the `CLAUDE.md` in each subdirectory for component-specific details.
@@ -28,7 +28,7 @@ Production runs as a two-node Docker Swarm cluster. Images must be pre-built (`b
 
 | Node | Hardware | Label | Workloads |
 |------|----------|-------|-----------|
-| **Manager** (server) | Ryzen CPU, amd64, 8 TB HDD | `tier=standard` | API, frontend, Keycloak, Postfix, DDNS, both app databases, standard-tier MinIO |
+| **Manager** (server) | Ryzen CPU, amd64, 8 TB HDD | `tier=standard` | API, frontend, Keycloak, Postfix, DDNS, both app databases, standard-tier MinIO, node-metrics-ingest |
 | **Worker** (Pi 5) | ARM64, dual NVMe (mergerfs pool) | `tier=fast` | Fast-tier MinIO only |
 
 Apply labels once after initializing the swarm:
@@ -64,6 +64,7 @@ docker service logs apollo-sfs_api --follow
 |---------|---------|-----------------|
 | `frontend` | 3000 (internal) | standard |
 | `api` | 8080 (internal) | standard |
+| `node-metrics-ingest` | 8080 (internal) | standard |
 | `keycloak` | 8180 (internal) | standard |
 | `postfix` | 587 (internal) | standard |
 | `db-app` | 5432 (internal) | standard |
@@ -72,9 +73,13 @@ docker service logs apollo-sfs_api --follow
 | `minio-standard` | 9001 (internal) | standard |
 | `ddns` | — | standard |
 
+`node-metrics-ingest` is a small standalone Go service (`api/cmd/node-metrics-ingest`) split out of the `api` service specifically to receive the per-node hardware pushes from `node-agent-standard`/`node-agent-fast` (see the API's `CLAUDE.md`). Keeping it separate isolates that internal, constant-frequency traffic (and any incident on it) from the public-facing `api` service; it shares no in-memory state with `api` — both read/write the same Postgres tables.
+
 All services communicate on the `app-network` overlay network. No service ports are exposed directly to the internet; host nginx terminates TLS and proxies inbound traffic.
 
-## Development (Single-Node)
+## Development (Single-Node) — DEPRECATED
+
+**`docker-compose.yml` is deprecated.** The two-node `docker-stack.yml` Swarm deployment (see above) is now the only stack actually run/maintained — do not assume `docker-compose.yml` is kept in sync with it (e.g. new services added to `docker-stack.yml` may not have a compose equivalent, or vice versa). Treat it as a historical reference, not a working local dev setup, unless told otherwise.
 
 ```bash
 # Copy and populate environment file

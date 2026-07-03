@@ -28,7 +28,7 @@ func main() {
 			hostname = h
 		}
 	}
-	apiURL := envOr("API_INTERNAL_URL", "http://api:8080")
+	ingestURL := envOr("NODE_METRICS_INGEST_URL", "http://node-metrics-ingest:8080")
 	token := os.Getenv("NODE_AGENT_TOKEN")
 	interval := 5 * time.Second
 	if v := os.Getenv("NODE_AGENT_INTERVAL_SECONDS"); v != "" {
@@ -44,7 +44,7 @@ func main() {
 		log.Fatal("node-agent: could not determine hostname (set NODE_HOSTNAME)")
 	}
 
-	endpoint := apiURL + "/api/v1/internal/node-metrics"
+	endpoint := ingestURL + "/internal/node-metrics"
 	client := &http.Client{Timeout: 10 * time.Second}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

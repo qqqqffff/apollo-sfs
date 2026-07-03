@@ -21,6 +21,7 @@ import { Route as AuthRouteImport } from './routes/_auth'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AuthPremiumRouteImport } from './routes/_auth.premium'
 import { Route as AuthClientIndexRouteImport } from './routes/_auth.client/index'
+import { Route as AuthShareTokenRouteImport } from './routes/_auth.share.$token'
 import { Route as AuthSettingsApiKeysRouteImport } from './routes/_auth.settings/api-keys'
 import { Route as AuthClientProfileRouteImport } from './routes/_auth.client/profile'
 import { Route as AuthClientFavoritesRouteImport } from './routes/_auth.client/favorites'
@@ -32,6 +33,8 @@ import { Route as AuthAdminEmailsRouteImport } from './routes/_auth.admin/emails
 import { Route as AuthAdminBansRouteImport } from './routes/_auth.admin/bans'
 import { Route as AuthAdminBannedIpsRouteImport } from './routes/_auth.admin/banned-ips'
 import { Route as AuthAdminAlarmRouteImport } from './routes/_auth.admin/alarm'
+import { Route as AuthClientSharedIndexRouteImport } from './routes/_auth.client/shared.index'
+import { Route as AuthClientSharedShareIdRouteImport } from './routes/_auth.client/shared.$shareId'
 
 const TermsRoute = TermsRouteImport.update({
   id: '/terms',
@@ -92,6 +95,11 @@ const AuthClientIndexRoute = AuthClientIndexRouteImport.update({
   path: '/client/',
   getParentRoute: () => AuthRoute,
 } as any)
+const AuthShareTokenRoute = AuthShareTokenRouteImport.update({
+  id: '/share/$token',
+  path: '/share/$token',
+  getParentRoute: () => AuthRoute,
+} as any)
 const AuthSettingsApiKeysRoute = AuthSettingsApiKeysRouteImport.update({
   id: '/settings/api-keys',
   path: '/settings/api-keys',
@@ -147,6 +155,16 @@ const AuthAdminAlarmRoute = AuthAdminAlarmRouteImport.update({
   path: '/admin/alarm',
   getParentRoute: () => AuthRoute,
 } as any)
+const AuthClientSharedIndexRoute = AuthClientSharedIndexRouteImport.update({
+  id: '/client/shared/',
+  path: '/client/shared/',
+  getParentRoute: () => AuthRoute,
+} as any)
+const AuthClientSharedShareIdRoute = AuthClientSharedShareIdRouteImport.update({
+  id: '/client/shared/$shareId',
+  path: '/client/shared/$shareId',
+  getParentRoute: () => AuthRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -170,7 +188,10 @@ export interface FileRoutesByFullPath {
   '/client/favorites': typeof AuthClientFavoritesRoute
   '/client/profile': typeof AuthClientProfileRoute
   '/settings/api-keys': typeof AuthSettingsApiKeysRoute
+  '/share/$token': typeof AuthShareTokenRoute
   '/client/': typeof AuthClientIndexRoute
+  '/client/shared/$shareId': typeof AuthClientSharedShareIdRoute
+  '/client/shared/': typeof AuthClientSharedIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -194,7 +215,10 @@ export interface FileRoutesByTo {
   '/client/favorites': typeof AuthClientFavoritesRoute
   '/client/profile': typeof AuthClientProfileRoute
   '/settings/api-keys': typeof AuthSettingsApiKeysRoute
+  '/share/$token': typeof AuthShareTokenRoute
   '/client': typeof AuthClientIndexRoute
+  '/client/shared/$shareId': typeof AuthClientSharedShareIdRoute
+  '/client/shared': typeof AuthClientSharedIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -220,7 +244,10 @@ export interface FileRoutesById {
   '/_auth/client/favorites': typeof AuthClientFavoritesRoute
   '/_auth/client/profile': typeof AuthClientProfileRoute
   '/_auth/settings/api-keys': typeof AuthSettingsApiKeysRoute
+  '/_auth/share/$token': typeof AuthShareTokenRoute
   '/_auth/client/': typeof AuthClientIndexRoute
+  '/_auth/client/shared/$shareId': typeof AuthClientSharedShareIdRoute
+  '/_auth/client/shared/': typeof AuthClientSharedIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -246,7 +273,10 @@ export interface FileRouteTypes {
     | '/client/favorites'
     | '/client/profile'
     | '/settings/api-keys'
+    | '/share/$token'
     | '/client/'
+    | '/client/shared/$shareId'
+    | '/client/shared/'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -270,7 +300,10 @@ export interface FileRouteTypes {
     | '/client/favorites'
     | '/client/profile'
     | '/settings/api-keys'
+    | '/share/$token'
     | '/client'
+    | '/client/shared/$shareId'
+    | '/client/shared'
   id:
     | '__root__'
     | '/'
@@ -295,7 +328,10 @@ export interface FileRouteTypes {
     | '/_auth/client/favorites'
     | '/_auth/client/profile'
     | '/_auth/settings/api-keys'
+    | '/_auth/share/$token'
     | '/_auth/client/'
+    | '/_auth/client/shared/$shareId'
+    | '/_auth/client/shared/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -397,6 +433,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthClientIndexRouteImport
       parentRoute: typeof AuthRoute
     }
+    '/_auth/share/$token': {
+      id: '/_auth/share/$token'
+      path: '/share/$token'
+      fullPath: '/share/$token'
+      preLoaderRoute: typeof AuthShareTokenRouteImport
+      parentRoute: typeof AuthRoute
+    }
     '/_auth/settings/api-keys': {
       id: '/_auth/settings/api-keys'
       path: '/settings/api-keys'
@@ -474,6 +517,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthAdminAlarmRouteImport
       parentRoute: typeof AuthRoute
     }
+    '/_auth/client/shared/': {
+      id: '/_auth/client/shared/'
+      path: '/client/shared'
+      fullPath: '/client/shared/'
+      preLoaderRoute: typeof AuthClientSharedIndexRouteImport
+      parentRoute: typeof AuthRoute
+    }
+    '/_auth/client/shared/$shareId': {
+      id: '/_auth/client/shared/$shareId'
+      path: '/client/shared/$shareId'
+      fullPath: '/client/shared/$shareId'
+      preLoaderRoute: typeof AuthClientSharedShareIdRouteImport
+      parentRoute: typeof AuthRoute
+    }
   }
 }
 
@@ -490,7 +547,10 @@ interface AuthRouteChildren {
   AuthClientFavoritesRoute: typeof AuthClientFavoritesRoute
   AuthClientProfileRoute: typeof AuthClientProfileRoute
   AuthSettingsApiKeysRoute: typeof AuthSettingsApiKeysRoute
+  AuthShareTokenRoute: typeof AuthShareTokenRoute
   AuthClientIndexRoute: typeof AuthClientIndexRoute
+  AuthClientSharedShareIdRoute: typeof AuthClientSharedShareIdRoute
+  AuthClientSharedIndexRoute: typeof AuthClientSharedIndexRoute
 }
 
 const AuthRouteChildren: AuthRouteChildren = {
@@ -506,7 +566,10 @@ const AuthRouteChildren: AuthRouteChildren = {
   AuthClientFavoritesRoute: AuthClientFavoritesRoute,
   AuthClientProfileRoute: AuthClientProfileRoute,
   AuthSettingsApiKeysRoute: AuthSettingsApiKeysRoute,
+  AuthShareTokenRoute: AuthShareTokenRoute,
   AuthClientIndexRoute: AuthClientIndexRoute,
+  AuthClientSharedShareIdRoute: AuthClientSharedShareIdRoute,
+  AuthClientSharedIndexRoute: AuthClientSharedIndexRoute,
 }
 
 const AuthRouteWithChildren = AuthRoute._addFileChildren(AuthRouteChildren)

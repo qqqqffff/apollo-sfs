@@ -43,24 +43,33 @@ DEFAULT_REGISTRY="192.168.68.57:5000"
 BUILDER_NAME="apollo-builder"
 
 # ── Per-service image config ──────────────────────────────────────────────────
+# node-metrics-ingest is deliberately NOT in ORDER (not its own checklist item):
+# it shares a wire-protocol contract with node-agent (the payload node-agent
+# posts must match what node-metrics-ingest expects), so the two must always be
+# built/redeployed together. See BUNDLE below, which pulls it in whenever
+# node-agent is selected.
 ORDER=(frontend api node-agent)
 declare -A IMAGE_REPO=(
   [frontend]="apollo-sfs_frontend"
   [api]="apollo-sfs_api"
   [node-agent]="apollo-sfs-node-agent"
+  [node-metrics-ingest]="apollo-sfs_node-metrics-ingest"
 )
 declare -A IMAGE_CONTEXT=(
   [frontend]="frontend/"
   [api]="api/"
   [node-agent]="api/"
+  [node-metrics-ingest]="api/"
 )
 declare -A IMAGE_DOCKERFILE=(
   [node-agent]="api/Dockerfile.node-agent"
+  [node-metrics-ingest]="api/Dockerfile.node-metrics-ingest"
 )
 declare -A IMAGE_PLATFORMS=(
   [frontend]="linux/amd64"
   [api]="linux/amd64,linux/arm64"
   [node-agent]="linux/amd64,linux/arm64"
+  [node-metrics-ingest]="linux/amd64"
 )
 # Swarm service name(s) to query for "what tag is currently deployed" when a
 # service isn't rebuilt this run. node-agent runs as two services (fast/standard)
@@ -69,7 +78,16 @@ declare -A SWARM_SERVICES=(
   [frontend]="apollo-sfs_frontend"
   [api]="apollo-sfs_api"
   [node-agent]="apollo-sfs_node-agent-standard apollo-sfs_node-agent-fast"
+  [node-metrics-ingest]="apollo-sfs_node-metrics-ingest"
 )
+# Services bundled with another: selecting the key also selects the value, so
+# they're always built/deployed together (see comment above ORDER).
+declare -A BUNDLE=(
+  [node-agent]="node-metrics-ingest"
+)
+# ORDER plus every bundled-only service, for the steps that need to resolve/
+# validate/display every image regardless of whether it has its own checklist entry.
+ALL_SERVICES=("${ORDER[@]}" "${BUNDLE[@]}")
 
 trap 'tput cnorm 2>/dev/null || true' EXIT
 
@@ -220,6 +238,16 @@ else
   exit 1
 fi
 
+# Pull in bundled services (e.g. node-agent -> node-metrics-ingest) so they're
+# always built/deployed alongside the service they're bundled with.
+for svc in ${SELECTED_SERVICES[@]+"${SELECTED_SERVICES[@]}"}; do
+  bundled="${BUNDLE[$svc]:-}"
+  [[ -z "$bundled" ]] && continue
+  already=0
+  for x in "${SELECTED_SERVICES[@]}"; do [[ "$x" == "$bundled" ]] && already=1; done
+  [[ $already -eq 1 ]] || SELECTED_SERVICES+=("$bundled")
+done
+
 for s in ${SELECTED_SERVICES[@]+"${SELECTED_SERVICES[@]}"}; do
   [[ -n "${IMAGE_REPO[$s]:-}" ]] || { echo "Unknown service: $s (expected one of: ${ORDER[*]})" >&2; exit 1; }
 done
@@ -247,7 +275,7 @@ resolve_deployed_tag() {
 
 declare -A RESOLVED_TAG=()
 declare -A STATUS=()
-for svc in "${ORDER[@]}"; do
+for svc in "${ALL_SERVICES[@]}"; do
   if is_selected "$svc"; then
     RESOLVED_TAG[$svc]="$TAG"
     STATUS[$svc]="build + push"
@@ -261,12 +289,12 @@ for svc in "${ORDER[@]}"; do
 done
 
 missing=()
-for svc in "${ORDER[@]}"; do
+for svc in "${ALL_SERVICES[@]}"; do
   [[ -z "${RESOLVED_TAG[$svc]}" ]] && missing+=("$svc")
 done
 if [[ ${#missing[@]} -gt 0 ]]; then
   echo "No running version found for: ${missing[*]}." >&2
-  echo "Include them in --services (or the checklist) so they get built on this first deploy." >&2
+  echo "Include them in --services (or the checklist; node-metrics-ingest rides along with node-agent) so they get built on this first deploy." >&2
   exit 1
 fi
 
@@ -276,9 +304,9 @@ echo "Registry: $REGISTRY"
 [[ $DEPLOY_ONLY -eq 1 ]] && echo "Mode:     deploy-only (no images will be built)"
 [[ $RUN_MIGRATIONS -eq 1 ]] && echo "Migrate:  db/apply-migrations.sh will run against apollo-sfs_db-app first"
 echo
-printf '  %-12s %-10s %s\n' "SERVICE" "TAG" "ACTION"
-for svc in "${ORDER[@]}"; do
-  printf '  %-12s %-10s %s\n' "$svc" "${RESOLVED_TAG[$svc]}" "${STATUS[$svc]}"
+printf '  %-20s %-10s %s\n' "SERVICE" "TAG" "ACTION"
+for svc in "${ALL_SERVICES[@]}"; do
+  printf '  %-20s %-10s %s\n' "$svc" "${RESOLVED_TAG[$svc]}" "${STATUS[$svc]}"
 done
 echo
 
@@ -338,6 +366,7 @@ export REGISTRY
 export API_TAG="${RESOLVED_TAG[api]}"
 export FRONTEND_TAG="${RESOLVED_TAG[frontend]}"
 export NODE_AGENT_TAG="${RESOLVED_TAG[node-agent]}"
+export NODE_METRICS_INGEST_TAG="${RESOLVED_TAG[node-metrics-ingest]}"
 
 echo "── Deploying $STACK_NAME ──"
 run docker stack deploy -c "$STACK_FILE" "$STACK_NAME"

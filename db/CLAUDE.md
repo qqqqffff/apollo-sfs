@@ -46,6 +46,7 @@ Files in `db/` are numbered and applied in order during initial container creati
 | `30_server_metrics_snapshots.sql` | `server_metrics_snapshots` | Manager-host metrics history |
 | `31_node_metrics_snapshots.sql` | `node_metrics_snapshots`, `drive_temp_snapshots` | Per-node hardware metrics history |
 | `32_node_disks.sql` | `node_disks`, `node_disk_temp_snapshots` | Physical disk telemetry |
+| `33_shares.sql` | `shares` | User-to-user file/folder shares (email-bound link tokens) |
 
 ## Migrations
 

@@ -12,7 +12,7 @@
 #
 # Deploy (see docs/registry_setup.md for the full registry workflow):
 #   Each custom image is pinned by its OWN tag variable (API_TAG, FRONTEND_TAG,
-#   NODE_AGENT_TAG) — NOT a single shared TAG. This is what lets you
+#   NODE_AGENT_TAG, NODE_METRICS_INGEST_TAG) — NOT a single shared TAG. This is what lets you
 #   rebuild/redeploy just one service: point ONLY that service's variable at a
 #   newly built+pushed tag, and set the other two variables to whatever tag is
 #   already running (query with `docker service inspect --format
@@ -34,7 +34,7 @@
 #   set -a && . ./.env && set +a                 # stack deploy does NOT auto-read .env
 #   docker stack deploy -c docker-stack.yml apollo-sfs   # nodes pull from the registry
 #
-# REGISTRY, API_TAG, FRONTEND_TAG, and NODE_AGENT_TAG must all be set before
+# REGISTRY, API_TAG, FRONTEND_TAG, NODE_AGENT_TAG, and NODE_METRICS_INGEST_TAG must all be set before
 # `docker stack deploy` — they are substituted from the shell environment (not
 # from .env). REGISTRY defaults to 192.168.68.57:5000 (the manager's LAN IP)
 # when unset; the three TAG vars have no default, so a missing one fails the
@@ -141,8 +141,6 @@ services:
       # Cloudflare Turnstile
       CLOUDFLARE_TURNSTILE_SECRET_KEY: ${CLOUDFLARE_TURNSTILE_SECRET_KEY}
       CLOUDFLARE_TURNSTILE_SITE_KEY: ${CLOUDFLARE_TURNSTILE_SITE_KEY}
-      # Shared secret authenticating per-node agent pushes to /api/v1/internal/*
-      NODE_AGENT_TOKEN: ${NODE_AGENT_TOKEN}
       # Premium tier / SFS API / PayPal
       SFS_API_KEY_PEPPER: ${SFS_API_KEY_PEPPER}
       PAYPAL_CLIENT_ID: ${PAYPAL_CLIENT_ID:-}
@@ -376,6 +374,31 @@ services:
       driver: json-file
       options: { max-size: "10m", max-file: "3" }
 
+  # ── Node metrics ingest — internal ingest endpoint for per-node agent pushes ─
+  # Isolated from the public api service: its own image, its own Swarm service,
+  # manager-only, reachable only over the overlay network (never proxied by
+  # nginx). See api/cmd/node-metrics-ingest.
+  node-metrics-ingest:
+    image: ${REGISTRY:-192.168.68.57:5000}/apollo-sfs_node-metrics-ingest:${NODE_METRICS_INGEST_TAG}
+    environment:
+      POSTGRES_APP_HOST: db-app
+      POSTGRES_APP_PORT: 5432
+      POSTGRES_APP_USER: ${POSTGRES_APP_USER}
+      POSTGRES_APP_PASSWORD: ${POSTGRES_APP_PASSWORD}
+      POSTGRES_APP_DB: ${POSTGRES_APP_DB}
+      # Shared secret authenticating per-node agent pushes.
+      NODE_AGENT_TOKEN: ${NODE_AGENT_TOKEN}
+    networks: [app-network]
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.labels.tier == standard]
+      restart_policy:
+        condition: any
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
   # ── Node metrics agent — standard tier (manager, HDD) ───────────────────────
   # Reads this node's CPU/memory/network/HDD sensors and pushes to the API.
   # Only mounts paths that exist on the manager; see node-agent-fast for the Pi.
@@ -383,7 +406,7 @@ services:
     image: ${REGISTRY:-192.168.68.57:5000}/apollo-sfs-node-agent:${NODE_AGENT_TAG}
     environment:
       NODE_HOSTNAME: "{{.Node.Hostname}}"
-      API_INTERNAL_URL: http://api:8080
+      NODE_METRICS_INGEST_URL: http://node-metrics-ingest:8080
       NODE_AGENT_TOKEN: ${NODE_AGENT_TOKEN}
       # Physical disks to report, as label:/mount/point (comma-separated). These
       # point at the bind-mounted data dirs below, so usage is readable inside the
@@ -412,7 +435,7 @@ services:
     image: ${REGISTRY:-192.168.68.57:5000}/apollo-sfs-node-agent:${NODE_AGENT_TAG}
     environment:
       NODE_HOSTNAME: "{{.Node.Hostname}}"
-      API_INTERNAL_URL: http://api:8080
+      NODE_METRICS_INGEST_URL: http://node-metrics-ingest:8080
       NODE_AGENT_TOKEN: ${NODE_AGENT_TOKEN}
       # Physical disks to report, as label:/mount/point (comma-separated). The two
       # NVMe drives are bind-mounted below, so usage is readable inside the

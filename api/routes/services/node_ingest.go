@@ -1,0 +1,102 @@
+package services
+
+import (
+	"context"
+	"log"
+	"time"
+
+	"apollo-sfs.com/api/db"
+	"apollo-sfs.com/api/models"
+)
+
+// NodeIngestService persists hardware pushes from per-node agents to Postgres.
+// It holds no in-memory state — the live per-node WebSocket view is assembled
+// by MetricsService reading these rows back from the DB, so this service can
+// run standalone (cmd/node-metrics-ingest) isolated from the public API.
+type NodeIngestService struct {
+	queries *db.Queries
+}
+
+// NewNodeIngestService constructs a NodeIngestService.
+func NewNodeIngestService(q *db.Queries) *NodeIngestService {
+	return &NodeIngestService{queries: q}
+}
+
+// UpdateNodeMetrics ingests a hardware push from a node's agent: it resolves the
+// reporting hostname to a node and persists the node snapshot and any drive
+// temperatures. Pushes from unregistered hostnames are logged and ignored (no
+// error) so an unconfigured agent never disrupts the stream.
+func (s *NodeIngestService) UpdateNodeMetrics(ctx context.Context, p *models.NodeMetricsPayload) error {
+	node, err := s.queries.GetNodeByHostname(ctx, p.Hostname)
+	if err != nil {
+		return err
+	}
+	if node == nil {
+		log.Printf("node-ingest: push from unknown hostname %q (ignored)", p.Hostname)
+		return nil
+	}
+
+	now := time.Now().UTC()
+	snap := &models.NodeMetricSnapshot{
+		NodeID:           node.ID,
+		CPUPercent:       p.CPUPercent,
+		CPUTempCelsius:   p.CPUTempCelsius,
+		MemoryUsedBytes:  p.MemoryUsedBytes,
+		MemoryTotalBytes: p.MemoryTotalBytes,
+		NetworkBytesSent: p.NetworkBytesSent,
+		NetworkBytesRecv: p.NetworkBytesRecv,
+		SampledAt:        now,
+	}
+	if err := s.queries.InsertNodeSnapshot(ctx, snap); err != nil {
+		log.Printf("node-ingest: insert node snapshot: %v", err)
+	}
+
+	// Map reported drive labels to registered drives on this node so temperature
+	// history can be attached to the right drive_id. Unregistered labels are skipped.
+	summaries, err := s.queries.GetDriveSummaries(ctx)
+	if err != nil {
+		log.Printf("node-ingest: drive summaries for node push: %v", err)
+	}
+	byLabel := make(map[string]models.DriveSummary)
+	for _, d := range summaries {
+		if d.NodeID != nil && *d.NodeID == node.ID {
+			byLabel[d.DriveLabel] = d
+		}
+	}
+
+	for _, dp := range p.Drives {
+		// Physical-disk telemetry: persist every reported disk and its temperature,
+		// independent of whether it backs a registered drive. This is what lets one
+		// disk in a pool be tracked (and run hot/fail) on its own.
+		disk, err := s.queries.UpsertNodeDisk(ctx, db.UpsertNodeDiskParams{
+			NodeID:        node.ID,
+			Label:         dp.Label,
+			Device:        dp.Device,
+			CapacityBytes: dp.TotalBytes,
+			UsedBytes:     dp.UsedBytes,
+			FreeBytes:     dp.FreeBytes,
+			TempCelsius:   dp.TempCelsius,
+		})
+		if err != nil {
+			log.Printf("node-ingest: upsert node disk %q: %v", dp.Label, err)
+		} else if dp.TempCelsius != nil {
+			if err := s.queries.InsertNodeDiskTemp(ctx, disk.ID, *dp.TempCelsius, now); err != nil {
+				log.Printf("node-ingest: insert node disk temp: %v", err)
+			}
+		}
+
+		// Logical-drive temperature: only disks whose label backs a registered
+		// drive on this node carry a drive_id for the infrastructure view.
+		sum, ok := byLabel[dp.Label]
+		if !ok {
+			continue
+		}
+		if dp.TempCelsius != nil {
+			if err := s.queries.InsertDriveTemp(ctx, sum.DriveID, *dp.TempCelsius, now); err != nil {
+				log.Printf("node-ingest: insert drive temp: %v", err)
+			}
+		}
+	}
+
+	return nil
+}

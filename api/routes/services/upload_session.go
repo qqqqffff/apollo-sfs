@@ -24,6 +24,11 @@ type UploadSession struct {
 	TotalChunks int
 	TotalSize   int64
 
+	// IgnoreRedirect, when true, skips auto-routing this upload into the user's
+	// media auto-upload folder even if it turns out to be an image or video.
+	// Set by the handler after Create, before any chunks are dispatched.
+	IgnoreRedirect bool
+
 	// Set by FileService.BeginChunkedUpload before any chunks are dispatched.
 	FileID        uuid.UUID
 	ObjectKey     string

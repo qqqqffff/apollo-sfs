@@ -410,3 +410,27 @@ func (q *Queries) FolderWouldCreateCycle(ctx context.Context, folderID, targetID
 	}
 	return would, nil
 }
+
+// IsFolderDescendant returns true if candidateID lies strictly inside the
+// subtree rooted at ancestorID (candidateID == ancestorID returns true as the
+// trivial case). Walks candidateID's ancestor chain upward with a recursive
+// CTE. Must be called on a Queries returned by ForUser so RLS confines the
+// walk to the owner's folders.
+func (q *Queries) IsFolderDescendant(ctx context.Context, ancestorID, candidateID uuid.UUID) (bool, error) {
+	if ancestorID == candidateID {
+		return true, nil
+	}
+	var is bool
+	err := q.db.QueryRowContext(ctx, `
+		WITH RECURSIVE chain AS (
+			SELECT id, parent_id FROM folders WHERE id = $2
+			UNION ALL
+			SELECT f.id, f.parent_id FROM folders f JOIN chain c ON f.id = c.parent_id
+		)
+		SELECT EXISTS(SELECT 1 FROM chain WHERE id = $1)
+	`, ancestorID, candidateID).Scan(&is)
+	if err != nil {
+		return false, fmt.Errorf("IsFolderDescendant: %w", err)
+	}
+	return is, nil
+}

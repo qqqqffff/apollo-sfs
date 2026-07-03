@@ -23,7 +23,6 @@ import (
 	"apollo-sfs.com/api/routes/middleware"
 	"apollo-sfs.com/api/routes/billing"
 	"apollo-sfs.com/api/routes/expansion"
-	"apollo-sfs.com/api/routes/nodeagent"
 	"apollo-sfs.com/api/routes/payments"
 	"apollo-sfs.com/api/routes/services"
 	"apollo-sfs.com/api/routes/sfs"
@@ -250,6 +249,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	h := routes.NewHandler(queries, fileSvc, folderSvc, inviteSvc, favSvc, authSvc, uploadStore, emailSvc, presignSvc, cfg.TurnstileSecretKey)
 	routes.SetAPIKeyService(h, apiKeySvc)
 	routes.SetMathGameService(h, services.NewMathGameService(queries))
+	routes.SetShareService(h, services.NewShareService(queries, emailSvc, cfg.AppBaseURL))
 	authHandler := auth.NewHandler(authSvc, cfg.CookieDomain, cfg.CookieSecure)
 	adminHandler := admin.NewHandler(queries, inviteSvc, metricsSvc, authSvc, fileSvc, registry, geoReader, cfg.DiskStatsPath, cfg.DiskStatsDriveLabel, cfg.BackendTestURL, cfg.AppDir, cfg.FrontendTestURL, cfg.FrontendE2EURL, shutdownCh)
 	// Configure the on-demand infrastructure sync (POST /system/sync): discover
@@ -314,10 +314,8 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	// ── SendGrid Inbound Parse webhook (no auth — guarded by ?token= secret) ──
 	v1.POST("/webhooks/email-inbound", inboundEmailHandler.InboundEmailWebhook)
 
-	// ── Internal node-agent ingest (no session auth — guarded by shared token) ──
-	// Reachable only on the overlay network; nginx returns 404 for /api/v1/internal/*.
-	nodeAgentHandler := nodeagent.NewHandler(metricsSvc, cfg.NodeAgentToken)
-	v1.POST("/internal/node-metrics", nodeAgentHandler.IngestNodeMetrics)
+	// Internal node-agent ingest lives in its own service (cmd/node-metrics-ingest)
+	// so it is deployed, scaled, and isolated independently of this API.
 
 	// ── Presigned file endpoints (token auth, no session cookie required) ────
 	v1.GET("/files/:file_id/download/p", h.DownloadFilePresigned)
@@ -418,6 +416,21 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 
 		// Search
 		protected.GET("/search", h.Search)
+
+		// Shares — user-to-user sharing of files and folders. The share token
+		// alone grants nothing: every endpoint requires the caller to be logged
+		// in as the share's recipient (or owner).
+		protected.POST("/shares", h.CreateShare)
+		protected.GET("/shares", h.ListMyShares)
+		protected.GET("/shares/shared-with-me", h.ListSharedWithMe)
+		protected.GET("/shares/resolve/:token", h.ResolveShareToken)
+		protected.GET("/shares/:share_id", h.GetShare)
+		protected.DELETE("/shares/:share_id", h.RevokeShare)
+		protected.GET("/shares/:share_id/contents", h.GetSharedContents)
+		protected.GET("/shares/:share_id/file", h.GetSharedFile)
+		protected.GET("/shares/:share_id/file/preview", h.PreviewSharedFile)
+		protected.GET("/shares/:share_id/file/download", h.DownloadSharedFile)
+		protected.POST("/shares/:share_id/upload", h.UploadToShare)
 
 		// Favorites
 		protected.GET("/favorites", h.ListFavorites)

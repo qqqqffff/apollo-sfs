@@ -41,11 +41,6 @@ type Config struct {
 	DiskStatsPath            string
 	DiskStatsDriveLabel      string
 
-	// NodeAgentToken is the shared secret the per-node metrics agents present in
-	// the X-Internal-Token header when pushing to /api/v1/internal/node-metrics.
-	// Empty disables the ingest endpoint (no agent pushes are accepted).
-	NodeAgentToken string
-
 	// SessionKey is the secret used to sign and encrypt the session cookie.
 	// Must be 32 or 64 bytes (AES-128 or AES-256). Set via SESSION_KEY env var.
 	SessionKey string
@@ -159,7 +154,6 @@ func loadConfig() Config {
 		QuotaWarningThresholdPct: quotaPct,
 		DiskStatsPath:            getEnv("DISK_STATS_PATH", "/mnt/data"),
 		DiskStatsDriveLabel:      getEnv("DISK_STATS_DRIVE_LABEL", ""),
-		NodeAgentToken:           os.Getenv("NODE_AGENT_TOKEN"),
 
 		SessionKey: requireEnv("SESSION_KEY"),
 

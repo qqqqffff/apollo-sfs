@@ -21,8 +21,10 @@ Go 1.26.2 REST API built with the Gin web framework. Handles all business logic:
 ```
 api/
 ├── cmd/
-│   ├── main.go          # Entry point, route registration, server start
-│   └── config.go        # Reads all env vars into a Config struct
+│   ├── main.go                 # Entry point, route registration, server start
+│   ├── config.go               # Reads all env vars into a Config struct
+│   ├── node-agent/             # Per-node hardware metrics collector (deployed once per Swarm node)
+│   └── node-metrics-ingest/    # Standalone ingest service node-agent pushes to (see Node Metrics Ingest below)
 ├── routes/
 │   ├── admin/           # Admin panel endpoints (users, bans, nodes, drive stats, infra)
 │   ├── auth/            # Login, register, refresh, mobile auth, social callbacks
@@ -45,8 +47,10 @@ api/
 ├── templates/           # HTML email templates
 ├── sanitize/            # Input validation and sanitization helpers
 ├── tests/               # Unit and integration tests
-├── Dockerfile           # Multi-stage Alpine build
-├── Dockerfile.test      # Test runner sidecar image
+├── Dockerfile                      # Multi-stage Alpine build (main api service)
+├── Dockerfile.test                 # Test runner sidecar image
+├── Dockerfile.node-agent           # Per-node metrics collector image
+├── Dockerfile.node-metrics-ingest  # Node metrics ingest service image
 ├── go.mod
 └── go.sum
 ```
@@ -97,19 +101,33 @@ All `files` and `folders` queries are executed after calling `db.Queries.ForUser
 
 `routes/admin/infrastructure.go` streams server metrics (CPU, RAM, disk) over WebSocket using `gopsutil`. The frontend connects via `hooks/useMetricsStream.ts`.
 
+Per-node hardware metrics (CPU, memory, network, drive temps/capacity) are collected by a separate `node-agent` process deployed once per Swarm node (`cmd/node-agent`), which pushes samples every ~5s to the `node-metrics-ingest` service — its own standalone binary and Swarm service (see below), not a route on this `api` process. `MetricsService` (`routes/services/metrics.go`) reads those pushes back from Postgres (`NodeStates()`) to assemble the combined cluster + per-node frame broadcast over the WebSocket above; it holds no in-memory node state.
+
+### Node Metrics Ingest (`cmd/node-metrics-ingest`)
+
+A small standalone Go binary/Swarm service, split out of `api` so this internal, constant-frequency traffic (and any incident on it) never touches the public-facing API:
+- Connects directly to Postgres (same `POSTGRES_APP_*` credentials as `api`) — it does **not** run migrations; `api` owns those.
+- Exposes `POST /internal/node-metrics` (auth: shared-secret `X-Internal-Token`, checked against `NODE_AGENT_TOKEN`) and `GET /healthz`.
+- Uses `services.NodeIngestService` (`routes/services/node_ingest.go`) to persist each push — no in-memory state, no WebSocket hub.
+- Deployed manager-only (`tier=standard`) in `docker-stack.yml`, reachable only over the `app-network` overlay network; never proxied by nginx.
+- `node-agent` targets it via `NODE_METRICS_INGEST_URL` (default `http://node-metrics-ingest:8080`).
+
 ## Building
 
 ```bash
-# Local build
+# Local build (builds every cmd/ binary: api, node-agent, node-metrics-ingest)
 cd api
 go build ./cmd/...
 
 # Docker image (multi-stage, produces a minimal Alpine binary)
 docker build -t apollo-sfs-api .
+docker build -f Dockerfile.node-metrics-ingest -t apollo-sfs_node-metrics-ingest .
 
 # Cross-compile for arm64 (Pi 5)
 GOOS=linux GOARCH=arm64 go build -o api-arm64 ./cmd/...
 ```
+
+`./deploy.sh` (repo root) automates building/pushing/deploying all of these images against the Swarm stack — see its `--help`.
 
 ## Testing
 
@@ -117,7 +135,8 @@ GOOS=linux GOARCH=arm64 go build -o api-arm64 ./cmd/...
 # Run unit tests
 go test ./...
 
-# Via Docker sidecar (matches CI)
+# Via Docker sidecar (matches CI) — NOTE: docker-compose.yml is deprecated
+# (see root CLAUDE.md); this sidecar has no docker-stack.yml equivalent yet.
 docker compose run api-tests
 ```
 

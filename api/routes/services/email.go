@@ -131,6 +131,35 @@ func (s *EmailService) SendInvitation(
 	)
 }
 
+// SendShareNotification enqueues an email telling a recipient that ownerEmail
+// shared a file or folder with them. itemType is "file" or "folder";
+// permissionLabel is a human-readable summary e.g. "view and download";
+// shareURL must be the full URL including the share token.
+func (s *EmailService) SendShareNotification(
+	ctx context.Context,
+	toEmail string,
+	ownerEmail string,
+	itemName string,
+	itemType string,
+	permissionLabel string,
+	shareURL string,
+) error {
+	return s.enqueue(ctx, toEmail,
+		fmt.Sprintf("%s shared a %s with you on %s", ownerEmail, itemType, s.appName),
+		"share_notification",
+		map[string]any{
+			"AppName":         s.appName,
+			"AppURL":          s.appURL,
+			"Email":           toEmail,
+			"OwnerEmail":      ownerEmail,
+			"ItemName":        itemName,
+			"ItemType":        itemType,
+			"PermissionLabel": permissionLabel,
+			"ShareURL":        shareURL,
+		},
+	)
+}
+
 // SendQuotaWarning enqueues a storage warning email when a user crosses the
 // warning threshold (default 80%). usedPercent is the integer percentage (e.g. 83).
 // usedFormatted and quotaFormatted are pre-formatted strings e.g. "8.3 GB", "10 GB".

@@ -119,7 +119,7 @@ describe('useFileUpload — startUpload (success path)', () => {
     await act(async () => {
       await result.current.startUpload([SMALL_FILE], 'folder-xyz', jest.fn())
     })
-    expect(mockPresignUpload).toHaveBeenCalledWith(SMALL_FILE.name, SMALL_FILE.size, 'folder-xyz')
+    expect(mockPresignUpload).toHaveBeenCalledWith(SMALL_FILE.name, SMALL_FILE.size, 'folder-xyz', false)
   })
 })
 
@@ -196,6 +196,7 @@ describe('useFileUpload — chunked upload', () => {
       2, // ceil((CHUNK_SIZE+1) / CHUNK_SIZE) = 2
       LARGE_FILE.size,
       null,
+      false,
     )
     expect(mockUploadChunkPresigned).toHaveBeenCalled()
     expect(mockCompleteChunkedUploadPresigned).toHaveBeenCalledWith('up-1', 'sess.tok')

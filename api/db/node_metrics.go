@@ -91,6 +91,39 @@ func (q *Queries) ListNodeSnapshotsByHours(ctx context.Context, nodeID uuid.UUID
 	return snaps, rows.Err()
 }
 
+// GetLatestNodeSnapshots returns the most recent snapshot for every node that
+// has reported at least one, keyed by node_id. Used to assemble the live
+// per-node WebSocket frame from Postgres instead of in-process state, since
+// ingestion runs in a separate service (cmd/node-metrics-ingest).
+func (q *Queries) GetLatestNodeSnapshots(ctx context.Context) (map[uuid.UUID]models.NodeMetricSnapshot, error) {
+	rows, err := q.db.QueryContext(ctx, `
+		SELECT DISTINCT ON (node_id)
+			id, node_id, cpu_percent, cpu_temp_celsius,
+			memory_used_bytes, memory_total_bytes,
+			network_bytes_sent, network_bytes_recv, sampled_at
+		FROM node_metrics_snapshots
+		ORDER BY node_id, sampled_at DESC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("GetLatestNodeSnapshots: %w", err)
+	}
+	defer rows.Close()
+
+	out := make(map[uuid.UUID]models.NodeMetricSnapshot)
+	for rows.Next() {
+		var s models.NodeMetricSnapshot
+		if err := rows.Scan(
+			&s.ID, &s.NodeID, &s.CPUPercent, &s.CPUTempCelsius,
+			&s.MemoryUsedBytes, &s.MemoryTotalBytes,
+			&s.NetworkBytesSent, &s.NetworkBytesRecv, &s.SampledAt,
+		); err != nil {
+			return nil, fmt.Errorf("GetLatestNodeSnapshots scan: %w", err)
+		}
+		out[s.NodeID] = s
+	}
+	return out, rows.Err()
+}
+
 // PruneOldNodeSnapshots deletes node snapshots sampled before the given time.
 func (q *Queries) PruneOldNodeSnapshots(ctx context.Context, before time.Time) error {
 	_, err := q.db.ExecContext(ctx,

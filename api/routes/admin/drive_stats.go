@@ -42,7 +42,9 @@ func (h *Handler) GetDriveStats(c *gin.Context) {
 	})
 	nodeStates := []models.NodeFrame(nil)
 	if h.metrics != nil {
-		nodeStates = h.metrics.NodeStates()
+		if ns, err := h.metrics.NodeStates(c.Request.Context()); err == nil {
+			nodeStates = ns
+		}
 	}
 	for _, n := range nodeStates {
 		if !n.Online {

@@ -1,0 +1,62 @@
+{{/*
+  Template name : "share_notification"
+  Trigger       : A user shares a file or folder and enables email notification
+  Data fields   :
+    AppName         string
+    AppURL          string
+    Email           string — the recipient's address
+    OwnerEmail      string — the account email of the user who shared the item
+    ItemName        string — display name of the shared file/folder
+    ItemType        string — "file" or "folder"
+    PermissionLabel string — human-readable permissions e.g. "view and download"
+    ShareURL        string — full URL containing the share token
+*/}}
+{{define "share_notification"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <title>A {{.ItemType}} was shared with you on {{.AppName}}</title>
+</head>
+<body>
+  <div class="email-wrapper">
+    <div class="email-card">
+
+      {{template "header" .}}
+
+      <div class="email-body">
+        <h1>Something was shared with you</h1>
+        <p>
+          <strong>{{.OwnerEmail}}</strong> has shared the {{.ItemType}}
+          <strong>{{.ItemName}}</strong> with you on <strong>{{.AppName}}</strong>.
+        </p>
+        <p>
+          You have <strong>{{.PermissionLabel}}</strong> access. This share is
+          personal to <strong>{{.Email}}</strong> — you will need to sign in
+          with this address to open it.
+        </p>
+
+        <div class="btn-wrapper">
+          <a href="{{.ShareURL}}" class="btn-primary">Open shared {{.ItemType}}</a>
+        </div>
+
+        <p>If the button does not work, copy and paste this link into your browser:</p>
+        <div class="token-block">{{.ShareURL}}</div>
+
+        <hr class="email-divider" />
+
+        <p>
+          If you were not expecting this, you can safely ignore this email.
+          The owner can revoke the share at any time.
+        </p>
+      </div>
+
+      {{template "footer" .}}
+
+    </div>
+  </div>
+</body>
+</html>
+{{end}}

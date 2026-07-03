@@ -91,6 +91,7 @@ type Handler struct {
 	email           *services.EmailService
 	presign         *services.PresignService
 	apiKeys         *services.APIKeyService
+	shares          *services.ShareService
 	turnstileSecret string
 	// verifyCaptcha overrides the real Turnstile HTTP call. When nil the
 	// production verifyTurnstile function is used.
@@ -126,6 +127,13 @@ func SetVerifyCaptcha(h *Handler, fn func(secret, token, ip string) (bool, error
 // causes the management endpoints to return 503 (configured, not crash).
 func SetAPIKeyService(h *Handler, svc *services.APIKeyService) {
 	h.apiKeys = svc
+}
+
+// SetShareService installs the sharing service on an existing Handler.
+// Wired from main once the service is constructed; nil is tolerated and
+// causes the share endpoints to return 503 (configured, not crash).
+func SetShareService(h *Handler, svc *services.ShareService) {
+	h.shares = svc
 }
 
 // SetMathGameService installs the math game score service on an existing

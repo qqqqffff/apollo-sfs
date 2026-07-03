@@ -1,12 +1,17 @@
 import { createFileRoute, useNavigate, useSearch } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useState } from 'react'
-import { MdAdd, MdContentCopy, MdCheck, MdDelete, MdKey, MdWarning } from 'react-icons/md'
+import type { ReactNode } from 'react'
+import { MdAdd, MdClose, MdContentCopy, MdCheck, MdDelete, MdInfoOutline, MdKey, MdWarning } from 'react-icons/md'
 import { createAPIKey, listAPIKeys, revokeAPIKey } from '../../api/apiKeys'
 import { meQueryOptions } from '../../api/me'
 import type { APIKeyOperation, APIKeyScope, IssuedAPIKey } from '../../types/api'
 
 const OPS: APIKeyOperation[] = ['read', 'list', 'write', 'delete']
+
+// Remembers that the user has dismissed the getting-started guide so it
+// doesn't reopen automatically after they revoke their last key.
+const GUIDE_DISMISSED_KEY = 'apollo_apikey_guide_dismissed'
 
 interface Search {
   // When present, the create form is pre-opened and prefilled with this prefix.
@@ -30,10 +35,27 @@ function RouteComponent() {
   const [creating, setCreating] = useState(search.prefix !== undefined)
   const [issued, setIssued] = useState<IssuedAPIKey | null>(null)
   const [copiedIssued, setCopiedIssued] = useState(false)
+  const [guideOpen, setGuideOpen] = useState(false)
 
   useEffect(() => {
     if (search.prefix !== undefined) setCreating(true)
   }, [search.prefix])
+
+  // Auto-open the guide the first time a premium/admin user lands here with
+  // no keys yet. Once dismissed it only comes back via the info button.
+  useEffect(() => {
+    if (
+      !isLoading && data && (user?.is_premium || user?.is_admin) &&
+      data.items.length === 0 && !localStorage.getItem(GUIDE_DISMISSED_KEY)
+    ) {
+      setGuideOpen(true)
+    }
+  }, [isLoading, data, user])
+
+  const dismissGuide = () => {
+    setGuideOpen(false)
+    localStorage.setItem(GUIDE_DISMISSED_KEY, '1')
+  }
 
   const revoke = useMutation({
     mutationFn: (id: string) => revokeAPIKey(id),
@@ -68,14 +90,26 @@ function RouteComponent() {
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-xl font-semibold text-gray-900 m-0">API Keys</h1>
         {!creating && (
-          <button
-            onClick={() => setCreating(true)}
-            className="inline-flex items-center gap-1.5 px-3 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium cursor-pointer transition-colors"
-          >
-            <MdAdd /> New key
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setGuideOpen(true)}
+              title="How API keys work"
+              aria-label="How API keys work"
+              className="inline-flex items-center justify-center w-9 h-9 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-lg border border-gray-200 cursor-pointer transition-colors"
+            >
+              <MdInfoOutline className="text-lg" />
+            </button>
+            <button
+              onClick={() => setCreating(true)}
+              className="inline-flex items-center gap-1.5 px-3 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium cursor-pointer transition-colors"
+            >
+              <MdAdd /> New key
+            </button>
+          </div>
         )}
       </div>
+
+      {guideOpen && <ApiKeyGuideModal onClose={dismissGuide} />}
 
       {issued && (
         <NewKeyBanner
@@ -313,5 +347,151 @@ function CreateKeyForm({
         </button>
       </div>
     </form>
+  )
+}
+
+const GUIDE_STEPS: { title: string; body: ReactNode }[] = [
+  {
+    title: 'What are API keys for?',
+    body: (
+      <>
+        <p className="m-0 mb-3">
+          API keys give scripts, backup tools, or your own apps programmatic, S3-style access to
+          your Apollo SFS storage — the same encrypted files and quota you see here, just reachable
+          without a browser.
+        </p>
+        <p className="m-0">
+          Each key is scoped: you choose exactly which operations (
+          <code className="font-mono text-xs bg-gray-100 px-1 py-0.5 rounded">read</code>,{' '}
+          <code className="font-mono text-xs bg-gray-100 px-1 py-0.5 rounded">write</code>,{' '}
+          <code className="font-mono text-xs bg-gray-100 px-1 py-0.5 rounded">list</code>,{' '}
+          <code className="font-mono text-xs bg-gray-100 px-1 py-0.5 rounded">delete</code>) it can
+          perform and on which folder — from read-only access to a single subfolder up to full
+          control of your whole account.
+        </p>
+      </>
+    ),
+  },
+  {
+    title: 'Create a key',
+    body: (
+      <>
+        <p className="m-0 mb-3">
+          Click <span className="font-medium">New key</span>, give it a name, and add one or more
+          scopes — an operation plus a path prefix. Leave the prefix empty to cover your whole
+          bucket. You can also set it to expire after a number of days.
+        </p>
+        <p className="m-0 rounded-lg bg-amber-50 border border-amber-200 px-3 py-2 text-amber-800">
+          The full key is shown exactly once, right after creation. Copy it somewhere safe — the
+          server only ever stores its hash.
+        </p>
+      </>
+    ),
+  },
+  {
+    title: 'Use your key',
+    body: (
+      <>
+        <p className="m-0 mb-3">
+          Send it as a bearer token on every request to{' '}
+          <code className="font-mono text-xs bg-gray-100 px-1 py-0.5 rounded">/api/v1/sfs/buckets/me/…</code>:
+        </p>
+        <pre className="m-0 mb-3 bg-gray-900 text-gray-100 text-xs rounded-lg p-3 overflow-x-auto">
+{`curl -X POST https://<your-domain>/api/v1/sfs/buckets/me/list \\
+  -H "Authorization: Bearer sfs_<prefix>_<secret>" \\
+  -d '{"prefix":"photos"}'`}
+        </pre>
+        <p className="m-0">
+          Endpoints cover upload, download, delete, list, and move — each request is checked
+          against the scopes on the key you send.
+        </p>
+      </>
+    ),
+  },
+  {
+    title: 'Manage & revoke',
+    body: (
+      <>
+        <p className="m-0 mb-3">
+          Every key you&rsquo;ve issued is listed on this page with its scopes and last-used date.
+          Revoke a key any time if it&rsquo;s no longer needed or you think it&rsquo;s been
+          exposed — revocation takes effect immediately.
+        </p>
+        <p className="m-0">
+          Lost the secret? There&rsquo;s no way to recover it — revoke the old key and issue a new
+          one instead. You can reopen this guide anytime with the <MdInfoOutline className="inline align-text-bottom" /> button above.
+        </p>
+      </>
+    ),
+  },
+]
+
+function ApiKeyGuideModal({ onClose }: { onClose: () => void }) {
+  const [step, setStep] = useState(0)
+  const isLastStep = step === GUIDE_STEPS.length - 1
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    document.addEventListener('keydown', handler)
+    return () => document.removeEventListener('keydown', handler)
+  }, [onClose])
+
+  return (
+    <div
+      onClick={onClose}
+      className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4"
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="bg-white rounded-xl shadow-xl w-full max-w-lg flex flex-col max-h-[85vh]"
+      >
+        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200 shrink-0">
+          <h2 className="text-base font-semibold text-gray-900 m-0">
+            {GUIDE_STEPS[step].title}
+          </h2>
+          <button
+            onClick={onClose}
+            className="text-gray-400 hover:text-gray-600 transition-colors cursor-pointer bg-transparent border-0 p-1"
+            aria-label="Close"
+          >
+            <MdClose className="text-xl" />
+          </button>
+        </div>
+
+        <div className="overflow-y-auto px-6 py-5 text-sm text-gray-700 leading-relaxed">
+          <p className="text-xs text-gray-400 m-0 mb-3">
+            Step {step + 1} of {GUIDE_STEPS.length}
+          </p>
+          {GUIDE_STEPS[step].body}
+        </div>
+
+        <div className="flex items-center justify-between px-6 py-4 border-t border-gray-200 shrink-0">
+          <div className="flex items-center gap-1.5">
+            {GUIDE_STEPS.map((_, i) => (
+              <span
+                key={i}
+                className={`w-1.5 h-1.5 rounded-full ${i === step ? 'bg-blue-600' : 'bg-gray-200'}`}
+              />
+            ))}
+          </div>
+          <div className="flex gap-2">
+            {step > 0 && (
+              <button
+                onClick={() => setStep((s) => s - 1)}
+                className="px-3 py-2 text-sm text-gray-600 hover:bg-gray-50 rounded-lg border border-gray-200 cursor-pointer transition-colors"
+              >
+                Back
+              </button>
+            )}
+            <button
+              onClick={() => (isLastStep ? onClose() : setStep((s) => s + 1))}
+              className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium cursor-pointer transition-colors"
+            >
+              {isLastStep ? 'Got it' : 'Next'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
   )
 }

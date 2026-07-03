@@ -24,9 +24,13 @@ type ServerExpansionRequest struct {
 	PayPalOrderID      string     `json:"paypal_order_id"`
 	PayPalCaptureID    *string    `json:"paypal_capture_id"`
 	Status             string     `json:"status"`
+	IsCustom           bool       `json:"is_custom"`
 	PreQuotaBytes      int64      `json:"pre_quota_bytes"`
 	PostQuotaBytes     *int64     `json:"post_quota_bytes"`
 	ExpiresAt          time.Time  `json:"expires_at"`
+	ApprovalDueAt      *time.Time `json:"approval_due_at"`
+	ApprovedAt         *time.Time `json:"approved_at"`
+	ExpansionDueAt     *time.Time `json:"expansion_due_at"`
 	CreatedAt          time.Time  `json:"created_at"`
 	CompletedAt        *time.Time `json:"completed_at"`
 	RefundID           *string    `json:"refund_id"`

@@ -21,6 +21,16 @@ const (
 	// paymentWindowDays is how long the user has to pay the remaining balance
 	// after the admin marks the server capacity as expanded.
 	paymentWindowDays = 3
+
+	// approvalSLABusinessDays is how many business days the admin has to
+	// approve a standard expansion request before the deposit is auto-refunded.
+	approvalSLABusinessDays = 7
+	// customReviewSLABusinessDays is the manual-review SLA for custom capacity
+	// requests (1 TiB – 10 PiB).
+	customReviewSLABusinessDays = 3
+	// expansionSLABusinessDays is how many business days after approval the
+	// capacity must be expanded before the deposit is auto-refunded.
+	expansionSLABusinessDays = 14
 )
 
 // Config holds URL templates used for the PayPal wallet redirect flow.
@@ -66,6 +76,7 @@ func (h *Handler) CreateWalletOrder(c *gin.Context) {
 		PlanID      string `json:"plan_id"      binding:"required"`
 		StorageType string `json:"storage_type" binding:"required,oneof=nvme hdd"`
 		ServerID    string `json:"server_id"    binding:"required"`
+		CustomBytes int64  `json:"custom_bytes"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -78,7 +89,7 @@ func (h *Handler) CreateWalletOrder(c *gin.Context) {
 		return
 	}
 
-	pl, fullCents, depositCents, ok := h.resolvePlan(c, req.PlanID, req.StorageType)
+	pl, fullCents, depositCents, ok := h.resolvePlan(c, req.PlanID, req.StorageType, req.CustomBytes)
 	if !ok {
 		return
 	}
@@ -99,6 +110,7 @@ func (h *Handler) CreateWalletOrder(c *gin.Context) {
 		return
 	}
 
+	isCustom := req.PlanID == billing.CustomPlanID
 	_, err = h.queries.CreateExpansionRequest(c.Request.Context(), db.CreateExpansionRequestParams{
 		Username:           username,
 		ServerID:           serverID,
@@ -111,8 +123,9 @@ func (h *Handler) CreateWalletOrder(c *gin.Context) {
 		PaymentMethod:      "paypal",
 		PayPalOrderID:      result.OrderID,
 		Status:             "opened",
+		IsCustom:           isCustom,
 		PreQuotaBytes:      user.StorageQuotaBytes,
-		ExpiresAt:          expiryAt(time.Now()),
+		ExpiresAt:          approvalDeadline(time.Now(), isCustom),
 	})
 	if err != nil {
 		log.Printf("expansion CreateWalletOrder persist: %v", err)
@@ -201,6 +214,7 @@ func (h *Handler) CaptureHostedCardExpansion(c *gin.Context) {
 		StorageType string `json:"storage_type" binding:"required,oneof=nvme hdd"`
 		ServerID    string `json:"server_id"    binding:"required"`
 		OrderID     string `json:"order_id"     binding:"required"`
+		CustomBytes int64  `json:"custom_bytes"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -213,7 +227,7 @@ func (h *Handler) CaptureHostedCardExpansion(c *gin.Context) {
 		return
 	}
 
-	pl, fullCents, depositCents, ok := h.resolvePlan(c, req.PlanID, req.StorageType)
+	pl, fullCents, depositCents, ok := h.resolvePlan(c, req.PlanID, req.StorageType, req.CustomBytes)
 	if !ok {
 		return
 	}
@@ -257,6 +271,7 @@ func (h *Handler) ChargeCardExpansion(c *gin.Context) {
 		PlanID      string `json:"plan_id"      binding:"required"`
 		StorageType string `json:"storage_type" binding:"required,oneof=nvme hdd"`
 		ServerID    string `json:"server_id"    binding:"required"`
+		CustomBytes int64  `json:"custom_bytes"`
 		Card        struct {
 			Number      string `json:"number"       binding:"required"`
 			ExpiryMonth string `json:"expiry_month" binding:"required"`
@@ -276,7 +291,7 @@ func (h *Handler) ChargeCardExpansion(c *gin.Context) {
 		return
 	}
 
-	pl, fullCents, depositCents, ok := h.resolvePlan(c, req.PlanID, req.StorageType)
+	pl, fullCents, depositCents, ok := h.resolvePlan(c, req.PlanID, req.StorageType, req.CustomBytes)
 	if !ok {
 		return
 	}
@@ -320,6 +335,7 @@ func (h *Handler) ChargeApplePayExpansion(c *gin.Context) {
 		PlanID      string `json:"plan_id"      binding:"required"`
 		StorageType string `json:"storage_type" binding:"required,oneof=nvme hdd"`
 		ServerID    string `json:"server_id"    binding:"required"`
+		CustomBytes int64  `json:"custom_bytes"`
 		Token       struct {
 			Version     string         `json:"version"      binding:"required"`
 			Data        string         `json:"data"         binding:"required"`
@@ -340,7 +356,7 @@ func (h *Handler) ChargeApplePayExpansion(c *gin.Context) {
 		return
 	}
 
-	pl, fullCents, depositCents, ok := h.resolvePlan(c, req.PlanID, req.StorageType)
+	pl, fullCents, depositCents, ok := h.resolvePlan(c, req.PlanID, req.StorageType, req.CustomBytes)
 	if !ok {
 		return
 	}
@@ -385,6 +401,7 @@ func (h *Handler) ChargeGooglePayExpansion(c *gin.Context) {
 		PlanID         string `json:"plan_id"          binding:"required"`
 		StorageType    string `json:"storage_type"     binding:"required,oneof=nvme hdd"`
 		ServerID       string `json:"server_id"        binding:"required"`
+		CustomBytes    int64  `json:"custom_bytes"`
 		GooglePayToken string `json:"google_pay_token" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -398,7 +415,7 @@ func (h *Handler) ChargeGooglePayExpansion(c *gin.Context) {
 		return
 	}
 
-	pl, fullCents, depositCents, ok := h.resolvePlan(c, req.PlanID, req.StorageType)
+	pl, fullCents, depositCents, ok := h.resolvePlan(c, req.PlanID, req.StorageType, req.CustomBytes)
 	if !ok {
 		return
 	}
@@ -686,6 +703,64 @@ func (h *Handler) ListRequests(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"items": result.Items, "next_token": result.NextToken})
 }
 
+// ApproveRequest transitions an 'opened' request to 'approved', starting the
+// 14-business-day expansion SLA clock. If the expansion is not completed by
+// then, the deposit is refunded automatically by the expiry loop.
+// POST /api/v1/admin/expansion-requests/:id/approve
+func (h *Handler) ApproveRequest(c *gin.Context) {
+	id, ok := h.parseID(c)
+	if !ok {
+		return
+	}
+
+	req, err := h.queries.GetExpansionRequestByID(c.Request.Context(), id)
+	if err != nil || req == nil {
+		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "not found"})
+		return
+	}
+	if req.Status != "opened" {
+		c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": "request must be in 'opened' state"})
+		return
+	}
+	if req.PayPalCaptureID == nil {
+		c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": "deposit not yet captured"})
+		return
+	}
+
+	expansionDue := addBusinessDays(time.Now(), expansionSLABusinessDays)
+	updated, err := h.queries.ApproveExpansionRequest(c.Request.Context(), id, expansionDue)
+	if err != nil {
+		log.Printf("expansion ApproveRequest: %v", err)
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "update status"})
+		return
+	}
+	if !updated {
+		c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": "concurrent modification"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"expansion_due_at": expansionDue})
+}
+
+// ListMine returns the calling user's expansion requests, newest first.
+// GET /api/v1/billing/storage/expansion/requests
+func (h *Handler) ListMine(c *gin.Context) {
+	username, ok := h.currentUsername(c)
+	if !ok {
+		return
+	}
+	items, err := h.queries.ListUserExpansionRequests(c.Request.Context(), username)
+	if err != nil {
+		log.Printf("expansion ListMine: %v", err)
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "list failed"})
+		return
+	}
+	if items == nil {
+		items = []models.ServerExpansionRequest{}
+	}
+	c.JSON(http.StatusOK, gin.H{"items": items})
+}
+
 // MarkExpanded verifies the server has capacity, sets status='expanded', and
 // emails the user to pay the remaining balance within 3 days.
 // POST /api/v1/admin/expansion-requests/:id/fulfill
@@ -700,8 +775,8 @@ func (h *Handler) MarkExpanded(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "not found"})
 		return
 	}
-	if req.Status != "opened" {
-		c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": "request must be in 'opened' state"})
+	if req.Status != "opened" && req.Status != "approved" {
+		c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": "request must be in 'opened' or 'approved' state"})
 		return
 	}
 	if req.PayPalCaptureID == nil {
@@ -784,7 +859,7 @@ func (h *Handler) CancelRequest(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "not found"})
 		return
 	}
-	if req.Status != "opened" && req.Status != "expanded" {
+	if req.Status != "opened" && req.Status != "approved" && req.Status != "expanded" {
 		c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": "request is not cancellable"})
 		return
 	}
@@ -828,7 +903,10 @@ func (h *Handler) CancelRequest(c *gin.Context) {
 // ── Background expiry loop ────────────────────────────────────────────────────
 
 // StartExpiryLoop spawns a goroutine that checks every hour for:
-//   - 'opened' requests past their 14-day SLA → refund deposit, mark expired
+//   - 'opened' requests past their approval SLA (7 business days; 3 for
+//     custom manual review) → refund deposit, mark expired
+//   - 'approved' requests past their 14-business-day expansion SLA → refund
+//     deposit, mark expired
 //   - 'expanded' requests past their 3-day payment window → forfeit (no refund)
 func (h *Handler) StartExpiryLoop(ctx context.Context) {
 	go func() {
@@ -842,18 +920,33 @@ func (h *Handler) StartExpiryLoop(ctx context.Context) {
 				return
 			case <-ticker.C:
 				h.processExpired(ctx)
+				h.processExpansionSLAMissed(ctx)
 				h.processForfeited(ctx)
 			}
 		}
 	}()
 }
 
-// processExpired handles 'opened' requests that have passed their 14-day SLA.
-// The deposit is refunded via PayPal.
+// processExpired handles 'opened' requests that have passed their approval
+// SLA. The deposit is refunded via PayPal.
 func (h *Handler) processExpired(ctx context.Context) {
 	expired, err := h.queries.ListExpiredOpenRequests(ctx)
 	if err != nil {
 		log.Printf("expansion expiry: list opened: %v", err)
+		return
+	}
+	for i := range expired {
+		h.expireOne(ctx, &expired[i])
+	}
+}
+
+// processExpansionSLAMissed handles 'approved' requests whose 14-business-day
+// expansion SLA elapsed without the capacity being expanded. The deposit is
+// refunded via PayPal.
+func (h *Handler) processExpansionSLAMissed(ctx context.Context) {
+	expired, err := h.queries.ListExpiredApprovedRequests(ctx)
+	if err != nil {
+		log.Printf("expansion expiry: list approved: %v", err)
 		return
 	}
 	for i := range expired {
@@ -960,6 +1053,7 @@ func (h *Handler) persistDirectExpansion(
 	}
 
 	cid := cap.CaptureID
+	isCustom := planID == billing.CustomPlanID
 	r, err := h.queries.CreateExpansionRequest(c.Request.Context(), db.CreateExpansionRequestParams{
 		Username:           username,
 		ServerID:           serverID,
@@ -973,8 +1067,9 @@ func (h *Handler) persistDirectExpansion(
 		PayPalOrderID:      cap.OrderID,
 		PayPalCaptureID:    &cid,
 		Status:             "opened",
+		IsCustom:           isCustom,
 		PreQuotaBytes:      user.StorageQuotaBytes,
-		ExpiresAt:          expiryAt(time.Now()),
+		ExpiresAt:          approvalDeadline(time.Now(), isCustom),
 	})
 	if err != nil {
 		log.Printf("expansion %s persist: %v", paymentMethod, err)
@@ -1013,7 +1108,19 @@ func (h *Handler) currentUsername(c *gin.Context) (string, bool) {
 	return username, true
 }
 
-func (h *Handler) resolvePlan(c *gin.Context, planID, storageType string) (billing.Plan, int, int, bool) {
+// resolvePlan resolves a fixed plan, or builds a custom one when planID is
+// "custom" (customBytes must then be within the 1 TiB – 10 PiB slider bounds).
+// Returns (plan, full price cents, 50% deposit cents, ok).
+func (h *Handler) resolvePlan(c *gin.Context, planID, storageType string, customBytes int64) (billing.Plan, int, int, bool) {
+	if planID == billing.CustomPlanID {
+		pl, err := billing.CustomPlan(customBytes, storageType)
+		if err != nil {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return billing.Plan{}, 0, 0, false
+		}
+		fullCents := pl.PriceCents[storageType]
+		return pl, fullCents, fullCents / 2, true
+	}
 	pl, found := billing.LookupPlan(planID)
 	if !found {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "unknown plan_id"})
@@ -1025,6 +1132,15 @@ func (h *Handler) resolvePlan(c *gin.Context, planID, storageType string) (billi
 		return billing.Plan{}, 0, 0, false
 	}
 	return pl, fullCents, fullCents / 2, true
+}
+
+// approvalDeadline returns the approval SLA deadline for a new request:
+// 3 business days for manually-reviewed custom requests, 7 otherwise.
+func approvalDeadline(now time.Time, isCustom bool) time.Time {
+	if isCustom {
+		return addBusinessDays(now, customReviewSLABusinessDays)
+	}
+	return addBusinessDays(now, approvalSLABusinessDays)
 }
 
 func (h *Handler) parseID(c *gin.Context) (uuid.UUID, bool) {
@@ -1046,7 +1162,7 @@ func (h *Handler) currencyOrDefault() string {
 func planLabel(planID, storageType string) string {
 	labels := map[string]string{
 		"64gb": "64 GB", "128gb": "128 GB", "256gb": "256 GB",
-		"512gb": "512 GB", "1tb": "1 TB",
+		"512gb": "512 GB", "1tb": "1 TB", billing.CustomPlanID: "Custom",
 	}
 	label := labels[planID]
 	if label == "" {

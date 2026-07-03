@@ -13,7 +13,7 @@ import (
 
 const storageOrderColumns = `id, username, plan_id, storage_type, bytes_added,
 	amount_cents, currency, payment_method, status,
-	paypal_order_id, paypal_capture_id, raw_response, created_at, captured_at`
+	paypal_order_id, paypal_capture_id, server_id, raw_response, created_at, captured_at`
 
 // CreateStorageOrder inserts a new storage order. For wallet (PayPal redirect)
 // orders, only paypal_order_id is set and status is "created". For direct
@@ -24,16 +24,20 @@ func (q *Queries) CreateStorageOrder(ctx context.Context, o *models.StorageOrder
 	if o.PayPalCaptureID != nil {
 		captureID = *o.PayPalCaptureID
 	}
+	var serverID any
+	if o.ServerID != nil {
+		serverID = *o.ServerID
+	}
 	err := q.db.QueryRowContext(ctx, `
 		INSERT INTO storage_orders
 		    (username, plan_id, storage_type, bytes_added, amount_cents, currency,
-		     payment_method, status, paypal_order_id, paypal_capture_id, raw_response,
-		     captured_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12)
+		     payment_method, status, paypal_order_id, paypal_capture_id, server_id,
+		     raw_response, captured_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13)
 		RETURNING id, created_at
 	`,
 		o.Username, o.PlanID, o.StorageType, o.BytesAdded, o.AmountCents, o.Currency,
-		o.PaymentMethod, o.Status, o.PayPalOrderID, captureID,
+		o.PaymentMethod, o.Status, o.PayPalOrderID, captureID, serverID,
 		rawWebhookOrNil(o.RawResponse), capturedAtOrNil(o.CapturedAt),
 	).Scan(&o.ID, &o.CreatedAt)
 	if err != nil {
@@ -118,18 +122,23 @@ func (q *Queries) GetUserStorageBreakdown(ctx context.Context, userID string) (U
 func scanStorageOrder(row *sql.Row) (*models.StorageOrder, error) {
 	var o models.StorageOrder
 	var captureID sql.NullString
+	var serverID uuid.NullUUID
 	var rawResp []byte
 	var capturedAt sql.NullTime
 	if err := row.Scan(
 		&o.ID, &o.Username, &o.PlanID, &o.StorageType, &o.BytesAdded,
 		&o.AmountCents, &o.Currency, &o.PaymentMethod, &o.Status,
-		&o.PayPalOrderID, &captureID, &rawResp, &o.CreatedAt, &capturedAt,
+		&o.PayPalOrderID, &captureID, &serverID, &rawResp, &o.CreatedAt, &capturedAt,
 	); err != nil {
 		return nil, err
 	}
 	if captureID.Valid {
 		s := captureID.String
 		o.PayPalCaptureID = &s
+	}
+	if serverID.Valid {
+		id := serverID.UUID
+		o.ServerID = &id
 	}
 	if len(rawResp) > 0 {
 		o.RawResponse = rawResp

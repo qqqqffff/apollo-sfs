@@ -177,6 +177,38 @@ func (q *Queries) ListServerCapacities(ctx context.Context) ([]ServerCapacity, e
 	return out, rows.Err()
 }
 
+// GetServerCapacity returns aggregated capacity info for a single active
+// server, or nil when the server does not exist or is inactive. Backs the
+// 90%-allocation purchase gate in the billing handler.
+func (q *Queries) GetServerCapacity(ctx context.Context, serverID uuid.UUID) (*ServerCapacity, error) {
+	row := q.db.QueryRowContext(ctx, `
+		SELECT
+			s.id, s.name, s.state,
+			COALESCE(SUM(d.capacity_bytes), 0)                                     AS total_capacity_bytes,
+			COALESCE(SUM(GREATEST(d.capacity_bytes - COALESCE(sub.allocated, 0), 0)), 0) AS available_bytes,
+			CASE WHEN COALESCE(BOOL_OR(d.drive_type = 'nvme'), false) THEN 'nvme' ELSE 'hdd' END AS drive_type
+		FROM servers s
+		LEFT JOIN drives d ON d.server_id = s.id AND d.is_active = true
+		LEFT JOIN (
+			SELECT uda.drive_id, SUM(u.storage_quota_bytes) AS allocated
+			FROM user_drive_allocations uda
+			JOIN users u ON u.username = uda.user_id
+			GROUP BY uda.drive_id
+		) sub ON sub.drive_id = d.id
+		WHERE s.is_active = true AND s.id = $1
+		GROUP BY s.id
+	`, serverID)
+	var sc ServerCapacity
+	if err := row.Scan(&sc.ServerID, &sc.Name, &sc.State,
+		&sc.TotalCapacityBytes, &sc.AvailableBytes, &sc.DriveType); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("GetServerCapacity: %w", err)
+	}
+	return &sc, nil
+}
+
 // GetServerByEndpoint fetches a server by its MinIO endpoint. Returns nil if no
 // server is registered for that endpoint. Used by the infrastructure sync to
 // upsert servers keyed by their MinIO endpoint.

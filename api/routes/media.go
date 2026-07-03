@@ -264,3 +264,34 @@ func (h *Handler) UpdatePreferences(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, prefs)
 }
+
+type updateStorageUIPreferencesRequest struct {
+	// Both fields optional; only the ones present are updated.
+	ShowStorageButtons   *bool `json:"show_storage_buttons"`
+	StoragePromptEnabled *bool `json:"storage_prompt_enabled"`
+}
+
+// UpdateStorageUIPreferences handles PUT /api/v1/me/preferences/storage-ui.
+// Toggles the "+" add-storage buttons and the automatic upgrade prompt shown
+// when an upload nears/exceeds the quota. Available to all users (unlike the
+// premium-only media auto-upload preference).
+// Body: {"show_storage_buttons": bool?, "storage_prompt_enabled": bool?}.
+func (h *Handler) UpdateStorageUIPreferences(c *gin.Context) {
+	var req updateStorageUIPreferencesRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+	if req.ShowStorageButtons == nil && req.StoragePromptEnabled == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no preference fields provided"})
+		return
+	}
+
+	username := c.GetString("username")
+	prefs, err := h.queries.SetStorageUIPreferences(c.Request.Context(), username, req.ShowStorageButtons, req.StoragePromptEnabled)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not save preferences"})
+		return
+	}
+	c.JSON(http.StatusOK, prefs)
+}

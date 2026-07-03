@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { MdFolder, MdLock, MdLockOpen } from 'react-icons/md'
+import { MdAddCircleOutline, MdFolder, MdLock, MdLockOpen } from 'react-icons/md'
 import type { User } from '../types/api'
 import { TierIcon } from './TierIcon'
 
@@ -20,6 +20,10 @@ interface Props {
   // policy is active for this upload (i.e. it would silently move any
   // image/video in this batch there). Null/undefined when no policy applies.
   redirectFolderName?: string | null
+  // When set, renders a "+" button beside the storage bar that opens the
+  // storage upgrade modal. Omitted when the user disabled the plus buttons
+  // in their profile preferences.
+  onAddStorage?: () => void
   onConfirm: (ignoreRedirectIndices: Set<number>) => void
   onCancel: () => void
 }
@@ -35,7 +39,7 @@ function isMediaFile(f: globalThis.File): boolean {
   return f.type.startsWith('image/') || f.type.startsWith('video/')
 }
 
-export function UploadModal({ files, folderName, user, location, redirectFolderName, onConfirm, onCancel }: Props) {
+export function UploadModal({ files, folderName, user, location, redirectFolderName, onAddStorage, onConfirm, onCancel }: Props) {
   const totalBytes = files.reduce((sum, f) => sum + f.size, 0)
   const usedBytes = user.storage_used_bytes
   const quotaBytes = user.storage_quota_bytes
@@ -176,7 +180,19 @@ export function UploadModal({ files, folderName, user, location, redirectFolderN
 
         <div className="flex flex-col gap-2">
           <div className="flex justify-between text-xs text-gray-500">
-            <span>Storage</span>
+            <span className="flex items-center gap-1">
+              Storage
+              {onAddStorage && (
+                <button
+                  type="button"
+                  onClick={onAddStorage}
+                  title="Add storage"
+                  className="flex items-center bg-transparent border-0 p-0 text-blue-500 hover:text-blue-700 cursor-pointer transition-colors"
+                >
+                  <MdAddCircleOutline className="text-sm" />
+                </button>
+              )}
+            </span>
             <span>{formatSize(usedBytes)} of {formatSize(quotaBytes)} used</span>
           </div>
           <div className="h-2 rounded-full bg-gray-100 overflow-hidden flex">

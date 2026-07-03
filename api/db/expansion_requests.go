@@ -15,8 +15,9 @@ const expansionRequestColumns = `
 	ser.id, ser.username, ser.server_id, ser.plan_id, ser.storage_type,
 	ser.bytes_requested, ser.deposit_amount_cents, ser.full_price_cents,
 	ser.currency, ser.payment_method, ser.paypal_order_id, ser.paypal_capture_id,
-	ser.status, ser.pre_quota_bytes, ser.post_quota_bytes,
-	ser.expires_at, ser.created_at, ser.completed_at,
+	ser.status, ser.is_custom, ser.pre_quota_bytes, ser.post_quota_bytes,
+	ser.expires_at, ser.approval_due_at, ser.approved_at, ser.expansion_due_at,
+	ser.created_at, ser.completed_at,
 	ser.refund_id, ser.cancellation_reason, ser.payment_due_at,
 	s.name AS server_name, s.state AS server_state,
 	u.email AS user_email`
@@ -27,18 +28,31 @@ func scanExpansionRequest(rows interface {
 	var r models.ServerExpansionRequest
 	var captureID, refundID, reason sql.NullString
 	var postQuota sql.NullInt64
-	var completedAt, paymentDueAt sql.NullTime
+	var completedAt, paymentDueAt, approvalDueAt, approvedAt, expansionDueAt sql.NullTime
 	err := rows.Scan(
 		&r.ID, &r.Username, &r.ServerID, &r.PlanID, &r.StorageType,
 		&r.BytesRequested, &r.DepositAmountCents, &r.FullPriceCents,
 		&r.Currency, &r.PaymentMethod, &r.PayPalOrderID, &captureID,
-		&r.Status, &r.PreQuotaBytes, &postQuota,
-		&r.ExpiresAt, &r.CreatedAt, &completedAt,
+		&r.Status, &r.IsCustom, &r.PreQuotaBytes, &postQuota,
+		&r.ExpiresAt, &approvalDueAt, &approvedAt, &expansionDueAt,
+		&r.CreatedAt, &completedAt,
 		&refundID, &reason, &paymentDueAt,
 		&r.ServerName, &r.ServerState, &r.UserEmail,
 	)
 	if err != nil {
 		return nil, err
+	}
+	if approvalDueAt.Valid {
+		t := approvalDueAt.Time
+		r.ApprovalDueAt = &t
+	}
+	if approvedAt.Valid {
+		t := approvedAt.Time
+		r.ApprovedAt = &t
+	}
+	if expansionDueAt.Valid {
+		t := expansionDueAt.Time
+		r.ExpansionDueAt = &t
 	}
 	if captureID.Valid {
 		s := captureID.String
@@ -83,8 +97,10 @@ type CreateExpansionRequestParams struct {
 	PayPalOrderID      string
 	PayPalCaptureID    *string
 	Status             string // "opened"
+	IsCustom           bool
 	PreQuotaBytes      int64
-	ExpiresAt          time.Time
+	// ExpiresAt is the approval deadline (also stored in approval_due_at).
+	ExpiresAt time.Time
 }
 
 // CreateExpansionRequest inserts a new server expansion request.
@@ -97,13 +113,14 @@ func (q *Queries) CreateExpansionRequest(ctx context.Context, p CreateExpansionR
 		INSERT INTO server_expansion_requests
 			(username, server_id, plan_id, storage_type, bytes_requested,
 			 deposit_amount_cents, full_price_cents, currency, payment_method,
-			 paypal_order_id, paypal_capture_id, status, pre_quota_bytes, expires_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+			 paypal_order_id, paypal_capture_id, status, is_custom,
+			 pre_quota_bytes, expires_at, approval_due_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$15)
 		RETURNING id, created_at
 	`,
 		p.Username, p.ServerID, p.PlanID, p.StorageType, p.BytesRequested,
 		p.DepositAmountCents, p.FullPriceCents, p.Currency, p.PaymentMethod,
-		p.PayPalOrderID, captureID, p.Status, p.PreQuotaBytes, p.ExpiresAt,
+		p.PayPalOrderID, captureID, p.Status, p.IsCustom, p.PreQuotaBytes, p.ExpiresAt,
 	)
 	var id uuid.UUID
 	var createdAt time.Time
@@ -141,7 +158,7 @@ func (q *Queries) CountActiveExpansionRequests(ctx context.Context, username str
 	var n int
 	err := q.db.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM server_expansion_requests
-		WHERE username = $1 AND status IN ('opened', 'expanded')
+		WHERE username = $1 AND status IN ('opened', 'approved', 'expanded')
 	`, username).Scan(&n)
 	if err != nil {
 		return 0, fmt.Errorf("CountActiveExpansionRequests: %w", err)
@@ -269,13 +286,13 @@ func (q *Queries) ListExpansionRequests(ctx context.Context, f ExpansionRequestF
 }
 
 // FulfillExpansionRequest sets status='completed', records post_quota_bytes and
-// completed_at. Returns false if the request was not in 'opened' state.
+// completed_at. Returns false if the request was not in a fulfillable state.
 func (q *Queries) FulfillExpansionRequest(ctx context.Context, id uuid.UUID, postQuotaBytes int64) (bool, error) {
 	now := time.Now()
 	res, err := q.db.ExecContext(ctx, `
 		UPDATE server_expansion_requests
 		SET status = 'completed', post_quota_bytes = $2, completed_at = $3
-		WHERE id = $1 AND status IN ('opened','expanded')
+		WHERE id = $1 AND status IN ('opened','approved','expanded')
 	`, id, postQuotaBytes, now)
 	if err != nil {
 		return false, fmt.Errorf("FulfillExpansionRequest: %w", err)
@@ -291,7 +308,7 @@ func (q *Queries) CancelExpansionRequest(ctx context.Context, id uuid.UUID, refu
 	res, err := q.db.ExecContext(ctx, `
 		UPDATE server_expansion_requests
 		SET status = 'refunded', refund_id = $2, cancellation_reason = $3, completed_at = $4
-		WHERE id = $1 AND status IN ('opened','expanded')
+		WHERE id = $1 AND status IN ('opened','approved','expanded')
 	`, id, refundID, reason, now)
 	if err != nil {
 		return false, fmt.Errorf("CancelExpansionRequest: %w", err)
@@ -301,12 +318,13 @@ func (q *Queries) CancelExpansionRequest(ctx context.Context, id uuid.UUID, refu
 }
 
 // ExpireExpansionRequest marks a single request as 'expired' with a refund ID.
+// Covers both missed-approval ('opened') and missed-expansion ('approved') SLAs.
 func (q *Queries) ExpireExpansionRequest(ctx context.Context, id uuid.UUID, refundID string) error {
 	now := time.Now()
 	_, err := q.db.ExecContext(ctx, `
 		UPDATE server_expansion_requests
 		SET status = 'expired', refund_id = $2, completed_at = $3
-		WHERE id = $1 AND status = 'opened'
+		WHERE id = $1 AND status IN ('opened','approved')
 	`, id, refundID, now)
 	if err != nil {
 		return fmt.Errorf("ExpireExpansionRequest: %w", err)
@@ -314,15 +332,32 @@ func (q *Queries) ExpireExpansionRequest(ctx context.Context, id uuid.UUID, refu
 	return nil
 }
 
-// MarkExpansionRequestExpanded transitions an 'opened' request to 'expanded',
-// indicating the server capacity is ready and the user must pay the remaining
-// balance within paymentWindowDays days. Returns false if not in 'opened' state.
+// ApproveExpansionRequest transitions an 'opened' request to 'approved',
+// stamping approved_at and the expansion deadline (14 business days out).
+// Returns false if the request was not in 'opened' state.
+func (q *Queries) ApproveExpansionRequest(ctx context.Context, id uuid.UUID, expansionDueAt time.Time) (bool, error) {
+	res, err := q.db.ExecContext(ctx, `
+		UPDATE server_expansion_requests
+		SET status = 'approved', approved_at = NOW(), expansion_due_at = $2
+		WHERE id = $1 AND status = 'opened'
+	`, id, expansionDueAt)
+	if err != nil {
+		return false, fmt.Errorf("ApproveExpansionRequest: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// MarkExpansionRequestExpanded transitions an 'approved' request (or a legacy
+// 'opened' one) to 'expanded', indicating the server capacity is ready and the
+// user must pay the remaining balance within paymentWindowDays days. Returns
+// false if not in an eligible state.
 func (q *Queries) MarkExpansionRequestExpanded(ctx context.Context, id uuid.UUID, paymentWindowDays int) (bool, error) {
 	due := time.Now().AddDate(0, 0, paymentWindowDays)
 	res, err := q.db.ExecContext(ctx, `
 		UPDATE server_expansion_requests
 		SET status = 'expanded', payment_due_at = $2
-		WHERE id = $1 AND status = 'opened'
+		WHERE id = $1 AND status IN ('opened','approved')
 	`, id, due)
 	if err != nil {
 		return false, fmt.Errorf("MarkExpansionRequestExpanded: %w", err)
@@ -373,15 +408,15 @@ func (q *Queries) ListExpiredExpandedRequests(ctx context.Context) ([]models.Ser
 	return out, rows.Err()
 }
 
-// ListExpiredOpenRequests returns all 'opened' requests whose expires_at has
-// passed. Used by the background expiry loop.
+// ListExpiredOpenRequests returns all 'opened' requests whose approval
+// deadline has passed. Used by the background expiry loop.
 func (q *Queries) ListExpiredOpenRequests(ctx context.Context) ([]models.ServerExpansionRequest, error) {
 	rows, err := q.db.QueryContext(ctx, `
 		SELECT `+expansionRequestColumns+`
 		FROM server_expansion_requests ser
 		JOIN servers s ON s.id = ser.server_id
 		JOIN users   u ON u.username = ser.username
-		WHERE ser.status = 'opened' AND ser.expires_at < NOW()
+		WHERE ser.status = 'opened' AND COALESCE(ser.approval_due_at, ser.expires_at) < NOW()
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("ListExpiredOpenRequests: %w", err)
@@ -393,6 +428,61 @@ func (q *Queries) ListExpiredOpenRequests(ctx context.Context) ([]models.ServerE
 		r, err := scanExpansionRequest(rows)
 		if err != nil {
 			return nil, fmt.Errorf("ListExpiredOpenRequests scan: %w", err)
+		}
+		out = append(out, *r)
+	}
+	return out, rows.Err()
+}
+
+// ListExpiredApprovedRequests returns 'approved' requests whose expansion
+// deadline (14 business days after approval) has passed. Their deposits are
+// refunded by the expiry loop.
+func (q *Queries) ListExpiredApprovedRequests(ctx context.Context) ([]models.ServerExpansionRequest, error) {
+	rows, err := q.db.QueryContext(ctx, `
+		SELECT `+expansionRequestColumns+`
+		FROM server_expansion_requests ser
+		JOIN servers s ON s.id = ser.server_id
+		JOIN users   u ON u.username = ser.username
+		WHERE ser.status = 'approved' AND ser.expansion_due_at < NOW()
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("ListExpiredApprovedRequests: %w", err)
+	}
+	defer rows.Close()
+
+	var out []models.ServerExpansionRequest
+	for rows.Next() {
+		r, err := scanExpansionRequest(rows)
+		if err != nil {
+			return nil, fmt.Errorf("ListExpiredApprovedRequests scan: %w", err)
+		}
+		out = append(out, *r)
+	}
+	return out, rows.Err()
+}
+
+// ListUserExpansionRequests returns the user's expansion requests, newest
+// first. Backs the web profile page's request list.
+func (q *Queries) ListUserExpansionRequests(ctx context.Context, username string) ([]models.ServerExpansionRequest, error) {
+	rows, err := q.db.QueryContext(ctx, `
+		SELECT `+expansionRequestColumns+`
+		FROM server_expansion_requests ser
+		JOIN servers s ON s.id = ser.server_id
+		JOIN users   u ON u.username = ser.username
+		WHERE ser.username = $1
+		ORDER BY ser.created_at DESC
+		LIMIT 50
+	`, username)
+	if err != nil {
+		return nil, fmt.Errorf("ListUserExpansionRequests: %w", err)
+	}
+	defer rows.Close()
+
+	var out []models.ServerExpansionRequest
+	for rows.Next() {
+		r, err := scanExpansionRequest(rows)
+		if err != nil {
+			return nil, fmt.Errorf("ListUserExpansionRequests scan: %w", err)
 		}
 		out = append(out, *r)
 	}

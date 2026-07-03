@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS storage_orders (
     status            TEXT        NOT NULL DEFAULT 'created', -- "created" | "captured"
     paypal_order_id   TEXT        NOT NULL,
     paypal_capture_id TEXT        UNIQUE,                 -- idempotency key; NULL until captured
+    server_id         UUID        REFERENCES servers(id), -- purchase target; NULL for legacy orders
     raw_response      JSONB,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     captured_at       TIMESTAMPTZ

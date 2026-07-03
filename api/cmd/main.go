@@ -281,9 +281,11 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	})
 	storageHandler := storageroutes.NewHandler(queries)
 	billingHandler := billing.NewHandler(paypalClient, queries, billing.Config{
-		Currency:  cfg.PremiumTierCurrency,
-		ReturnURL: "apollosfs://billing/storage/complete",
-		CancelURL: "apollosfs://billing/storage/cancel",
+		Currency:    cfg.PremiumTierCurrency,
+		ReturnURL:   "apollosfs://billing/storage/complete",
+		CancelURL:   "apollosfs://billing/storage/cancel",
+		ClientID:    cfg.PayPalClientID,
+		Environment: cfg.PayPalEnvironment,
 	})
 	expansionHandler := expansion.NewHandler(paypalClient, emailSvc, queries, expansion.Config{
 		Currency:  cfg.PremiumTierCurrency,
@@ -381,6 +383,8 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		protected.POST("/me/password", h.ChangePassword)
 		protected.GET("/me/preferences", h.GetPreferences)
 		// PUT /me/preferences is premium-only (media auto-upload); registered below.
+		// Storage UI toggles are available to every user.
+		protected.PUT("/me/preferences/storage-ui", h.UpdateStorageUIPreferences)
 		protected.POST("/me/social/link", h.LinkSocial)
 		protected.DELETE("/me/social/unlink", h.UnlinkSocial)
 
@@ -475,6 +479,9 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		protected.GET("/storage/speed/download", storageHandler.SpeedTestDownload)
 		protected.POST("/storage/speed/upload", storageHandler.SpeedTestUpload)
 
+		// Public PayPal config for the web frontend's JS SDK (react-paypal-js).
+		protected.GET("/billing/config", billingHandler.GetConfig)
+
 		// Storage add-on billing — four payment methods, each backed by PayPal.
 		protected.POST("/billing/storage/order", billingHandler.CreateWalletOrder)
 		protected.POST("/billing/storage/order/:order_id/capture", billingHandler.CaptureWalletOrder)
@@ -483,7 +490,9 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		protected.POST("/billing/storage/apple-pay", billingHandler.ChargeApplePay)
 		protected.POST("/billing/storage/google-pay", billingHandler.ChargeGooglePay)
 
-		// Expansion deposit billing — when a tier is unavailable, user pays a 50% deposit.
+		// Expansion deposit billing — when a tier is unavailable (or the server
+		// is >= 90% allocated), the user pays a 50% deposit.
+		protected.GET("/billing/storage/expansion/requests", expansionHandler.ListMine)
 		protected.POST("/billing/storage/expansion/order", expansionHandler.CreateWalletOrder)
 		protected.POST("/billing/storage/expansion/order/:order_id/capture", expansionHandler.CaptureWalletOrder)
 		protected.POST("/billing/storage/expansion/hosted-card", expansionHandler.CaptureHostedCardExpansion)
@@ -562,6 +571,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 			adminGroup.GET("/bans", adminHandler.ListUserBans)
 
 			adminGroup.GET("/expansion-requests", expansionHandler.ListRequests)
+			adminGroup.POST("/expansion-requests/:id/approve", expansionHandler.ApproveRequest)
 			adminGroup.POST("/expansion-requests/:id/fulfill", expansionHandler.MarkExpanded)
 			adminGroup.POST("/expansion-requests/:id/cancel", expansionHandler.CancelRequest)
 

@@ -114,6 +114,11 @@ export interface DriveMigrationEligibility {
 export interface UserPreferences {
   user_id: string
   media_autoupload_folder_id: string | null
+  // Show the "+" add-storage buttons on the client home page and upload modal.
+  show_storage_buttons: boolean
+  // Auto-open the storage upgrade modal when an upload would push usage past
+  // 75% of quota or exceed it.
+  storage_prompt_enabled: boolean
   created_at: string
   updated_at: string
 }

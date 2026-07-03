@@ -27,6 +27,15 @@ export function updatePreferences(mediaAutouploadFolderId: string | null) {
   })
 }
 
+// updateStorageUIPreferences toggles the "+" add-storage buttons and the
+// automatic upgrade prompt. Only the provided fields are changed.
+export function updateStorageUIPreferences(prefs: {
+  show_storage_buttons?: boolean
+  storage_prompt_enabled?: boolean
+}) {
+  return put<UserPreferences>('/me/preferences/storage-ui', prefs)
+}
+
 export const preferencesQueryOptions = {
   queryKey: ['preferences'] as const,
   queryFn: getPreferences,

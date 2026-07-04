@@ -71,6 +71,10 @@ type Handler struct {
 	// nil means the kill-switch endpoint is disabled.
 	shutdownCh   chan struct{}
 	shutdownOnce sync.Once
+
+	// paypal is used to refund the interest-form deposit when a submission is
+	// denied. nil is tolerated and causes DenyInterestSubmission to 503.
+	paypal *services.PayPalClient
 }
 
 // NewHandler constructs an admin Handler.
@@ -99,6 +103,13 @@ type InfraSyncConfig struct {
 	// StandardEndpoint is the standard-tier MinIO endpoint (MINIO_STANDARD_ENDPOINT),
 	// reachable with the same root credentials. Empty for single-instance deployments.
 	StandardEndpoint string
+}
+
+// SetPayPalClient installs the PayPal client used to refund interest-form
+// deposits on denial. Wired from main once the client is constructed; nil is
+// tolerated and causes DenyInterestSubmission to return 503.
+func (h *Handler) SetPayPalClient(client *services.PayPalClient) {
+	h.paypal = client
 }
 
 // ConfigureInfraSync attaches the swarm/storage inspectors and MinIO connection

@@ -274,6 +274,12 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		ClientSecret: cfg.PayPalClientSecret,
 		WebhookID:    cfg.PayPalWebhookID,
 	})
+	routes.SetPayPalClient(h, paypalClient, routes.InterestDepositConfig{
+		Currency:  cfg.PremiumTierCurrency,
+		ReturnURL: cfg.AppBaseURL + "/interest",
+		CancelURL: cfg.AppBaseURL + "/interest",
+	})
+	adminHandler.SetPayPalClient(paypalClient)
 	paymentSvc := services.NewPaymentService(queries, authSvc)
 	paymentsHandler := payments.NewHandler(paypalClient, paymentSvc, queries, payments.Config{
 		AmountCents: cfg.PremiumTierPriceCents,
@@ -312,6 +318,13 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	})
 	v1.GET("/invitations/:token", h.ValidateInvitationToken)
 	v1.POST("/interest", h.SubmitInterestForm)
+	// Interest-form deposit: fixed-tier pricing + 50% deposit, same as a
+	// direct storage purchase or expansion request — no custom amounts.
+	v1.POST("/interest/deposit/orders", h.CreateInterestDepositOrder)
+	v1.POST("/interest/deposit/orders/:order_id/capture", h.CaptureInterestDepositOrder)
+	v1.POST("/interest/deposit/orders/apple-pay", h.CreateApplePayInterestDeposit)
+	v1.POST("/interest/deposit/orders/google-pay", h.CreateGooglePayInterestDeposit)
+	v1.POST("/interest/deposit/apple-pay/validate", h.ValidateApplePayMerchantForDeposit)
 
 	// ── PayPal webhook (no auth — verified via signature) ────────────────────
 	v1.POST("/payments/webhook", paymentsHandler.Webhook)
@@ -603,6 +616,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 			adminGroup.GET("/interest/settings", adminHandler.GetInterestFormSettings)
 			adminGroup.PUT("/interest/settings", adminHandler.UpdateInterestFormSettings)
 			adminGroup.POST("/interest/:id/provision", adminHandler.ProvisionInterestSubmission)
+			adminGroup.POST("/interest/:id/deny", adminHandler.DenyInterestSubmission)
 
 			adminGroup.POST("/system/tests", adminHandler.RunTests)
 			adminGroup.POST("/system/shutdown", adminHandler.Shutdown)

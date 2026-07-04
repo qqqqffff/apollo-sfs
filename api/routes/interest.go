@@ -12,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"apollo-sfs.com/api/models"
+	"apollo-sfs.com/api/routes/billing"
 )
 
 const (
@@ -22,11 +23,15 @@ const (
 )
 
 type submitInterestRequest struct {
-	Name             string `json:"name"               binding:"required,min=1,max=120"`
-	Email            string `json:"email"              binding:"required,email,max=254"`
-	DesiredStorageGB int    `json:"desired_storage_gb" binding:"required,min=1,max=10000"`
-	UseCase          string `json:"use_case"           binding:"required,min=1,max=2000"`
-	CaptchaToken     string `json:"captcha_token"      binding:"required"`
+	Name         string `json:"name"          binding:"required,min=1,max=120"`
+	Email        string `json:"email"         binding:"required,email,max=254"`
+	PlanID       string `json:"plan_id"       binding:"required"`
+	StorageType  string `json:"storage_type"  binding:"required,oneof=nvme hdd"`
+	UseCase      string `json:"use_case"      binding:"required,min=1,max=2000"`
+	CaptchaToken string `json:"captcha_token" binding:"required"`
+	// DepositOrderID references a captured interest_deposit_orders row for
+	// this exact plan_id/storage_type — see CaptureInterestDepositOrder.
+	DepositOrderID string `json:"deposit_order_id" binding:"required"`
 }
 
 // SubmitInterestForm handles POST /api/v1/interest.
@@ -100,13 +105,64 @@ func (h *Handler) SubmitInterestForm(c *gin.Context) {
 		return
 	}
 
+	// 5. Resolve the fixed plan — no custom/arbitrary storage amounts. Mirrors
+	// the same plan table used for storage purchases and expansion requests.
+	pl, found := billing.LookupPlan(req.PlanID)
+	if !found {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "unknown plan_id"})
+		return
+	}
+	fullCents, ok := pl.PriceCents[req.StorageType]
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "unknown storage_type for plan"})
+		return
+	}
+	depositCents := fullCents / 2
+
+	// 6. The 50% deposit must already be captured against this exact plan and
+	// storage type, and not previously used by another submission.
+	order, err := h.queries.GetInterestDepositOrder(ctx, req.DepositOrderID)
+	if err != nil {
+		log.Printf("interest form: load deposit order: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+	if order == nil || order.CapturedAt == nil {
+		c.JSON(http.StatusPaymentRequired, gin.H{"error": "deposit has not been captured"})
+		return
+	}
+	if order.PlanID != req.PlanID || order.StorageType != req.StorageType || order.DepositAmountCents != depositCents {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "deposit does not match the selected plan"})
+		return
+	}
+	consumed, err := h.queries.ConsumeInterestDepositOrder(ctx, req.DepositOrderID)
+	if err != nil {
+		log.Printf("interest form: consume deposit order: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+	if !consumed {
+		c.JSON(http.StatusConflict, gin.H{"error": "this deposit has already been used"})
+		return
+	}
+
+	desiredStorageGB := int(pl.BytesAdded / (1 << 30))
+
 	// Persist the submission.
 	if err := h.queries.CreateInterestSubmission(ctx, &models.InterestSubmission{
-		Name:             strings.TrimSpace(req.Name),
-		Email:            normalizedEmail,
-		DesiredStorageGB: req.DesiredStorageGB,
-		UseCase:          strings.TrimSpace(req.UseCase),
-		IPAddress:        c.ClientIP(),
+		Name:               strings.TrimSpace(req.Name),
+		Email:              normalizedEmail,
+		DesiredStorageGB:   desiredStorageGB,
+		UseCase:            strings.TrimSpace(req.UseCase),
+		IPAddress:          c.ClientIP(),
+		PlanID:             req.PlanID,
+		StorageType:        req.StorageType,
+		FullPriceCents:     fullCents,
+		DepositAmountCents: depositCents,
+		Currency:           h.currencyOrDefault(),
+		PaymentMethod:      order.PaymentMethod,
+		PayPalOrderID:      &req.DepositOrderID,
+		PayPalCaptureID:    order.PayPalCaptureID,
 	}); err != nil {
 		log.Printf("interest form: create submission: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
@@ -128,7 +184,7 @@ func (h *Handler) SubmitInterestForm(c *gin.Context) {
 			adminEmails,
 			strings.TrimSpace(req.Name),
 			normalizedEmail,
-			req.DesiredStorageGB,
+			desiredStorageGB,
 			strings.TrimSpace(req.UseCase),
 		); err != nil {
 			log.Printf("interest form: enqueue admin notification: %v", err)

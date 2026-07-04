@@ -3,6 +3,7 @@ package admin
 import (
 	"database/sql"
 	"errors"
+	"log"
 	"net/http"
 	"strings"
 
@@ -130,4 +131,61 @@ func (h *Handler) ProvisionInterestSubmission(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusCreated, inv)
+}
+
+// DenyInterestSubmission handles POST /api/v1/admin/interest/:id/deny.
+// Refunds the 50% deposit (if one was captured) via PayPal and marks the
+// submission denied. The deposit is refunded in full — Apollo SFS keeps
+// nothing from a denied request.
+func (h *Handler) DenyInterestSubmission(c *gin.Context) {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid submission id"})
+		return
+	}
+
+	ctx := c.Request.Context()
+
+	submission, err := h.queries.GetInterestSubmissionByID(ctx, id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "submission not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not load submission"})
+		return
+	}
+	if submission.ProvisionedAt != nil {
+		c.JSON(http.StatusConflict, gin.H{"error": "this submission has already been provisioned"})
+		return
+	}
+	if submission.DeniedAt != nil {
+		c.JSON(http.StatusConflict, gin.H{"error": "this submission has already been denied"})
+		return
+	}
+
+	refundID := ""
+	if submission.PayPalCaptureID != nil && *submission.PayPalCaptureID != "" {
+		if h.paypal == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "payments not configured — cannot refund deposit"})
+			return
+		}
+		refund, err := h.paypal.RefundCapture(
+			ctx, *submission.PayPalCaptureID, submission.DepositAmountCents, submission.Currency,
+		)
+		if err != nil {
+			log.Printf("interest deny: paypal refund: %v", err)
+			c.JSON(http.StatusBadGateway, gin.H{"error": "refund failed"})
+			return
+		}
+		refundID = refund.RefundID
+	}
+
+	if err := h.queries.DenyInterestSubmission(ctx, id, refundID); err != nil {
+		log.Printf("interest deny: mark denied: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not update submission"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "denied", "refund_id": refundID})
 }

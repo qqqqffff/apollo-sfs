@@ -84,6 +84,10 @@ type stubQuerier struct {
 	createSubErr        error
 	adminEmails         []string
 	adminEmailsErr      error
+	depositOrder        *models.InterestDepositOrder
+	depositOrderErr     error
+	consumeOrderFail    bool
+	consumeOrderErr     error
 }
 
 func (s *stubQuerier) GetUserByUsername(_ context.Context, _ string) (*models.User, error) {
@@ -149,6 +153,39 @@ func (s *stubQuerier) CreateInterestSubmission(_ context.Context, _ *models.Inte
 func (s *stubQuerier) ListAdminEmails(_ context.Context) ([]string, error) {
 	return s.adminEmails, s.adminEmailsErr
 }
+func (s *stubQuerier) CreateInterestDepositOrder(_ context.Context, _ *models.InterestDepositOrder) error {
+	return nil
+}
+func (s *stubQuerier) MarkInterestDepositOrderCaptured(_ context.Context, _, _ string) error {
+	return nil
+}
+func (s *stubQuerier) GetInterestDepositOrder(_ context.Context, orderID string) (*models.InterestDepositOrder, error) {
+	if s.depositOrderErr != nil {
+		return nil, s.depositOrderErr
+	}
+	if s.depositOrder != nil {
+		return s.depositOrder, nil
+	}
+	// Default: a captured deposit matching the 64gb/nvme plan used by the
+	// test helpers, so tests that don't care about the deposit flow pass.
+	capturedAt := time.Now()
+	captureID := "CAP-TEST"
+	return &models.InterestDepositOrder{
+		OrderID: orderID, PlanID: "64gb", StorageType: "nvme",
+		FullPriceCents: 3000, DepositAmountCents: 1500,
+		Currency: "USD", PaymentMethod: "paypal",
+		PayPalCaptureID: &captureID, CapturedAt: &capturedAt,
+	}, nil
+}
+func (s *stubQuerier) ConsumeInterestDepositOrder(_ context.Context, _ string) (bool, error) {
+	if s.consumeOrderErr != nil {
+		return false, s.consumeOrderErr
+	}
+	if s.consumeOrderFail {
+		return false, nil
+	}
+	return true, nil
+}
 func (s *stubQuerier) SearchFoldersByUser(_ context.Context, _ uuid.UUID, _ string, _ db.PageInput) (*db.PageResult[models.Folder], error) {
 	return &db.PageResult[models.Folder]{}, nil
 }
@@ -207,6 +244,7 @@ type stubAdminQuerier struct {
 	updatedSettings    *models.InterestFormSettings
 	updatedSettingsErr error
 	provisionErr       error
+	denyErr            error
 	// drive / quota fields
 	userDrive      *models.UserDriveAllocation
 	userDriveErr   error
@@ -387,6 +425,9 @@ func (s *stubAdminQuerier) GetInterestSubmissionByID(_ context.Context, _ uuid.U
 }
 func (s *stubAdminQuerier) MarkInterestSubmissionProvisioned(_ context.Context, _ uuid.UUID, _ uuid.UUID) error {
 	return s.provisionErr
+}
+func (s *stubAdminQuerier) DenyInterestSubmission(_ context.Context, _ uuid.UUID, _ string) error {
+	return s.denyErr
 }
 
 // ── Stub AdminInviteService ───────────────────────────────────────────────────

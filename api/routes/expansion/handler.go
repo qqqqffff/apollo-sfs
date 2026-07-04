@@ -31,18 +31,19 @@ const (
 	// invoiceAcceptBusinessDays is how long the user has to review, accept and
 	// pay the deposit on a custom-capacity invoice before the request expires.
 	invoiceAcceptBusinessDays = 14
-	// balanceReminderBusinessDays: a reminder email goes out when the
-	// remaining balance is still unpaid this many business days after the
-	// quota was provisioned.
-	balanceReminderBusinessDays = 7
 	// balanceRevertDays: when the remaining balance is still unpaid this many
-	// (calendar) days after it came due, the provisioned allocation is
-	// reverted and the deposit kept.
+	// calendar days after it came due, the provisioned allocation is reverted
+	// and the deposit kept.
 	balanceRevertDays = 30
 	// maxFailedRequests: users with this many cancelled / non-paid / refunded
 	// / rejected requests can no longer open expansion or custom requests.
 	maxFailedRequests = 3
 )
+
+// balanceReminderOffsetsDays are the calendar-day offsets (after the balance
+// came due) at which the three reminder emails go out: 7 days after due,
+// 1 week before the 30-day revert, and 1 day before the revert.
+var balanceReminderOffsetsDays = [...]int{7, balanceRevertDays - 7, balanceRevertDays - 1}
 
 // Config holds URL templates used for the PayPal wallet redirect flow.
 type Config struct {
@@ -52,6 +53,8 @@ type Config struct {
 	// AppURL is used to build the payment deep-link sent in the payment-due email.
 	// e.g. "https://files.example.com" — the email links to apollosfs://expansion/pay/{id}
 	AppURL string
+	// AppName is used on generated invoice PDFs. Defaults to "Apollo SFS".
+	AppName string
 }
 
 // Handler serves expansion-request endpoints for both users and admins.
@@ -633,6 +636,15 @@ func (h *Handler) CreateInvoice(c *gin.Context) {
 	if inv.DepositCents > 0 {
 		depositFmt = formatCents(int(inv.DepositCents), req.Currency)
 	}
+
+	// Attach the invoice as a real PDF to the email; a render failure is
+	// logged but never blocks the send.
+	pdf, err := services.RenderInvoicePDF(h.appName(), inv, req)
+	if err != nil {
+		log.Printf("expansion CreateInvoice render pdf: %v", err)
+		pdf = nil
+	}
+
 	if err := h.emailSvc.SendExpansionInvoice(
 		c.Request.Context(),
 		req.UserEmail,
@@ -643,11 +655,66 @@ func (h *Handler) CreateInvoice(c *gin.Context) {
 		depositFmt,
 		inv.AcceptDueAt.Format("Mon, 02 Jan 2006"),
 		reviewURL,
+		pdf,
 	); err != nil {
 		log.Printf("expansion CreateInvoice send email: %v", err)
 	}
 
 	c.JSON(http.StatusCreated, inv)
+}
+
+// appName returns the configured application name for invoice PDFs.
+func (h *Handler) appName() string {
+	if h.cfg.AppName != "" {
+		return h.cfg.AppName
+	}
+	return "Apollo SFS"
+}
+
+// writeInvoicePDF renders and streams an invoice PDF.
+func (h *Handler) writeInvoicePDF(c *gin.Context, inv *models.ExpansionInvoice, req *models.ServerExpansionRequest) {
+	pdf, err := services.RenderInvoicePDF(h.appName(), inv, req)
+	if err != nil {
+		log.Printf("expansion invoice pdf: %v", err)
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "render pdf"})
+		return
+	}
+	c.Header("Content-Disposition", fmt.Sprintf("inline; filename=%q", inv.InvoiceNumber+".pdf"))
+	c.Data(http.StatusOK, "application/pdf", pdf)
+}
+
+// GetMyInvoicePDF streams the invoice PDF for the review page.
+// GET /api/v1/billing/invoices/:token/pdf
+func (h *Handler) GetMyInvoicePDF(c *gin.Context) {
+	username, ok := h.currentUsername(c)
+	if !ok {
+		return
+	}
+	inv, req, ok := h.loadInvoiceForUser(c, username, false)
+	if !ok {
+		return
+	}
+	h.writeInvoicePDF(c, inv, req)
+}
+
+// GetInvoicePDF streams the latest invoice PDF for a request (admin view).
+// GET /api/v1/admin/expansion-requests/:id/invoice/pdf
+func (h *Handler) GetInvoicePDF(c *gin.Context) {
+	id, ok := h.parseID(c)
+	if !ok {
+		return
+	}
+	inv, err := h.queries.GetLatestExpansionInvoice(c.Request.Context(), id)
+	if err != nil || inv == nil {
+		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "no invoice for request"})
+		return
+	}
+	req, err := h.queries.GetExpansionRequestByID(c.Request.Context(), id)
+	if err != nil || req == nil {
+		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "request not found"})
+		return
+	}
+	h.writeInvoicePDF(c, inv, req)
 }
 
 // GetInvoice returns the latest invoice for a request (admin view).
@@ -1486,9 +1553,10 @@ func (h *Handler) processExpiredInvoices(ctx context.Context) {
 }
 
 // processUnpaidBalances walks 'expanded' requests still awaiting their
-// remaining balance: sends the one-time reminder 7 business days after the
-// balance came due, and reverts the allocation (keeping the deposit) once it
-// is 30 days overdue.
+// remaining balance. Three reminder emails go out on a calendar-day schedule
+// (7 days after the balance came due, 1 week before the 30-day revert, and
+// 1 day before the revert); once the balance is 30 calendar days overdue the
+// allocation is reverted and the deposit kept.
 func (h *Handler) processUnpaidBalances(ctx context.Context) {
 	unpaid, err := h.queries.ListUnpaidExpandedRequests(ctx)
 	if err != nil {
@@ -1503,7 +1571,7 @@ func (h *Handler) processUnpaidBalances(ctx context.Context) {
 		}
 		remainingCents := r.FullPriceCents - r.DepositAmountCents
 
-		// 30 days overdue → revert the allocation, keep the deposit.
+		// 30 calendar days overdue → revert the allocation, keep the deposit.
 		if now.After(r.PaymentDueAt.AddDate(0, 0, balanceRevertDays)) {
 			if _, err := h.queries.AddUserQuota(ctx, r.Username, -r.BytesRequested); err != nil {
 				log.Printf("expansion revert %s: subtract quota: %v", r.ID, err)
@@ -1515,25 +1583,40 @@ func (h *Handler) processUnpaidBalances(ctx context.Context) {
 			continue
 		}
 
-		// 7 business days overdue → one-time reminder email.
-		if r.ReminderSentAt == nil && now.After(addBusinessDays(*r.PaymentDueAt, balanceReminderBusinessDays)) && remainingCents > 0 {
-			paymentURL := fmt.Sprintf("apollosfs://expansion/pay/%s", r.ID)
-			revertAt := r.PaymentDueAt.AddDate(0, 0, balanceRevertDays)
-			if err := h.emailSvc.SendExpansionBalanceReminder(
-				ctx,
-				r.UserEmail,
-				r.ServerName,
-				planLabel(r.PlanID, r.StorageType),
-				formatCents(remainingCents, r.Currency),
-				revertAt.Format("Mon, 02 Jan 2006"),
-				paymentURL,
-			); err != nil {
-				log.Printf("expansion reminder %s: %v", r.ID, err)
-				continue
+		if remainingCents <= 0 {
+			continue
+		}
+
+		// Send the next due reminder, at most one per pass. Catching up after
+		// downtime sends only the latest applicable reminder.
+		next := r.RemindersSent
+		due := -1
+		for k := len(balanceReminderOffsetsDays) - 1; k >= next; k-- {
+			if now.After(r.PaymentDueAt.AddDate(0, 0, balanceReminderOffsetsDays[k])) {
+				due = k
+				break
 			}
-			if err := h.queries.MarkExpansionReminderSent(ctx, r.ID); err != nil {
-				log.Printf("expansion reminder %s: mark sent: %v", r.ID, err)
-			}
+		}
+		if due < 0 {
+			continue
+		}
+
+		paymentURL := fmt.Sprintf("apollosfs://expansion/pay/%s", r.ID)
+		revertAt := r.PaymentDueAt.AddDate(0, 0, balanceRevertDays)
+		if err := h.emailSvc.SendExpansionBalanceReminder(
+			ctx,
+			r.UserEmail,
+			r.ServerName,
+			planLabel(r.PlanID, r.StorageType),
+			formatCents(remainingCents, r.Currency),
+			revertAt.Format("Mon, 02 Jan 2006"),
+			paymentURL,
+		); err != nil {
+			log.Printf("expansion reminder %s: %v", r.ID, err)
+			continue
+		}
+		if err := h.queries.MarkExpansionReminderSent(ctx, r.ID, due+1); err != nil {
+			log.Printf("expansion reminder %s: mark sent: %v", r.ID, err)
 		}
 	}
 }

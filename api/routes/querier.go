@@ -22,6 +22,11 @@ type Querier interface {
 	GetUserStorageAllocations(ctx context.Context, username, userID string) ([]db.UserStorageAllocation, error)
 	CountActiveExpansionRequests(ctx context.Context, username string) (int, error)
 
+	// Notification bell
+	ListUserExpansionRequests(ctx context.Context, username string) ([]models.ServerExpansionRequest, error)
+	GetLatestExpansionInvoice(ctx context.Context, requestID uuid.UUID) (*models.ExpansionInvoice, error)
+	ListSharesForRecipient(ctx context.Context, email string) ([]models.Share, error)
+
 	// User preferences
 	GetUserPreferences(ctx context.Context, userID string) (*models.UserPreferences, error)
 	SetMediaAutouploadFolder(ctx context.Context, userID string, folderID *uuid.UUID) (*models.UserPreferences, error)

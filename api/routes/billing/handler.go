@@ -9,6 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	"apollo-sfs.com/api/db"
 	"apollo-sfs.com/api/models"
 	"apollo-sfs.com/api/routes/services"
 )
@@ -55,6 +56,27 @@ func (h *Handler) GetConfig(c *gin.Context) {
 		"currency":         h.currencyOrDefault(),
 		"environment":      h.cfg.Environment,
 	})
+}
+
+// ── GET /api/v1/billing/orders ────────────────────────────────────────────────
+
+// ListMyOrders returns the calling user's combined orders (premium payments +
+// storage purchases), newest first. Backs the user-facing orders page.
+func (h *Handler) ListMyOrders(c *gin.Context) {
+	username, ok := h.currentUsername(c)
+	if !ok {
+		return
+	}
+	items, err := h.queries.ListUserOrders(c.Request.Context(), username)
+	if err != nil {
+		log.Printf("billing ListMyOrders: %v", err)
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "list failed"})
+		return
+	}
+	if items == nil {
+		items = []db.AdminOrder{}
+	}
+	c.JSON(http.StatusOK, gin.H{"items": items})
 }
 
 // ── POST /api/v1/billing/storage/order ───────────────────────────────────────

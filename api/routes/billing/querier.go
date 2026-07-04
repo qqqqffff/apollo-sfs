@@ -19,6 +19,7 @@ type Querier interface {
 	GetUserDrive(ctx context.Context, username string) (*models.UserDriveAllocation, error)
 	GetDriveAvailableBytes(ctx context.Context, driveID uuid.UUID) (int64, error)
 	GetServerCapacity(ctx context.Context, serverID uuid.UUID) (*db.ServerCapacity, error)
+	ListUserOrders(ctx context.Context, username string) ([]db.AdminOrder, error)
 }
 
 // Compile-time check.

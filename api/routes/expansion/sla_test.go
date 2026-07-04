@@ -31,6 +31,18 @@ func TestAddBusinessDays(t *testing.T) {
 	}
 }
 
+func TestBalanceReminderSchedule(t *testing.T) {
+	// Three reminders on a calendar-day schedule: 7 days after the balance
+	// came due, 1 week before the 30-day revert, and 1 day before it.
+	want := [...]int{7, 23, 29}
+	if balanceReminderOffsetsDays != want {
+		t.Errorf("balanceReminderOffsetsDays = %v, want %v", balanceReminderOffsetsDays, want)
+	}
+	if balanceRevertDays != 30 {
+		t.Errorf("balanceRevertDays = %d, want 30", balanceRevertDays)
+	}
+}
+
 func TestApprovalDeadline(t *testing.T) {
 	wed := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	std := approvalDeadline(wed, false)

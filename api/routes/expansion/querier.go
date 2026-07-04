@@ -35,7 +35,7 @@ type Querier interface {
 	ListExpiredOpenRequests(ctx context.Context) ([]models.ServerExpansionRequest, error)
 	ListExpiredApprovedRequests(ctx context.Context) ([]models.ServerExpansionRequest, error)
 	ListUnpaidExpandedRequests(ctx context.Context) ([]models.ServerExpansionRequest, error)
-	MarkExpansionReminderSent(ctx context.Context, id uuid.UUID) error
+	MarkExpansionReminderSent(ctx context.Context, id uuid.UUID, n int) error
 	RevertExpansionRequest(ctx context.Context, id uuid.UUID) error
 	CountFailedExpansionRequests(ctx context.Context, username string) (int, error)
 

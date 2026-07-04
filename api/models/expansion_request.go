@@ -36,9 +36,11 @@ type ServerExpansionRequest struct {
 	RefundID           *string    `json:"refund_id"`
 	CancellationReason *string    `json:"cancellation_reason"`
 	PaymentDueAt       *time.Time `json:"payment_due_at"`
-	// ReminderSentAt is set when the 7-business-day remaining-balance
-	// reminder email has gone out.
+	// ReminderSentAt is when the most recent remaining-balance reminder went
+	// out; RemindersSent counts them (3 total: due+7d, 7 days before the
+	// revert, 1 day before the revert).
 	ReminderSentAt *time.Time `json:"reminder_sent_at"`
+	RemindersSent  int        `json:"reminders_sent"`
 
 	// Populated by JOIN queries.
 	ServerName  string `json:"server_name"`

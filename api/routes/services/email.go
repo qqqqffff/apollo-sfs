@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"html/template"
@@ -336,13 +337,23 @@ func (s *EmailService) SendExpansionCancellation(
 	)
 }
 
-// SendExpansionInvoice emails a custom-capacity invoice to the user. reviewURL
-// is empty when the admin chose not to include the website review link.
+// SendExpansionInvoice emails a custom-capacity invoice to the user, attaching
+// the invoice PDF when provided. reviewURL is empty when the admin chose not
+// to include the website review link.
 func (s *EmailService) SendExpansionInvoice(
 	ctx context.Context,
 	toEmail, serverName, planLabel, invoiceNumber, totalFmt, depositFmt, acceptDueAt, reviewURL string,
+	invoicePDF []byte,
 ) error {
-	return s.enqueue(ctx, toEmail,
+	var attachments []EmailAttachment
+	if len(invoicePDF) > 0 {
+		attachments = append(attachments, EmailAttachment{
+			Filename:   fmt.Sprintf("%s.pdf", invoiceNumber),
+			MimeType:   "application/pdf",
+			ContentB64: base64.StdEncoding.EncodeToString(invoicePDF),
+		})
+	}
+	return s.enqueueWithAttachments(ctx, toEmail,
 		fmt.Sprintf("Invoice %s for your custom storage request — %s", invoiceNumber, s.appName),
 		"expansion_invoice",
 		map[string]any{
@@ -356,6 +367,7 @@ func (s *EmailService) SendExpansionInvoice(
 			"AcceptDueAt":   acceptDueAt,
 			"ReviewURL":     reviewURL,
 		},
+		attachments,
 	)
 }
 
@@ -461,8 +473,17 @@ func (s *EmailService) dispatchOne(ctx context.Context, e models.EmailQueue) {
 		return
 	}
 
+	// Decode attachments stored on the queue row (invoice PDFs, etc.).
+	var attachments []EmailAttachment
+	if len(e.Attachments) > 0 {
+		if err := json.Unmarshal(e.Attachments, &attachments); err != nil {
+			s.failEmail(ctx, e.ID, fmt.Sprintf("unmarshal attachments: %v", err))
+			return
+		}
+	}
+
 	// Attempt SMTP delivery.
-	if err := s.send(e.ToAddress, e.Subject, body); err != nil {
+	if err := s.send(e.ToAddress, e.Subject, body, attachments); err != nil {
 		log.Printf("email %s: attempt %d/%d failed: %v", e.ID, attempt, emailMaxAttempts, err)
 		if attempt >= emailMaxAttempts {
 			s.failEmail(ctx, e.ID, err.Error())
@@ -478,18 +499,39 @@ func (s *EmailService) dispatchOne(ctx context.Context, e models.EmailQueue) {
 
 // ── Private helpers ───────────────────────────────────────────────────────────
 
+// EmailAttachment is a MIME attachment stored on the queue row and added to
+// the message at send time.
+type EmailAttachment struct {
+	Filename   string `json:"filename"`
+	MimeType   string `json:"mime_type"`
+	ContentB64 string `json:"content_b64"`
+}
+
 // enqueue marshals data to JSON and inserts a pending row into email_queue.
 func (s *EmailService) enqueue(ctx context.Context, to, subject, templateName string, data map[string]any) error {
+	return s.enqueueWithAttachments(ctx, to, subject, templateName, data, nil)
+}
+
+// enqueueWithAttachments is enqueue plus optional MIME attachments.
+func (s *EmailService) enqueueWithAttachments(ctx context.Context, to, subject, templateName string, data map[string]any, attachments []EmailAttachment) error {
 	raw, err := json.Marshal(data)
 	if err != nil {
 		return fmt.Errorf("enqueue %q: marshal data: %w", templateName, err)
 	}
-	return s.q.EnqueueEmail(ctx, &models.EmailQueue{
+	e := &models.EmailQueue{
 		ToAddress:    to,
 		Subject:      subject,
 		TemplateName: templateName,
 		TemplateData: raw,
-	})
+	}
+	if len(attachments) > 0 {
+		rawAtt, err := json.Marshal(attachments)
+		if err != nil {
+			return fmt.Errorf("enqueue %q: marshal attachments: %w", templateName, err)
+		}
+		e.Attachments = rawAtt
+	}
+	return s.q.EnqueueEmail(ctx, e)
 }
 
 // render executes the named template against data and returns the HTML string.
@@ -502,8 +544,8 @@ func (s *EmailService) render(name string, data any) (string, error) {
 }
 
 // send opens an SMTP connection to Postfix, upgrades to STARTTLS if available,
-// and delivers one HTML message.
-func (s *EmailService) send(to, subject, htmlBody string) error {
+// and delivers one HTML message (multipart/mixed when attachments are present).
+func (s *EmailService) send(to, subject, htmlBody string, attachments []EmailAttachment) error {
 	addr := net.JoinHostPort(s.host, s.port)
 
 	c, err := smtp.Dial(addr)
@@ -537,7 +579,7 @@ func (s *EmailService) send(to, subject, htmlBody string) error {
 		return fmt.Errorf("DATA: %w", err)
 	}
 
-	msg := buildMessage(s.appName, s.from, to, subject, htmlBody, s.css)
+	msg := buildMessage(s.appName, s.from, to, subject, htmlBody, s.css, attachments)
 	if _, err := w.Write(msg); err != nil {
 		return fmt.Errorf("write message: %w", err)
 	}
@@ -551,7 +593,7 @@ func (s *EmailService) send(to, subject, htmlBody string) error {
 // buildMessage assembles a minimal RFC 5322 / MIME message for HTML email.
 // css is injected as a <style> block immediately before </head> so the
 // stylesheet is embedded in the message regardless of how the template renders.
-func buildMessage(fromName, fromAddr, to, subject, htmlBody, css string) []byte {
+func buildMessage(fromName, fromAddr, to, subject, htmlBody, css string, attachments []EmailAttachment) []byte {
 	if css != "" {
 		htmlBody = strings.Replace(
 			htmlBody,
@@ -566,9 +608,42 @@ func buildMessage(fromName, fromAddr, to, subject, htmlBody, css string) []byte 
 	fmt.Fprintf(&b, "To: %s\r\n", to)
 	fmt.Fprintf(&b, "Subject: %s\r\n", subject)
 	fmt.Fprintf(&b, "MIME-Version: 1.0\r\n")
+
+	if len(attachments) == 0 {
+		fmt.Fprintf(&b, "Content-Type: text/html; charset=UTF-8\r\n")
+		fmt.Fprintf(&b, "\r\n")
+		b.WriteString(htmlBody)
+		return b.Bytes()
+	}
+
+	// multipart/mixed: HTML body part followed by base64 attachment parts.
+	const boundary = "apollo-sfs-mime-boundary-7f3a9c"
+	fmt.Fprintf(&b, "Content-Type: multipart/mixed; boundary=%q\r\n", boundary)
+	fmt.Fprintf(&b, "\r\n")
+
+	fmt.Fprintf(&b, "--%s\r\n", boundary)
 	fmt.Fprintf(&b, "Content-Type: text/html; charset=UTF-8\r\n")
 	fmt.Fprintf(&b, "\r\n")
 	b.WriteString(htmlBody)
+	fmt.Fprintf(&b, "\r\n")
+
+	for _, att := range attachments {
+		fmt.Fprintf(&b, "--%s\r\n", boundary)
+		fmt.Fprintf(&b, "Content-Type: %s; name=%q\r\n", att.MimeType, att.Filename)
+		fmt.Fprintf(&b, "Content-Transfer-Encoding: base64\r\n")
+		fmt.Fprintf(&b, "Content-Disposition: attachment; filename=%q\r\n", att.Filename)
+		fmt.Fprintf(&b, "\r\n")
+		// Wrap base64 at 76 chars per RFC 2045.
+		for i := 0; i < len(att.ContentB64); i += 76 {
+			end := i + 76
+			if end > len(att.ContentB64) {
+				end = len(att.ContentB64)
+			}
+			b.WriteString(att.ContentB64[i:end])
+			b.WriteString("\r\n")
+		}
+	}
+	fmt.Fprintf(&b, "--%s--\r\n", boundary)
 	return b.Bytes()
 }
 

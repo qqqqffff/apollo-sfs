@@ -24,7 +24,10 @@ type EmailQueue struct {
 	Subject      string          `json:"subject" db:"subject"`
 	TemplateName string          `json:"template_name" db:"template_name"`
 	TemplateData json.RawMessage `json:"template_data" db:"template_data"`
-	Status       EmailStatus     `json:"status" db:"status"`
+	// Attachments: optional [{"filename","mime_type","content_b64"}] MIME
+	// attachments added at send time (e.g. invoice PDFs).
+	Attachments json.RawMessage `json:"attachments,omitempty" db:"attachments"`
+	Status      EmailStatus     `json:"status" db:"status"`
 	Attempts     int             `json:"attempts" db:"attempts"`
 	LastError    *string         `json:"last_error,omitempty" db:"last_error"`
 	CreatedAt    time.Time       `json:"created_at" db:"created_at"`

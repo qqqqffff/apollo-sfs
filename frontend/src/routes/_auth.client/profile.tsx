@@ -59,6 +59,7 @@ function CheckItem({ ok, label }: { ok: boolean; label: string }) {
 }
 
 function RouteComponent() {
+  const navigate = useNavigate()
   const { data: user, isLoading } = useQuery(meQueryOptions)
 
   const [showUpgradeModal, setShowUpgradeModal] = useState(false)
@@ -134,12 +135,20 @@ function RouteComponent() {
           </div>
           <div className="flex items-center justify-between mt-1.5">
             <p className="text-xs text-gray-400 m-0">{pct.toFixed(1)}% used</p>
-            <button
-              onClick={() => setShowStorageModal(true)}
-              className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 bg-transparent border-0 p-0 cursor-pointer font-medium transition-colors"
-            >
-              <MdAddCircleOutline className="text-sm" /> Add storage
-            </button>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => navigate({ to: '/client/orders' as never })}
+                className="text-xs text-gray-500 hover:text-gray-700 bg-transparent border-0 p-0 cursor-pointer font-medium transition-colors"
+              >
+                My orders
+              </button>
+              <button
+                onClick={() => setShowStorageModal(true)}
+                className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 bg-transparent border-0 p-0 cursor-pointer font-medium transition-colors"
+              >
+                <MdAddCircleOutline className="text-sm" /> Add storage
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -566,6 +575,7 @@ function expansionCapacityLabel(r: ExpansionRequest): string {
 }
 
 function ExpansionRequestsCard() {
+  const navigate = useNavigate()
   const { data: requests } = useQuery({
     queryKey: ['billing', 'expansion-requests'],
     queryFn: listMyExpansionRequests,
@@ -575,7 +585,15 @@ function ExpansionRequestsCard() {
 
   return (
     <div className="bg-white border border-gray-200 rounded-xl px-5 py-4">
-      <h3 className="text-sm font-semibold text-gray-800 mb-1">Capacity expansion requests</h3>
+      <div className="flex items-center justify-between mb-1">
+        <h3 className="text-sm font-semibold text-gray-800 m-0">Capacity expansion requests</h3>
+        <button
+          onClick={() => navigate({ to: '/client/orders' as never })}
+          className="text-xs text-blue-600 hover:text-blue-700 bg-transparent border-0 p-0 cursor-pointer font-medium transition-colors"
+        >
+          View all orders
+        </button>
+      </div>
       <p className="text-xs text-gray-400 mb-3">
         Requests are reviewed within 7 business days (3 for custom capacity) and expanded within
         14 business days of approval. Your deposit is refunded automatically if either deadline is missed.

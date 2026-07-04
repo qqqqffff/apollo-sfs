@@ -11,6 +11,7 @@ import {
   formatCents,
   getBillingConfig,
   getInvoiceByToken,
+  invoicePdfUrl,
 } from '../api/billing'
 import { ApiError } from '../api/client'
 import { InvoiceDocument } from '../components/InvoiceDocument'
@@ -87,7 +88,17 @@ function RouteComponent() {
 
   return (
     <div className="max-w-2xl mx-auto space-y-5">
-      <h2 className="text-lg font-semibold text-gray-900 m-0">Invoice {invoice.invoice_number}</h2>
+      <div className="flex items-center justify-between">
+        <h2 className="text-lg font-semibold text-gray-900 m-0">Invoice {invoice.invoice_number}</h2>
+        <a
+          href={invoicePdfUrl(token)}
+          target="_blank"
+          rel="noreferrer"
+          className="text-xs text-blue-600 hover:text-blue-700 no-underline hover:underline"
+        >
+          Download PDF
+        </a>
+      </div>
 
       {(invoice.status === 'accepted' || done === 'accepted') && (
         <div className="flex items-start gap-2 px-4 py-3 bg-green-50 border border-green-200 rounded-xl">

@@ -111,6 +111,15 @@ func (s *stubQuerier) SetStorageUIPreferences(_ context.Context, userID string, 
 func (s *stubQuerier) CountActiveExpansionRequests(_ context.Context, _ string) (int, error) {
 	return 0, nil
 }
+func (s *stubQuerier) ListUserExpansionRequests(_ context.Context, _ string) ([]models.ServerExpansionRequest, error) {
+	return nil, nil
+}
+func (s *stubQuerier) GetLatestExpansionInvoice(_ context.Context, _ uuid.UUID) (*models.ExpansionInvoice, error) {
+	return nil, nil
+}
+func (s *stubQuerier) ListSharesForRecipient(_ context.Context, _ string) ([]models.Share, error) {
+	return nil, nil
+}
 func (s *stubQuerier) GetUserStorageBreakdown(_ context.Context, _ string) (db.UserStorageBreakdown, error) {
 	return db.UserStorageBreakdown{}, nil
 }

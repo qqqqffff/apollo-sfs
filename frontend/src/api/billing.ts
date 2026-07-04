@@ -151,6 +151,11 @@ export function getInvoiceByToken(token: string) {
   return get<{ invoice: ExpansionInvoice; request: ExpansionRequest }>(`/billing/invoices/${token}`)
 }
 
+// invoicePdfUrl is the server-rendered PDF for the invoice review page.
+export function invoicePdfUrl(token: string): string {
+  return `/api/v1/billing/invoices/${token}/pdf`
+}
+
 export function acceptInvoice(token: string) {
   return post<{ status: string }>(`/billing/invoices/${token}/accept`)
 }
@@ -208,6 +213,50 @@ export interface ExpansionRequest {
 
 export async function listMyExpansionRequests(): Promise<ExpansionRequest[]> {
   const res = await get<{ items: ExpansionRequest[] }>('/billing/storage/expansion/requests')
+  return res.items ?? []
+}
+
+// ── User's combined order history (premium + storage purchases) ───────────────
+
+export interface UserOrder {
+  id: string
+  type: 'premium' | 'storage'
+  status: string
+  amount_cents: number
+  currency: string
+  payment_method: string
+  reference: string
+  invoice_number: string
+  created_at: string
+  captured_at: string | null
+  refunded_at: string | null
+  plan_id?: string
+  storage_type?: string
+  bytes_added?: number
+  server_name?: string
+}
+
+export async function listMyOrders(): Promise<UserOrder[]> {
+  const res = await get<{ items: UserOrder[] }>('/billing/orders')
+  return res.items ?? []
+}
+
+// ── Notifications ──────────────────────────────────────────────────────────────
+
+export type NotificationKind =
+  | 'capacity_provisioned' | 'payment_required' | 'action_pending' | 'share_received'
+
+export interface AppNotification {
+  id: string
+  kind: NotificationKind
+  title: string
+  body: string
+  link: string
+  created_at: string
+}
+
+export async function listNotifications(): Promise<AppNotification[]> {
+  const res = await get<{ items: AppNotification[] }>('/me/notifications')
   return res.items ?? []
 }
 

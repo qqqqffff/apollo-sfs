@@ -293,6 +293,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		ReturnURL: "apollosfs://billing/expansion/complete",
 		CancelURL: "apollosfs://billing/expansion/cancel",
 		AppURL:    cfg.AppBaseURL,
+		AppName:   "Apollo SFS",
 	})
 	expansionHandler.StartExpiryLoop(context.Background())
 	ordersHandler := orders.NewHandler(paypalClient, queries)
@@ -384,6 +385,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		protected.POST("/mobile/auth/session", authHandler.MobileSession)
 		protected.POST("/me/password", h.ChangePassword)
 		protected.GET("/me/preferences", h.GetPreferences)
+		protected.GET("/me/notifications", h.Notifications)
 		// PUT /me/preferences is premium-only (media auto-upload); registered below.
 		// Storage UI toggles are available to every user.
 		protected.PUT("/me/preferences/storage-ui", h.UpdateStorageUIPreferences)
@@ -505,8 +507,12 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		protected.POST("/billing/storage/expansion/google-pay", expansionHandler.ChargeGooglePayExpansion)
 
 		// Pay remaining balance after admin marks server capacity as expanded.
+		// User's combined order history (premium + storage purchases).
+		protected.GET("/billing/orders", billingHandler.ListMyOrders)
+
 		// Custom-capacity invoice review & acceptance (linked from the invoice email).
 		protected.GET("/billing/invoices/:token", expansionHandler.GetMyInvoice)
+		protected.GET("/billing/invoices/:token/pdf", expansionHandler.GetMyInvoicePDF)
 		protected.POST("/billing/invoices/:token/accept", expansionHandler.AcceptInvoice)
 		protected.POST("/billing/invoices/:token/decline", expansionHandler.DeclineInvoice)
 		protected.POST("/billing/invoices/:token/order", expansionHandler.CreateInvoiceDepositOrder)
@@ -585,6 +591,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 			adminGroup.POST("/expansion-requests/:id/approve", expansionHandler.ApproveRequest)
 			adminGroup.POST("/expansion-requests/:id/fulfill", expansionHandler.MarkExpanded)
 			adminGroup.GET("/expansion-requests/:id/invoice", expansionHandler.GetInvoice)
+			adminGroup.GET("/expansion-requests/:id/invoice/pdf", expansionHandler.GetInvoicePDF)
 			adminGroup.POST("/expansion-requests/:id/invoice", expansionHandler.CreateInvoice)
 
 			// Combined orders view (premium payments + storage purchases).

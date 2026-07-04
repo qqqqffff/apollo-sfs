@@ -25,6 +25,7 @@ import { Route as AuthShareTokenRouteImport } from './routes/_auth.share.$token'
 import { Route as AuthSettingsApiKeysRouteImport } from './routes/_auth.settings/api-keys'
 import { Route as AuthInvoiceTokenRouteImport } from './routes/_auth.invoice.$token'
 import { Route as AuthClientProfileRouteImport } from './routes/_auth.client/profile'
+import { Route as AuthClientOrdersRouteImport } from './routes/_auth.client/orders'
 import { Route as AuthClientFavoritesRouteImport } from './routes/_auth.client/favorites'
 import { Route as AuthAdminUsersRouteImport } from './routes/_auth.admin/users'
 import { Route as AuthAdminOrdersRouteImport } from './routes/_auth.admin/orders'
@@ -117,6 +118,11 @@ const AuthClientProfileRoute = AuthClientProfileRouteImport.update({
   path: '/client/profile',
   getParentRoute: () => AuthRoute,
 } as any)
+const AuthClientOrdersRoute = AuthClientOrdersRouteImport.update({
+  id: '/client/orders',
+  path: '/client/orders',
+  getParentRoute: () => AuthRoute,
+} as any)
 const AuthClientFavoritesRoute = AuthClientFavoritesRouteImport.update({
   id: '/client/favorites',
   path: '/client/favorites',
@@ -199,6 +205,7 @@ export interface FileRoutesByFullPath {
   '/admin/orders': typeof AuthAdminOrdersRoute
   '/admin/users': typeof AuthAdminUsersRoute
   '/client/favorites': typeof AuthClientFavoritesRoute
+  '/client/orders': typeof AuthClientOrdersRoute
   '/client/profile': typeof AuthClientProfileRoute
   '/invoice/$token': typeof AuthInvoiceTokenRoute
   '/settings/api-keys': typeof AuthSettingsApiKeysRoute
@@ -228,6 +235,7 @@ export interface FileRoutesByTo {
   '/admin/orders': typeof AuthAdminOrdersRoute
   '/admin/users': typeof AuthAdminUsersRoute
   '/client/favorites': typeof AuthClientFavoritesRoute
+  '/client/orders': typeof AuthClientOrdersRoute
   '/client/profile': typeof AuthClientProfileRoute
   '/invoice/$token': typeof AuthInvoiceTokenRoute
   '/settings/api-keys': typeof AuthSettingsApiKeysRoute
@@ -259,6 +267,7 @@ export interface FileRoutesById {
   '/_auth/admin/orders': typeof AuthAdminOrdersRoute
   '/_auth/admin/users': typeof AuthAdminUsersRoute
   '/_auth/client/favorites': typeof AuthClientFavoritesRoute
+  '/_auth/client/orders': typeof AuthClientOrdersRoute
   '/_auth/client/profile': typeof AuthClientProfileRoute
   '/_auth/invoice/$token': typeof AuthInvoiceTokenRoute
   '/_auth/settings/api-keys': typeof AuthSettingsApiKeysRoute
@@ -290,6 +299,7 @@ export interface FileRouteTypes {
     | '/admin/orders'
     | '/admin/users'
     | '/client/favorites'
+    | '/client/orders'
     | '/client/profile'
     | '/invoice/$token'
     | '/settings/api-keys'
@@ -319,6 +329,7 @@ export interface FileRouteTypes {
     | '/admin/orders'
     | '/admin/users'
     | '/client/favorites'
+    | '/client/orders'
     | '/client/profile'
     | '/invoice/$token'
     | '/settings/api-keys'
@@ -349,6 +360,7 @@ export interface FileRouteTypes {
     | '/_auth/admin/orders'
     | '/_auth/admin/users'
     | '/_auth/client/favorites'
+    | '/_auth/client/orders'
     | '/_auth/client/profile'
     | '/_auth/invoice/$token'
     | '/_auth/settings/api-keys'
@@ -485,6 +497,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthClientProfileRouteImport
       parentRoute: typeof AuthRoute
     }
+    '/_auth/client/orders': {
+      id: '/_auth/client/orders'
+      path: '/client/orders'
+      fullPath: '/client/orders'
+      preLoaderRoute: typeof AuthClientOrdersRouteImport
+      parentRoute: typeof AuthRoute
+    }
     '/_auth/client/favorites': {
       id: '/_auth/client/favorites'
       path: '/client/favorites'
@@ -584,6 +603,7 @@ interface AuthRouteChildren {
   AuthAdminOrdersRoute: typeof AuthAdminOrdersRoute
   AuthAdminUsersRoute: typeof AuthAdminUsersRoute
   AuthClientFavoritesRoute: typeof AuthClientFavoritesRoute
+  AuthClientOrdersRoute: typeof AuthClientOrdersRoute
   AuthClientProfileRoute: typeof AuthClientProfileRoute
   AuthInvoiceTokenRoute: typeof AuthInvoiceTokenRoute
   AuthSettingsApiKeysRoute: typeof AuthSettingsApiKeysRoute
@@ -605,6 +625,7 @@ const AuthRouteChildren: AuthRouteChildren = {
   AuthAdminOrdersRoute: AuthAdminOrdersRoute,
   AuthAdminUsersRoute: AuthAdminUsersRoute,
   AuthClientFavoritesRoute: AuthClientFavoritesRoute,
+  AuthClientOrdersRoute: AuthClientOrdersRoute,
   AuthClientProfileRoute: AuthClientProfileRoute,
   AuthInvoiceTokenRoute: AuthInvoiceTokenRoute,
   AuthSettingsApiKeysRoute: AuthSettingsApiKeysRoute,

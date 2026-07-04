@@ -10,6 +10,7 @@ import { clearSkipDeleteCookie } from '../components/DeleteConfirmModal'
 import { useImpersonation } from '../context/ImpersonationContext'
 import { useNotification } from '../context/NotificationContext'
 import { BanSuspendModal } from '../components/BanSuspendModal'
+import { NotificationBell } from '../components/NotificationBell'
 import type { UserBan } from '../types/api'
 
 export const Route = createFileRoute('/_auth')({
@@ -169,8 +170,9 @@ function RouteComponent() {
           </div>
         </div>
 
-        {/* Right: impersonation badge + ban controls + username + sign out */}
+        {/* Right: notifications + impersonation badge + ban controls + username + sign out */}
         <div className="flex items-center gap-2 shrink-0">
+          {!impersonatedUser && <NotificationBell />}
           {impersonatedUser && (
             <>
               {/* Ban / suspend / pardon icons shown while impersonating */}

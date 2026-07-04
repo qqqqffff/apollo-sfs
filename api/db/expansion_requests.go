@@ -19,6 +19,7 @@ const expansionRequestColumns = `
 	ser.expires_at, ser.approval_due_at, ser.approved_at, ser.expansion_due_at,
 	ser.created_at, ser.completed_at,
 	ser.refund_id, ser.cancellation_reason, ser.payment_due_at, ser.reminder_sent_at,
+	ser.reminders_sent,
 	s.name AS server_name, s.state AS server_state,
 	u.email AS user_email`
 
@@ -36,7 +37,7 @@ func scanExpansionRequest(rows interface {
 		&r.Status, &r.IsCustom, &r.PreQuotaBytes, &postQuota,
 		&r.ExpiresAt, &approvalDueAt, &approvedAt, &expansionDueAt,
 		&r.CreatedAt, &completedAt,
-		&refundID, &reason, &paymentDueAt, &reminderSentAt,
+		&refundID, &reason, &paymentDueAt, &reminderSentAt, &r.RemindersSent,
 		&r.ServerName, &r.ServerState, &r.UserEmail,
 	)
 	if err != nil {
@@ -350,7 +351,7 @@ func scanExpansionRequestWithInvoice(rows *sql.Rows) (*models.ServerExpansionReq
 		&r.Status, &r.IsCustom, &r.PreQuotaBytes, &postQuota,
 		&r.ExpiresAt, &approvalDueAt, &approvedAt, &expansionDueAt,
 		&r.CreatedAt, &completedAt,
-		&refundID, &reason, &paymentDueAt, &reminderSentAt,
+		&refundID, &reason, &paymentDueAt, &reminderSentAt, &r.RemindersSent,
 		&r.ServerName, &r.ServerState, &r.UserEmail,
 		&invNumber, &invStatus, &invSentAt, &invAcceptDueAt,
 	)
@@ -535,14 +536,15 @@ func (q *Queries) RejectExpansionRequest(ctx context.Context, id uuid.UUID, reas
 	return n > 0, nil
 }
 
-// MarkExpansionReminderSent stamps reminder_sent_at after the 7-business-day
-// remaining-balance reminder email went out.
-func (q *Queries) MarkExpansionReminderSent(ctx context.Context, id uuid.UUID) error {
+// MarkExpansionReminderSent records that the n-th remaining-balance reminder
+// went out (n is the new total count). Guarded so a stale caller cannot move
+// the counter backwards.
+func (q *Queries) MarkExpansionReminderSent(ctx context.Context, id uuid.UUID, n int) error {
 	_, err := q.db.ExecContext(ctx, `
 		UPDATE server_expansion_requests
-		SET reminder_sent_at = NOW()
-		WHERE id = $1 AND status = 'expanded' AND reminder_sent_at IS NULL
-	`, id)
+		SET reminder_sent_at = NOW(), reminders_sent = $2
+		WHERE id = $1 AND status = 'expanded' AND reminders_sent < $2
+	`, id, n)
 	if err != nil {
 		return fmt.Errorf("MarkExpansionReminderSent: %w", err)
 	}

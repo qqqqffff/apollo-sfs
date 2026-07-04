@@ -135,6 +135,56 @@ func (q *Queries) ListAdminOrders(ctx context.Context, search, sort string, limi
 	return out, total, rows.Err()
 }
 
+// ListUserOrders returns the given user's combined orders (premium payments +
+// storage purchases), newest first. Backs the user-facing orders page.
+func (q *Queries) ListUserOrders(ctx context.Context, username string) ([]AdminOrder, error) {
+	query := fmt.Sprintf(`
+		SELECT * FROM (%s) ord
+		WHERE ord.username = $1
+		ORDER BY ord.created_at DESC
+		LIMIT 100
+	`, adminOrdersBase)
+	rows, err := q.db.QueryContext(ctx, query, username)
+	if err != nil {
+		return nil, fmt.Errorf("ListUserOrders: %w", err)
+	}
+	defer rows.Close()
+
+	var out []AdminOrder
+	for rows.Next() {
+		var o AdminOrder
+		var capturedAt, refundedAt sql.NullTime
+		var refundID, captureID sql.NullString
+		if err := rows.Scan(
+			&o.ID, &o.Type, &o.Username, &o.Status,
+			&o.AmountCents, &o.Currency, &o.PaymentMethod,
+			&o.Reference, &o.InvoiceNumber,
+			&o.CreatedAt, &capturedAt, &refundID, &refundedAt, &captureID,
+			&o.PlanID, &o.StorageType, &o.BytesAdded, &o.ServerName,
+		); err != nil {
+			return nil, fmt.Errorf("ListUserOrders scan: %w", err)
+		}
+		if capturedAt.Valid {
+			t := capturedAt.Time
+			o.CapturedAt = &t
+		}
+		if refundedAt.Valid {
+			t := refundedAt.Time
+			o.RefundedAt = &t
+		}
+		if refundID.Valid {
+			s := refundID.String
+			o.RefundID = &s
+		}
+		if captureID.Valid {
+			s := captureID.String
+			o.PayPalCaptureID = &s
+		}
+		out = append(out, o)
+	}
+	return out, rows.Err()
+}
+
 // GetAdminOrder loads a single normalised order by type + id.
 func (q *Queries) GetAdminOrder(ctx context.Context, orderType string, id uuid.UUID) (*AdminOrder, error) {
 	query := fmt.Sprintf(`SELECT * FROM (%s) ord WHERE ord.order_type = $1 AND ord.id = $2`, adminOrdersBase)

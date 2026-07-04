@@ -58,6 +58,9 @@ CREATE TABLE server_expansion_requests (
     -- deposit kept) 30 days after payment came due.
     payment_due_at       TIMESTAMPTZ,
     reminder_sent_at     TIMESTAMPTZ,
+    -- reminders_sent counts the balance reminder emails (3 total: due+7d,
+    -- 7 days before the revert, 1 day before the revert).
+    reminders_sent       SMALLINT    NOT NULL DEFAULT 0,
     refund_id            TEXT,
     cancellation_reason  TEXT
 );

@@ -40,7 +40,7 @@ Files in `db/` are numbered and applied in order during initial container creati
 | `24_email_queue.sql` | `email_queue` | Async outbound email delivery queue |
 | `25_inbound_emails.sql` | `inbound_emails` | Parsed inbound email index (SendGrid webhook) |
 | `26_math_game_scores.sql` | `math_game_scores` | Mental-math game leaderboard |
-| `27_interest_form.sql` | `interest_submissions`, `interest_form_settings` | Early access signups |
+| `27_interest_form.sql` | `interest_submissions`, `interest_deposit_orders`, `interest_form_settings` | Early access signups (fixed-plan pricing + 50% deposit, no custom amounts) |
 | `28_alarm_settings.sql` | `alarm_settings` | Cluster-wide alarm subscriber email arrays |
 | `29_alarm_subscriptions.sql` | `alarm_subscriptions` | Per-node/drive alarm subscriptions with thresholds |
 | `30_server_metrics_snapshots.sql` | `server_metrics_snapshots` | Manager-host metrics history |

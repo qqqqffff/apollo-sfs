@@ -246,3 +246,98 @@ func TestAdminProvisionInterest_InvalidUUID(t *testing.T) {
 		t.Fatalf("expected 400, got %d", w.Code)
 	}
 }
+
+// ── Deny (refunds the deposit) ────────────────────────────────────────────────
+
+func TestAdminDenyInterest_NoDeposit_Succeeds(t *testing.T) {
+	subID := uuid.New()
+	q := &stubAdminQuerier{
+		singleSub: &models.InterestSubmission{ID: subID, Email: "alice@example.com"},
+	}
+	h := newAdminHandler(q, &stubAdminInviteService{})
+
+	r := newEngine()
+	r.POST("/admin/interest/:id/deny", h.DenyInterestSubmission)
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/interest/"+subID.String()+"/deny", nil)
+	w := doRequest(r, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body: %s)", w.Code, w.Body.String())
+	}
+}
+
+func TestAdminDenyInterest_WithCapture_NoPayPalConfigured(t *testing.T) {
+	subID := uuid.New()
+	captureID := "CAP-1"
+	q := &stubAdminQuerier{
+		singleSub: &models.InterestSubmission{
+			ID: subID, Email: "alice@example.com",
+			PayPalCaptureID: &captureID, DepositAmountCents: 1500, Currency: "USD",
+		},
+	}
+	h := newAdminHandler(q, &stubAdminInviteService{}) // no PayPal client set
+
+	r := newEngine()
+	r.POST("/admin/interest/:id/deny", h.DenyInterestSubmission)
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/interest/"+subID.String()+"/deny", nil)
+	w := doRequest(r, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d (body: %s)", w.Code, w.Body.String())
+	}
+}
+
+func TestAdminDenyInterest_AlreadyProvisioned(t *testing.T) {
+	now := time.Now()
+	subID := uuid.New()
+	q := &stubAdminQuerier{
+		singleSub: &models.InterestSubmission{ID: subID, Email: "alice@example.com", ProvisionedAt: &now},
+	}
+	h := newAdminHandler(q, &stubAdminInviteService{})
+
+	r := newEngine()
+	r.POST("/admin/interest/:id/deny", h.DenyInterestSubmission)
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/interest/"+subID.String()+"/deny", nil)
+	w := doRequest(r, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d (body: %s)", w.Code, w.Body.String())
+	}
+}
+
+func TestAdminDenyInterest_AlreadyDenied(t *testing.T) {
+	now := time.Now()
+	subID := uuid.New()
+	q := &stubAdminQuerier{
+		singleSub: &models.InterestSubmission{ID: subID, Email: "alice@example.com", DeniedAt: &now},
+	}
+	h := newAdminHandler(q, &stubAdminInviteService{})
+
+	r := newEngine()
+	r.POST("/admin/interest/:id/deny", h.DenyInterestSubmission)
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/interest/"+subID.String()+"/deny", nil)
+	w := doRequest(r, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d (body: %s)", w.Code, w.Body.String())
+	}
+}
+
+func TestAdminDenyInterest_NotFound(t *testing.T) {
+	q := &stubAdminQuerier{singleSubErr: sql.ErrNoRows}
+	h := newAdminHandler(q, &stubAdminInviteService{})
+
+	r := newEngine()
+	r.POST("/admin/interest/:id/deny", h.DenyInterestSubmission)
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/interest/"+uuid.New().String()+"/deny", nil)
+	w := doRequest(r, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
+	}
+}

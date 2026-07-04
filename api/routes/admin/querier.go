@@ -79,6 +79,7 @@ type AdminQuerier interface {
 	UpdateInterestFormSettings(ctx context.Context, dailyCap int) (*models.InterestFormSettings, error)
 	GetInterestSubmissionByID(ctx context.Context, id uuid.UUID) (*models.InterestSubmission, error)
 	MarkInterestSubmissionProvisioned(ctx context.Context, id uuid.UUID, invitationID uuid.UUID) error
+	DenyInterestSubmission(ctx context.Context, id uuid.UUID, refundID string) error
 }
 
 // AdminInviteService is the subset of *services.InviteService used by admin handlers.

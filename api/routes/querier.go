@@ -49,6 +49,12 @@ type Querier interface {
 	CreateInterestSubmission(ctx context.Context, s *models.InterestSubmission) error
 	ListAdminEmails(ctx context.Context) ([]string, error)
 
+	// Interest form — fixed-plan deposit (no custom storage amounts)
+	CreateInterestDepositOrder(ctx context.Context, o *models.InterestDepositOrder) error
+	GetInterestDepositOrder(ctx context.Context, orderID string) (*models.InterestDepositOrder, error)
+	MarkInterestDepositOrderCaptured(ctx context.Context, orderID, captureID string) error
+	ConsumeInterestDepositOrder(ctx context.Context, orderID string) (bool, error)
+
 	// Audit logs
 	InsertAuditLog(ctx context.Context, in db.AuditInput) error
 	ListAuditLogsForUser(ctx context.Context, username string, in db.PageInput) (*db.PageResult[models.AuditLog], error)

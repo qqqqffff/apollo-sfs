@@ -93,6 +93,11 @@ type Handler struct {
 	apiKeys         *services.APIKeyService
 	shares          *services.ShareService
 	turnstileSecret string
+	// paypal is used for the interest-form deposit (nil is tolerated and
+	// causes the deposit endpoints to return 503).
+	paypal *services.PayPalClient
+	// interestDepositCfg holds the redirect URLs for the PayPal wallet flow.
+	interestDepositCfg InterestDepositConfig
 	// verifyCaptcha overrides the real Turnstile HTTP call. When nil the
 	// production verifyTurnstile function is used.
 	verifyCaptcha func(secret, token, ip string) (bool, error)
@@ -153,4 +158,21 @@ func SetInviteService(h *Handler, svc InviteService) {
 // tests that need to bypass real Keycloak API calls.
 func SetKcIDResolver(h *Handler, fn func(ctx context.Context, username string) (uuid.UUID, error)) {
 	h.resolveKcID = fn
+}
+
+// InterestDepositConfig holds the PayPal redirect URLs for the interest-form
+// deposit flow.
+type InterestDepositConfig struct {
+	Currency  string
+	ReturnURL string
+	CancelURL string
+}
+
+// SetPayPalClient installs the PayPal client and deposit redirect config used
+// by the interest-form deposit endpoints. Wired from main once the client is
+// constructed; nil is tolerated and causes those endpoints to return 503
+// (configured, not crash).
+func SetPayPalClient(h *Handler, client *services.PayPalClient, cfg InterestDepositConfig) {
+	h.paypal = client
+	h.interestDepositCfg = cfg
 }

@@ -11,13 +11,17 @@ import (
 )
 
 // makeInterestRequest returns a POST /interest request with all valid fields.
+// plan_id/storage_type match the default captured deposit order the stub
+// querier's GetInterestDepositOrder returns (64gb/nvme, $15.00 deposit).
 func makeInterestRequest() *http.Request {
 	body := jsonBody(map[string]any{
-		"name":               "Jane Smith",
-		"email":              "jane@example.com",
-		"desired_storage_gb": 10,
-		"use_case":           "Personal encrypted backups",
-		"captcha_token":      "test-token",
+		"name":             "Jane Smith",
+		"email":            "jane@example.com",
+		"plan_id":          "64gb",
+		"storage_type":     "nvme",
+		"use_case":         "Personal encrypted backups",
+		"captcha_token":    "test-token",
+		"deposit_order_id": "order-test-1",
 	})
 	req := httptest.NewRequest(http.MethodPost, "/interest", body)
 	req.Header.Set("Content-Type", "application/json")
@@ -77,12 +81,27 @@ func TestInterestForm_MissingRequiredFields(t *testing.T) {
 	r := newEngine()
 	r.POST("/interest", h.SubmitInterestForm)
 
+	base := map[string]any{
+		"name": "Alice", "email": "a@b.com", "plan_id": "64gb", "storage_type": "nvme",
+		"use_case": "x", "captcha_token": "t", "deposit_order_id": "order-1",
+	}
+	withoutKey := func(key string) map[string]any {
+		m := map[string]any{}
+		for k, v := range base {
+			if k != key {
+				m[k] = v
+			}
+		}
+		return m
+	}
 	cases := []map[string]any{
-		{"email": "a@b.com", "desired_storage_gb": 5, "use_case": "x", "captcha_token": "t"},               // no name
-		{"name": "Alice", "desired_storage_gb": 5, "use_case": "x", "captcha_token": "t"},                   // no email
-		{"name": "Alice", "email": "a@b.com", "use_case": "x", "captcha_token": "t"},                        // no storage
-		{"name": "Alice", "email": "a@b.com", "desired_storage_gb": 5, "captcha_token": "t"},                 // no use_case
-		{"name": "Alice", "email": "a@b.com", "desired_storage_gb": 5, "use_case": "x"},                     // no captcha_token
+		withoutKey("name"),
+		withoutKey("email"),
+		withoutKey("plan_id"),
+		withoutKey("storage_type"),
+		withoutKey("use_case"),
+		withoutKey("captcha_token"),
+		withoutKey("deposit_order_id"),
 	}
 
 	for _, payload := range cases {
@@ -104,11 +123,13 @@ func TestInterestForm_InvalidEmail(t *testing.T) {
 	r.POST("/interest", h.SubmitInterestForm)
 
 	body := jsonBody(map[string]any{
-		"name":               "Jane",
-		"email":              "not-an-email",
-		"desired_storage_gb": 10,
-		"use_case":           "Testing",
-		"captcha_token":      "tok",
+		"name":             "Jane",
+		"email":            "not-an-email",
+		"plan_id":          "64gb",
+		"storage_type":     "nvme",
+		"use_case":         "Testing",
+		"captcha_token":    "tok",
+		"deposit_order_id": "order-1",
 	})
 	req := httptest.NewRequest(http.MethodPost, "/interest", body)
 	req.Header.Set("Content-Type", "application/json")
@@ -183,11 +204,13 @@ func TestInterestForm_EmailNormalized(t *testing.T) {
 	r.POST("/interest", h.SubmitInterestForm)
 
 	body := jsonBody(map[string]any{
-		"name":               "Jane",
-		"email":              "JANE@EXAMPLE.COM",
-		"desired_storage_gb": 10,
-		"use_case":           "Testing",
-		"captcha_token":      "tok",
+		"name":             "Jane",
+		"email":            "JANE@EXAMPLE.COM",
+		"plan_id":          "64gb",
+		"storage_type":     "nvme",
+		"use_case":         "Testing",
+		"captcha_token":    "tok",
+		"deposit_order_id": "order-1",
 	})
 	req := httptest.NewRequest(http.MethodPost, "/interest", body)
 	req.Header.Set("Content-Type", "application/json")

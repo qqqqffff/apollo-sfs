@@ -10,6 +10,7 @@ import { clearSkipDeleteCookie } from '../components/DeleteConfirmModal'
 import { useImpersonation } from '../context/ImpersonationContext'
 import { useNotification } from '../context/NotificationContext'
 import { BanSuspendModal } from '../components/BanSuspendModal'
+import { NotificationBell } from '../components/NotificationBell'
 import type { UserBan } from '../types/api'
 
 export const Route = createFileRoute('/_auth')({
@@ -157,6 +158,7 @@ function RouteComponent() {
                     <AdminDropdownLink to="/admin/users" onClick={() => setAdminMenuOpen(false)}>Users</AdminDropdownLink>
                     <AdminDropdownLink to="/admin/invitations" onClick={() => setAdminMenuOpen(false)}>Invitations</AdminDropdownLink>
                     <AdminDropdownLink to="/admin/interest" onClick={() => setAdminMenuOpen(false)}>Requests</AdminDropdownLink>
+                    <AdminDropdownLink to="/admin/orders" onClick={() => setAdminMenuOpen(false)}>Orders</AdminDropdownLink>
                     <AdminDropdownLink to="/admin/emails" onClick={() => setAdminMenuOpen(false)}>Emails</AdminDropdownLink>
                     <AdminDropdownLink to="/admin/bans" onClick={() => setAdminMenuOpen(false)}>Bans & Suspensions</AdminDropdownLink>
                     <AdminDropdownLink to="/admin/metrics" onClick={() => setAdminMenuOpen(false)}>Metrics</AdminDropdownLink>
@@ -168,8 +170,9 @@ function RouteComponent() {
           </div>
         </div>
 
-        {/* Right: impersonation badge + ban controls + username + sign out */}
+        {/* Right: notifications + impersonation badge + ban controls + username + sign out */}
         <div className="flex items-center gap-2 shrink-0">
+          {!impersonatedUser && <NotificationBell />}
           {impersonatedUser && (
             <>
               {/* Ban / suspend / pardon icons shown while impersonating */}
@@ -269,6 +272,7 @@ function RouteComponent() {
               <MobileNavLink to="/admin/users" onClick={closeMenu}>Users</MobileNavLink>
               <MobileNavLink to="/admin/invitations" onClick={closeMenu}>Invitations</MobileNavLink>
               <MobileNavLink to="/admin/interest" onClick={closeMenu}>Requests</MobileNavLink>
+              <MobileNavLink to="/admin/orders" onClick={closeMenu}>Orders</MobileNavLink>
               <MobileNavLink to="/admin/emails" onClick={closeMenu}>Emails</MobileNavLink>
               <MobileNavLink to="/admin/bans" onClick={closeMenu}>Bans & Suspensions</MobileNavLink>
               <MobileNavLink to="/admin/metrics" onClick={closeMenu}>Metrics</MobileNavLink>

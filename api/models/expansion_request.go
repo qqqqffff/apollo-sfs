@@ -24,17 +24,33 @@ type ServerExpansionRequest struct {
 	PayPalOrderID      string     `json:"paypal_order_id"`
 	PayPalCaptureID    *string    `json:"paypal_capture_id"`
 	Status             string     `json:"status"`
+	IsCustom           bool       `json:"is_custom"`
 	PreQuotaBytes      int64      `json:"pre_quota_bytes"`
 	PostQuotaBytes     *int64     `json:"post_quota_bytes"`
 	ExpiresAt          time.Time  `json:"expires_at"`
+	ApprovalDueAt      *time.Time `json:"approval_due_at"`
+	ApprovedAt         *time.Time `json:"approved_at"`
+	ExpansionDueAt     *time.Time `json:"expansion_due_at"`
 	CreatedAt          time.Time  `json:"created_at"`
 	CompletedAt        *time.Time `json:"completed_at"`
 	RefundID           *string    `json:"refund_id"`
 	CancellationReason *string    `json:"cancellation_reason"`
 	PaymentDueAt       *time.Time `json:"payment_due_at"`
+	// ReminderSentAt is when the most recent remaining-balance reminder went
+	// out; RemindersSent counts them (3 total: due+7d, 7 days before the
+	// revert, 1 day before the revert).
+	ReminderSentAt *time.Time `json:"reminder_sent_at"`
+	RemindersSent  int        `json:"reminders_sent"`
 
 	// Populated by JOIN queries.
 	ServerName  string `json:"server_name"`
 	ServerState string `json:"server_state"`
 	UserEmail   string `json:"user_email"`
+
+	// Latest invoice summary, populated only by the admin listing query for
+	// custom requests.
+	InvoiceNumber      *string    `json:"invoice_number,omitempty"`
+	InvoiceStatus      *string    `json:"invoice_status,omitempty"`
+	InvoiceSentAt      *time.Time `json:"invoice_sent_at,omitempty"`
+	InvoiceAcceptDueAt *time.Time `json:"invoice_accept_due_at,omitempty"`
 }

@@ -98,6 +98,34 @@ func (s *stubQuerier) GetUserPreferences(_ context.Context, userID string) (*mod
 func (s *stubQuerier) SetMediaAutouploadFolder(_ context.Context, userID string, folderID *uuid.UUID) (*models.UserPreferences, error) {
 	return &models.UserPreferences{UserID: userID, MediaAutouploadFolderID: folderID}, nil
 }
+func (s *stubQuerier) SetStorageUIPreferences(_ context.Context, userID string, showButtons, promptEnabled *bool) (*models.UserPreferences, error) {
+	p := &models.UserPreferences{UserID: userID, ShowStorageButtons: true, StoragePromptEnabled: true}
+	if showButtons != nil {
+		p.ShowStorageButtons = *showButtons
+	}
+	if promptEnabled != nil {
+		p.StoragePromptEnabled = *promptEnabled
+	}
+	return p, nil
+}
+func (s *stubQuerier) CountActiveExpansionRequests(_ context.Context, _ string) (int, error) {
+	return 0, nil
+}
+func (s *stubQuerier) ListUserExpansionRequests(_ context.Context, _ string) ([]models.ServerExpansionRequest, error) {
+	return nil, nil
+}
+func (s *stubQuerier) GetLatestExpansionInvoice(_ context.Context, _ uuid.UUID) (*models.ExpansionInvoice, error) {
+	return nil, nil
+}
+func (s *stubQuerier) ListSharesForRecipient(_ context.Context, _ string) ([]models.Share, error) {
+	return nil, nil
+}
+func (s *stubQuerier) GetUserStorageBreakdown(_ context.Context, _ string) (db.UserStorageBreakdown, error) {
+	return db.UserStorageBreakdown{}, nil
+}
+func (s *stubQuerier) GetUserStorageAllocations(_ context.Context, _, _ string) ([]db.UserStorageAllocation, error) {
+	return nil, nil
+}
 func (s *stubQuerier) AutoPardonExpiredSuspension(_ context.Context, _ string) error { return nil }
 func (s *stubQuerier) AddBannedIP(_ context.Context, _, _ string) error              { return nil }
 func (s *stubQuerier) GetInterestFormSettings(_ context.Context) (*models.InterestFormSettings, error) {

@@ -2,6 +2,7 @@ import { createFileRoute, useNavigate, useSearch } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useRef, useState } from 'react'
 import {
+  MdAddCircleOutline,
   MdArrowBack,
   MdBolt,
   MdCheck,
@@ -34,6 +35,7 @@ import { FilePreviewModal, canPreview } from '../../components/FilePreviewModal'
 import { MediaCollectionView } from '../../components/MediaCollectionView'
 import type { Folder, FolderKind } from '../../types/api'
 import { UploadModal } from '../../components/UploadModal'
+import { StorageUpgradeModal, STORAGE_PROMPT_THRESHOLD } from '../../components/StorageUpgradeModal'
 import { ShareModal } from '../../components/ShareModal'
 import { DeleteConfirmModal, readSkipDeleteCookie } from '../../components/DeleteConfirmModal'
 import { FolderBreadcrumb } from '../../components/FolderBreadcrumb'
@@ -144,10 +146,28 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
   const [newFolderDriveId, setNewFolderDriveId] = useState<string | null>(null)
   const { progress, startUpload, dismiss } = useFileUpload()
   const { isDragging } = useDragDrop((dropped) => { if (!readOnly) setPendingFiles(dropped) })
+
+  // Auto-open the storage upgrade modal when a pending upload would exceed the
+  // quota or push usage past 75% of it (unless disabled in preferences).
+  useEffect(() => {
+    if (!storagePromptEnabled || readOnly || !user || pendingFiles.length === 0) return
+    const totalBytes = pendingFiles.reduce((sum, f) => sum + f.size, 0)
+    const after = user.storage_used_bytes + totalBytes
+    if (after > user.storage_quota_bytes) {
+      setStorageModalReason('upload-over-quota')
+    } else if (user.storage_quota_bytes > 0 && after >= user.storage_quota_bytes * STORAGE_PROMPT_THRESHOLD) {
+      setStorageModalReason('upload-near-quota')
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingFiles])
   const { sort, onSort } = useSort()
   const { favoriteFileIds, favoriteFolderIds, toggleFile, toggleFolder } = useFavorites()
   const { data: prefs } = useQuery(preferencesQueryOptions)
   const autoUploadTargetId = prefs?.media_autoupload_folder_id ?? null
+  const showStorageButtons = prefs?.show_storage_buttons ?? true
+  const storagePromptEnabled = prefs?.storage_prompt_enabled ?? true
+  const [storageModalReason, setStorageModalReason] =
+    useState<'open' | 'upload-near-quota' | 'upload-over-quota' | null>(null)
   const { data: myServers } = useQuery({
     queryKey: ['storage', 'my-servers'],
     queryFn: listMyServers,
@@ -527,7 +547,11 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
       )}
 
       {viewingUser && (
-        <QuotaBar used={viewingUser.storage_used_bytes} quota={viewingUser.storage_quota_bytes} />
+        <QuotaBar
+          used={viewingUser.storage_used_bytes}
+          quota={viewingUser.storage_quota_bytes}
+          onAddStorage={!readOnly && showStorageButtons ? () => setStorageModalReason('open') : undefined}
+        />
       )}
 
       {/* Google Backup error */}
@@ -745,6 +769,7 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
           location={uploadDrive ? { name: uploadDrive.name, tier: uploadDrive.drive_type, isPinned: uploadDriveIsPinned } : undefined}
           redirectFolderName={uploadRedirectFolderName}
           user={user}
+          onAddStorage={showStorageButtons ? () => setStorageModalReason('open') : undefined}
           onConfirm={(ignoreRedirectIndices) => {
             const filesToUpload = pendingFiles
             setPendingFiles([])
@@ -758,6 +783,13 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
       )}
 
       <UploadToast progress={progress} onDismiss={dismiss} />
+
+      {storageModalReason && !readOnly && (
+        <StorageUpgradeModal
+          promptReason={storageModalReason === 'open' ? null : storageModalReason}
+          onClose={() => setStorageModalReason(null)}
+        />
+      )}
 
       {/* Google Backup — service selection */}
       {serviceSelectOpen && (
@@ -836,7 +868,7 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
 
 // ── Shared components ─────────────────────────────────────────────────────────
 
-function QuotaBar({ used, quota }: { used: number; quota: number }) {
+function QuotaBar({ used, quota, onAddStorage }: { used: number; quota: number; onAddStorage?: () => void }) {
   const pct = quota > 0 ? (used / quota) * 100 : 0
   const color =
     pct >= 90 ? 'bg-red-500' :
@@ -846,7 +878,19 @@ function QuotaBar({ used, quota }: { used: number; quota: number }) {
     <div className="mb-4">
       <div className="flex justify-between text-xs text-gray-400 mb-1">
         <span>{formatSize(used)} used</span>
-        <span>{formatSize(quota)} quota</span>
+        <span className="flex items-center gap-1">
+          {formatSize(quota)} quota
+          {onAddStorage && (
+            <button
+              type="button"
+              onClick={onAddStorage}
+              title="Add storage"
+              className="flex items-center bg-transparent border-0 p-0 text-blue-500 hover:text-blue-700 cursor-pointer transition-colors"
+            >
+              <MdAddCircleOutline className="text-sm" />
+            </button>
+          )}
+        </span>
       </div>
       <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
         <div className={`h-full rounded-full transition-all ${color}`} style={{ width: `${pct}%` }} />

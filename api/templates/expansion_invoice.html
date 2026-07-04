@@ -1,0 +1,78 @@
+{{/*
+  Template name : "expansion_invoice"
+  Trigger       : Admin sends the invoice for a custom capacity expansion request
+  Data fields   :
+    AppName        string
+    AppURL         string
+    ServerName     string
+    PlanLabel      string  — e.g. "Custom NVME"
+    InvoiceNumber  string  — e.g. "INV-2026-00042"
+    TotalFmt       string  — e.g. "$1,250.00"
+    DepositFmt     string  — e.g. "$625.00" ("" when no deposit is required)
+    AcceptDueAt    string  — human-readable acceptance deadline
+    ReviewURL      string  — website link to review & approve ("" when omitted)
+*/}}
+{{define "expansion_invoice"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <title>Invoice {{.InvoiceNumber}} — {{.AppName}}</title>
+</head>
+<body>
+  <div class="email-wrapper">
+    <div class="email-card">
+
+      {{template "header" .}}
+
+      <div class="email-body">
+        <h1>Your custom storage invoice is ready</h1>
+        <p>
+          We've reviewed your custom capacity request for <strong>{{.ServerName}}</strong>
+          (<strong>{{.PlanLabel}}</strong>) and prepared invoice
+          <strong>{{.InvoiceNumber}}</strong> with the final pricing.
+        </p>
+
+        <table style="width:100%;border-collapse:collapse;margin:20px 0;">
+          <tr>
+            <td style="padding:8px 12px;font-weight:600;color:#374151;width:40%;border-bottom:1px solid #e5e7eb;">Invoice</td>
+            <td style="padding:8px 12px;color:#111827;border-bottom:1px solid #e5e7eb;">{{.InvoiceNumber}}</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 12px;font-weight:600;color:#374151;border-bottom:1px solid #e5e7eb;">Total</td>
+            <td style="padding:8px 12px;color:#111827;font-weight:700;border-bottom:1px solid #e5e7eb;">{{.TotalFmt}}</td>
+          </tr>
+          {{if .DepositFmt}}
+          <tr>
+            <td style="padding:8px 12px;font-weight:600;color:#374151;border-bottom:1px solid #e5e7eb;">Deposit due on acceptance</td>
+            <td style="padding:8px 12px;color:#111827;border-bottom:1px solid #e5e7eb;">{{.DepositFmt}}</td>
+          </tr>
+          {{end}}
+          <tr>
+            <td style="padding:8px 12px;font-weight:600;color:#374151;">Accept by</td>
+            <td style="padding:8px 12px;color:#dc2626;font-weight:600;">{{.AcceptDueAt}}</td>
+          </tr>
+        </table>
+
+        <p style="font-size:14px;color:#6b7280;">
+          Please review and accept the invoice within <strong>14 business days</strong>
+          (by {{.AcceptDueAt}}). If it is not accepted{{if .DepositFmt}} and the deposit paid{{end}}
+          by then, the request expires automatically.
+        </p>
+
+        {{if .ReviewURL}}
+        <div class="btn-wrapper">
+          <a href="{{.ReviewURL}}" class="btn-primary">Review &amp; approve invoice</a>
+        </div>
+        {{end}}
+      </div>
+
+      {{template "footer" .}}
+
+    </div>
+  </div>
+</body>
+</html>
+{{end}}

@@ -15,12 +15,16 @@ func scanEmailQueue(rows *sql.Rows) (*models.EmailQueue, error) {
 	var e models.EmailQueue
 	var lastError sql.NullString
 	var sentAt sql.NullTime
+	var attachments []byte
 	err := rows.Scan(
 		&e.ID, &e.ToAddress, &e.Subject, &e.TemplateName,
-		&e.TemplateData, &e.Status, &e.Attempts, &lastError, &e.CreatedAt, &sentAt,
+		&e.TemplateData, &attachments, &e.Status, &e.Attempts, &lastError, &e.CreatedAt, &sentAt,
 	)
 	if err != nil {
 		return nil, err
+	}
+	if len(attachments) > 0 {
+		e.Attachments = attachments
 	}
 	if lastError.Valid {
 		e.LastError = &lastError.String
@@ -33,12 +37,16 @@ func scanEmailQueue(rows *sql.Rows) (*models.EmailQueue, error) {
 
 // EnqueueEmail inserts a new email job with status "pending" and zero attempts.
 func (q *Queries) EnqueueEmail(ctx context.Context, e *models.EmailQueue) error {
+	var attachments any
+	if len(e.Attachments) > 0 {
+		attachments = []byte(e.Attachments)
+	}
 	_, err := q.db.ExecContext(ctx, `
 		INSERT INTO email_queue (
 			id, to_address, subject, template_name,
-			template_data, status, attempts, created_at
-		) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, 0, NOW())
-	`, e.ToAddress, e.Subject, e.TemplateName, e.TemplateData, models.EmailStatusPending)
+			template_data, attachments, status, attempts, created_at
+		) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, 0, NOW())
+	`, e.ToAddress, e.Subject, e.TemplateName, e.TemplateData, attachments, models.EmailStatusPending)
 	if err != nil {
 		return fmt.Errorf("EnqueueEmail: %w", err)
 	}
@@ -55,7 +63,7 @@ func (q *Queries) GetPendingEmails(ctx context.Context, in PageInput) (*PageResu
 
 	rows, err := q.db.QueryContext(ctx, `
 		SELECT id, to_address, subject, template_name,
-		       template_data, status, attempts, last_error, created_at, sent_at
+		       template_data, attachments, status, attempts, last_error, created_at, sent_at
 		FROM email_queue
 		WHERE status = $1
 		ORDER BY created_at ASC

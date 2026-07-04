@@ -23,6 +23,10 @@ import { useImpersonation } from '../../context/ImpersonationContext'
 import { BanSuspendModal } from '../../components/BanSuspendModal'
 
 export const Route = createFileRoute('/_auth/admin/users')({
+  // focus: username to auto-expand when arriving from the admin Orders page.
+  validateSearch: (search: Record<string, unknown>): { focus?: string } => ({
+    focus: typeof search.focus === 'string' ? search.focus : undefined,
+  }),
   component: RouteComponent,
 })
 
@@ -316,8 +320,9 @@ function RouteComponent() {
     useInfiniteQuery(adminUsersInfiniteQueryOptions)
   const { data: me } = useQuery(meQueryOptions)
 
+  const { focus } = Route.useSearch()
   const [auditUser, setAuditUser] = useState<string | null>(null)
-  const [expandedUser, setExpandedUser] = useState<string | null>(null)
+  const [expandedUser, setExpandedUser] = useState<string | null>(focus ?? null)
   const [banModal, setBanModal] = useState<BanModal | null>(null)
 
   function viewUserFiles(u: User) {

@@ -11,6 +11,8 @@ CREATE TABLE email_queue (
     subject       TEXT         NOT NULL,
     template_name TEXT         NOT NULL,
     template_data JSONB        NOT NULL DEFAULT '{}',
+    -- Optional MIME attachments: [{"filename","mime_type","content_b64"}].
+    attachments   JSONB,
     status        email_status NOT NULL DEFAULT 'pending',
     attempts      INT          NOT NULL DEFAULT 0,
     last_error    TEXT,

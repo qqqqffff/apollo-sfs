@@ -23,6 +23,9 @@ type StorageOrder struct {
 	Status           string          `json:"status"`
 	PayPalOrderID    string          `json:"paypal_order_id"`
 	PayPalCaptureID  *string         `json:"paypal_capture_id"`
+	// ServerID is the server the capacity was purchased on. Nil for legacy
+	// orders created before server selection existed.
+	ServerID         *uuid.UUID      `json:"server_id"`
 	RawResponse      json.RawMessage `json:"-"`
 	CreatedAt        time.Time       `json:"created_at"`
 	CapturedAt       *time.Time      `json:"captured_at"`

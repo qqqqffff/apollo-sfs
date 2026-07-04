@@ -1,0 +1,54 @@
+{{/*
+  Template name : "expansion_balance_reminder"
+  Trigger       : Remaining balance unpaid 7 business days after quota provisioning
+  Data fields   :
+    AppName        string
+    AppURL         string
+    ServerName     string
+    PlanLabel      string  — e.g. "256 GB NVME"
+    RemainingFmt   string  — e.g. "$50.00"
+    RevertAt       string  — date the allocation is reverted if still unpaid
+    PaymentURL     string  — link to complete payment
+*/}}
+{{define "expansion_balance_reminder"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <title>Reminder: balance due — {{.AppName}}</title>
+</head>
+<body>
+  <div class="email-wrapper">
+    <div class="email-card">
+
+      {{template "header" .}}
+
+      <div class="email-body">
+        <h1>Reminder: your expansion balance is due</h1>
+        <p>
+          Your additional storage on <strong>{{.ServerName}}</strong>
+          (<strong>{{.PlanLabel}}</strong>) has been provisioned and is already
+          available on your account, but the remaining balance of
+          <strong>{{.RemainingFmt}}</strong> has not been paid yet.
+        </p>
+
+        <p style="font-size:14px;color:#6b7280;">
+          If the balance is not received by <strong>{{.RevertAt}}</strong>, the
+          additional storage will be removed from your account and your deposit
+          will <strong>not</strong> be refunded.
+        </p>
+
+        <div class="btn-wrapper">
+          <a href="{{.PaymentURL}}" class="btn-primary">Pay {{.RemainingFmt}} now</a>
+        </div>
+      </div>
+
+      {{template "footer" .}}
+
+    </div>
+  </div>
+</body>
+</html>
+{{end}}

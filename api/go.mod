@@ -20,6 +20,7 @@ require (
 require github.com/rwcarlsen/goexif v0.0.0-20190401172101-9e8deecbddbd
 
 require (
+	codeberg.org/go-pdf/fpdf v0.12.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/golang-jwt/jwt/v4 v4.5.2 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect

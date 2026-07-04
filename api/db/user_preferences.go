@@ -12,17 +12,23 @@ import (
 )
 
 // GetUserPreferences returns the preferences row for userID. If no row exists
-// yet it returns a zero-value record (with UserID set) and no error, so callers
+// yet it returns a defaults record (with UserID set) and no error, so callers
 // can treat "never configured" as "all defaults".
 func (q *Queries) GetUserPreferences(ctx context.Context, userID string) (*models.UserPreferences, error) {
 	var p models.UserPreferences
 	var folderID uuid.NullUUID
 	err := q.db.QueryRowContext(ctx, `
-		SELECT user_id, media_autoupload_folder_id, created_at, updated_at
+		SELECT user_id, media_autoupload_folder_id, show_storage_buttons,
+		       storage_prompt_enabled, created_at, updated_at
 		FROM user_preferences WHERE user_id = $1
-	`, userID).Scan(&p.UserID, &folderID, &p.CreatedAt, &p.UpdatedAt)
+	`, userID).Scan(&p.UserID, &folderID, &p.ShowStorageButtons,
+		&p.StoragePromptEnabled, &p.CreatedAt, &p.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		return &models.UserPreferences{UserID: userID}, nil
+		return &models.UserPreferences{
+			UserID:               userID,
+			ShowStorageButtons:   true,
+			StoragePromptEnabled: true,
+		}, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("GetUserPreferences: %w", err)
@@ -48,8 +54,10 @@ func (q *Queries) SetMediaAutouploadFolder(ctx context.Context, userID string, f
 		ON CONFLICT (user_id) DO UPDATE
 			SET media_autoupload_folder_id = EXCLUDED.media_autoupload_folder_id,
 			    updated_at = NOW()
-		RETURNING user_id, media_autoupload_folder_id, created_at, updated_at
-	`, userID, nf).Scan(&p.UserID, &out, &p.CreatedAt, &p.UpdatedAt)
+		RETURNING user_id, media_autoupload_folder_id, show_storage_buttons,
+		          storage_prompt_enabled, created_at, updated_at
+	`, userID, nf).Scan(&p.UserID, &out, &p.ShowStorageButtons,
+		&p.StoragePromptEnabled, &p.CreatedAt, &p.UpdatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("SetMediaAutouploadFolder: %w", err)
 	}
@@ -57,4 +65,37 @@ func (q *Queries) SetMediaAutouploadFolder(ctx context.Context, userID string, f
 		p.MediaAutouploadFolderID = &out.UUID
 	}
 	return &p, nil
+}
+
+// SetStorageUIPreferences upserts the storage upgrade UI toggles. Nil fields
+// are left unchanged (or default to true when the row is first created).
+func (q *Queries) SetStorageUIPreferences(ctx context.Context, userID string, showButtons, promptEnabled *bool) (*models.UserPreferences, error) {
+	var p models.UserPreferences
+	var folderID uuid.NullUUID
+	err := q.db.QueryRowContext(ctx, `
+		INSERT INTO user_preferences (user_id, show_storage_buttons, storage_prompt_enabled, created_at, updated_at)
+		VALUES ($1, COALESCE($2, TRUE), COALESCE($3, TRUE), NOW(), NOW())
+		ON CONFLICT (user_id) DO UPDATE
+			SET show_storage_buttons   = COALESCE($2, user_preferences.show_storage_buttons),
+			    storage_prompt_enabled = COALESCE($3, user_preferences.storage_prompt_enabled),
+			    updated_at = NOW()
+		RETURNING user_id, media_autoupload_folder_id, show_storage_buttons,
+		          storage_prompt_enabled, created_at, updated_at
+	`, userID, nullBool(showButtons), nullBool(promptEnabled)).Scan(
+		&p.UserID, &folderID, &p.ShowStorageButtons,
+		&p.StoragePromptEnabled, &p.CreatedAt, &p.UpdatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("SetStorageUIPreferences: %w", err)
+	}
+	if folderID.Valid {
+		p.MediaAutouploadFolderID = &folderID.UUID
+	}
+	return &p, nil
+}
+
+func nullBool(b *bool) any {
+	if b == nil {
+		return nil
+	}
+	return *b
 }

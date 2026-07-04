@@ -114,6 +114,11 @@ export interface DriveMigrationEligibility {
 export interface UserPreferences {
   user_id: string
   media_autoupload_folder_id: string | null
+  // Show the "+" add-storage buttons on the client home page and upload modal.
+  show_storage_buttons: boolean
+  // Auto-open the storage upgrade modal when an upload would push usage past
+  // 75% of quota or exceed it.
+  storage_prompt_enabled: boolean
   created_at: string
   updated_at: string
 }
@@ -247,6 +252,10 @@ export interface AccountRestriction {
   expires_at?: string | null
 }
 
+export type ExpansionRequestStatus =
+  | 'opened' | 'invoice_sent' | 'accepted' | 'approved' | 'expanded'
+  | 'completed' | 'expired' | 'refunded' | 'rejected'
+
 export interface ServerExpansionRequest {
   id: string
   username: string
@@ -260,18 +269,28 @@ export interface ServerExpansionRequest {
   payment_method: string
   paypal_order_id: string
   paypal_capture_id: string | null
-  status: 'opened' | 'expanded' | 'completed' | 'expired' | 'refunded'
+  status: ExpansionRequestStatus
+  is_custom: boolean
   pre_quota_bytes: number
   post_quota_bytes: number | null
   expires_at: string
+  approval_due_at: string | null
+  approved_at: string | null
+  expansion_due_at: string | null
   created_at: string
   completed_at: string | null
   refund_id: string | null
   cancellation_reason: string | null
   payment_due_at: string | null
+  reminder_sent_at: string | null
   server_name: string
   server_state: string
   user_email: string
+  // Latest invoice summary (custom requests, admin listing only).
+  invoice_number?: string
+  invoice_status?: string
+  invoice_sent_at?: string
+  invoice_accept_due_at?: string
 }
 
 export const VIOLATION_CODES: Record<string, string> = {

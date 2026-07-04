@@ -554,9 +554,10 @@ export default function StorageUpgradeModal({
                       This server doesn't have enough free space for {selectedPlan.label}{' '}
                       {selectedServer ? `(${selectedServer.drive_type === 'nvme' ? 'fast' : 'standard'} storage)` : ''} right now.
                       You can pay a <Text style={{ fontWeight: '700' }}>50% deposit ({depositDisplay})</Text> to
-                      increase server capacity for you. Our team will expand server capacity within{' '}
-                      <Text style={{ fontWeight: '700' }}>14 days</Text> and provision your additional capacity. 
-                      If we can't fulfil the request in time, your deposit is automatically refunded.
+                      increase server capacity for you. Your request is reviewed within{' '}
+                      <Text style={{ fontWeight: '700' }}>7 business days</Text> and, once approved, capacity is
+                      expanded within <Text style={{ fontWeight: '700' }}>14 business days</Text>.
+                      If either deadline is missed, your deposit is automatically refunded.
                       The remaining amount will be charged when your additional capacity is provisioned.
                     </Text>
                   </View>
@@ -649,9 +650,10 @@ export default function StorageUpgradeModal({
                 <View style={styles.expansionSuccessBanner}>
                   <Text style={styles.expansionSuccessTitle}>Expansion Request Submitted</Text>
                   <Text style={styles.expansionSuccessBody}>
-                    Your deposit was received. Our team will expand server capacity and apply your
-                    storage within 14 days. You'll be notified by email once it's ready.
-                    {expansionExpiresAt ? `\n\nExpires: ${new Date(expansionExpiresAt).toLocaleDateString()}` : ''}
+                    Your deposit was received. Your request is reviewed within 7 business days and,
+                    once approved, capacity is expanded within 14 business days. You'll be notified
+                    by email once it's ready. If either deadline is missed, your deposit is refunded.
+                    {expansionExpiresAt ? `\n\nReview due: ${new Date(expansionExpiresAt).toLocaleDateString()}` : ''}
                   </Text>
                 </View>
                 <TouchableOpacity style={styles.primaryBtn} onPress={onClose} activeOpacity={0.85}>

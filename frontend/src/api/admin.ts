@@ -645,31 +645,112 @@ export const adminMetricsQueryOptions = {
 export interface ExpansionRequestFilter {
   status?: string
   server_id?: string
-  from?: string
-  to?: string
-  cursor?: string
+  is_custom?: boolean
+  search?: string
+  // "created" (default) | "sla" (nearest deadline first) | "deposit"
+  sort?: string
+  page?: number
+  page_size?: number
+}
+
+export interface OffsetPage<T> {
+  items: T[]
+  total: number
+  page: number
+  page_size: number
 }
 
 export function listExpansionRequests(filter: ExpansionRequestFilter = {}) {
   const params = new URLSearchParams()
   if (filter.status)    params.set('status',    filter.status)
   if (filter.server_id) params.set('server_id', filter.server_id)
-  if (filter.from)      params.set('from',       filter.from)
-  if (filter.to)        params.set('to',         filter.to)
-  if (filter.cursor)    params.set('cursor',     filter.cursor)
+  if (filter.is_custom !== undefined) params.set('is_custom', String(filter.is_custom))
+  if (filter.search)    params.set('search',    filter.search)
+  if (filter.sort)      params.set('sort',      filter.sort)
+  if (filter.page)      params.set('page',      String(filter.page))
+  if (filter.page_size) params.set('page_size', String(filter.page_size))
   const qs = params.toString()
-  return get<PageResult<ServerExpansionRequest>>(`/admin/expansion-requests${qs ? '?' + qs : ''}`)
+  return get<OffsetPage<ServerExpansionRequest>>(`/admin/expansion-requests${qs ? '?' + qs : ''}`)
+}
+
+export function approveExpansionRequest(id: string) {
+  return post<{ expansion_due_at: string }>(`/admin/expansion-requests/${id}/approve`, {})
 }
 
 export function fulfillExpansionRequest(id: string) {
-  return post<{ new_quota_bytes: number }>(`/admin/expansion-requests/${id}/fulfill`, {})
+  return post<{ new_quota_bytes: number; remaining_cents: number }>(`/admin/expansion-requests/${id}/fulfill`, {})
 }
 
 export function cancelExpansionRequest(id: string, reason: string) {
-  return post<{ refund_id: string }>(`/admin/expansion-requests/${id}/cancel`, { reason })
+  return post<{ refund_id: string | null }>(`/admin/expansion-requests/${id}/cancel`, { reason })
 }
 
-export const expansionRequestsQueryOptions = (filter: ExpansionRequestFilter = {}) => ({
-  queryKey: ['admin', 'expansion-requests', filter] as const,
-  queryFn: () => listExpansionRequests(filter),
-})
+// ── Custom-request invoices ─────────────────────────────────────────────────────
+
+export interface AdminInvoicePayload {
+  line_items: { description: string; amount_cents: number }[]
+  deposit_cents: number
+  disclosures: string
+  notes: string
+  include_review_link: boolean
+}
+
+export interface AdminExpansionInvoice {
+  id: string
+  request_id: string
+  invoice_number: string
+  line_items: { description: string; amount_cents: number }[]
+  total_cents: number
+  deposit_cents: number
+  disclosures: string
+  notes: string
+  include_review_link: boolean
+  status: 'sent' | 'accepted' | 'expired' | 'cancelled'
+  sent_at: string
+  accept_due_at: string
+  accepted_at: string | null
+}
+
+export function createExpansionInvoice(id: string, payload: AdminInvoicePayload) {
+  return post<AdminExpansionInvoice>(`/admin/expansion-requests/${id}/invoice`, payload)
+}
+
+export function getExpansionInvoice(id: string) {
+  return get<AdminExpansionInvoice>(`/admin/expansion-requests/${id}/invoice`)
+}
+
+// ── Combined orders (premium payments + storage purchases) ─────────────────────
+
+export interface AdminOrder {
+  id: string
+  type: 'premium' | 'storage'
+  username: string
+  status: string
+  amount_cents: number
+  currency: string
+  payment_method: string
+  reference: string
+  invoice_number: string
+  created_at: string
+  captured_at: string | null
+  refund_id: string | null
+  refunded_at: string | null
+  plan_id?: string
+  storage_type?: string
+  bytes_added?: number
+  server_name?: string
+}
+
+export function listAdminOrders(opts: { search?: string; sort?: string; page?: number; page_size?: number } = {}) {
+  const params = new URLSearchParams()
+  if (opts.search)    params.set('search',    opts.search)
+  if (opts.sort)      params.set('sort',      opts.sort)
+  if (opts.page)      params.set('page',      String(opts.page))
+  if (opts.page_size) params.set('page_size', String(opts.page_size))
+  const qs = params.toString()
+  return get<OffsetPage<AdminOrder>>(`/admin/orders${qs ? '?' + qs : ''}`)
+}
+
+export function refundAdminOrder(type: 'premium' | 'storage', id: string) {
+  return post<{ refund_id: string }>(`/admin/orders/${type}/${id}/refund`, {})
+}

@@ -46,6 +46,24 @@ export function resolveDrive(
   return { drive: servers?.find((s) => s.is_primary), isPinned: false }
 }
 
+// PublicServer is a purchasable server as returned by GET /storage/servers —
+// every active server with aggregated capacity, not just the ones the user
+// already has an allocation on.
+export interface PublicServer {
+  id: string
+  name: string
+  state: string
+  total_capacity_bytes: number
+  available_bytes: number
+  ping_url: string
+  drive_type: 'nvme' | 'hdd'
+}
+
+export async function listServers(): Promise<PublicServer[]> {
+  const res = await get<{ servers: PublicServer[] }>('/storage/servers')
+  return res.servers ?? []
+}
+
 export async function getStorageBreakdown(): Promise<StorageBreakdown> {
   return get<StorageBreakdown>('/storage/breakdown')
 }

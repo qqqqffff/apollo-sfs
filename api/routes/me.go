@@ -3,8 +3,10 @@ package routes
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -227,6 +229,135 @@ func (h *Handler) UnlinkSocial(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"message": "identity unlinked"})
+}
+
+// ── Notifications ─────────────────────────────────────────────────────────────
+
+// notificationItem is one entry in the bell dropdown. Kind is one of:
+// capacity_provisioned | payment_required | action_pending | share_received.
+type notificationItem struct {
+	ID        string    `json:"id"`
+	Kind      string    `json:"kind"`
+	Title     string    `json:"title"`
+	Body      string    `json:"body"`
+	Link      string    `json:"link"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// shareNotificationWindow bounds how long a received share keeps showing in
+// the bell dropdown.
+const shareNotificationWindow = 30 * 24 * time.Hour
+
+// Notifications handles GET /api/v1/me/notifications.
+// Derives the user's pending-action notifications from live state: provisioned
+// capacity awaiting its balance, invoices awaiting review, and recent shares.
+func (h *Handler) Notifications(c *gin.Context) {
+	username := c.GetString("username")
+	if username == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+	ctx := c.Request.Context()
+
+	items := []notificationItem{}
+
+	requests, err := h.queries.ListUserExpansionRequests(ctx, username)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "load notifications"})
+		return
+	}
+	for _, r := range requests {
+		capacity := formatCapacityShort(r.BytesRequested)
+		tier := "standard"
+		if r.StorageType == "nvme" {
+			tier = "fast"
+		}
+		switch r.Status {
+		case "expanded":
+			provisionedAt := r.CreatedAt
+			if r.PaymentDueAt != nil {
+				provisionedAt = *r.PaymentDueAt
+			}
+			items = append(items, notificationItem{
+				ID:        r.ID.String() + ":provisioned",
+				Kind:      "capacity_provisioned",
+				Title:     "Additional capacity provisioned",
+				Body:      fmt.Sprintf("%s of %s storage on %s is now available on your account.", capacity, tier, r.ServerName),
+				Link:      "/client/orders",
+				CreatedAt: provisionedAt,
+			})
+			if remaining := r.FullPriceCents - r.DepositAmountCents; remaining > 0 {
+				items = append(items, notificationItem{
+					ID:        r.ID.String() + ":payment",
+					Kind:      "payment_required",
+					Title:     "Payment required",
+					Body:      fmt.Sprintf("The remaining balance of %s for your %s expansion is due.", formatCentsShort(remaining), capacity),
+					Link:      "/client/orders?pay=" + r.ID.String(),
+					CreatedAt: provisionedAt,
+				})
+			}
+		case "invoice_sent":
+			link := "/client/orders"
+			if inv, err := h.queries.GetLatestExpansionInvoice(ctx, r.ID); err == nil && inv != nil && inv.ReviewToken != nil {
+				link = "/invoice/" + *inv.ReviewToken
+			}
+			sentAt := r.CreatedAt
+			if r.InvoiceSentAt != nil {
+				sentAt = *r.InvoiceSentAt
+			}
+			items = append(items, notificationItem{
+				ID:        r.ID.String() + ":invoice",
+				Kind:      "action_pending",
+				Title:     "Action pending: invoice awaiting review",
+				Body:      fmt.Sprintf("Your custom %s request has been priced — review and approve the invoice.", capacity),
+				Link:      link,
+				CreatedAt: sentAt,
+			})
+		}
+	}
+
+	// Recent shares addressed to the user's email.
+	if user, err := h.queries.GetUserByUsername(ctx, username); err == nil && user != nil {
+		if shares, err := h.queries.ListSharesForRecipient(ctx, strings.ToLower(user.Email)); err == nil {
+			for _, s := range shares {
+				if time.Since(s.CreatedAt) > shareNotificationWindow {
+					continue
+				}
+				itemType := "file"
+				if s.FolderID != nil {
+					itemType = "folder"
+				}
+				items = append(items, notificationItem{
+					ID:        s.ID.String() + ":share",
+					Kind:      "share_received",
+					Title:     fmt.Sprintf("A %s was shared with you", itemType),
+					Body:      fmt.Sprintf("%s shared a %s with you.", s.OwnerUsername, itemType),
+					Link:      "/client/shared",
+					CreatedAt: s.CreatedAt,
+				})
+			}
+		}
+	}
+
+	sort.Slice(items, func(i, j int) bool { return items[i].CreatedAt.After(items[j].CreatedAt) })
+
+	c.JSON(http.StatusOK, gin.H{"items": items})
+}
+
+func formatCapacityShort(bytes int64) string {
+	const tib = int64(1) << 40
+	switch {
+	case bytes >= 1024*tib:
+		return strings.TrimSuffix(fmt.Sprintf("%.1f", float64(bytes)/float64(1024*tib)), ".0") + " PB"
+	case bytes >= tib:
+		return strings.TrimSuffix(fmt.Sprintf("%.1f", float64(bytes)/float64(tib)), ".0") + " TB"
+	default:
+		return fmt.Sprintf("%d GB", bytes/(1<<30))
+	}
+}
+
+func formatCentsShort(cents int) string {
+	return fmt.Sprintf("$%d.%02d", cents/100, cents%100)
 }
 
 // clientIP extracts the real client IP from the request, preferring

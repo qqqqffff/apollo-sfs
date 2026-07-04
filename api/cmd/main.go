@@ -23,6 +23,7 @@ import (
 	"apollo-sfs.com/api/routes/middleware"
 	"apollo-sfs.com/api/routes/billing"
 	"apollo-sfs.com/api/routes/expansion"
+	"apollo-sfs.com/api/routes/orders"
 	"apollo-sfs.com/api/routes/payments"
 	"apollo-sfs.com/api/routes/services"
 	"apollo-sfs.com/api/routes/sfs"
@@ -281,17 +282,21 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	})
 	storageHandler := storageroutes.NewHandler(queries)
 	billingHandler := billing.NewHandler(paypalClient, queries, billing.Config{
-		Currency:  cfg.PremiumTierCurrency,
-		ReturnURL: "apollosfs://billing/storage/complete",
-		CancelURL: "apollosfs://billing/storage/cancel",
+		Currency:    cfg.PremiumTierCurrency,
+		ReturnURL:   "apollosfs://billing/storage/complete",
+		CancelURL:   "apollosfs://billing/storage/cancel",
+		ClientID:    cfg.PayPalClientID,
+		Environment: cfg.PayPalEnvironment,
 	})
 	expansionHandler := expansion.NewHandler(paypalClient, emailSvc, queries, expansion.Config{
 		Currency:  cfg.PremiumTierCurrency,
 		ReturnURL: "apollosfs://billing/expansion/complete",
 		CancelURL: "apollosfs://billing/expansion/cancel",
 		AppURL:    cfg.AppBaseURL,
+		AppName:   "Apollo SFS",
 	})
 	expansionHandler.StartExpiryLoop(context.Background())
+	ordersHandler := orders.NewHandler(paypalClient, queries)
 	metricsSvc.SetSpeedTestProvider(adminHandler)
 	go adminHandler.SpeedTestLoop(context.Background())
 
@@ -380,7 +385,10 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		protected.POST("/mobile/auth/session", authHandler.MobileSession)
 		protected.POST("/me/password", h.ChangePassword)
 		protected.GET("/me/preferences", h.GetPreferences)
+		protected.GET("/me/notifications", h.Notifications)
 		// PUT /me/preferences is premium-only (media auto-upload); registered below.
+		// Storage UI toggles are available to every user.
+		protected.PUT("/me/preferences/storage-ui", h.UpdateStorageUIPreferences)
 		protected.POST("/me/social/link", h.LinkSocial)
 		protected.DELETE("/me/social/unlink", h.UnlinkSocial)
 
@@ -475,6 +483,9 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		protected.GET("/storage/speed/download", storageHandler.SpeedTestDownload)
 		protected.POST("/storage/speed/upload", storageHandler.SpeedTestUpload)
 
+		// Public PayPal config for the web frontend's JS SDK (react-paypal-js).
+		protected.GET("/billing/config", billingHandler.GetConfig)
+
 		// Storage add-on billing — four payment methods, each backed by PayPal.
 		protected.POST("/billing/storage/order", billingHandler.CreateWalletOrder)
 		protected.POST("/billing/storage/order/:order_id/capture", billingHandler.CaptureWalletOrder)
@@ -483,7 +494,11 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		protected.POST("/billing/storage/apple-pay", billingHandler.ChargeApplePay)
 		protected.POST("/billing/storage/google-pay", billingHandler.ChargeGooglePay)
 
-		// Expansion deposit billing — when a tier is unavailable, user pays a 50% deposit.
+		// Expansion deposit billing — when a tier is unavailable (or the server
+		// is >= 90% allocated), the user pays a 50% deposit.
+		protected.GET("/billing/storage/expansion/requests", expansionHandler.ListMine)
+		// Custom capacity requests: estimated price only, invoiced after review.
+		protected.POST("/billing/storage/expansion/custom", expansionHandler.SubmitCustomRequest)
 		protected.POST("/billing/storage/expansion/order", expansionHandler.CreateWalletOrder)
 		protected.POST("/billing/storage/expansion/order/:order_id/capture", expansionHandler.CaptureWalletOrder)
 		protected.POST("/billing/storage/expansion/hosted-card", expansionHandler.CaptureHostedCardExpansion)
@@ -492,6 +507,17 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		protected.POST("/billing/storage/expansion/google-pay", expansionHandler.ChargeGooglePayExpansion)
 
 		// Pay remaining balance after admin marks server capacity as expanded.
+		// User's combined order history (premium + storage purchases).
+		protected.GET("/billing/orders", billingHandler.ListMyOrders)
+
+		// Custom-capacity invoice review & acceptance (linked from the invoice email).
+		protected.GET("/billing/invoices/:token", expansionHandler.GetMyInvoice)
+		protected.GET("/billing/invoices/:token/pdf", expansionHandler.GetMyInvoicePDF)
+		protected.POST("/billing/invoices/:token/accept", expansionHandler.AcceptInvoice)
+		protected.POST("/billing/invoices/:token/decline", expansionHandler.DeclineInvoice)
+		protected.POST("/billing/invoices/:token/order", expansionHandler.CreateInvoiceDepositOrder)
+		protected.POST("/billing/invoices/:token/order/:order_id/capture", expansionHandler.CaptureInvoiceDepositOrder)
+
 		protected.POST("/billing/storage/expansion/:id/pay-remaining/order", expansionHandler.PayRemainingWalletOrder)
 		protected.POST("/billing/storage/expansion/:id/pay-remaining/order/:order_id/capture", expansionHandler.CapturePayRemainingWallet)
 		protected.POST("/billing/storage/expansion/:id/pay-remaining/card", expansionHandler.PayRemainingCard)
@@ -562,7 +588,15 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 			adminGroup.GET("/bans", adminHandler.ListUserBans)
 
 			adminGroup.GET("/expansion-requests", expansionHandler.ListRequests)
+			adminGroup.POST("/expansion-requests/:id/approve", expansionHandler.ApproveRequest)
 			adminGroup.POST("/expansion-requests/:id/fulfill", expansionHandler.MarkExpanded)
+			adminGroup.GET("/expansion-requests/:id/invoice", expansionHandler.GetInvoice)
+			adminGroup.GET("/expansion-requests/:id/invoice/pdf", expansionHandler.GetInvoicePDF)
+			adminGroup.POST("/expansion-requests/:id/invoice", expansionHandler.CreateInvoice)
+
+			// Combined orders view (premium payments + storage purchases).
+			adminGroup.GET("/orders", ordersHandler.List)
+			adminGroup.POST("/orders/:type/:id/refund", ordersHandler.Refund)
 			adminGroup.POST("/expansion-requests/:id/cancel", expansionHandler.CancelRequest)
 
 			adminGroup.GET("/interest", adminHandler.ListInterestSubmissions)

@@ -1,11 +1,13 @@
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
 import { useEffect, useRef, useCallback, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { MdCheck, MdClose, MdPhotoLibrary, MdRocketLaunch, MdKey, MdStorage, MdVpnKey, MdCloudUpload, MdSpeed, MdBolt, MdRefresh } from 'react-icons/md'
+import { MdAddCircleOutline, MdCheck, MdClose, MdPhotoLibrary, MdRocketLaunch, MdKey, MdStorage, MdVpnKey, MdCloudUpload, MdSpeed, MdBolt, MdRefresh } from 'react-icons/md'
 import { FaApple } from 'react-icons/fa'
-import { meQueryOptions, changePassword, preferencesQueryOptions, updatePreferences, unlinkProvider } from '../../api/me'
+import { meQueryOptions, changePassword, preferencesQueryOptions, updatePreferences, updateStorageUIPreferences, unlinkProvider } from '../../api/me'
 import { listRoot } from '../../api/folders'
 import { ApiError } from '../../api/client'
+import { StorageUpgradeModal } from '../../components/StorageUpgradeModal'
+import { formatCents, listMyExpansionRequests, type ExpansionRequest } from '../../api/billing'
 import {
   getStorageBreakdown,
   listMyServers,
@@ -57,9 +59,11 @@ function CheckItem({ ok, label }: { ok: boolean; label: string }) {
 }
 
 function RouteComponent() {
+  const navigate = useNavigate()
   const { data: user, isLoading } = useQuery(meQueryOptions)
 
   const [showUpgradeModal, setShowUpgradeModal] = useState(false)
+  const [showStorageModal, setShowStorageModal] = useState(false)
 
   const [current, setCurrent] = useState('')
   const [newPw, setNewPw] = useState('')
@@ -129,9 +133,29 @@ function RouteComponent() {
               style={{ width: `${pct}%` }}
             />
           </div>
-          <p className="text-xs text-gray-400 mt-1.5">{pct.toFixed(1)}% used</p>
+          <div className="flex items-center justify-between mt-1.5">
+            <p className="text-xs text-gray-400 m-0">{pct.toFixed(1)}% used</p>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => navigate({ to: '/client/orders' as never })}
+                className="text-xs text-gray-500 hover:text-gray-700 bg-transparent border-0 p-0 cursor-pointer font-medium transition-colors"
+              >
+                My orders
+              </button>
+              <button
+                onClick={() => setShowStorageModal(true)}
+                className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 bg-transparent border-0 p-0 cursor-pointer font-medium transition-colors"
+              >
+                <MdAddCircleOutline className="text-sm" /> Add storage
+              </button>
+            </div>
+          </div>
         </div>
       </div>
+
+      {showStorageModal && <StorageUpgradeModal onClose={() => setShowStorageModal(false)} />}
+
+      <ExpansionRequestsCard />
 
       <StorageInfraCard />
 
@@ -144,6 +168,8 @@ function RouteComponent() {
         onUpgrade={() => setShowUpgradeModal(true)}
       />
       {showUpgradeModal && <PremiumUpgradeModal onClose={() => setShowUpgradeModal(false)} />}
+
+      <StorageUIPreferences />
 
       <MediaAutoUpload />
 
@@ -524,6 +550,135 @@ function StorageInfraCard() {
         </div>
       )}
     </>
+  )
+}
+
+// ── Storage upgrades ──────────────────────────────────────────────────────────
+
+const EXPANSION_STATUS_META: Record<ExpansionRequest['status'], { label: string; className: string }> = {
+  opened:       { label: 'Awaiting review',  className: 'bg-amber-50 text-amber-700' },
+  invoice_sent: { label: 'Invoice sent',     className: 'bg-blue-50 text-blue-700' },
+  accepted:     { label: 'Invoice accepted', className: 'bg-blue-50 text-blue-700' },
+  approved:     { label: 'Approved',         className: 'bg-blue-50 text-blue-700' },
+  expanded:     { label: 'Balance due',      className: 'bg-purple-50 text-purple-700' },
+  completed:    { label: 'Completed',        className: 'bg-green-50 text-green-700' },
+  expired:      { label: 'Expired',          className: 'bg-gray-100 text-gray-500' },
+  refunded:     { label: 'Refunded',         className: 'bg-gray-100 text-gray-500' },
+  rejected:     { label: 'Rejected',         className: 'bg-red-50 text-red-600' },
+}
+
+function expansionCapacityLabel(r: ExpansionRequest): string {
+  const tib = 1024 ** 4
+  if (r.bytes_requested >= 1024 * tib) return `${(r.bytes_requested / (1024 * tib)).toFixed(1).replace(/\.0$/, '')} PB`
+  if (r.bytes_requested >= tib) return `${(r.bytes_requested / tib).toFixed(1).replace(/\.0$/, '')} TB`
+  return `${Math.round(r.bytes_requested / 1024 ** 3)} GB`
+}
+
+function ExpansionRequestsCard() {
+  const navigate = useNavigate()
+  const { data: requests } = useQuery({
+    queryKey: ['billing', 'expansion-requests'],
+    queryFn: listMyExpansionRequests,
+  })
+
+  if (!Array.isArray(requests) || requests.length === 0) return null
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-xl px-5 py-4">
+      <div className="flex items-center justify-between mb-1">
+        <h3 className="text-sm font-semibold text-gray-800 m-0">Capacity expansion requests</h3>
+        <button
+          onClick={() => navigate({ to: '/client/orders' as never })}
+          className="text-xs text-blue-600 hover:text-blue-700 bg-transparent border-0 p-0 cursor-pointer font-medium transition-colors"
+        >
+          View all orders
+        </button>
+      </div>
+      <p className="text-xs text-gray-400 mb-3">
+        Requests are reviewed within 7 business days (3 for custom capacity) and expanded within
+        14 business days of approval. Your deposit is refunded automatically if either deadline is missed.
+      </p>
+      <div className="divide-y divide-gray-100">
+        {requests.map((r) => {
+          const meta = EXPANSION_STATUS_META[r.status] ?? { label: r.status, className: 'bg-gray-100 text-gray-500' }
+          const deadline =
+            r.status === 'opened' ? { label: 'Review due', at: r.approval_due_at ?? r.expires_at }
+            : r.status === 'invoice_sent' ? { label: 'Accept invoice by', at: r.invoice_accept_due_at ?? null }
+            : r.status === 'accepted' ? { label: 'Approval due', at: r.approval_due_at }
+            : r.status === 'approved' ? { label: 'Expansion due', at: r.expansion_due_at }
+            : r.status === 'expanded' ? { label: 'Balance due since', at: r.payment_due_at }
+            : null
+          return (
+            <div key={r.id} className="py-3 first:pt-0 last:pb-0">
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-medium text-gray-800">
+                  {expansionCapacityLabel(r)} {r.storage_type === 'nvme' ? 'Fast' : 'Standard'}
+                  {r.is_custom ? ' (custom)' : ''}
+                </span>
+                <span className={`px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider rounded ${meta.className}`}>
+                  {meta.label}
+                </span>
+              </div>
+              <p className="text-xs text-gray-400 m-0 mt-1">
+                {r.server_name} · deposit {formatCents(r.deposit_amount_cents)} of {formatCents(r.full_price_cents)} ·
+                requested {new Date(r.created_at).toLocaleDateString()}
+                {deadline?.at && <> · {deadline.label} {new Date(deadline.at).toLocaleDateString()}</>}
+              </p>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+function StorageUIPreferences() {
+  const queryClient = useQueryClient()
+  const { data: prefs } = useQuery(preferencesQueryOptions)
+  const [error, setError] = useState<string | null>(null)
+
+  const mutation = useMutation({
+    mutationFn: updateStorageUIPreferences,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['preferences'] })
+      setError(null)
+    },
+    onError: (err) => setError(err instanceof ApiError ? err.message : 'Failed to save preference'),
+  })
+
+  const showButtons = prefs?.show_storage_buttons ?? true
+  const promptEnabled = prefs?.storage_prompt_enabled ?? true
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-xl px-5 py-4">
+      <h3 className="text-sm font-semibold text-gray-800 mb-1 flex items-center gap-1.5">
+        <MdAddCircleOutline className="text-gray-500" /> Storage upgrades
+      </h3>
+      <p className="text-xs text-gray-400 mb-4">
+        Control where the add-storage shortcuts appear. You can always add storage from this page.
+      </p>
+      <div className="flex flex-col gap-3">
+        <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={showButtons}
+            onChange={(e) => mutation.mutate({ show_storage_buttons: e.target.checked })}
+            className="cursor-pointer"
+          />
+          Show &ldquo;+&rdquo; add-storage buttons on the home page and upload dialog
+        </label>
+        <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={promptEnabled}
+            onChange={(e) => mutation.mutate({ storage_prompt_enabled: e.target.checked })}
+            className="cursor-pointer"
+          />
+          Offer more storage when an upload passes 75% of my quota or exceeds it
+        </label>
+        {error && <p className="text-xs text-red-500 m-0">{error}</p>}
+      </div>
+    </div>
   )
 }
 

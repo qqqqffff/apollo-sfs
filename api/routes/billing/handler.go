@@ -7,10 +7,17 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 
+	"apollo-sfs.com/api/db"
 	"apollo-sfs.com/api/models"
 	"apollo-sfs.com/api/routes/services"
 )
+
+// maxAllocatedPct is the allocation threshold above which direct purchases on
+// a server are blocked; the user must file a capacity expansion request
+// (50% deposit) instead.
+const maxAllocatedPct = 90
 
 // Config holds URL templates used for the PayPal wallet redirect flow.
 // ReturnURL and CancelURL are deep-link scheme URIs that the mobile app
@@ -19,6 +26,11 @@ type Config struct {
 	Currency  string
 	ReturnURL string // e.g. "apollosfs://billing/storage/complete"
 	CancelURL string // e.g. "apollosfs://billing/storage/cancel"
+	// ClientID / Environment are exposed to the web frontend via GET
+	// /billing/config so the PayPal JS SDK can be initialised without
+	// baking credentials into the frontend build.
+	ClientID    string
+	Environment string // "sandbox" | "live"
 }
 
 // Handler wires the /api/v1/billing/storage/* endpoints.
@@ -32,6 +44,39 @@ type Handler struct {
 // without PayPal credentials; all endpoints then return 503.
 func NewHandler(paypal *services.PayPalClient, q Querier, cfg Config) *Handler {
 	return &Handler{paypal: paypal, queries: q, cfg: cfg}
+}
+
+// ── GET /api/v1/billing/config ────────────────────────────────────────────────
+
+// GetConfig returns the public PayPal configuration the web frontend needs to
+// load the PayPal JS SDK (react-paypal-js). The client ID is public by design.
+func (h *Handler) GetConfig(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"paypal_client_id": h.cfg.ClientID,
+		"currency":         h.currencyOrDefault(),
+		"environment":      h.cfg.Environment,
+	})
+}
+
+// ── GET /api/v1/billing/orders ────────────────────────────────────────────────
+
+// ListMyOrders returns the calling user's combined orders (premium payments +
+// storage purchases), newest first. Backs the user-facing orders page.
+func (h *Handler) ListMyOrders(c *gin.Context) {
+	username, ok := h.currentUsername(c)
+	if !ok {
+		return
+	}
+	items, err := h.queries.ListUserOrders(c.Request.Context(), username)
+	if err != nil {
+		log.Printf("billing ListMyOrders: %v", err)
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "list failed"})
+		return
+	}
+	if items == nil {
+		items = []db.AdminOrder{}
+	}
+	c.JSON(http.StatusOK, gin.H{"items": items})
 }
 
 // ── POST /api/v1/billing/storage/order ───────────────────────────────────────
@@ -52,6 +97,7 @@ func (h *Handler) CreateWalletOrder(c *gin.Context) {
 	var req struct {
 		PlanID      string `json:"plan_id"      binding:"required"`
 		StorageType string `json:"storage_type" binding:"required,oneof=nvme hdd"`
+		ServerID    string `json:"server_id"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -59,6 +105,11 @@ func (h *Handler) CreateWalletOrder(c *gin.Context) {
 	}
 
 	pl, amountCents, ok := h.resolvePlan(c, req.PlanID, req.StorageType)
+	if !ok {
+		return
+	}
+
+	serverID, ok := h.validatePurchaseServer(c, req.ServerID, req.StorageType, pl.BytesAdded)
 	if !ok {
 		return
 	}
@@ -87,6 +138,7 @@ func (h *Handler) CreateWalletOrder(c *gin.Context) {
 		PaymentMethod: "paypal",
 		Status:        "created",
 		PayPalOrderID: result.OrderID,
+		ServerID:      serverID,
 	}
 	if err := h.queries.CreateStorageOrder(c.Request.Context(), order); err != nil {
 		log.Printf("billing CreateWalletOrder persist: %v", err)
@@ -194,6 +246,7 @@ func (h *Handler) CaptureHostedCard(c *gin.Context) {
 		PlanID      string `json:"plan_id"      binding:"required"`
 		StorageType string `json:"storage_type" binding:"required,oneof=nvme hdd"`
 		OrderID     string `json:"order_id"     binding:"required"`
+		ServerID    string `json:"server_id"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -201,6 +254,11 @@ func (h *Handler) CaptureHostedCard(c *gin.Context) {
 	}
 
 	pl, expectedCents, ok := h.resolvePlan(c, req.PlanID, req.StorageType)
+	if !ok {
+		return
+	}
+
+	serverID, ok := h.validatePurchaseServer(c, req.ServerID, req.StorageType, pl.BytesAdded)
 	if !ok {
 		return
 	}
@@ -218,7 +276,7 @@ func (h *Handler) CaptureHostedCard(c *gin.Context) {
 		return
 	}
 
-	newQuota, err := h.persistDirectCapture(c, username, req.PlanID, req.StorageType, "hosted_card", pl, cap)
+	newQuota, err := h.persistDirectCapture(c, username, req.PlanID, req.StorageType, "hosted_card", pl, serverID, cap)
 	if err != nil {
 		return
 	}
@@ -244,6 +302,7 @@ func (h *Handler) ChargeCard(c *gin.Context) {
 	var req struct {
 		PlanID      string `json:"plan_id"      binding:"required"`
 		StorageType string `json:"storage_type" binding:"required,oneof=nvme hdd"`
+		ServerID    string `json:"server_id"`
 		Card        struct {
 			Number      string `json:"number"       binding:"required"`
 			ExpiryMonth string `json:"expiry_month" binding:"required"`
@@ -258,6 +317,11 @@ func (h *Handler) ChargeCard(c *gin.Context) {
 	}
 
 	pl, amountCents, ok := h.resolvePlan(c, req.PlanID, req.StorageType)
+	if !ok {
+		return
+	}
+
+	serverID, ok := h.validatePurchaseServer(c, req.ServerID, req.StorageType, pl.BytesAdded)
 	if !ok {
 		return
 	}
@@ -277,7 +341,7 @@ func (h *Handler) ChargeCard(c *gin.Context) {
 		return
 	}
 
-	newQuota, err := h.persistDirectCapture(c, username, req.PlanID, req.StorageType, "card", pl, cap)
+	newQuota, err := h.persistDirectCapture(c, username, req.PlanID, req.StorageType, "card", pl, serverID, cap)
 	if err != nil {
 		return
 	}
@@ -303,6 +367,7 @@ func (h *Handler) ChargeApplePay(c *gin.Context) {
 	var req struct {
 		PlanID      string `json:"plan_id"      binding:"required"`
 		StorageType string `json:"storage_type" binding:"required,oneof=nvme hdd"`
+		ServerID    string `json:"server_id"`
 		Token       struct {
 			Version     string         `json:"version"     binding:"required"`
 			Data        string         `json:"data"        binding:"required"`
@@ -318,6 +383,11 @@ func (h *Handler) ChargeApplePay(c *gin.Context) {
 	}
 
 	pl, amountCents, ok := h.resolvePlan(c, req.PlanID, req.StorageType)
+	if !ok {
+		return
+	}
+
+	serverID, ok := h.validatePurchaseServer(c, req.ServerID, req.StorageType, pl.BytesAdded)
 	if !ok {
 		return
 	}
@@ -338,7 +408,7 @@ func (h *Handler) ChargeApplePay(c *gin.Context) {
 		return
 	}
 
-	newQuota, err := h.persistDirectCapture(c, username, req.PlanID, req.StorageType, "apple_pay", pl, cap)
+	newQuota, err := h.persistDirectCapture(c, username, req.PlanID, req.StorageType, "apple_pay", pl, serverID, cap)
 	if err != nil {
 		return
 	}
@@ -364,6 +434,7 @@ func (h *Handler) ChargeGooglePay(c *gin.Context) {
 	var req struct {
 		PlanID         string `json:"plan_id"         binding:"required"`
 		StorageType    string `json:"storage_type"    binding:"required,oneof=nvme hdd"`
+		ServerID       string `json:"server_id"`
 		GooglePayToken string `json:"google_pay_token" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -372,6 +443,11 @@ func (h *Handler) ChargeGooglePay(c *gin.Context) {
 	}
 
 	pl, amountCents, ok := h.resolvePlan(c, req.PlanID, req.StorageType)
+	if !ok {
+		return
+	}
+
+	serverID, ok := h.validatePurchaseServer(c, req.ServerID, req.StorageType, pl.BytesAdded)
 	if !ok {
 		return
 	}
@@ -385,7 +461,7 @@ func (h *Handler) ChargeGooglePay(c *gin.Context) {
 		return
 	}
 
-	newQuota, err := h.persistDirectCapture(c, username, req.PlanID, req.StorageType, "google_pay", pl, cap)
+	newQuota, err := h.persistDirectCapture(c, username, req.PlanID, req.StorageType, "google_pay", pl, serverID, cap)
 	if err != nil {
 		return
 	}
@@ -393,6 +469,61 @@ func (h *Handler) ChargeGooglePay(c *gin.Context) {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+// validatePurchaseServer enforces the direct-purchase rules for a selected
+// server: it must exist and be active, offer the requested storage type, be
+// under 90% allocated, and have enough unallocated capacity for the plan.
+// Violations respond 409 with requires_expansion=true so the client can steer
+// the user into the expansion request flow. serverIDStr may be empty (legacy
+// mobile clients) in which case no server check is performed.
+func (h *Handler) validatePurchaseServer(c *gin.Context, serverIDStr, storageType string, bytes int64) (*uuid.UUID, bool) {
+	if serverIDStr == "" {
+		return nil, true
+	}
+	id, err := uuid.Parse(serverIDStr)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid server_id"})
+		return nil, false
+	}
+	capa, err := h.queries.GetServerCapacity(c.Request.Context(), id)
+	if err != nil {
+		log.Printf("billing validatePurchaseServer: %v", err)
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "check server capacity"})
+		return nil, false
+	}
+	if capa == nil {
+		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "server not found"})
+		return nil, false
+	}
+	if capa.DriveType != storageType {
+		c.AbortWithStatusJSON(http.StatusConflict, gin.H{
+			"error":              "server does not offer the requested storage type",
+			"requires_expansion": true,
+		})
+		return nil, false
+	}
+	if capa.TotalCapacityBytes > 0 {
+		allocated := capa.TotalCapacityBytes - capa.AvailableBytes
+		if allocated*100 >= int64(maxAllocatedPct)*capa.TotalCapacityBytes {
+			c.AbortWithStatusJSON(http.StatusConflict, gin.H{
+				"error":              "server is at or above 90% allocated capacity — submit an expansion request instead",
+				"requires_expansion": true,
+				"available_bytes":    capa.AvailableBytes,
+			})
+			return nil, false
+		}
+	}
+	if capa.AvailableBytes < bytes {
+		c.AbortWithStatusJSON(http.StatusConflict, gin.H{
+			"error":              "server lacks capacity for this plan — submit an expansion request instead",
+			"requires_expansion": true,
+			"available_bytes":    capa.AvailableBytes,
+			"requested_bytes":    bytes,
+		})
+		return nil, false
+	}
+	return &id, true
+}
 
 // checkDriveCapacity returns an error response and non-nil error if the user's
 // drive lacks sufficient unallocated space for bytesAdded. Callers should return
@@ -427,6 +558,7 @@ func (h *Handler) persistDirectCapture(
 	c *gin.Context,
 	username, planID, storageType, paymentMethod string,
 	pl Plan,
+	serverID *uuid.UUID,
 	cap *services.CaptureOrderResult,
 ) (int64, error) {
 	if err := h.checkDriveCapacity(c, username, pl.BytesAdded); err != nil {
@@ -444,6 +576,7 @@ func (h *Handler) persistDirectCapture(
 		Status:          "captured",
 		PayPalOrderID:   cap.OrderID,
 		PayPalCaptureID: &cap.CaptureID,
+		ServerID:        serverID,
 		RawResponse:     cap.Raw,
 		CapturedAt:      &now,
 	}

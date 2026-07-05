@@ -1,0 +1,70 @@
+{{/*
+  Template name : "file_server_verify_location"
+  Trigger       : A file-server mount link with enhanced security enabled was
+                  used to upload or download from an unverified location
+                  (new source IP, or last verification older than 30 days).
+  Data fields   :
+    AppName    string
+    AppURL     string
+    Email      string — the link owner's address
+    ServerName string — display name of the storage server the link mounts
+    SourceIP   string — the source IP attempting the transfer
+    VerifyURL  string — full in-app URL carrying the one-time verification token
+*/}}
+{{define "file_server_verify_location"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <title>Verify a new file server location on {{.AppName}}</title>
+</head>
+<body>
+  <div class="email-wrapper">
+    <div class="email-card">
+
+      {{template "header" .}}
+
+      <div class="email-body">
+        <h1>Verify a new location</h1>
+        <p>
+          Your <strong>{{.AppName}}</strong> file server for
+          <strong>{{.ServerName}}</strong> was just used from a location we
+          haven't verified recently:
+        </p>
+        <div class="token-block">{{.SourceIP}}</div>
+        <p>
+          Because <strong>enhanced security mode</strong> is enabled on this
+          link, uploads and downloads from this location are blocked until you
+          confirm it was you. Verified locations stay trusted for
+          <strong>30 days</strong>.
+        </p>
+
+        <div class="btn-wrapper">
+          <a href="{{.VerifyURL}}" class="btn-primary">Yes, this was me — verify location</a>
+        </div>
+
+        <p>If the button does not work, copy and paste this link into your browser:</p>
+        <div class="token-block">{{.VerifyURL}}</div>
+
+        <hr class="email-divider" />
+
+        <p>
+          You must be signed in to <strong>{{.Email}}</strong>'s account for
+          the verification to complete — that sign-in is your second factor.
+          The link expires in 24 hours.
+        </p>
+        <p>
+          If this wasn't you, do not click the button. Consider deleting the
+          file server link from your profile page and changing your password.
+        </p>
+      </div>
+
+      {{template "footer" .}}
+
+    </div>
+  </div>
+</body>
+</html>
+{{end}}

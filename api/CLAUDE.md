@@ -32,6 +32,7 @@ api/
 │   ├── expansion/       # Storage expansion (tier upgrade) flow
 │   ├── storage/         # Multi-tier storage management
 │   ├── sfs/             # SFS public API endpoints (S3-compatible)
+│   ├── dav/             # Premium file-server mounts (WebDAV; no previews/execution)
 │   ├── services/        # Internal service layer (business logic shared across routes)
 │   ├── middleware/       # Auth, rate-limit, request logging middleware
 │   ├── files.go         # File CRUD, upload, download, encryption

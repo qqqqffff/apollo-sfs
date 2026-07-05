@@ -206,17 +206,27 @@ func scanUserWithBanRow(rows *sql.Rows) (*models.User, error) {
 // from the JWT realm roles. Called by the auth middleware on every
 // authenticated request. premium_granted_at is set the first time the flag
 // flips true and never cleared here (the payment refund path clears it).
+//
+// When the sync leaves the user non-premium, any file-server mount links they
+// own are destroyed in the same statement, so a cancelled membership loses
+// DAV upload/download access on their next authenticated request.
 func (q *Queries) UpdateLastSeenAt(ctx context.Context, username string, isAdmin, isPremium bool) error {
 	_, err := q.db.ExecContext(ctx, `
-		UPDATE users
-		SET last_seen_at       = NOW(),
-		    is_admin           = $2,
-		    is_premium         = $3,
-		    premium_granted_at = CASE
-		                            WHEN $3 AND premium_granted_at IS NULL THEN NOW()
-		                            ELSE premium_granted_at
-		                         END
-		WHERE username = $1
+		WITH updated AS (
+			UPDATE users
+			SET last_seen_at       = NOW(),
+			    is_admin           = $2,
+			    is_premium         = $3,
+			    premium_granted_at = CASE
+			                            WHEN $3 AND premium_granted_at IS NULL THEN NOW()
+			                            ELSE premium_granted_at
+			                         END
+			WHERE username = $1
+			RETURNING username
+		)
+		DELETE FROM file_server_links fsl
+		USING updated u
+		WHERE fsl.username = u.username AND NOT $3
 	`, username, isAdmin, isPremium)
 	if err != nil {
 		return fmt.Errorf("UpdateLastSeenAt %q: %w", username, err)
@@ -226,16 +236,23 @@ func (q *Queries) UpdateLastSeenAt(ctx context.Context, username string, isAdmin
 
 // SetUserPremium toggles the is_premium flag. Used by payments/ApplyCapture
 // and the refund/dispute handler. Sets premium_granted_at when granting,
-// leaves the historical timestamp alone when revoking.
+// leaves the historical timestamp alone when revoking. Revoking also
+// destroys the user's file-server mount links in the same statement.
 func (q *Queries) SetUserPremium(ctx context.Context, username string, isPremium bool) error {
 	_, err := q.db.ExecContext(ctx, `
-		UPDATE users
-		SET is_premium         = $2,
-		    premium_granted_at = CASE
-		                            WHEN $2 AND premium_granted_at IS NULL THEN NOW()
-		                            ELSE premium_granted_at
-		                         END
-		WHERE username = $1
+		WITH updated AS (
+			UPDATE users
+			SET is_premium         = $2,
+			    premium_granted_at = CASE
+			                            WHEN $2 AND premium_granted_at IS NULL THEN NOW()
+			                            ELSE premium_granted_at
+			                         END
+			WHERE username = $1
+			RETURNING username
+		)
+		DELETE FROM file_server_links fsl
+		USING updated u
+		WHERE fsl.username = u.username AND NOT $2
 	`, username, isPremium)
 	if err != nil {
 		return fmt.Errorf("SetUserPremium %q: %w", username, err)

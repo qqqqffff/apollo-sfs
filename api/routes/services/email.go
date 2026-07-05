@@ -416,6 +416,31 @@ func (s *EmailService) SendPasswordReset(
 	)
 }
 
+// SendFileServerLocationVerification enqueues the enhanced-security 2FA email
+// sent when a file-server mount is used from a new (or expired) location.
+// verifyURL is the full in-app URL carrying the one-time verification token;
+// opening it requires being signed in, which is the second factor.
+func (s *EmailService) SendFileServerLocationVerification(
+	ctx context.Context,
+	toEmail string,
+	serverName string,
+	sourceIP string,
+	verifyURL string,
+) error {
+	return s.enqueue(ctx, toEmail,
+		fmt.Sprintf("Verify a new location for your %s file server", s.appName),
+		"file_server_verify_location",
+		map[string]any{
+			"AppName":    s.appName,
+			"AppURL":     s.appURL,
+			"Email":      toEmail,
+			"ServerName": serverName,
+			"SourceIP":   sourceIP,
+			"VerifyURL":  verifyURL,
+		},
+	)
+}
+
 // ── Background worker ─────────────────────────────────────────────────────────
 
 // Start launches the background email worker. It polls the email_queue table

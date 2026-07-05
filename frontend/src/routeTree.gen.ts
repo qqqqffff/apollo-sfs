@@ -19,6 +19,7 @@ import { Route as InterestRouteImport } from './routes/interest'
 import { Route as AboutRouteImport } from './routes/about'
 import { Route as AuthRouteImport } from './routes/_auth'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as VerifyLocationTokenRouteImport } from './routes/verify-location.$token'
 import { Route as AuthPremiumRouteImport } from './routes/_auth.premium'
 import { Route as AuthClientIndexRouteImport } from './routes/_auth.client/index'
 import { Route as AuthShareTokenRouteImport } from './routes/_auth.share.$token'
@@ -86,6 +87,11 @@ const AuthRoute = AuthRouteImport.update({
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const VerifyLocationTokenRoute = VerifyLocationTokenRouteImport.update({
+  id: '/verify-location/$token',
+  path: '/verify-location/$token',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AuthPremiumRoute = AuthPremiumRouteImport.update({
@@ -195,6 +201,7 @@ export interface FileRoutesByFullPath {
   '/suspended': typeof SuspendedRoute
   '/terms': typeof TermsRoute
   '/premium': typeof AuthPremiumRoute
+  '/verify-location/$token': typeof VerifyLocationTokenRoute
   '/admin/alarm': typeof AuthAdminAlarmRoute
   '/admin/banned-ips': typeof AuthAdminBannedIpsRoute
   '/admin/bans': typeof AuthAdminBansRoute
@@ -225,6 +232,7 @@ export interface FileRoutesByTo {
   '/suspended': typeof SuspendedRoute
   '/terms': typeof TermsRoute
   '/premium': typeof AuthPremiumRoute
+  '/verify-location/$token': typeof VerifyLocationTokenRoute
   '/admin/alarm': typeof AuthAdminAlarmRoute
   '/admin/banned-ips': typeof AuthAdminBannedIpsRoute
   '/admin/bans': typeof AuthAdminBansRoute
@@ -257,6 +265,7 @@ export interface FileRoutesById {
   '/suspended': typeof SuspendedRoute
   '/terms': typeof TermsRoute
   '/_auth/premium': typeof AuthPremiumRoute
+  '/verify-location/$token': typeof VerifyLocationTokenRoute
   '/_auth/admin/alarm': typeof AuthAdminAlarmRoute
   '/_auth/admin/banned-ips': typeof AuthAdminBannedIpsRoute
   '/_auth/admin/bans': typeof AuthAdminBansRoute
@@ -289,6 +298,7 @@ export interface FileRouteTypes {
     | '/suspended'
     | '/terms'
     | '/premium'
+    | '/verify-location/$token'
     | '/admin/alarm'
     | '/admin/banned-ips'
     | '/admin/bans'
@@ -319,6 +329,7 @@ export interface FileRouteTypes {
     | '/suspended'
     | '/terms'
     | '/premium'
+    | '/verify-location/$token'
     | '/admin/alarm'
     | '/admin/banned-ips'
     | '/admin/bans'
@@ -350,6 +361,7 @@ export interface FileRouteTypes {
     | '/suspended'
     | '/terms'
     | '/_auth/premium'
+    | '/verify-location/$token'
     | '/_auth/admin/alarm'
     | '/_auth/admin/banned-ips'
     | '/_auth/admin/bans'
@@ -381,6 +393,7 @@ export interface RootRouteChildren {
   RegisterRoute: typeof RegisterRoute
   SuspendedRoute: typeof SuspendedRoute
   TermsRoute: typeof TermsRoute
+  VerifyLocationTokenRoute: typeof VerifyLocationTokenRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -453,6 +466,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/verify-location/$token': {
+      id: '/verify-location/$token'
+      path: '/verify-location/$token'
+      fullPath: '/verify-location/$token'
+      preLoaderRoute: typeof VerifyLocationTokenRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/_auth/premium': {
@@ -648,6 +668,7 @@ const rootRouteChildren: RootRouteChildren = {
   RegisterRoute: RegisterRoute,
   SuspendedRoute: SuspendedRoute,
   TermsRoute: TermsRoute,
+  VerifyLocationTokenRoute: VerifyLocationTokenRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

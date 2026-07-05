@@ -137,3 +137,4 @@ Docker logging uses the JSON file driver with rotation (10 MB max, 3 files). Ngi
 - `docs/mobile_app_setup.md` — React Native build and release
 - `docs/paypal_setup.md` — PayPal payment integration
 - `docs/sfs_api.md` — SFS public API reference
+- `docs/file_server_links.md` — premium WebDAV mount links (file server feature)

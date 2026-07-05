@@ -60,6 +60,11 @@ type UploadInput struct {
 	// for single-blob AES-256-GCM and for MIME detection. Video files use chunked
 	// AES-256-GCM (1 MiB chunks with independent nonces) for range-based streaming.
 	Reader io.Reader
+	// RequireDriveID, when set, pins the upload to this exact drive with no
+	// fallback: the upload fails with ErrDriveUnavailable if the drive is not
+	// one of the user's active allocations or lacks room. Used by file-server
+	// (WebDAV) mounts, which are scoped to a single storage server.
+	RequireDriveID *uuid.UUID
 }
 
 // ── Service ───────────────────────────────────────────────────────────────────
@@ -393,18 +398,39 @@ func (s *FileService) Upload(ctx context.Context, in UploadInput) (*models.File,
 		}
 	}
 
-	// 6. Resolve the destination drive: the destination folder's pin if valid,
-	// otherwise the user's primary, or the least-full owned drive when the
+	// 6. Resolve the destination drive: a hard pin when the caller requires a
+	// specific drive (file-server mounts are scoped to one server and must
+	// never spill onto another), otherwise the destination folder's pin if
+	// valid, then the user's primary, or the least-full owned drive when the
 	// primary can't fit the file.
-	var folderDriveID *uuid.UUID
-	if in.FolderID != nil {
-		if folder, err := s.queries.GetFolderByID(ctx, *in.FolderID); err == nil {
-			folderDriveID = folder.DriveID
+	var storage *MinIOService
+	var driveID uuid.UUID
+	if in.RequireDriveID != nil {
+		drives, err := s.queries.GetUserDrives(ctx, in.Username, in.UserID.String())
+		if err != nil {
+			return nil, fmt.Errorf("upload: %w", err)
 		}
-	}
-	storage, driveID, err := s.resolveUploadDrive(ctx, in.Username, in.UserID, fileSize, folderDriveID)
-	if err != nil {
-		return nil, fmt.Errorf("upload: %w", err)
+		id, ok := pinnedDriveIfValid(drives, in.RequireDriveID, fileSize)
+		if !ok {
+			return nil, ErrDriveUnavailable
+		}
+		storage, err = s.storageForDrive(ctx, id)
+		if err != nil {
+			return nil, fmt.Errorf("upload: %w", err)
+		}
+		driveID = id
+	} else {
+		var folderDriveID *uuid.UUID
+		if in.FolderID != nil {
+			if folder, err := s.queries.GetFolderByID(ctx, *in.FolderID); err == nil {
+				folderDriveID = folder.DriveID
+			}
+		}
+		var err error
+		storage, driveID, err = s.resolveUploadDrive(ctx, in.Username, in.UserID, fileSize, folderDriveID)
+		if err != nil {
+			return nil, fmt.Errorf("upload: %w", err)
+		}
 	}
 
 	// 7. Stream ciphertext to MinIO. Object key: {userID}/{fileID}.
@@ -1404,5 +1430,6 @@ func (s *FileService) FinalizeChunkedUpload(ctx context.Context, sess *UploadSes
 // ── Sentinel errors ───────────────────────────────────────────────────────────
 
 var ErrQuotaExceeded = errors.New("storage quota exceeded")
+var ErrDriveUnavailable = errors.New("the required drive is unavailable or has no room")
 var ErrNotFound = errors.New("file not found")
 var ErrDuplicateName = errors.New("a file with that name already exists in this folder")

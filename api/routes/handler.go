@@ -92,6 +92,7 @@ type Handler struct {
 	presign         *services.PresignService
 	apiKeys         *services.APIKeyService
 	shares          *services.ShareService
+	fileServerLinks *services.FileServerLinkService
 	turnstileSecret string
 	// paypal is used for the interest-form deposit (nil is tolerated and
 	// causes the deposit endpoints to return 503).
@@ -139,6 +140,13 @@ func SetAPIKeyService(h *Handler, svc *services.APIKeyService) {
 // causes the share endpoints to return 503 (configured, not crash).
 func SetShareService(h *Handler, svc *services.ShareService) {
 	h.shares = svc
+}
+
+// SetFileServerLinkService installs the file-server mount link service on an
+// existing Handler. Wired from main once the service is constructed; nil is
+// tolerated and causes the link endpoints to return 503 (configured, not crash).
+func SetFileServerLinkService(h *Handler, svc *services.FileServerLinkService) {
+	h.fileServerLinks = svc
 }
 
 // SetMathGameService installs the math game score service on an existing

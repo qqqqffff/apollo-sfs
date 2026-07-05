@@ -22,6 +22,7 @@ import (
 	"apollo-sfs.com/api/routes/auth"
 	"apollo-sfs.com/api/routes/middleware"
 	"apollo-sfs.com/api/routes/billing"
+	"apollo-sfs.com/api/routes/dav"
 	"apollo-sfs.com/api/routes/expansion"
 	"apollo-sfs.com/api/routes/orders"
 	"apollo-sfs.com/api/routes/payments"
@@ -266,6 +267,9 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		StandardEndpoint: cfg.MinIOStandardEndpoint,
 	})
 	sfsHandler := sfs.NewHandler(queries, fileSvc, presignSvc, apiKeySvc)
+	fileServerLinkSvc := services.NewFileServerLinkService(queries, authSvc, emailSvc, cfg.AppBaseURL)
+	routes.SetFileServerLinkService(h, fileServerLinkSvc)
+	davHandler := dav.NewHandler(fileServerLinkSvc, fileSvc, queries)
 	inboundEmailHandler := admin.NewInboundEmailHandler(inboundEmailSvc, cfg.SendgridWebhookSecret)
 
 	paypalClient := services.NewPayPalClient(services.PayPalConfig{
@@ -356,6 +360,12 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		sfsGroup.POST("/buckets/:bucket_id/list", sfsHandler.List)
 		sfsGroup.POST("/buckets/:bucket_id/move", sfsHandler.Move)
 	}
+
+	// ── File-server mounts (WebDAV, premium) ─────────────────────────────────
+	// Lives at the router root (not /api/v1) so mount URLs stay short:
+	// https://<host>/dav/<token>. Authenticated per request via HTTP Basic
+	// against Keycloak — never the session cookie. Upload/download only.
+	davHandler.Register(r, mw.APIRateLimit())
 
 	// ── Auth — rate-limited, no JWT required ─────────────────────────────────
 	// Logout is the exception: it requires a valid session to invalidate.
@@ -482,6 +492,15 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		protected.GET("/me/api-keys", h.ListAPIKeys)
 		protected.POST("/me/api-keys", h.CreateAPIKey)
 		protected.DELETE("/me/api-keys/:id", h.RevokeAPIKey)
+
+		// File-server mount links (premium WebDAV feature). Premium users
+		// only; non-premium callers receive 402 from the handler. The DAV
+		// endpoint itself is registered at the router root (/dav/:token).
+		protected.GET("/me/file-server-links", h.ListFileServerLinks)
+		protected.POST("/me/file-server-links", h.CreateFileServerLink)
+		protected.PATCH("/me/file-server-links/:id", h.UpdateFileServerLink)
+		protected.DELETE("/me/file-server-links/:id", h.DeleteFileServerLink)
+		protected.POST("/me/file-server-links/verify-location", h.VerifyFileServerLocation)
 
 		// Premium upgrade — create + capture a one-time PayPal order.
 		protected.POST("/payments/orders", paymentsHandler.CreateOrder)

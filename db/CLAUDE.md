@@ -48,6 +48,7 @@ Files in `db/` are numbered and applied in order during initial container creati
 | `32_node_disks.sql` | `node_disks`, `node_disk_temp_snapshots` | Physical disk telemetry |
 | `33_shares.sql` | `shares` | User-to-user file/folder shares (email-bound link tokens) |
 | `34_expansion_invoices.sql` | `expansion_invoices` | Invoices for custom capacity expansion requests |
+| `35_file_server_links.sql` | `file_server_links`, `file_server_link_locations` | Premium WebDAV mount links + enhanced-security location ledger |
 
 ## Migrations
 

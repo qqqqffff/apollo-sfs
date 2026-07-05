@@ -2,16 +2,17 @@
 // deliberately restricted WebDAV server at /dav/:token, mountable as a
 // network drive on Windows, macOS, Linux, iOS and Android.
 //
-// Restrictions (by design — the product is an upload/download drop box):
-//   - Upload (PUT, MKCOL) and download (GET, HEAD, PROPFIND) only.
-//     DELETE, MOVE, COPY and PROPPATCH are refused with 403.
+// The mount supports full file management — upload (PUT, MKCOL), download
+// (GET, HEAD, PROPFIND), DELETE, MOVE, COPY and PROPPATCH — under two
+// invariants that are never relaxed:
 //   - Nothing is ever executed server-side: file bytes are stored encrypted
 //     in MinIO and only ever streamed back.
 //   - No previews: every download is served as application/octet-stream with
 //     Content-Disposition: attachment and X-Content-Type-Options: nosniff.
-//   - The tree is scoped to the link's storage server: only files stored on
-//     that server's drives are visible, and uploads are pinned to the owner's
-//     drive on that server.
+//
+// The tree is scoped to the link's storage server: only files stored on that
+// server's drives are visible or manageable, and uploads/copies are pinned
+// to the owner's drive on that server.
 //
 // Every request must carry HTTP Basic credentials, which are verified against
 // Keycloak (the user's normal login credentials). The link token alone grants
@@ -61,9 +62,10 @@ func (h *Handler) Register(r gin.IRouter, mw ...gin.HandlerFunc) {
 	group := r.Group("/dav", mw...)
 	for _, method := range []string{
 		http.MethodOptions, http.MethodGet, http.MethodHead, http.MethodPut,
-		"PROPFIND", "MKCOL", "LOCK", "UNLOCK",
-		// Refused verbs still need routes so they get a clean 403 instead of 404.
-		http.MethodDelete, "MOVE", "COPY", "PROPPATCH", http.MethodPost,
+		http.MethodDelete, "PROPFIND", "PROPPATCH", "MKCOL", "MOVE", "COPY",
+		"LOCK", "UNLOCK",
+		// POST still needs a route so it gets a clean 403 instead of 404.
+		http.MethodPost,
 	} {
 		group.Handle(method, "/:token", h.dispatch)
 		group.Handle(method, "/:token/*path", h.dispatch)
@@ -77,7 +79,7 @@ func (h *Handler) dispatch(c *gin.Context) {
 		// Answer OPTIONS before auth: Windows probes it pre-credentials.
 		h.options(c)
 		return
-	case http.MethodDelete, "MOVE", "COPY", "PROPPATCH", http.MethodPost:
+	case http.MethodPost:
 		h.refuse(c)
 		return
 	}
@@ -92,8 +94,16 @@ func (h *Handler) dispatch(c *gin.Context) {
 		h.download(c, link, user)
 	case http.MethodPut:
 		h.upload(c, link, user)
+	case http.MethodDelete:
+		h.remove(c, link, user)
+	case "MOVE":
+		h.move(c, link, user)
+	case "COPY":
+		h.copyResource(c, link, user)
 	case "PROPFIND":
 		h.propfind(c, link)
+	case "PROPPATCH":
+		h.proppatch(c, link)
 	case "MKCOL":
 		h.mkcol(c, link)
 	case "LOCK":
@@ -105,16 +115,19 @@ func (h *Handler) dispatch(c *gin.Context) {
 	}
 }
 
+// allowedMethods is advertised on OPTIONS and refusals.
+const allowedMethods = "OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, PROPPATCH, MKCOL, MOVE, COPY, LOCK, UNLOCK"
+
 func (h *Handler) options(c *gin.Context) {
 	c.Header("DAV", "1, 2")
 	c.Header("MS-Author-Via", "DAV")
-	c.Header("Allow", "OPTIONS, GET, HEAD, PUT, PROPFIND, MKCOL, LOCK, UNLOCK")
+	c.Header("Allow", allowedMethods)
 	c.Status(http.StatusOK)
 }
 
 func (h *Handler) refuse(c *gin.Context) {
-	c.Header("Allow", "OPTIONS, GET, HEAD, PUT, PROPFIND, MKCOL, LOCK, UNLOCK")
-	c.String(http.StatusForbidden, "this file server is upload and download only")
+	c.Header("Allow", allowedMethods)
+	c.String(http.StatusForbidden, "method not supported on this file server")
 	c.Abort()
 }
 
@@ -445,16 +458,37 @@ func (h *Handler) upload(c *gin.Context, link *models.FileServerLink, user *mode
 		c.String(http.StatusConflict, "cannot create destination folder")
 		return
 	}
-	// Overwrites are refused: the mount is upload-only, and allowing PUT to
-	// replace an existing object would be deletion by another name.
-	if existing, err := q.FindFileByFolderAndName(c.Request.Context(), link.UserID, folderID, leaf); err == nil && existing != nil {
-		_ = tx.Rollback()
-		c.String(http.StatusForbidden, "a file with this name already exists — overwriting is not permitted")
-		return
+	// PUT replaces an existing file (standard WebDAV semantics), but only when
+	// the existing file is manageable through this mount — i.e. stored on the
+	// link's server. Same-named files on other servers stay untouchable.
+	var existing *models.File
+	if found, err := q.FindFileByFolderAndName(c.Request.Context(), link.UserID, folderID, leaf); err == nil && found != nil {
+		onServer := false
+		if found.DriveID != nil {
+			onServer, err = h.pool.DriveBelongsToServer(c.Request.Context(), *found.DriveID, link.ServerID)
+			if err != nil {
+				_ = tx.Rollback()
+				c.String(http.StatusInternalServerError, "server error")
+				return
+			}
+		}
+		if !onServer {
+			_ = tx.Rollback()
+			c.String(http.StatusForbidden, "a file with this name exists on a different storage server")
+			return
+		}
+		existing = found
 	}
 	if err := tx.Commit(); err != nil {
 		c.String(http.StatusInternalServerError, "server error")
 		return
+	}
+	if existing != nil {
+		if err := h.files.Delete(c.Request.Context(), existing.ID, link.UserID, link.Username); err != nil {
+			log.Printf("dav: put overwrite delete %s: %v", existing.ID, err)
+			c.String(http.StatusInternalServerError, "upload failed")
+			return
+		}
 	}
 
 	driveID := link.DriveID
@@ -475,7 +509,8 @@ func (h *Handler) upload(c *gin.Context, link *models.FileServerLink, user *mode
 		case errors.Is(err, services.ErrDriveUnavailable):
 			c.String(http.StatusInsufficientStorage, "the storage server has no room for this file")
 		case errors.Is(err, services.ErrDuplicateName):
-			c.String(http.StatusForbidden, "a file with this name already exists — overwriting is not permitted")
+			// Raced with a concurrent upload of the same name.
+			c.String(http.StatusConflict, "a file with this name was just created — retry to overwrite")
 		default:
 			log.Printf("dav: upload %q: %v", leaf, err)
 			c.String(http.StatusInternalServerError, "upload failed")
@@ -485,7 +520,11 @@ func (h *Handler) upload(c *gin.Context, link *models.FileServerLink, user *mode
 	h.links.Touch(c.Request.Context(), link.ID)
 	h.audit(c, link, "dav.upload", strings.Join(segments, "/"))
 	_ = file
-	c.Status(http.StatusCreated)
+	if existing != nil {
+		c.Status(http.StatusNoContent) // replaced
+	} else {
+		c.Status(http.StatusCreated)
+	}
 }
 
 // ── MKCOL ─────────────────────────────────────────────────────────────────────

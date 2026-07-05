@@ -117,8 +117,8 @@ function MountGuide({ mountUrl, defaultOpen }: { mountUrl: string | null; defaul
             </div>
           )}
           <p className="text-[11px] text-gray-400 m-0">
-            The file server is upload &amp; download only — files cannot be deleted, moved,
-            previewed or executed through the mount.
+            You can upload, download, rename, move, copy and delete files through the
+            mount — but files are never previewed or executed on the server.
           </p>
         </div>
       )}

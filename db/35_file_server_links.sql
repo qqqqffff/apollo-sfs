@@ -1,7 +1,7 @@
 -- Premium file-server mount links (WebDAV).
 -- A link lets its owner mount one storage server as a network drive via
--- https://<app>/dav/<token>. The mount is upload/download only: the DAV
--- handler rejects DELETE/MOVE/COPY, serves every file as an opaque
+-- https://<app>/dav/<token> with full file management (upload, download,
+-- delete, move, copy). The DAV handler serves every file as an opaque
 -- attachment (no previews), and nothing is ever executed server-side.
 --
 -- Exactly one link may exist per (user, server) — enforced by the unique

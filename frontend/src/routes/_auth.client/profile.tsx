@@ -859,7 +859,7 @@ function FileServerLinksCard() {
         </button>
       </div>
       <p className="text-xs text-gray-400 mt-0 mb-3">
-        Mount a storage server as a network drive. Upload &amp; download only — one link per server.
+        Mount a storage server as a network drive and manage your files from it — one link per server.
       </p>
 
       {linksLoading && <p className="text-xs text-gray-400 m-0">Loading…</p>}

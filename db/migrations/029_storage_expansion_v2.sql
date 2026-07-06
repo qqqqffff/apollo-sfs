@@ -40,12 +40,12 @@ UPDATE server_expansion_requests
 SET approval_due_at = expires_at
 WHERE approval_due_at IS NULL;
 
--- Allow the new 'approved' status.
-ALTER TABLE server_expansion_requests
-    DROP CONSTRAINT IF EXISTS server_expansion_requests_status_check;
-ALTER TABLE server_expansion_requests
-    ADD CONSTRAINT server_expansion_requests_status_check
-    CHECK (status IN ('opened','approved','expanded','completed','expired','refunded'));
+-- The 'approved' status check is added by migration 030 (which lands
+-- immediately after this one and folds in additional statuses too), so it's
+-- not repeated here — re-adding a narrower CHECK in this file would fail
+-- ADD CONSTRAINT validation on re-run once rows exist in 030's later statuses
+-- ('invoice_sent'/'accepted'/'rejected'), breaking apply-migrations.sh's
+-- idempotency guarantee.
 
 CREATE INDEX IF NOT EXISTS ser_approval_due_idx
     ON server_expansion_requests (approval_due_at)

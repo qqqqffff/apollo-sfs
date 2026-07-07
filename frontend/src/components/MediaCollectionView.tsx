@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   MdAdd,
@@ -6,6 +6,7 @@ import {
   MdCheck,
   MdClose,
   MdCreateNewFolder,
+  MdInfoOutline,
   MdMovie,
   MdInsertDriveFile,
   MdPhotoLibrary,
@@ -14,7 +15,7 @@ import {
   MdVisibilityOff,
 } from 'react-icons/md'
 import { getMediaFolder, createFolder } from '../api/folders'
-import { hideFile, unhideFile, previewUrl } from '../api/files'
+import { hideFile, unhideFile, previewUrl, streamUrl } from '../api/files'
 import { copyToCollection, removeFromCollection } from '../api/collections'
 import { meQueryOptions } from '../api/me'
 import { listMyServers, resolveDrive } from '../api/storage'
@@ -64,6 +65,7 @@ export function MediaCollectionView({ folderId, folder, readOnly, onBack, onOpen
   const [hidden, setHidden] = useState<HiddenMode>('hide')
   const [creating, setCreating] = useState(false)
   const [newName, setNewName] = useState('')
+  const [infoFile, setInfoFile] = useState<File | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
   const [pendingFiles, setPendingFiles] = useState<globalThis.File[]>([])
   const { progress, startUpload, dismiss } = useFileUpload()
@@ -232,6 +234,7 @@ export function MediaCollectionView({ folderId, folder, readOnly, onBack, onOpen
               subcollections={subfolders}
               isSubcollection={isSubcollection}
               onOpen={() => onOpenFile(f.id)}
+              onShowInfo={() => setInfoFile(f)}
               onToggleHidden={() => hideMutation.mutate({ id: f.id, hide: !f.hidden })}
               onCopy={(collectionId) => copyMutation.mutate({ collectionId, fileId: f.id })}
               onRemove={() => removeMutation.mutate(f.id)}
@@ -273,6 +276,8 @@ export function MediaCollectionView({ folderId, folder, readOnly, onBack, onOpen
       )}
 
       <UploadToast progress={progress} onDismiss={dismiss} />
+
+      {infoFile && <MediaInfoModal file={infoFile} onClose={() => setInfoFile(null)} />}
     </div>
   )
 }
@@ -296,6 +301,7 @@ function MediaTile({
   subcollections,
   isSubcollection,
   onOpen,
+  onShowInfo,
   onToggleHidden,
   onCopy,
   onRemove,
@@ -305,6 +311,7 @@ function MediaTile({
   subcollections: Folder[]
   isSubcollection: boolean
   onOpen: () => void
+  onShowInfo: () => void
   onToggleHidden: () => void
   onCopy: (collectionId: string) => void
   onRemove: () => void
@@ -342,26 +349,35 @@ function MediaTile({
         <span className="absolute top-1 left-1 bg-black/60 text-white text-[10px] px-1.5 py-0.5 rounded">Hidden</span>
       )}
 
-      {!readOnly && (
-        <div className="absolute top-1 right-1 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-          <button
-            onClick={onToggleHidden}
-            title={file.hidden ? 'Unhide' : 'Hide'}
-            className="bg-white/90 hover:bg-white rounded p-1 cursor-pointer border-0 text-gray-600 shadow-sm"
-          >
-            {file.hidden ? <MdVisibility className="text-sm" /> : <MdVisibilityOff className="text-sm" />}
-          </button>
-          {subcollections.length > 0 && (
+      <div className="absolute top-1 right-1 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+        <button
+          onClick={onShowInfo}
+          title="File info"
+          className="bg-white/90 hover:bg-white rounded p-1 cursor-pointer border-0 text-gray-600 shadow-sm"
+        >
+          <MdInfoOutline className="text-sm" />
+        </button>
+        {!readOnly && (
+          <>
             <button
-              onClick={() => setMenuOpen((v) => !v)}
-              title="Add to subcollection"
+              onClick={onToggleHidden}
+              title={file.hidden ? 'Unhide' : 'Hide'}
               className="bg-white/90 hover:bg-white rounded p-1 cursor-pointer border-0 text-gray-600 shadow-sm"
             >
-              <MdAdd className="text-sm" />
+              {file.hidden ? <MdVisibility className="text-sm" /> : <MdVisibilityOff className="text-sm" />}
             </button>
-          )}
-        </div>
-      )}
+            {subcollections.length > 0 && (
+              <button
+                onClick={() => setMenuOpen((v) => !v)}
+                title="Add to subcollection"
+                className="bg-white/90 hover:bg-white rounded p-1 cursor-pointer border-0 text-gray-600 shadow-sm"
+              >
+                <MdAdd className="text-sm" />
+              </button>
+            )}
+          </>
+        )}
+      </div>
 
       {menuOpen && subcollections.length > 0 && (
         <div className="absolute top-9 right-1 z-10 bg-white rounded-lg shadow-lg border border-gray-200 py-1 min-w-40">
@@ -385,6 +401,92 @@ function MediaTile({
           )}
         </div>
       )}
+    </div>
+  )
+}
+
+// ── Metadata viewer ───────────────────────────────────────────────────────────
+
+function formatBytes(bytes: number): string {
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(2)} GB`
+  if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MB`
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${bytes} B`
+}
+
+// MediaInfoModal shows a media file's metadata: capture date (EXIF/container,
+// as extracted server-side into taken_at), upload/modified dates, type, size,
+// visibility, and — measured from the loaded preview — pixel dimensions.
+function MediaInfoModal({ file, onClose }: { file: File; onClose: () => void }) {
+  const [dimensions, setDimensions] = useState<{ w: number; h: number } | null>(null)
+  const isImage = file.mime_type.startsWith('image/')
+  const isVideo = file.mime_type.startsWith('video/')
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    document.addEventListener('keydown', handler)
+    return () => document.removeEventListener('keydown', handler)
+  }, [onClose])
+
+  return (
+    <div
+      onClick={onClose}
+      className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4"
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="bg-white rounded-xl shadow-xl w-96 max-w-[92vw] max-h-[90vh] overflow-y-auto"
+      >
+        <div className="flex items-center justify-between px-5 py-3.5 border-b border-gray-100">
+          <h3 className="text-sm font-semibold text-gray-900 m-0 truncate pr-3" title={file.name}>{file.name}</h3>
+          <button
+            onClick={onClose}
+            aria-label="Close info"
+            className="text-gray-400 hover:text-gray-600 cursor-pointer bg-transparent border-0 p-0 shrink-0"
+          >
+            <MdClose className="text-lg" />
+          </button>
+        </div>
+
+        {isImage && (
+          <img
+            src={previewUrl(file.id)}
+            alt={file.name}
+            onLoad={(e) => setDimensions({ w: e.currentTarget.naturalWidth, h: e.currentTarget.naturalHeight })}
+            className="w-full max-h-56 object-contain bg-gray-50"
+          />
+        )}
+        {isVideo && (
+          <video
+            src={streamUrl(file.id)}
+            onLoadedMetadata={(e) => setDimensions({ w: e.currentTarget.videoWidth, h: e.currentTarget.videoHeight })}
+            muted
+            preload="metadata"
+            className="w-full max-h-56 object-contain bg-gray-50"
+          />
+        )}
+
+        <dl className="m-0 px-5 py-2 divide-y divide-gray-50">
+          <InfoRow label="Date taken" value={file.taken_at ? new Date(file.taken_at).toLocaleString() : 'Not available'} muted={!file.taken_at} />
+          <InfoRow label="Uploaded" value={new Date(file.created_at).toLocaleString()} />
+          <InfoRow label="Modified" value={new Date(file.updated_at).toLocaleString()} />
+          <InfoRow label="Type" value={file.mime_type} />
+          <InfoRow label="Size" value={formatBytes(file.size_bytes)} />
+          {(isImage || isVideo) && (
+            <InfoRow label="Dimensions" value={dimensions ? `${dimensions.w} × ${dimensions.h} px` : 'Measuring…'} muted={!dimensions} />
+          )}
+          <InfoRow label="Visibility" value={file.hidden ? 'Hidden from collection' : 'Visible'} />
+        </dl>
+      </div>
+    </div>
+  )
+}
+
+function InfoRow({ label, value, muted }: { label: string; value: string; muted?: boolean }) {
+  return (
+    <div className="flex items-center justify-between gap-4 py-2.5">
+      <dt className="text-xs text-gray-500 m-0 shrink-0">{label}</dt>
+      <dd className={`text-xs m-0 text-right break-all ${muted ? 'text-gray-400' : 'text-gray-800 font-medium'}`}>{value}</dd>
     </div>
   )
 }

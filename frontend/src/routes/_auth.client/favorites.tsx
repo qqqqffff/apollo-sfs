@@ -8,12 +8,21 @@ import { useState } from 'react'
 import type { File as ApiFile } from '../../types/api'
 import { useNotification } from '../../context/NotificationContext'
 import { useImpersonation } from '../../context/ImpersonationContext'
+import { FilesLayout } from '../../components/FilesSidebar'
 
 export const Route = createFileRoute('/_auth/client/favorites')({
   component: RouteComponent,
 })
 
 function RouteComponent() {
+  return (
+    <FilesLayout>
+      <FavoritesView />
+    </FilesLayout>
+  )
+}
+
+function FavoritesView() {
   const queryClient = useQueryClient()
   const { notify } = useNotification()
   const { impersonatedUser } = useImpersonation()

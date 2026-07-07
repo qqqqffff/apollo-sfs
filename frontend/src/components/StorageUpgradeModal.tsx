@@ -58,6 +58,11 @@ function formatSize(bytes: number): string {
 interface ServerWithPing extends PublicServer {
   ping_ms: number | null
   allocated_pct: number
+  // One logical server can expose both tiers, yielding two rows with the SAME
+  // server id (one per drive_type). Selecting by bare id always resolves to
+  // whichever row sorts first (hdd), making every fast plan look unavailable
+  // even when the fast tier has room — so rows are keyed by id + tier instead.
+  row_key: string
 }
 
 interface Props {
@@ -91,6 +96,7 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
           allocated_pct: s.total_capacity_bytes > 0
             ? ((s.total_capacity_bytes - s.available_bytes) / s.total_capacity_bytes) * 100
             : 0,
+          row_key: `${s.id}:${s.drive_type}`,
         })),
       )
     },
@@ -100,7 +106,7 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
   const [storageType, setStorageType] = useState<StorageType>('nvme')
   const [selectedPlanId, setSelectedPlanId] = useState<string | null>(null)
   const [customStopIdx, setCustomStopIdx] = useState(0)
-  const [selectedServerId, setSelectedServerId] = useState<string | null>(null)
+  const [selectedServerKey, setSelectedServerKey] = useState<string | null>(null)
   const [serverListOpen, setServerListOpen] = useState(false)
   const [phase, setPhase] = useState<Phase>('select')
   const [busy, setBusy] = useState(false)
@@ -109,18 +115,18 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
   const [customResult, setCustomResult] = useState<{ reviewDueAt: string; estimateCents: number } | null>(null)
   const [newQuota, setNewQuota] = useState<number | null>(null)
 
-  // Default server selection once servers load, and re-select a server
+  // Default server selection once servers load, and re-select a server row
   // matching the active storage type tab whenever it changes. Without this,
-  // the previously selected server (e.g. the standard-tier one, if it sorts
+  // the previously selected row (e.g. the standard-tier one, if it sorts
   // first alphabetically) stays selected after switching to "Fast", making
   // every plan look unavailable even when the fast tier has room.
   useEffect(() => {
     if (!servers || servers.length === 0) return
-    setSelectedServerId((prev) => {
-      const prevServer = prev ? servers.find((s) => s.id === prev) : undefined
+    setSelectedServerKey((prev) => {
+      const prevServer = prev ? servers.find((s) => s.row_key === prev) : undefined
       if (prevServer && prevServer.drive_type === storageType) return prev
       const match = servers.find((s) => s.drive_type === storageType)
-      return (match ?? servers[0]).id
+      return (match ?? servers[0]).row_key
     })
   }, [servers, storageType])
 
@@ -135,7 +141,7 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
     return () => { document.body.style.overflow = '' }
   }, [])
 
-  const selectedServer = servers?.find((s) => s.id === selectedServerId)
+  const selectedServer = servers?.find((s) => s.row_key === selectedServerKey)
   const isCustom = selectedPlanId === CUSTOM_PLAN_ID
   const customBytes = CUSTOM_TIB_STOPS[customStopIdx] * TIB
   const selectedPlan = STORAGE_PLANS.find((p) => p.id === selectedPlanId)
@@ -172,13 +178,13 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
 
   async function handleCreateOrder(): Promise<string> {
     setPayError(null)
-    if (!selectedPlanId || !selectedServerId) throw new Error('No plan selected')
+    if (!selectedPlanId || !selectedServer) throw new Error('No plan selected')
     try {
       if (isExpansion) {
-        const res = await createExpansionOrder(selectedPlanId, storageType, selectedServerId)
+        const res = await createExpansionOrder(selectedPlanId, storageType, selectedServer.id)
         return res.order_id
       }
-      const res = await createStorageOrder(selectedPlanId, storageType, selectedServerId)
+      const res = await createStorageOrder(selectedPlanId, storageType, selectedServer.id)
       return res.order_id
     } catch (err) {
       const msg = err instanceof ApiError ? err.message : 'Could not start checkout'
@@ -188,11 +194,11 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
   }
 
   async function handleSubmitCustom() {
-    if (!selectedServerId || !isCustom) return
+    if (!selectedServer || !isCustom) return
     setBusy(true)
     setPayError(null)
     try {
-      const res = await submitCustomRequest(storageType, selectedServerId, customBytes)
+      const res = await submitCustomRequest(storageType, selectedServer.id, customBytes)
       setCustomResult({ reviewDueAt: res.review_due_at, estimateCents: res.estimated_price_cents })
       setPhase('custom_submitted')
       queryClient.invalidateQueries({ queryKey: ['billing', 'expansion-requests'] })
@@ -404,15 +410,15 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
                       <div className="border-t border-gray-100 divide-y divide-gray-50">
                         {servers.map((s) => (
                           <button
-                            key={s.id}
-                            onClick={() => { setSelectedServerId(s.id); setServerListOpen(false) }}
+                            key={s.row_key}
+                            onClick={() => { setSelectedServerKey(s.row_key); setServerListOpen(false) }}
                             className={`flex items-center gap-3 w-full px-4 py-2.5 border-0 cursor-pointer text-left transition-colors ${
-                              s.id === selectedServerId ? 'bg-blue-50' : 'bg-transparent hover:bg-gray-50'
+                              s.row_key === selectedServerKey ? 'bg-blue-50' : 'bg-transparent hover:bg-gray-50'
                             }`}
                           >
                             <div className="flex-1 min-w-0">
                               <div className="flex items-center gap-2">
-                                <span className={`text-sm ${s.id === selectedServerId ? 'font-semibold text-blue-700' : 'font-medium text-gray-800'}`}>
+                                <span className={`text-sm ${s.row_key === selectedServerKey ? 'font-semibold text-blue-700' : 'font-medium text-gray-800'}`}>
                                   {s.name}
                                 </span>
                                 <TierBadge type={s.drive_type} />
@@ -617,7 +623,7 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
                     }}
                   >
                     <PayPalButtons
-                      forceReRender={[selectedPlanId, storageType, selectedServerId, isExpansion]}
+                      forceReRender={[selectedPlanId, storageType, selectedServerKey, isExpansion]}
                       disabled={!canPay}
                       style={{ layout: 'vertical', shape: 'rect', label: 'pay' }}
                       createOrder={handleCreateOrder}

@@ -33,15 +33,16 @@ describe('getMe', () => {
 })
 
 describe('changePassword', () => {
-  it('POSTs to /me/password with current and new password', async () => {
+  it('POSTs to /me/password with current, new password and 2FA code', async () => {
     mockFetch(200, { message: 'updated' })
-    const result = await changePassword('oldpass', 'newpass')
+    const result = await changePassword('oldpass', 'newpass', '123456')
     const [url, init] = lastCall()
     expect(url).toBe('/api/v1/me/password')
     expect(init.method).toBe('POST')
     expect(JSON.parse(init.body as string)).toEqual({
       current_password: 'oldpass',
       new_password: 'newpass',
+      code: '123456',
     })
     expect(result).toEqual({ message: 'updated' })
   })

@@ -3,7 +3,11 @@ import { render, screen, fireEvent } from '@testing-library/react'
 import '@testing-library/jest-dom'
 
 const mockNavigate = jest.fn()
-let mockSearch = { file: undefined as string | undefined, folder: undefined as string | undefined }
+let mockSearch = {
+  file: undefined as string | undefined,
+  folder: undefined as string | undefined,
+  action: undefined as string | undefined,
+}
 
 jest.mock('@tanstack/react-router', () => ({
   createFileRoute: () => (opts: any) => ({ options: opts }),
@@ -127,6 +131,13 @@ jest.mock('../../../api/me', () => ({
   meQueryOptions: { queryKey: ['me'], queryFn: jest.fn() },
 }))
 
+// The page renders inside the shared files control-panel layout; stub it to a
+// passthrough so these tests stay focused on the folder/file content.
+jest.mock('../../../components/FilesSidebar', () => ({
+  FilesLayout: ({ children }: any) => children,
+  parseFilesAction: () => undefined,
+}))
+
 import { Route } from '../../../routes/_auth.client/index'
 const Page = Route.options.component as React.ComponentType
 
@@ -160,7 +171,11 @@ function mockQueryByKey(userOverride: typeof USER | null) {
   })
 }
 
-function setup(overrides: Partial<typeof mockContentsReturnValue> = {}, userOverride: typeof USER | null = USER) {
+function setup(
+  overrides: Partial<typeof mockContentsReturnValue> = {},
+  userOverride: typeof USER | null = USER,
+  search: { file?: string; folder?: string; action?: string } = { file: undefined, folder: undefined },
+) {
   mockContentsReturnValue = {
     folder: null,
     folders: FOLDERS,
@@ -175,7 +190,7 @@ function setup(overrides: Partial<typeof mockContentsReturnValue> = {}, userOver
   mockQueryByKey(userOverride)
   mockMutation.mockReturnValue({ mutate: jest.fn(), isPending: false })
   mockQueryClient.mockReturnValue({ invalidateQueries: jest.fn() })
-  mockSearch = { file: undefined, folder: undefined }
+  mockSearch = search as typeof mockSearch
   return render(<Page />)
 }
 
@@ -213,21 +228,22 @@ describe('Client Files (index) page', () => {
     expect(screen.getByText('note.txt')).toBeInTheDocument()
   })
 
-  test('renders New folder and Upload buttons', () => {
+  test('renders the Upload button (New folder moved to the files sidebar)', () => {
     setup()
-    expect(screen.getByRole('button', { name: /new folder/i })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /upload/i })).toBeInTheDocument()
+    // "New folder" is now a sidebar action, not a page-toolbar button.
+    expect(screen.queryByRole('button', { name: /new folder/i })).not.toBeInTheDocument()
   })
 
-  test('clicking New folder shows folder name input', () => {
-    setup()
-    fireEvent.click(screen.getByRole('button', { name: /new folder/i }))
+  test('the new-folder sidebar action shows the folder name input', () => {
+    // The sidebar fires ?action=new-folder; the page picks it up and opens the
+    // inline folder creator.
+    setup({}, USER, { file: undefined, folder: undefined, action: 'new-folder' })
     expect(screen.getByPlaceholderText(/folder name/i)).toBeInTheDocument()
   })
 
   test('Escape cancels folder creation', () => {
-    setup()
-    fireEvent.click(screen.getByRole('button', { name: /new folder/i }))
+    setup({}, USER, { file: undefined, folder: undefined, action: 'new-folder' })
     fireEvent.keyDown(screen.getByPlaceholderText(/folder name/i), { key: 'Escape' })
     expect(screen.queryByPlaceholderText(/folder name/i)).not.toBeInTheDocument()
   })
@@ -251,7 +267,7 @@ describe('Client Files (index) page', () => {
     mockQueryByKey(USER)
     mockMutation.mockReturnValue({ mutate: jest.fn(), isPending: false })
     mockQueryClient.mockReturnValue({ invalidateQueries: jest.fn() })
-    mockSearch = { file: undefined, folder: 'fold1' }
+    mockSearch = { file: undefined, folder: 'fold1', action: undefined }
     render(<Page />)
     expect(screen.getByText(/this folder is empty/i)).toBeInTheDocument()
   })

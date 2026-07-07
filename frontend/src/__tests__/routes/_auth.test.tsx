@@ -100,23 +100,28 @@ describe('_auth layout nav', () => {
     expect(screen.getByText('Apollo SFS')).toBeInTheDocument()
   })
 
-  test('renders Files and Favorites links', () => {
+  test('renders Files link; Favorites/Shared moved into the files sidebar', () => {
     renderNav({ username: 'alice' })
     expect(screen.getByRole('link', { name: 'Files' })).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: 'Favorites' })).toBeInTheDocument()
+    // Favorites and Shared are now sub-pages of Files (rendered in the files
+    // control panel), not top-level nav links.
+    expect(screen.queryByRole('link', { name: 'Favorites' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Shared' })).not.toBeInTheDocument()
   })
 
-  test('admin nav links not shown for non-admin user', () => {
+  test('admin dropdown not shown for non-admin user', () => {
     renderNav({ username: 'alice', is_admin: false })
+    expect(screen.queryByRole('button', { name: /^admin$/i })).not.toBeInTheDocument()
     expect(screen.queryByRole('link', { name: 'Users' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('link', { name: 'Metrics' })).not.toBeInTheDocument()
   })
 
-  test('admin nav links shown for admin user', () => {
+  test('admin nav links shown for admin user after opening the Admin menu', () => {
     renderNav({ username: 'admin', is_admin: true })
+    fireEvent.click(screen.getByRole('button', { name: /^admin$/i }))
     expect(screen.getByRole('link', { name: 'Users' })).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: 'Invitations' })).toBeInTheDocument()
+    // Invitations and access requests are now combined under a single Requests page.
     expect(screen.getByRole('link', { name: 'Requests' })).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Invitations' })).not.toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Bans & Suspensions' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Metrics' })).toBeInTheDocument()
   })

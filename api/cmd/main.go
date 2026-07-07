@@ -417,7 +417,9 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		// login. Lives here (not in mobileAuthGroup) because it requires a valid
 		// brokered access token, which RequireAuth validates.
 		protected.POST("/mobile/auth/session", authHandler.MobileSession)
+		protected.POST("/me/password/request-code", h.RequestPasswordChangeCode)
 		protected.POST("/me/password", h.ChangePassword)
+		protected.PATCH("/me/username", h.UpdateMyUsername)
 		protected.GET("/me/preferences", h.GetPreferences)
 		protected.GET("/me/notifications", h.Notifications)
 		// PUT /me/preferences is premium-only (media auto-upload); registered below.

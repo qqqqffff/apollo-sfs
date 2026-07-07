@@ -1,9 +1,12 @@
 package routes
 
 import (
+	"context"
+	"crypto/rand"
 	"database/sql"
 	"errors"
 	"fmt"
+	"math/big"
 	"net"
 	"net/http"
 	"sort"
@@ -17,19 +20,79 @@ import (
 	"apollo-sfs.com/api/routes/services"
 )
 
+// passwordChangeCodeTTL bounds how long an emailed change-password code stays
+// valid. Short enough to limit exposure, long enough to fetch it from email.
+const passwordChangeCodeTTL = 10 * time.Minute
+
 type changePasswordRequest struct {
 	CurrentPassword string `json:"current_password" binding:"required"`
 	NewPassword     string `json:"new_password" binding:"required"`
+	// Code is the one-time two-factor code emailed to the account address via
+	// RequestPasswordChangeCode. Required.
+	Code string `json:"code" binding:"required"`
+}
+
+// RequestPasswordChangeCode handles POST /api/v1/me/password/request-code.
+// Emails a single-use two-factor code to the signed-in user's account address.
+// The code must later be presented to ChangePassword along with the current and
+// new password. Always returns 200 with a generic message (the caller is
+// already authenticated, so there's no enumeration concern, but the response
+// intentionally does not echo the code).
+func (h *Handler) RequestPasswordChangeCode(c *gin.Context) {
+	username := c.GetString("username")
+	if username == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+	ctx := c.Request.Context()
+
+	user, err := h.queries.GetUserByUsername(ctx, username)
+	if err != nil || user == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not load account"})
+		return
+	}
+
+	code, err := generateNumericCode(6)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not generate code"})
+		return
+	}
+
+	if err := h.queries.CreatePasswordChangeCode(ctx, username, code, time.Now().Add(passwordChangeCodeTTL)); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not issue code"})
+		return
+	}
+
+	if err := h.email.SendPasswordChangeCode(ctx, user, code, "10 minutes"); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not send code"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "a change-password code has been emailed to you"})
 }
 
 // ChangePassword handles POST /api/v1/me/password.
-// Verifies the current password then sets the new one via Keycloak.
+// Requires a valid two-factor code (from RequestPasswordChangeCode) in addition
+// to the current password, then sets the new one via Keycloak.
 func (h *Handler) ChangePassword(c *gin.Context) {
 	username := c.GetString("username")
 
 	var req changePasswordRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "current_password and new_password are required"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "current_password, new_password and code are required"})
+		return
+	}
+
+	// Verify the two-factor code first so an attacker with only the current
+	// password (e.g. a shared/leaked one) still can't change it without access
+	// to the account's email.
+	ok, err := h.queries.ConsumePasswordChangeCode(c.Request.Context(), username, req.Code)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not verify code"})
+		return
+	}
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid or expired code"})
 		return
 	}
 
@@ -43,6 +106,64 @@ func (h *Handler) ChangePassword(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "password changed"})
+}
+
+type updateMyUsernameRequest struct {
+	NewUsername string `json:"new_username" binding:"required,min=3,max=150"`
+}
+
+// UpdateMyUsername handles PATCH /api/v1/me/username.
+// Lets the signed-in user rename their own account in Keycloak and the app DB.
+// The caller's existing access token still carries the old preferred_username
+// until it is refreshed, so the frontend signs the user out after a successful
+// rename to force a fresh token on next login.
+func (h *Handler) UpdateMyUsername(c *gin.Context) {
+	oldUsername := c.GetString("username")
+	if oldUsername == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	var req updateMyUsernameRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "new_username is required (3–150 characters)"})
+		return
+	}
+
+	newUsername := strings.TrimSpace(req.NewUsername)
+	if newUsername == "" || len(newUsername) < 3 || len(newUsername) > 150 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "new_username must be 3–150 characters"})
+		return
+	}
+	if newUsername == oldUsername {
+		c.JSON(http.StatusOK, gin.H{"message": "username unchanged"})
+		return
+	}
+
+	if err := h.auth.RenameUser(c.Request.Context(), oldUsername, newUsername); err != nil {
+		if strings.Contains(err.Error(), "already taken") {
+			c.JSON(http.StatusConflict, gin.H{"error": "that username is already taken"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not update username"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "username updated"})
+}
+
+// generateNumericCode returns a cryptographically random decimal code of the
+// given length (zero-padded), e.g. "042931" for length 6.
+func generateNumericCode(digits int) (string, error) {
+	max := big.NewInt(1)
+	for i := 0; i < digits; i++ {
+		max.Mul(max, big.NewInt(10))
+	}
+	n, err := rand.Int(rand.Reader, max)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%0*d", digits, n), nil
 }
 
 // meResponse is the JSON shape returned by GET /api/v1/me.
@@ -267,7 +388,9 @@ func (h *Handler) UnlinkSocial(c *gin.Context) {
 // ── Notifications ─────────────────────────────────────────────────────────────
 
 // notificationItem is one entry in the bell dropdown. Kind is one of:
-// capacity_provisioned | payment_required | action_pending | share_received.
+// capacity_provisioned | payment_required | action_pending | share_received
+// and, for admins: invitation_accepted | order_received | email_received |
+// alarm_triggered. The frontend groups the dropdown by kind.
 type notificationItem struct {
 	ID        string    `json:"id"`
 	Kind      string    `json:"kind"`
@@ -280,6 +403,15 @@ type notificationItem struct {
 // shareNotificationWindow bounds how long a received share keeps showing in
 // the bell dropdown.
 const shareNotificationWindow = 30 * 24 * time.Hour
+
+// adminNotificationWindow bounds how long admin activity (accepted
+// invitations, captured orders, inbound emails, fired alarms) keeps showing
+// in the bell dropdown.
+const adminNotificationWindow = 7 * 24 * time.Hour
+
+// adminNotificationLimit caps each admin category so one busy day of orders
+// or inbound mail can't flood the dropdown.
+const adminNotificationLimit = 15
 
 // Notifications handles GET /api/v1/me/notifications.
 // Derives the user's pending-action notifications from live state: provisioned
@@ -372,9 +504,117 @@ func (h *Handler) Notifications(c *gin.Context) {
 		}
 	}
 
+	// Admin-only categories: recent account/infrastructure activity, so alerts
+	// that previously only lived on the admin pages (or in email) surface in
+	// the same bell, grouped by kind on the frontend.
+	if c.GetBool("isAdmin") {
+		items = append(items, h.adminNotifications(ctx)...)
+	}
+
 	sort.Slice(items, func(i, j int) bool { return items[i].CreatedAt.After(items[j].CreatedAt) })
 
 	c.JSON(http.StatusOK, gin.H{"items": items})
+}
+
+// adminNotifications assembles the admin-only bell categories. Each source is
+// best-effort: a failure in one category never blanks the whole dropdown.
+func (h *Handler) adminNotifications(ctx context.Context) []notificationItem {
+	since := time.Now().Add(-adminNotificationWindow)
+	items := []notificationItem{}
+
+	if invs, err := h.queries.ListRecentlyAcceptedInvitations(ctx, since); err == nil {
+		for i, inv := range invs {
+			if i >= adminNotificationLimit {
+				break
+			}
+			acceptedAt := inv.CreatedAt
+			if inv.AcceptedAt != nil {
+				acceptedAt = *inv.AcceptedAt
+			}
+			items = append(items, notificationItem{
+				ID:        inv.ID.String() + ":invitation-accepted",
+				Kind:      "invitation_accepted",
+				Title:     "Invitation accepted",
+				Body:      fmt.Sprintf("%s accepted their invitation.", inv.Email),
+				Link:      "/admin/requests",
+				CreatedAt: acceptedAt,
+			})
+		}
+	}
+
+	if orders, err := h.queries.ListRecentCapturedOrders(ctx, since, adminNotificationLimit); err == nil {
+		for _, o := range orders {
+			capturedAt := o.CreatedAt
+			if o.CapturedAt != nil {
+				capturedAt = *o.CapturedAt
+			}
+			kindLabel := "storage order"
+			if o.Type == "premium" {
+				kindLabel = "premium upgrade"
+			}
+			env := ""
+			if o.Environment == "sandbox" {
+				env = " (sandbox)"
+			}
+			items = append(items, notificationItem{
+				ID:        o.ID.String() + ":order-received",
+				Kind:      "order_received",
+				Title:     "Order received",
+				Body:      fmt.Sprintf("%s paid %s for a %s%s.", o.Username, formatCentsShort(int(o.AmountCents)), kindLabel, env),
+				Link:      "/admin/orders",
+				CreatedAt: capturedAt,
+			})
+		}
+	}
+
+	if emails, err := h.queries.ListRecentUnreadInboundEmails(ctx, since, adminNotificationLimit); err == nil {
+		for _, e := range emails {
+			subject := e.Subject
+			if subject == "" {
+				subject = "(no subject)"
+			}
+			items = append(items, notificationItem{
+				ID:        e.ID.String() + ":email-received",
+				Kind:      "email_received",
+				Title:     "Email received",
+				Body:      fmt.Sprintf("%s — %s", e.FromAddr, subject),
+				Link:      "/admin/emails",
+				CreatedAt: e.ReceivedAt,
+			})
+		}
+	}
+
+	if subs, err := h.queries.ListRecentlyFiredAlarmSubscriptions(ctx, since); err == nil {
+		for i, s := range subs {
+			if i >= adminNotificationLimit {
+				break
+			}
+			target := s.ServerName
+			if s.NodeHostname != "" {
+				target = s.NodeHostname
+			}
+			if s.DriveLabel != "" {
+				target = fmt.Sprintf("%s (%s)", target, s.DriveLabel)
+			}
+			if target == "" {
+				target = "cluster"
+			}
+			firedAt := time.Now()
+			if s.LastFiredAt != nil {
+				firedAt = *s.LastFiredAt
+			}
+			items = append(items, notificationItem{
+				ID:        s.ID.String() + ":alarm-triggered",
+				Kind:      "alarm_triggered",
+				Title:     "Alarm triggered",
+				Body:      fmt.Sprintf("%s alarm fired on %s.", s.AlarmType, target),
+				Link:      "/admin/alarm",
+				CreatedAt: firedAt,
+			})
+		}
+	}
+
+	return items
 }
 
 func formatCapacityShort(bytes int64) string {

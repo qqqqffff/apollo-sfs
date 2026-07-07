@@ -1,14 +1,16 @@
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
 import { useEffect, useRef, useCallback, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { MdAddCircleOutline, MdCheck, MdClose, MdLink, MdPhotoLibrary, MdRocketLaunch, MdKey, MdStorage, MdVpnKey, MdCloudUpload, MdSpeed, MdBolt, MdRefresh, MdScience } from 'react-icons/md'
+import { MdAddCircleOutline, MdCheck, MdClose, MdEdit, MdPhotoLibrary, MdRocketLaunch, MdKey, MdShield, MdStorage, MdVpnKey, MdCloudUpload, MdSpeed, MdBolt, MdRefresh, MdScience } from 'react-icons/md'
 import { FaApple } from 'react-icons/fa'
-import { meQueryOptions, changePassword, preferencesQueryOptions, updatePreferences, updateStorageUIPreferences, updateSandboxPayments, unlinkProvider } from '../../api/me'
+import { meQueryOptions, updateUsername, preferencesQueryOptions, updatePreferences, updateStorageUIPreferences, updateSandboxPayments, unlinkProvider } from '../../api/me'
+import { logout } from '../../api/auth'
 import { listRoot } from '../../api/folders'
 import { ApiError } from '../../api/client'
 import { StorageUpgradeModal } from '../../components/StorageUpgradeModal'
-import { FileServerLinkModal, LinkDisplay } from '../../components/FileServerLinkModal'
-import { listFileServerLinks, deleteFileServerLink } from '../../api/fileServerLinks'
+import { GroupBadge, groupOf } from '../../components/GroupBadge'
+import { FileServerLinksCard } from '../../components/FileServerLinksCard'
+import { useNotification } from '../../context/NotificationContext'
 import { formatCents, listMyExpansionRequests, type ExpansionRequest } from '../../api/billing'
 import {
   getStorageBreakdown,
@@ -33,65 +35,12 @@ function formatSize(bytes: number): string {
   return `${bytes} B`
 }
 
-interface PasswordChecks {
-  length: boolean
-  upper: boolean
-  number: boolean
-  symbol: boolean
-  match: boolean
-}
-
-function getChecks(newPassword: string, confirm: string): PasswordChecks {
-  return {
-    length: newPassword.length >= 8,
-    upper: /[A-Z]/.test(newPassword),
-    number: /[0-9]/.test(newPassword),
-    symbol: /[^A-Za-z0-9]/.test(newPassword),
-    match: newPassword.length > 0 && newPassword === confirm,
-  }
-}
-
-function CheckItem({ ok, label }: { ok: boolean; label: string }) {
-  return (
-    <li className={`flex items-center gap-1.5 text-xs transition-colors ${ok ? 'text-green-600' : 'text-red-500'}`}>
-      {ok ? <MdCheck className="shrink-0" /> : <MdClose className="shrink-0" />}
-      {label}
-    </li>
-  )
-}
-
 function RouteComponent() {
   const navigate = useNavigate()
   const { data: user, isLoading } = useQuery(meQueryOptions)
 
   const [showUpgradeModal, setShowUpgradeModal] = useState(false)
   const [showStorageModal, setShowStorageModal] = useState(false)
-
-  const [current, setCurrent] = useState('')
-  const [newPw, setNewPw] = useState('')
-  const [confirm, setConfirm] = useState('')
-  const [touched, setTouched] = useState(false)
-  const [pwError, setPwError] = useState<string | null>(null)
-  const [pwSuccess, setPwSuccess] = useState(false)
-
-  const checks = getChecks(newPw, confirm)
-  const allValid = Object.values(checks).every(Boolean)
-
-  const pwMutation = useMutation({
-    mutationFn: () => changePassword(current, newPw),
-    onSuccess: () => {
-      setCurrent('')
-      setNewPw('')
-      setConfirm('')
-      setTouched(false)
-      setPwError(null)
-      setPwSuccess(true)
-      setTimeout(() => setPwSuccess(false), 4000)
-    },
-    onError: (err) => {
-      setPwError(err instanceof ApiError ? err.message : 'Failed to change password')
-    },
-  })
 
   if (isLoading) return <p className="text-sm text-gray-500">Loading…</p>
   if (!user) return null
@@ -106,9 +55,12 @@ function RouteComponent() {
       <h2 className="text-lg font-semibold text-gray-900 mb-6 mt-0">Profile</h2>
 
       <div className="bg-white border border-gray-200 rounded-xl divide-y divide-gray-100">
-        <Row label="Username" value={user.username} />
+        <UsernameRow currentUsername={user.username} />
         <Row label="Email" value={user.email} />
-        <Row label="Account type" value={user.is_admin ? 'Admin' : user.is_premium ? 'Premium' : 'User'} />
+        <div className="flex items-center justify-between px-5 py-3.5">
+          <span className="text-sm text-gray-500">Account type</span>
+          <GroupBadge group={groupOf(user)} />
+        </div>
         <Row
           label="Member since"
           value={new Date(user.created_at).toLocaleDateString(undefined, {
@@ -181,72 +133,20 @@ function RouteComponent() {
       {user.is_admin && <SandboxPaymentsToggle enabled={user.sandbox_payments_enabled} />}
 
       <div className="bg-white border border-gray-200 rounded-xl px-5 py-4">
-        <h3 className="text-sm font-semibold text-gray-800 mb-4">Change password</h3>
-        <form
-          onSubmit={(e) => {
-            e.preventDefault()
-            setPwError(null)
-            setPwSuccess(false)
-            pwMutation.mutate()
-          }}
-          className="flex flex-col gap-3"
-        >
-          <div className="flex flex-col gap-1">
-            <label className="text-xs text-gray-500">Current password</label>
-            <input
-              type="password"
-              value={current}
-              onChange={(e) => { setCurrent(e.target.value); setPwError(null) }}
-              autoComplete="current-password"
-              className="border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-            />
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-semibold text-gray-800 m-0">Password</h3>
+            <p className="text-xs text-gray-500 m-0 mt-1">
+              Changing your password requires a one-time code sent to your email.
+            </p>
           </div>
-
-          <div className="flex flex-col gap-1">
-            <label className="text-xs text-gray-500">New password</label>
-            <input
-              type="password"
-              value={newPw}
-              onChange={(e) => setNewPw(e.target.value)}
-              onFocus={() => setTouched(true)}
-              autoComplete="new-password"
-              className="border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-            />
-          </div>
-
-          <div className="flex flex-col gap-1">
-            <label className="text-xs text-gray-500">Confirm new password</label>
-            <input
-              type="password"
-              value={confirm}
-              onChange={(e) => setConfirm(e.target.value)}
-              onFocus={() => setTouched(true)}
-              autoComplete="new-password"
-              className="border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-            />
-          </div>
-
-          {touched && (
-            <ul className="space-y-1 pl-0.5">
-              <CheckItem ok={checks.length} label="At least 8 characters" />
-              <CheckItem ok={checks.upper}  label="One uppercase letter" />
-              <CheckItem ok={checks.number} label="One number" />
-              <CheckItem ok={checks.symbol} label="One symbol" />
-              <CheckItem ok={checks.match}  label="Passwords match" />
-            </ul>
-          )}
-
-          {pwError && <p className="text-xs text-red-500">{pwError}</p>}
-          {pwSuccess && <p className="text-xs text-green-600">Password changed successfully.</p>}
-
           <button
-            type="submit"
-            disabled={!current || !allValid || pwMutation.isPending}
-            className="self-start px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-lg disabled:opacity-50 transition-colors cursor-pointer"
+            onClick={() => navigate({ to: '/client/change-password' as never })}
+            className="shrink-0 inline-flex items-center gap-1.5 px-3 py-2 text-xs border border-gray-200 rounded-lg text-gray-700 hover:bg-gray-50 cursor-pointer transition-colors"
           >
-            {pwMutation.isPending ? 'Saving…' : 'Update password'}
+            <MdShield className="text-sm text-blue-600" /> Change password
           </button>
-        </form>
+        </div>
       </div>
     </div>
   )
@@ -864,110 +764,96 @@ function LinkedAccountsCard({ linkedProviders }: { linkedProviders: string[] }) 
   )
 }
 
-// FileServerLinksCard lists the user's premium WebDAV mount links: view,
-// copy and delete, plus the creation modal. Rendered only for premium/admin.
-function FileServerLinksCard() {
-  const queryClient = useQueryClient()
-  const [showModal, setShowModal] = useState(false)
-  const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
-
-  const { data, isLoading: linksLoading } = useQuery({
-    queryKey: ['file-server-links'],
-    queryFn: listFileServerLinks,
-  })
-  const links = data?.items ?? []
-
-  const deleteMutation = useMutation({
-    mutationFn: (id: string) => deleteFileServerLink(id),
-    onSettled: () => {
-      setConfirmDelete(null)
-      queryClient.invalidateQueries({ queryKey: ['file-server-links'] })
-    },
-  })
-
-  return (
-    <div className="bg-white border border-gray-200 rounded-xl px-5 py-4">
-      <div className="flex items-center justify-between mb-1">
-        <h3 className="text-sm font-semibold text-gray-800 m-0 flex items-center gap-1.5">
-          <MdLink className="text-blue-600" /> File server links
-        </h3>
-        <button
-          onClick={() => setShowModal(true)}
-          className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 bg-transparent border-0 p-0 cursor-pointer font-medium transition-colors"
-        >
-          <MdAddCircleOutline className="text-sm" /> New link
-        </button>
-      </div>
-      <p className="text-xs text-gray-400 mt-0 mb-3">
-        Mount a storage server as a network drive and manage your files from it — one link per server.
-      </p>
-
-      {linksLoading && <p className="text-xs text-gray-400 m-0">Loading…</p>}
-      {!linksLoading && links.length === 0 && (
-        <p className="text-xs text-gray-400 m-0">No links yet.</p>
-      )}
-
-      <div className="space-y-3">
-        {links.map((link) => (
-          <div key={link.id} className="border border-gray-100 rounded-lg px-3 py-2.5 space-y-2">
-            <div className="flex items-center justify-between gap-2">
-              <span className="flex items-center gap-2 min-w-0">
-                <span className="text-sm text-gray-800 font-medium truncate">{link.server_name}</span>
-                {link.enhanced_security && (
-                  <span className="text-[10px] font-medium text-green-700 bg-green-50 rounded px-1.5 py-0.5 shrink-0">
-                    enhanced security
-                  </span>
-                )}
-              </span>
-              {confirmDelete === link.id ? (
-                <span className="flex items-center gap-2 shrink-0">
-                  <button
-                    onClick={() => deleteMutation.mutate(link.id)}
-                    disabled={deleteMutation.isPending}
-                    className="text-[11px] font-medium text-red-600 hover:text-red-700 bg-transparent border-0 p-0 cursor-pointer disabled:opacity-50"
-                  >
-                    {deleteMutation.isPending ? 'Deleting…' : 'Confirm delete'}
-                  </button>
-                  <button
-                    onClick={() => setConfirmDelete(null)}
-                    className="text-[11px] text-gray-400 hover:text-gray-600 bg-transparent border-0 p-0 cursor-pointer"
-                  >
-                    Cancel
-                  </button>
-                </span>
-              ) : (
-                <button
-                  onClick={() => setConfirmDelete(link.id)}
-                  className="text-[11px] text-gray-400 hover:text-red-600 bg-transparent border-0 p-0 cursor-pointer transition-colors shrink-0"
-                >
-                  Delete
-                </button>
-              )}
-            </div>
-            <LinkDisplay link={link} />
-            <p className="text-[11px] text-gray-400 m-0">
-              Created {new Date(link.created_at).toLocaleDateString()}
-              {link.last_used_at ? ` · last used ${new Date(link.last_used_at).toLocaleString()}` : ' · never used'}
-            </p>
-          </div>
-        ))}
-      </div>
-
-      {showModal && (
-        <FileServerLinkModal
-          onClose={() => setShowModal(false)}
-          existingLinks={links}
-        />
-      )}
-    </div>
-  )
-}
-
 function Row({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex items-center justify-between px-5 py-3.5">
       <span className="text-sm text-gray-500">{label}</span>
       <span className="text-sm text-gray-900 font-medium">{value}</span>
+    </div>
+  )
+}
+
+// UsernameRow shows the current username with inline editing. Because a rename
+// only takes effect for the current session on the next token refresh, a
+// successful change signs the user out so they log back in with the new name.
+function UsernameRow({ currentUsername }: { currentUsername: string }) {
+  const queryClient = useQueryClient()
+  const navigate = useNavigate()
+  const { notify } = useNotification()
+  const [editing, setEditing] = useState(false)
+  const [value, setValue] = useState(currentUsername)
+  const [error, setError] = useState<string | null>(null)
+
+  const mutation = useMutation({
+    mutationFn: () => updateUsername(value.trim()),
+    onSuccess: async () => {
+      notify('success', 'Username updated — please sign in again')
+      // The current token still holds the old username; sign out so the next
+      // login mints a token with the new identity.
+      try { await logout() } catch { /* ignore — redirect regardless */ }
+      queryClient.clear()
+      navigate({ to: '/login', search: { social_error: undefined, link_provider: undefined, link_email: undefined, link_username: undefined } })
+    },
+    onError: (err) => setError(err instanceof ApiError ? err.message : 'Failed to update username'),
+  })
+
+  const trimmed = value.trim()
+  const valid = trimmed.length >= 3 && trimmed.length <= 150 && trimmed !== currentUsername
+
+  if (!editing) {
+    return (
+      <div className="flex items-center justify-between px-5 py-3.5">
+        <span className="text-sm text-gray-500">Username</span>
+        <span className="flex items-center gap-2">
+          <span className="text-sm text-gray-900 font-medium">{currentUsername}</span>
+          <button
+            onClick={() => { setValue(currentUsername); setError(null); setEditing(true) }}
+            title="Edit username"
+            className="text-gray-400 hover:text-blue-600 cursor-pointer bg-transparent border-0 p-0 transition-colors"
+          >
+            <MdEdit className="text-base" />
+          </button>
+        </span>
+      </div>
+    )
+  }
+
+  return (
+    <div className="px-5 py-3.5">
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-sm text-gray-500 shrink-0">Username</span>
+        <div className="flex items-center gap-1.5 flex-1 justify-end">
+          <input
+            autoFocus
+            value={value}
+            onChange={(e) => { setValue(e.target.value); setError(null) }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && valid && !mutation.isPending) mutation.mutate()
+              if (e.key === 'Escape') { setEditing(false); setValue(currentUsername) }
+            }}
+            className="w-48 max-w-full border border-gray-200 rounded-lg px-3 py-1.5 text-sm text-right focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+          />
+          <button
+            onClick={() => mutation.mutate()}
+            disabled={!valid || mutation.isPending}
+            title="Save username"
+            className="text-green-500 hover:text-green-700 disabled:opacity-30 cursor-pointer bg-transparent border-0 p-1 transition-colors"
+          >
+            <MdCheck className="text-lg" />
+          </button>
+          <button
+            onClick={() => { setEditing(false); setValue(currentUsername); setError(null) }}
+            title="Cancel"
+            className="text-gray-400 hover:text-gray-600 cursor-pointer bg-transparent border-0 p-1 transition-colors"
+          >
+            <MdClose className="text-lg" />
+          </button>
+        </div>
+      </div>
+      <p className="text-xs text-gray-400 m-0 mt-1.5 text-right">
+        Changing your username signs you out; log back in with the new name.
+      </p>
+      {error && <p className="text-xs text-red-500 m-0 mt-1 text-right">{error}</p>}
     </div>
   )
 }

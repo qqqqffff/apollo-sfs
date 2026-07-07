@@ -28,11 +28,11 @@ import { Route as AuthInvoiceTokenRouteImport } from './routes/_auth.invoice.$to
 import { Route as AuthClientProfileRouteImport } from './routes/_auth.client/profile'
 import { Route as AuthClientOrdersRouteImport } from './routes/_auth.client/orders'
 import { Route as AuthClientFavoritesRouteImport } from './routes/_auth.client/favorites'
+import { Route as AuthClientChangePasswordRouteImport } from './routes/_auth.client/change-password'
 import { Route as AuthAdminUsersRouteImport } from './routes/_auth.admin/users'
+import { Route as AuthAdminRequestsRouteImport } from './routes/_auth.admin/requests'
 import { Route as AuthAdminOrdersRouteImport } from './routes/_auth.admin/orders'
 import { Route as AuthAdminMetricsRouteImport } from './routes/_auth.admin/metrics'
-import { Route as AuthAdminInvitationsRouteImport } from './routes/_auth.admin/invitations'
-import { Route as AuthAdminInterestRouteImport } from './routes/_auth.admin/interest'
 import { Route as AuthAdminEmailsRouteImport } from './routes/_auth.admin/emails'
 import { Route as AuthAdminBansRouteImport } from './routes/_auth.admin/bans'
 import { Route as AuthAdminBannedIpsRouteImport } from './routes/_auth.admin/banned-ips'
@@ -134,9 +134,20 @@ const AuthClientFavoritesRoute = AuthClientFavoritesRouteImport.update({
   path: '/client/favorites',
   getParentRoute: () => AuthRoute,
 } as any)
+const AuthClientChangePasswordRoute =
+  AuthClientChangePasswordRouteImport.update({
+    id: '/client/change-password',
+    path: '/client/change-password',
+    getParentRoute: () => AuthRoute,
+  } as any)
 const AuthAdminUsersRoute = AuthAdminUsersRouteImport.update({
   id: '/admin/users',
   path: '/admin/users',
+  getParentRoute: () => AuthRoute,
+} as any)
+const AuthAdminRequestsRoute = AuthAdminRequestsRouteImport.update({
+  id: '/admin/requests',
+  path: '/admin/requests',
   getParentRoute: () => AuthRoute,
 } as any)
 const AuthAdminOrdersRoute = AuthAdminOrdersRouteImport.update({
@@ -147,16 +158,6 @@ const AuthAdminOrdersRoute = AuthAdminOrdersRouteImport.update({
 const AuthAdminMetricsRoute = AuthAdminMetricsRouteImport.update({
   id: '/admin/metrics',
   path: '/admin/metrics',
-  getParentRoute: () => AuthRoute,
-} as any)
-const AuthAdminInvitationsRoute = AuthAdminInvitationsRouteImport.update({
-  id: '/admin/invitations',
-  path: '/admin/invitations',
-  getParentRoute: () => AuthRoute,
-} as any)
-const AuthAdminInterestRoute = AuthAdminInterestRouteImport.update({
-  id: '/admin/interest',
-  path: '/admin/interest',
   getParentRoute: () => AuthRoute,
 } as any)
 const AuthAdminEmailsRoute = AuthAdminEmailsRouteImport.update({
@@ -206,11 +207,11 @@ export interface FileRoutesByFullPath {
   '/admin/banned-ips': typeof AuthAdminBannedIpsRoute
   '/admin/bans': typeof AuthAdminBansRoute
   '/admin/emails': typeof AuthAdminEmailsRoute
-  '/admin/interest': typeof AuthAdminInterestRoute
-  '/admin/invitations': typeof AuthAdminInvitationsRoute
   '/admin/metrics': typeof AuthAdminMetricsRoute
   '/admin/orders': typeof AuthAdminOrdersRoute
+  '/admin/requests': typeof AuthAdminRequestsRoute
   '/admin/users': typeof AuthAdminUsersRoute
+  '/client/change-password': typeof AuthClientChangePasswordRoute
   '/client/favorites': typeof AuthClientFavoritesRoute
   '/client/orders': typeof AuthClientOrdersRoute
   '/client/profile': typeof AuthClientProfileRoute
@@ -237,11 +238,11 @@ export interface FileRoutesByTo {
   '/admin/banned-ips': typeof AuthAdminBannedIpsRoute
   '/admin/bans': typeof AuthAdminBansRoute
   '/admin/emails': typeof AuthAdminEmailsRoute
-  '/admin/interest': typeof AuthAdminInterestRoute
-  '/admin/invitations': typeof AuthAdminInvitationsRoute
   '/admin/metrics': typeof AuthAdminMetricsRoute
   '/admin/orders': typeof AuthAdminOrdersRoute
+  '/admin/requests': typeof AuthAdminRequestsRoute
   '/admin/users': typeof AuthAdminUsersRoute
+  '/client/change-password': typeof AuthClientChangePasswordRoute
   '/client/favorites': typeof AuthClientFavoritesRoute
   '/client/orders': typeof AuthClientOrdersRoute
   '/client/profile': typeof AuthClientProfileRoute
@@ -270,11 +271,11 @@ export interface FileRoutesById {
   '/_auth/admin/banned-ips': typeof AuthAdminBannedIpsRoute
   '/_auth/admin/bans': typeof AuthAdminBansRoute
   '/_auth/admin/emails': typeof AuthAdminEmailsRoute
-  '/_auth/admin/interest': typeof AuthAdminInterestRoute
-  '/_auth/admin/invitations': typeof AuthAdminInvitationsRoute
   '/_auth/admin/metrics': typeof AuthAdminMetricsRoute
   '/_auth/admin/orders': typeof AuthAdminOrdersRoute
+  '/_auth/admin/requests': typeof AuthAdminRequestsRoute
   '/_auth/admin/users': typeof AuthAdminUsersRoute
+  '/_auth/client/change-password': typeof AuthClientChangePasswordRoute
   '/_auth/client/favorites': typeof AuthClientFavoritesRoute
   '/_auth/client/orders': typeof AuthClientOrdersRoute
   '/_auth/client/profile': typeof AuthClientProfileRoute
@@ -303,11 +304,11 @@ export interface FileRouteTypes {
     | '/admin/banned-ips'
     | '/admin/bans'
     | '/admin/emails'
-    | '/admin/interest'
-    | '/admin/invitations'
     | '/admin/metrics'
     | '/admin/orders'
+    | '/admin/requests'
     | '/admin/users'
+    | '/client/change-password'
     | '/client/favorites'
     | '/client/orders'
     | '/client/profile'
@@ -334,11 +335,11 @@ export interface FileRouteTypes {
     | '/admin/banned-ips'
     | '/admin/bans'
     | '/admin/emails'
-    | '/admin/interest'
-    | '/admin/invitations'
     | '/admin/metrics'
     | '/admin/orders'
+    | '/admin/requests'
     | '/admin/users'
+    | '/client/change-password'
     | '/client/favorites'
     | '/client/orders'
     | '/client/profile'
@@ -366,11 +367,11 @@ export interface FileRouteTypes {
     | '/_auth/admin/banned-ips'
     | '/_auth/admin/bans'
     | '/_auth/admin/emails'
-    | '/_auth/admin/interest'
-    | '/_auth/admin/invitations'
     | '/_auth/admin/metrics'
     | '/_auth/admin/orders'
+    | '/_auth/admin/requests'
     | '/_auth/admin/users'
+    | '/_auth/client/change-password'
     | '/_auth/client/favorites'
     | '/_auth/client/orders'
     | '/_auth/client/profile'
@@ -531,11 +532,25 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthClientFavoritesRouteImport
       parentRoute: typeof AuthRoute
     }
+    '/_auth/client/change-password': {
+      id: '/_auth/client/change-password'
+      path: '/client/change-password'
+      fullPath: '/client/change-password'
+      preLoaderRoute: typeof AuthClientChangePasswordRouteImport
+      parentRoute: typeof AuthRoute
+    }
     '/_auth/admin/users': {
       id: '/_auth/admin/users'
       path: '/admin/users'
       fullPath: '/admin/users'
       preLoaderRoute: typeof AuthAdminUsersRouteImport
+      parentRoute: typeof AuthRoute
+    }
+    '/_auth/admin/requests': {
+      id: '/_auth/admin/requests'
+      path: '/admin/requests'
+      fullPath: '/admin/requests'
+      preLoaderRoute: typeof AuthAdminRequestsRouteImport
       parentRoute: typeof AuthRoute
     }
     '/_auth/admin/orders': {
@@ -550,20 +565,6 @@ declare module '@tanstack/react-router' {
       path: '/admin/metrics'
       fullPath: '/admin/metrics'
       preLoaderRoute: typeof AuthAdminMetricsRouteImport
-      parentRoute: typeof AuthRoute
-    }
-    '/_auth/admin/invitations': {
-      id: '/_auth/admin/invitations'
-      path: '/admin/invitations'
-      fullPath: '/admin/invitations'
-      preLoaderRoute: typeof AuthAdminInvitationsRouteImport
-      parentRoute: typeof AuthRoute
-    }
-    '/_auth/admin/interest': {
-      id: '/_auth/admin/interest'
-      path: '/admin/interest'
-      fullPath: '/admin/interest'
-      preLoaderRoute: typeof AuthAdminInterestRouteImport
       parentRoute: typeof AuthRoute
     }
     '/_auth/admin/emails': {
@@ -617,11 +618,11 @@ interface AuthRouteChildren {
   AuthAdminBannedIpsRoute: typeof AuthAdminBannedIpsRoute
   AuthAdminBansRoute: typeof AuthAdminBansRoute
   AuthAdminEmailsRoute: typeof AuthAdminEmailsRoute
-  AuthAdminInterestRoute: typeof AuthAdminInterestRoute
-  AuthAdminInvitationsRoute: typeof AuthAdminInvitationsRoute
   AuthAdminMetricsRoute: typeof AuthAdminMetricsRoute
   AuthAdminOrdersRoute: typeof AuthAdminOrdersRoute
+  AuthAdminRequestsRoute: typeof AuthAdminRequestsRoute
   AuthAdminUsersRoute: typeof AuthAdminUsersRoute
+  AuthClientChangePasswordRoute: typeof AuthClientChangePasswordRoute
   AuthClientFavoritesRoute: typeof AuthClientFavoritesRoute
   AuthClientOrdersRoute: typeof AuthClientOrdersRoute
   AuthClientProfileRoute: typeof AuthClientProfileRoute
@@ -639,11 +640,11 @@ const AuthRouteChildren: AuthRouteChildren = {
   AuthAdminBannedIpsRoute: AuthAdminBannedIpsRoute,
   AuthAdminBansRoute: AuthAdminBansRoute,
   AuthAdminEmailsRoute: AuthAdminEmailsRoute,
-  AuthAdminInterestRoute: AuthAdminInterestRoute,
-  AuthAdminInvitationsRoute: AuthAdminInvitationsRoute,
   AuthAdminMetricsRoute: AuthAdminMetricsRoute,
   AuthAdminOrdersRoute: AuthAdminOrdersRoute,
+  AuthAdminRequestsRoute: AuthAdminRequestsRoute,
   AuthAdminUsersRoute: AuthAdminUsersRoute,
+  AuthClientChangePasswordRoute: AuthClientChangePasswordRoute,
   AuthClientFavoritesRoute: AuthClientFavoritesRoute,
   AuthClientOrdersRoute: AuthClientOrdersRoute,
   AuthClientProfileRoute: AuthClientProfileRoute,

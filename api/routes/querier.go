@@ -17,6 +17,10 @@ type Querier interface {
 	// Me
 	GetUserByUsername(ctx context.Context, username string) (*models.User, error)
 
+	// Change-password two-factor codes
+	CreatePasswordChangeCode(ctx context.Context, username, code string, expiresAt time.Time) error
+	ConsumePasswordChangeCode(ctx context.Context, username, code string) (bool, error)
+
 	// Admin per-user storage view
 	GetUserStorageBreakdown(ctx context.Context, userID string) (db.UserStorageBreakdown, error)
 	GetUserStorageAllocations(ctx context.Context, username, userID string) ([]db.UserStorageAllocation, error)
@@ -26,6 +30,12 @@ type Querier interface {
 	ListUserExpansionRequests(ctx context.Context, username string) ([]models.ServerExpansionRequest, error)
 	GetLatestExpansionInvoice(ctx context.Context, requestID uuid.UUID) (*models.ExpansionInvoice, error)
 	ListSharesForRecipient(ctx context.Context, email string) ([]models.Share, error)
+
+	// Notification bell — admin-only categories
+	ListRecentlyAcceptedInvitations(ctx context.Context, since time.Time) ([]models.Invitation, error)
+	ListRecentCapturedOrders(ctx context.Context, since time.Time, limit int) ([]db.AdminOrder, error)
+	ListRecentUnreadInboundEmails(ctx context.Context, since time.Time, limit int) ([]models.InboundEmail, error)
+	ListRecentlyFiredAlarmSubscriptions(ctx context.Context, since time.Time) ([]models.AlarmSubscription, error)
 
 	// User preferences
 	GetUserPreferences(ctx context.Context, userID string) (*models.UserPreferences, error)

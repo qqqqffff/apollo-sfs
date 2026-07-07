@@ -217,7 +217,7 @@ func (s *EmailService) SendInterestFormNotification(
 	desiredStorageGB int,
 	useCase string,
 ) error {
-	adminURL := s.appURL + "/admin/interest"
+	adminURL := s.appURL + "/admin/requests"
 	for _, to := range adminEmails {
 		if err := s.enqueue(ctx, to,
 			fmt.Sprintf("New interest form submission — %s", s.appName),
@@ -411,6 +411,29 @@ func (s *EmailService) SendPasswordReset(
 			"Email":     user.Email,
 			"Username":  user.Username,
 			"ResetURL":  resetURL,
+			"ExpiresIn": expiresIn,
+		},
+	)
+}
+
+// SendPasswordChangeCode enqueues the two-factor code emailed when a signed-in
+// user starts the change-password flow. The code must be entered alongside the
+// current and new password to complete the change.
+func (s *EmailService) SendPasswordChangeCode(
+	ctx context.Context,
+	user *models.User,
+	code string,
+	expiresIn string,
+) error {
+	return s.enqueue(ctx, user.Email,
+		fmt.Sprintf("Your %s password change code", s.appName),
+		"password_change_code",
+		map[string]any{
+			"AppName":   s.appName,
+			"AppURL":    s.appURL,
+			"Email":     user.Email,
+			"Username":  user.Username,
+			"Code":      code,
 			"ExpiresIn": expiresIn,
 		},
 	)

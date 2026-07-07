@@ -10,6 +10,7 @@ import { clearSkipDeleteCookie } from '../components/DeleteConfirmModal'
 import { useImpersonation } from '../context/ImpersonationContext'
 import { useNotification } from '../context/NotificationContext'
 import { BanSuspendModal } from '../components/BanSuspendModal'
+import { GroupBadge, groupOf } from '../components/GroupBadge'
 import { NotificationBell } from '../components/NotificationBell'
 import type { UserBan } from '../types/api'
 
@@ -138,9 +139,9 @@ function RouteComponent() {
             </span>
           </div>
           <div className="hidden xl:flex items-center gap-1">
-            <NavLink to="/client" exact onClick={closeMenu}>Files</NavLink>
-            <NavLink to="/client/favorites" onClick={closeMenu}>Favorites</NavLink>
-            <NavLink to="/client/shared" onClick={closeMenu}>Shared</NavLink>
+            {/* Favorites and Shared moved into the files page's side control
+                panel — they are sub-pages of Files now, not top-level tabs. */}
+            <NavLink to="/client" onClick={closeMenu}>Files</NavLink>
             {(user?.is_premium || user?.is_admin) && (
               <NavLink to={'/settings/api-keys' as never} onClick={closeMenu}>API Keys</NavLink>
             )}
@@ -156,8 +157,7 @@ function RouteComponent() {
                 {adminMenuOpen && (
                   <div className="absolute left-0 top-full mt-1 w-48 bg-white border border-gray-200 rounded-lg shadow-lg py-1 z-50">
                     <AdminDropdownLink to="/admin/users" onClick={() => setAdminMenuOpen(false)}>Users</AdminDropdownLink>
-                    <AdminDropdownLink to="/admin/invitations" onClick={() => setAdminMenuOpen(false)}>Invitations</AdminDropdownLink>
-                    <AdminDropdownLink to="/admin/interest" onClick={() => setAdminMenuOpen(false)}>Requests</AdminDropdownLink>
+                    <AdminDropdownLink to="/admin/requests" onClick={() => setAdminMenuOpen(false)}>Requests</AdminDropdownLink>
                     <AdminDropdownLink to="/admin/orders" onClick={() => setAdminMenuOpen(false)}>Orders</AdminDropdownLink>
                     <AdminDropdownLink to="/admin/emails" onClick={() => setAdminMenuOpen(false)}>Emails</AdminDropdownLink>
                     <AdminDropdownLink to="/admin/bans" onClick={() => setAdminMenuOpen(false)}>Bans & Suspensions</AdminDropdownLink>
@@ -229,12 +229,11 @@ function RouteComponent() {
             <MdPerson className="text-sm shrink-0" />
             <span className="truncate">{user?.username}</span>
             {(user?.is_premium || user?.is_admin) && (
-              <span
+              <GroupBadge
+                group={groupOf(user)}
                 title={user.is_admin ? 'Admin (premium included)' : 'Premium subscriber'}
-                className="px-1 py-px text-[9px] font-semibold uppercase tracking-wider bg-amber-200 text-amber-800 rounded-sm"
-              >
-                {user.is_admin ? 'A' : 'P'}
-              </span>
+                className="text-[9px] px-1.5 py-px shrink-0"
+              />
             )}
           </Link>
           <button
@@ -260,9 +259,7 @@ function RouteComponent() {
           ref={menuRef}
           className="xl:hidden bg-white border-b border-gray-200 px-4 py-3 flex flex-col gap-1"
         >
-          <MobileNavLink to="/client" exact onClick={closeMenu}>Files</MobileNavLink>
-          <MobileNavLink to="/client/favorites" onClick={closeMenu}>Favorites</MobileNavLink>
-          <MobileNavLink to="/client/shared" onClick={closeMenu}>Shared</MobileNavLink>
+          <MobileNavLink to="/client" onClick={closeMenu}>Files</MobileNavLink>
           {(user?.is_premium || user?.is_admin) && (
             <MobileNavLink to={'/settings/api-keys' as never} onClick={closeMenu}>API Keys</MobileNavLink>
           )}
@@ -270,8 +267,7 @@ function RouteComponent() {
             <>
               <div className="pt-1 pb-0.5 px-3 text-xs font-semibold text-gray-400 uppercase tracking-wider">Admin</div>
               <MobileNavLink to="/admin/users" onClick={closeMenu}>Users</MobileNavLink>
-              <MobileNavLink to="/admin/invitations" onClick={closeMenu}>Invitations</MobileNavLink>
-              <MobileNavLink to="/admin/interest" onClick={closeMenu}>Requests</MobileNavLink>
+              <MobileNavLink to="/admin/requests" onClick={closeMenu}>Requests</MobileNavLink>
               <MobileNavLink to="/admin/orders" onClick={closeMenu}>Orders</MobileNavLink>
               <MobileNavLink to="/admin/emails" onClick={closeMenu}>Emails</MobileNavLink>
               <MobileNavLink to="/admin/bans" onClick={closeMenu}>Bans & Suspensions</MobileNavLink>
@@ -292,7 +288,7 @@ function RouteComponent() {
       )}
       </div>
 
-      <main className="max-w-5xl mx-auto px-4 sm:px-6 py-6 sm:py-8">
+      <main className="max-w-6xl mx-auto px-4 sm:px-6 py-6 sm:py-8">
         <Outlet />
       </main>
 

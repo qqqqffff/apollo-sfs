@@ -1,19 +1,33 @@
-import { get, post, put, del } from './client'
+import { get, post, put, patch, del } from './client'
 import type { User, UserPreferences } from '../types/api'
 
 export function getMe() {
   return get<User>('/me')
 }
 
-export function changePassword(currentPassword: string, newPassword: string) {
+// requestPasswordChangeCode emails a one-time two-factor code to the signed-in
+// user's account address, required to complete changePassword.
+export function requestPasswordChangeCode() {
+  return post<{ message: string }>('/me/password/request-code')
+}
+
+export function changePassword(currentPassword: string, newPassword: string, code: string) {
   return post<{ message: string }>('/me/password', {
     current_password: currentPassword,
     new_password: newPassword,
+    code,
   })
 }
 
 export function unlinkProvider(provider: string) {
   return del<{ message: string }>('/me/social/unlink', { provider })
+}
+
+// updateUsername renames the signed-in user's account. The current session's
+// token still carries the old username afterwards, so callers should sign the
+// user out on success to force a fresh login with the new identity.
+export function updateUsername(newUsername: string) {
+  return patch<{ message: string }>('/me/username', { new_username: newUsername })
 }
 
 export function getPreferences() {

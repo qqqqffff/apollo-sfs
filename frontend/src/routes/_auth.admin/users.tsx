@@ -21,6 +21,7 @@ import { VIOLATION_CODES } from '../../types/api'
 import { useNotification } from '../../context/NotificationContext'
 import { useImpersonation } from '../../context/ImpersonationContext'
 import { BanSuspendModal } from '../../components/BanSuspendModal'
+import { GroupBadge, groupOf } from '../../components/GroupBadge'
 
 export const Route = createFileRoute('/_auth/admin/users')({
   // focus: username to auto-expand when arriving from the admin Orders page.
@@ -155,25 +156,7 @@ function AuditLogModal({ username, onClose }: { username: string; onClose: () =>
 // ── Role badge ────────────────────────────────────────────────────────────────
 
 function RoleBadge({ user }: { user: User }) {
-  if (user.is_admin) {
-    return (
-      <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-purple-100 text-purple-700">
-        Admin
-      </span>
-    )
-  }
-  if (user.is_premium) {
-    return (
-      <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-blue-100 text-blue-700">
-        Premium
-      </span>
-    )
-  }
-  return (
-    <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-gray-100 text-gray-500">
-      Standard
-    </span>
-  )
+  return <GroupBadge group={groupOf(user)} />
 }
 
 // ── Per-user storage detail (expandable subtable) ─────────────────────────────
@@ -214,8 +197,7 @@ function StorageDetails({ username }: { username: string }) {
       {/* Active expansion requests → quick link to the requests page */}
       {s.active_request_count > 0 && (
         <Link
-          to="/admin/interest"
-          search={{ tab: 'expansion' }}
+          to="/admin/requests"
           className="flex items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2.5 no-underline hover:bg-amber-100 transition-colors"
         >
           <span className="text-sm font-medium text-amber-800">

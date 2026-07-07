@@ -11,6 +11,7 @@ import {
 } from 'react-icons/md'
 import { mySharesQueryOptions, revokeShare, sharedWithMeQueryOptions } from '../../api/shares'
 import { useNotification } from '../../context/NotificationContext'
+import { FilesLayout } from '../../components/FilesSidebar'
 import type { Share } from '../../types/api'
 
 export const Route = createFileRoute('/_auth/client/shared/')({
@@ -18,6 +19,14 @@ export const Route = createFileRoute('/_auth/client/shared/')({
 })
 
 function RouteComponent() {
+  return (
+    <FilesLayout>
+      <SharedView />
+    </FilesLayout>
+  )
+}
+
+function SharedView() {
   const queryClient = useQueryClient()
   const { notify } = useNotification()
 

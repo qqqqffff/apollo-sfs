@@ -77,6 +77,20 @@ func collectAlarmSubscriptions(rows interface {
 	return subs, rows.Err()
 }
 
+// ListRecentlyFiredAlarmSubscriptions returns subscriptions whose alarm last
+// fired since the given time, most recent first. Backs the admin notification
+// bell's "alarm triggered" category.
+func (q *Queries) ListRecentlyFiredAlarmSubscriptions(ctx context.Context, since time.Time) ([]models.AlarmSubscription, error) {
+	rows, err := q.db.QueryContext(ctx, `SELECT`+alarmSubColumns+alarmSubFrom+`
+		WHERE s.last_fired_at IS NOT NULL AND s.last_fired_at >= $1
+		ORDER BY s.last_fired_at DESC`, since)
+	if err != nil {
+		return nil, fmt.Errorf("ListRecentlyFiredAlarmSubscriptions: %w", err)
+	}
+	defer rows.Close()
+	return collectAlarmSubscriptions(rows)
+}
+
 // UpsertAlarmSubscription creates or updates a subscription's threshold for the
 // given (email, alarm_type, target) tuple and returns the stored row.
 func (q *Queries) UpsertAlarmSubscription(ctx context.Context, email, alarmType string, nodeID, driveID *uuid.UUID, threshold float64) (*models.AlarmSubscription, error) {

@@ -124,6 +124,24 @@ func (s *stubQuerier) GetLatestExpansionInvoice(_ context.Context, _ uuid.UUID) 
 func (s *stubQuerier) ListSharesForRecipient(_ context.Context, _ string) ([]models.Share, error) {
 	return nil, nil
 }
+func (s *stubQuerier) ListRecentlyAcceptedInvitations(_ context.Context, _ time.Time) ([]models.Invitation, error) {
+	return nil, nil
+}
+func (s *stubQuerier) ListRecentCapturedOrders(_ context.Context, _ time.Time, _ int) ([]db.AdminOrder, error) {
+	return nil, nil
+}
+func (s *stubQuerier) ListRecentUnreadInboundEmails(_ context.Context, _ time.Time, _ int) ([]models.InboundEmail, error) {
+	return nil, nil
+}
+func (s *stubQuerier) ListRecentlyFiredAlarmSubscriptions(_ context.Context, _ time.Time) ([]models.AlarmSubscription, error) {
+	return nil, nil
+}
+func (s *stubQuerier) CreatePasswordChangeCode(_ context.Context, _, _ string, _ time.Time) error {
+	return nil
+}
+func (s *stubQuerier) ConsumePasswordChangeCode(_ context.Context, _, _ string) (bool, error) {
+	return true, nil
+}
 func (s *stubQuerier) GetUserStorageBreakdown(_ context.Context, _ string) (db.UserStorageBreakdown, error) {
 	return db.UserStorageBreakdown{}, nil
 }

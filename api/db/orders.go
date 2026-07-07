@@ -189,6 +189,57 @@ func (q *Queries) ListUserOrders(ctx context.Context, username string) ([]AdminO
 	return out, rows.Err()
 }
 
+// ListRecentCapturedOrders returns orders (premium + storage) captured since
+// the given time, newest first. Backs the admin notification bell's
+// "order received" category.
+func (q *Queries) ListRecentCapturedOrders(ctx context.Context, since time.Time, limit int) ([]AdminOrder, error) {
+	query := fmt.Sprintf(`
+		SELECT * FROM (%s) ord
+		WHERE ord.captured_at IS NOT NULL AND ord.captured_at >= $1
+		ORDER BY ord.captured_at DESC
+		LIMIT $2
+	`, adminOrdersBase)
+	rows, err := q.db.QueryContext(ctx, query, since, limit)
+	if err != nil {
+		return nil, fmt.Errorf("ListRecentCapturedOrders: %w", err)
+	}
+	defer rows.Close()
+
+	var out []AdminOrder
+	for rows.Next() {
+		var o AdminOrder
+		var capturedAt, refundedAt sql.NullTime
+		var refundID, captureID sql.NullString
+		if err := rows.Scan(
+			&o.ID, &o.Type, &o.Username, &o.Status,
+			&o.AmountCents, &o.Currency, &o.PaymentMethod,
+			&o.Reference, &o.InvoiceNumber,
+			&o.CreatedAt, &capturedAt, &refundID, &refundedAt, &captureID, &o.Environment,
+			&o.PlanID, &o.StorageType, &o.BytesAdded, &o.ServerName,
+		); err != nil {
+			return nil, fmt.Errorf("ListRecentCapturedOrders scan: %w", err)
+		}
+		if capturedAt.Valid {
+			t := capturedAt.Time
+			o.CapturedAt = &t
+		}
+		if refundedAt.Valid {
+			t := refundedAt.Time
+			o.RefundedAt = &t
+		}
+		if refundID.Valid {
+			s := refundID.String
+			o.RefundID = &s
+		}
+		if captureID.Valid {
+			s := captureID.String
+			o.PayPalCaptureID = &s
+		}
+		out = append(out, o)
+	}
+	return out, rows.Err()
+}
+
 // GetAdminOrder loads a single normalised order by type + id.
 func (q *Queries) GetAdminOrder(ctx context.Context, orderType string, id uuid.UUID) (*AdminOrder, error) {
 	query := fmt.Sprintf(`SELECT * FROM (%s) ord WHERE ord.order_type = $1 AND ord.id = $2`, adminOrdersBase)

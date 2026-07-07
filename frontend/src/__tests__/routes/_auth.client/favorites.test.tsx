@@ -43,6 +43,12 @@ jest.mock('../../../components/FilePreviewModal', () => ({
   FilePreviewModal: () => null,
 }))
 
+// The page renders inside the shared files control-panel layout; stub it to a
+// passthrough so these tests stay focused on the favorites content.
+jest.mock('../../../components/FilesSidebar', () => ({
+  FilesLayout: ({ children }: any) => children,
+}))
+
 import { Route } from '../../../routes/_auth.client/favorites'
 const Page = Route.options.component as React.ComponentType
 

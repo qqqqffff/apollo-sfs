@@ -282,6 +282,10 @@ export async function listNotifications(): Promise<AppNotification[]> {
   return res.items ?? []
 }
 
+export async function dismissNotifications(ids: string[]): Promise<void> {
+  await post('/me/notifications/dismiss', { ids })
+}
+
 // ── Pay-remaining (after admin marks the capacity expanded) ───────────────────
 
 export function createPayRemainingOrder(requestId: string) {

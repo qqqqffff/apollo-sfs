@@ -37,6 +37,10 @@ type Querier interface {
 	ListRecentUnreadInboundEmails(ctx context.Context, since time.Time, limit int) ([]models.InboundEmail, error)
 	ListRecentlyFiredAlarmSubscriptions(ctx context.Context, since time.Time) ([]models.AlarmSubscription, error)
 
+	// Notification bell — dismissal
+	ListDismissedNotificationIDs(ctx context.Context, username string) (map[string]bool, error)
+	DismissNotifications(ctx context.Context, username string, ids []string) error
+
 	// User preferences
 	GetUserPreferences(ctx context.Context, userID string) (*models.UserPreferences, error)
 	SetMediaAutouploadFolder(ctx context.Context, userID string, folderID *uuid.UUID) (*models.UserPreferences, error)

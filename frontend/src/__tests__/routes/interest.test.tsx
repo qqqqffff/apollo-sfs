@@ -33,11 +33,14 @@ jest.mock('../../api/client', () => ({
   },
 }))
 
-// Stub the hosted card fields — they render PayPal-hosted iframes that require
-// the PayPal JS SDK, which can't load in jsdom. The section wrapper ("or pay by
-// card") lives in interest.tsx and still renders around this stub.
+// Stub the hosted card fields (+ its embedded PayPal Google Pay button) — they
+// render PayPal-hosted iframes and load the PayPal/Google Pay SDKs, none of
+// which work in jsdom. A marker lets us assert the section is wired up.
 jest.mock('../../components/HostedCardFields', () => ({
-  HostedCardFields: () => null,
+  HostedCardFields: () => {
+    const R = require('react')
+    return R.createElement('div', { 'data-testid': 'hosted-card-fields' })
+  },
 }))
 
 // Render Turnstile as a button so tests can simulate captcha completion.
@@ -171,15 +174,15 @@ describe('Interest / request-access page (/interest)', () => {
   })
 
   test('renders the hosted card fields section only when PayPal is configured', () => {
-    // Without a client id the card section is hidden…
+    // Without a client id the card/Google Pay section is hidden…
     const { unmount } = renderPage({ turnstile_site_key: 'key123' })
     fireEvent.click(screen.getByRole('button', { name: /128 gb/i }))
-    expect(screen.queryByText(/or pay by card/i)).not.toBeInTheDocument()
+    expect(screen.queryByTestId('hosted-card-fields')).not.toBeInTheDocument()
     unmount()
     // …and shown once the public config carries a PayPal client id.
     renderPage({ turnstile_site_key: 'key123', paypal_client_id: 'test-client' })
     fireEvent.click(screen.getByRole('button', { name: /128 gb/i }))
-    expect(screen.getByText(/or pay by card/i)).toBeInTheDocument()
+    expect(screen.getByTestId('hosted-card-fields')).toBeInTheDocument()
   })
 
   test('disables the PayPal button while a deposit order is pending', () => {

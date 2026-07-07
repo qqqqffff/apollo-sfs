@@ -350,6 +350,12 @@ func (p *PayPalClient) doAuthed(ctx context.Context, method, path string, body i
 // CreateStorageWalletOrder creates a PayPal wallet order for a storage add-on
 // and returns the order ID + approval URL. The mobile app opens the URL, waits
 // for the user to approve in the browser, then calls CaptureOrder.
+// isWebURL reports whether u is an http(s) URL — the only schemes PayPal's
+// REST Orders API accepts for application_context return/cancel URLs.
+func isWebURL(u string) bool {
+	return strings.HasPrefix(u, "http://") || strings.HasPrefix(u, "https://")
+}
+
 func (p *PayPalClient) CreateStorageWalletOrder(ctx context.Context, amountCents int, currency, returnURL, cancelURL string) (*CreateOrderResult, error) {
 	if amountCents <= 0 {
 		return nil, errors.New("paypal: amount must be > 0")
@@ -358,6 +364,18 @@ func (p *PayPalClient) CreateStorageWalletOrder(ctx context.Context, amountCents
 		currency = "USD"
 	}
 	value := fmt.Sprintf("%d.%02d", amountCents/100, amountCents%100)
+	// PayPal's REST Orders API rejects application_context return/cancel URLs
+	// that use a non-web scheme (e.g. the mobile app's apollosfs:// deep links),
+	// failing order creation for the web JS-SDK button flow — where these URLs
+	// are never used anyway (the SDK approves in-context, no browser redirect).
+	// Include them only when they are http(s); otherwise omit them.
+	appCtx := map[string]any{"user_action": "PAY_NOW"}
+	if isWebURL(returnURL) {
+		appCtx["return_url"] = returnURL
+	}
+	if isWebURL(cancelURL) {
+		appCtx["cancel_url"] = cancelURL
+	}
 	payload := map[string]any{
 		"intent": "CAPTURE",
 		"purchase_units": []any{
@@ -368,11 +386,7 @@ func (p *PayPalClient) CreateStorageWalletOrder(ctx context.Context, amountCents
 				},
 			},
 		},
-		"application_context": map[string]any{
-			"return_url":  returnURL,
-			"cancel_url":  cancelURL,
-			"user_action": "PAY_NOW",
-		},
+		"application_context": appCtx,
 	}
 	body, _ := json.Marshal(payload)
 	resp, err := p.doAuthed(ctx, http.MethodPost, "/v2/checkout/orders", bytes.NewReader(body), nil)

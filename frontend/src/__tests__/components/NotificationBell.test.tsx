@@ -1,0 +1,108 @@
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import '@testing-library/jest-dom'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+
+const mockNavigate = jest.fn()
+jest.mock('@tanstack/react-router', () => ({
+  useNavigate: () => mockNavigate,
+}))
+
+jest.mock('../../api/billing', () => ({
+  listNotifications: jest.fn(),
+  dismissNotifications: jest.fn(),
+}))
+
+import { listNotifications, dismissNotifications, type AppNotification } from '../../api/billing'
+import { NotificationBell } from '../../components/NotificationBell'
+
+const mockListNotifications = listNotifications as jest.Mock
+const mockDismissNotifications = dismissNotifications as jest.Mock
+
+function makeNotification(overrides: Partial<AppNotification>): AppNotification {
+  return {
+    id: 'id-1',
+    kind: 'share_received',
+    title: 'Title',
+    body: 'Body',
+    link: '/client/shared',
+    created_at: '2026-01-01T00:00:00Z',
+    ...overrides,
+  }
+}
+
+// listNotifications/dismissNotifications share a mutable in-memory list so a
+// dismiss-triggered refetch (onSettled invalidation) sees the item actually
+// gone server-side, the same as the real API filtering dismissed IDs out.
+function renderBell(items: AppNotification[]) {
+  let current = items
+  mockListNotifications.mockImplementation(() => Promise.resolve(current))
+  mockDismissNotifications.mockImplementation((ids: string[]) => {
+    current = current.filter((n) => !ids.includes(n.id))
+    return Promise.resolve()
+  })
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  })
+  render(
+    <QueryClientProvider client={client}>
+      <NotificationBell />
+    </QueryClientProvider>,
+  )
+}
+
+describe('NotificationBell', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+  })
+
+  it('shows an empty state when there are no notifications', async () => {
+    renderBell([])
+    fireEvent.click(screen.getByTitle('Notifications'))
+    expect(await screen.findByText("You're all caught up.")).toBeInTheDocument()
+  })
+
+  it('groups items by category and collapses the Emails category by default', async () => {
+    renderBell([
+      makeNotification({ id: 's1', kind: 'share_received', title: 'A file was shared with you' }),
+      makeNotification({ id: 'e1', kind: 'email_received', title: 'Email received' }),
+    ])
+    fireEvent.click(screen.getByTitle('Notifications'))
+
+    expect(await screen.findByText('A file was shared with you')).toBeInTheDocument()
+    // Emails category header is shown with its count, but the item underneath
+    // starts collapsed.
+    expect(screen.getByText(/Emails \(1\)/)).toBeInTheDocument()
+    expect(screen.queryByText('Email received')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByText(/Emails \(1\)/))
+    expect(await screen.findByText('Email received')).toBeInTheDocument()
+  })
+
+  it('dismisses a single notification and persists it via the API', async () => {
+    renderBell([makeNotification({ id: 's1', kind: 'share_received', title: 'A file was shared with you' })])
+    fireEvent.click(screen.getByTitle('Notifications'))
+    await screen.findByText('A file was shared with you')
+
+    fireEvent.click(screen.getByTitle('Dismiss'))
+
+    await waitFor(() => expect(mockDismissNotifications).toHaveBeenCalledWith(['s1']))
+    await waitFor(() => expect(screen.queryByText('A file was shared with you')).not.toBeInTheDocument())
+    // Dismissing an item is not the same as opening it — no navigation.
+    expect(mockNavigate).not.toHaveBeenCalled()
+  })
+
+  it('dismisses an entire category with "Dismiss all"', async () => {
+    renderBell([
+      makeNotification({ id: 's1', kind: 'share_received', title: 'Share one' }),
+      makeNotification({ id: 's2', kind: 'share_received', title: 'Share two' }),
+    ])
+    fireEvent.click(screen.getByTitle('Notifications'))
+    await screen.findByText('Share one')
+
+    fireEvent.click(screen.getByText('Dismiss all'))
+
+    await waitFor(() => expect(mockDismissNotifications).toHaveBeenCalledWith(expect.arrayContaining(['s1', 's2'])))
+    await waitFor(() => expect(screen.queryByText('Share one')).not.toBeInTheDocument())
+    expect(screen.queryByText('Share two')).not.toBeInTheDocument()
+  })
+})

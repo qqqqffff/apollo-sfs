@@ -88,6 +88,11 @@ type stubQuerier struct {
 	depositOrderErr     error
 	consumeOrderFail    bool
 	consumeOrderErr     error
+	dismissedIDs        map[string]bool
+	dismissedIDsErr     error
+	dismissErr          error
+	dismissedCalls      [][]string
+	expansionRequests   []models.ServerExpansionRequest
 }
 
 func (s *stubQuerier) GetUserByUsername(_ context.Context, _ string) (*models.User, error) {
@@ -116,7 +121,7 @@ func (s *stubQuerier) CountActiveExpansionRequests(_ context.Context, _ string) 
 	return 0, nil
 }
 func (s *stubQuerier) ListUserExpansionRequests(_ context.Context, _ string) ([]models.ServerExpansionRequest, error) {
-	return nil, nil
+	return s.expansionRequests, nil
 }
 func (s *stubQuerier) GetLatestExpansionInvoice(_ context.Context, _ uuid.UUID) (*models.ExpansionInvoice, error) {
 	return nil, nil
@@ -135,6 +140,22 @@ func (s *stubQuerier) ListRecentUnreadInboundEmails(_ context.Context, _ time.Ti
 }
 func (s *stubQuerier) ListRecentlyFiredAlarmSubscriptions(_ context.Context, _ time.Time) ([]models.AlarmSubscription, error) {
 	return nil, nil
+}
+func (s *stubQuerier) ListDismissedNotificationIDs(_ context.Context, _ string) (map[string]bool, error) {
+	if s.dismissedIDsErr != nil {
+		return nil, s.dismissedIDsErr
+	}
+	if s.dismissedIDs == nil {
+		return map[string]bool{}, nil
+	}
+	return s.dismissedIDs, nil
+}
+func (s *stubQuerier) DismissNotifications(_ context.Context, _ string, ids []string) error {
+	if s.dismissErr != nil {
+		return s.dismissErr
+	}
+	s.dismissedCalls = append(s.dismissedCalls, ids)
+	return nil
 }
 func (s *stubQuerier) CreatePasswordChangeCode(_ context.Context, _, _ string, _ time.Time) error {
 	return nil

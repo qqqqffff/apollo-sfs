@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from '@tanstack/react-router'
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   MdNotificationsNone,
   MdCloudDone,
@@ -11,8 +11,11 @@ import {
   MdNotificationImportant,
   MdPersonAddAlt1,
   MdReceiptLong,
+  MdExpandMore,
+  MdChevronRight,
+  MdClose,
 } from 'react-icons/md'
-import { listNotifications, type AppNotification, type NotificationKind } from '../api/billing'
+import { listNotifications, dismissNotifications, type AppNotification, type NotificationKind } from '../api/billing'
 
 interface KindMeta {
   icon: React.ComponentType<{ className?: string }>
@@ -41,14 +44,23 @@ const FALLBACK_META: KindMeta = KIND_META.action_pending
 // activity, most urgent (alarms) at the top of the admin block.
 const CATEGORY_ORDER = ['Billing', 'Storage', 'Shares', 'Alarms', 'Orders', 'Invitations', 'Emails']
 
+// Categories collapsed by default when the dropdown first loads — Emails in
+// particular can get noisy (one entry per inbound message), so it's tucked
+// away behind a click rather than shown expanded like the actionable
+// categories (billing, storage, shares).
+const DEFAULT_COLLAPSED = new Set(['Emails'])
+
 // NotificationBell shows a badge with the user's pending-action notifications
 // (capacity provisioned, payment required, invoice review pending, shares
 // received) — plus, for admins, recent activity alerts (invitations accepted,
-// orders received, inbound emails, fired alarms) — grouped by category, with
-// each item deep-linking to the page it concerns.
+// orders received, inbound emails, fired alarms) — grouped by collapsible
+// categories, with each item deep-linking to the page it concerns. Items and
+// whole categories can be dismissed, which persists server-side.
 export function NotificationBell() {
   const navigate = useNavigate()
+  const queryClient = useQueryClient()
   const [open, setOpen] = useState(false)
+  const [collapsed, setCollapsed] = useState<Set<string>>(DEFAULT_COLLAPSED)
   const ref = useRef<HTMLDivElement>(null)
 
   const { data: notifications = [] } = useQuery({
@@ -58,6 +70,24 @@ export function NotificationBell() {
     staleTime: 30_000,
   })
   const items = Array.isArray(notifications) ? notifications : []
+
+  const dismissMutation = useMutation({
+    mutationFn: (ids: string[]) => dismissNotifications(ids),
+    onMutate: async (ids: string[]) => {
+      await queryClient.cancelQueries({ queryKey: ['me', 'notifications'] })
+      const previous = queryClient.getQueryData<AppNotification[]>(['me', 'notifications'])
+      queryClient.setQueryData<AppNotification[]>(['me', 'notifications'], (prev) =>
+        (prev ?? []).filter((n) => !ids.includes(n.id)),
+      )
+      return { previous }
+    },
+    onError: (_err, _ids, context) => {
+      if (context?.previous) queryClient.setQueryData(['me', 'notifications'], context.previous)
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ['me', 'notifications'] })
+    },
+  })
 
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {
@@ -72,6 +102,15 @@ export function NotificationBell() {
     const [pathname, search] = n.link.split('?')
     const params = Object.fromEntries(new URLSearchParams(search ?? ''))
     navigate({ to: pathname as never, search: params as never })
+  }
+
+  function toggleCategory(category: string) {
+    setCollapsed((prev) => {
+      const next = new Set(prev)
+      if (next.has(category)) next.delete(category)
+      else next.add(category)
+      return next
+    })
   }
 
   // Group by category, preserving the server's newest-first order within each.
@@ -111,35 +150,60 @@ export function NotificationBell() {
             <p className="px-4 py-6 text-sm text-gray-400 text-center m-0">You're all caught up.</p>
           ) : (
             <div className="max-h-96 overflow-y-auto">
-              {orderedCategories.map((category) => (
-                <div key={category}>
-                  <p className="px-4 pt-2.5 pb-1 text-[10px] font-semibold text-gray-400 uppercase tracking-wider m-0 bg-gray-50/60">
-                    {category}
-                  </p>
-                  {groups.get(category)!.map((n) => {
-                    const meta = KIND_META[n.kind] ?? FALLBACK_META
-                    const Icon = meta.icon
-                    return (
+              {orderedCategories.map((category) => {
+                const categoryItems = groups.get(category)!
+                const isCollapsed = collapsed.has(category)
+                return (
+                  <div key={category}>
+                    <div className="flex items-center justify-between gap-2 pl-2 pr-4 pt-2.5 pb-1 bg-gray-50/60">
                       <button
-                        key={n.id}
-                        onClick={() => openItem(n)}
-                        className="flex items-start gap-3 w-full px-4 py-2.5 text-left bg-transparent border-0 hover:bg-gray-50 cursor-pointer transition-colors"
+                        onClick={() => toggleCategory(category)}
+                        className="flex items-center gap-0.5 text-[10px] font-semibold text-gray-400 uppercase tracking-wider bg-transparent border-0 p-0 pl-2 cursor-pointer hover:text-gray-600"
                       >
-                        <span className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 mt-0.5 ${meta.className}`}>
-                          <Icon className="text-sm" />
-                        </span>
-                        <span className="min-w-0">
-                          <span className="block text-sm font-medium text-gray-800">{n.title}</span>
-                          <span className="block text-xs text-gray-500 mt-0.5">{n.body}</span>
-                          <span className="block text-[10px] text-gray-300 mt-0.5">
-                            {new Date(n.created_at).toLocaleDateString()}
-                          </span>
-                        </span>
+                        {isCollapsed ? <MdChevronRight className="text-sm" /> : <MdExpandMore className="text-sm" />}
+                        {category} ({categoryItems.length})
                       </button>
-                    )
-                  })}
-                </div>
-              ))}
+                      <button
+                        onClick={() => dismissMutation.mutate(categoryItems.map((n) => n.id))}
+                        className="text-[10px] font-medium text-gray-400 hover:text-gray-600 bg-transparent border-0 p-0 cursor-pointer"
+                      >
+                        Dismiss all
+                      </button>
+                    </div>
+                    {!isCollapsed &&
+                      categoryItems.map((n) => {
+                        const meta = KIND_META[n.kind] ?? FALLBACK_META
+                        const Icon = meta.icon
+                        return (
+                          <div key={n.id} className="group flex items-stretch hover:bg-gray-50 transition-colors">
+                            <button
+                              onClick={() => openItem(n)}
+                              className="flex items-start gap-3 flex-1 min-w-0 pl-4 pr-1 py-2.5 text-left bg-transparent border-0 cursor-pointer"
+                            >
+                              <span className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 mt-0.5 ${meta.className}`}>
+                                <Icon className="text-sm" />
+                              </span>
+                              <span className="min-w-0">
+                                <span className="block text-sm font-medium text-gray-800">{n.title}</span>
+                                <span className="block text-xs text-gray-500 mt-0.5">{n.body}</span>
+                                <span className="block text-[10px] text-gray-300 mt-0.5">
+                                  {new Date(n.created_at).toLocaleDateString()}
+                                </span>
+                              </span>
+                            </button>
+                            <button
+                              onClick={() => dismissMutation.mutate([n.id])}
+                              title="Dismiss"
+                              className="shrink-0 flex items-center justify-center w-8 mr-1 text-gray-300 opacity-0 group-hover:opacity-100 hover:text-gray-600 bg-transparent border-0 cursor-pointer transition-opacity"
+                            >
+                              <MdClose className="text-base" />
+                            </button>
+                          </div>
+                        )
+                      })}
+                  </div>
+                )
+              })}
             </div>
           )}
         </div>

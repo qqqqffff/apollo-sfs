@@ -433,6 +433,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		protected.PATCH("/me/username", h.UpdateMyUsername)
 		protected.GET("/me/preferences", h.GetPreferences)
 		protected.GET("/me/notifications", h.Notifications)
+		protected.POST("/me/notifications/dismiss", h.DismissNotifications)
 		// PUT /me/preferences is premium-only (media auto-upload); registered below.
 		// Storage UI toggles are available to every user.
 		protected.PUT("/me/preferences/storage-ui", h.UpdateStorageUIPreferences)
@@ -530,7 +531,6 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 
 		// Premium upgrade — create + capture a one-time PayPal order.
 		protected.POST("/payments/orders", paymentsHandler.CreateOrder)
-		protected.POST("/payments/orders/google-pay", paymentsHandler.ChargeGooglePay)
 		protected.POST("/payments/orders/:order_id/capture", paymentsHandler.CaptureOrder)
 
 		// User-facing storage info — separate from admin routes for security.

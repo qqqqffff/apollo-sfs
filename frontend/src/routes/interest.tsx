@@ -9,14 +9,11 @@ import {
   captureInterestDepositOrder,
   validateApplePayMerchantForDeposit,
   createApplePayInterestDeposit,
-  createGooglePayInterestDeposit,
   publicConfigQueryOptions,
   type StorageType,
 } from '../api/interest'
 import { ApiError } from '../api/client'
 import { HostedCardFields } from '../components/HostedCardFields'
-import { GooglePayButton } from '../components/GooglePayButton'
-import { useGooglePay } from '../hooks/useGooglePay'
 
 export const Route = createFileRoute('/interest')({
   component: RouteComponent,
@@ -67,7 +64,6 @@ function RouteComponent() {
   const [error, setError] = useState<string | null>(null)
   const [pendingOrderId, setPendingOrderId] = useState<string | null>(null)
   const [canApplePay, setCanApplePay] = useState(false)
-  const googlePay = useGooglePay()
   const turnstileRef = useRef<TurnstileInstance>(null)
 
   const selectedPlan = PLANS.find((p) => p.id === selectedPlanId) ?? null
@@ -178,23 +174,6 @@ function RouteComponent() {
     }
     session.oncancel = () => setStep('form')
     session.begin()
-  }
-
-  // ── Google Pay ───────────────────────────────────────────────────────────────
-
-  async function handleGooglePay() {
-    if (!validateForm() || !selectedPlan) return
-    setError(null)
-    try {
-      const token = await googlePay.requestToken(depositAmt(selectedPlan, storageType))
-      if (!token) return // shopper cancelled the sheet
-      setStep('pending')
-      const { order_id } = await createGooglePayInterestDeposit(selectedPlanId!, storageType, token)
-      submitMutation.mutate(order_id)
-    } catch {
-      setError('Google Pay payment failed — please try another method.')
-      setStep('form')
-    }
   }
 
   // ── Hosted card fields (PCI-compliant inline entry) ───────────────────────────
@@ -446,14 +425,6 @@ function RouteComponent() {
               </button>
             )}
 
-            {googlePay.ready && (
-              <GooglePayButton
-                onClick={handleGooglePay}
-                disabled={!formReady || isPending}
-                loading={isPending}
-                label={`Pay${selectedPlan ? ` ${depositDisplay(selectedPlan, storageType)}` : ''}`}
-              />
-            )}
 
             <button
               type="button"
@@ -471,13 +442,11 @@ function RouteComponent() {
               )}
             </button>
 
-            {/* Hosted card fields: PCI-compliant inline card entry (card data is
-                keyed into PayPal-hosted iframes, never our page). */}
+            {/* Google Pay (PayPal-orchestrated) + PCI-compliant hosted card
+                fields — card data is keyed into PayPal-hosted iframes, never our
+                page. Both share one PayPal SDK provider inside HostedCardFields. */}
             {config?.paypal_client_id && (
               <div className={`mt-1 ${formReady && !isPending ? '' : 'opacity-50 pointer-events-none'}`}>
-                <div className="flex items-center gap-2 mb-3 text-[11px] text-gray-400">
-                  <span className="flex-1 h-px bg-gray-200" />or pay by card<span className="flex-1 h-px bg-gray-200" />
-                </div>
                 <HostedCardFields
                   clientId={config.paypal_client_id}
                   currency={config.paypal_currency || 'USD'}
@@ -486,6 +455,7 @@ function RouteComponent() {
                   onError={(msg) => setError(msg)}
                   disabled={!formReady || isPending}
                   submitLabel={`Pay by Card${selectedPlan ? ` — ${depositDisplay(selectedPlan, storageType)}` : ''}`}
+                  googlePayAmount={() => (selectedPlan ? depositAmt(selectedPlan, storageType) : '0.00')}
                 />
               </div>
             )}

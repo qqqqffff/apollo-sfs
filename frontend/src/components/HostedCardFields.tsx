@@ -5,6 +5,7 @@ import {
   PayPalCardFieldsForm,
   usePayPalCardFields,
 } from '@paypal/react-paypal-js'
+import { PayPalGooglePayButton } from './PayPalGooglePayButton'
 
 interface Props {
   // Public PayPal client id (from GET /config or /billing/config).
@@ -21,6 +22,11 @@ interface Props {
   // Disables the pay button (e.g. while a plan hasn't been chosen or a capture
   // is in flight). The card fields themselves stay interactive.
   disabled?: boolean
+  // When provided, a PayPal-orchestrated Google Pay button is shown above the
+  // card fields (sharing this component's SDK provider). Returns the current
+  // amount in major units for the Google Pay sheet. Google Pay reuses the same
+  // createOrder/onApprove as the card fields.
+  googlePayAmount?: () => string
 }
 
 // HostedCardFields renders PayPal's PCI-compliant hosted card fields — the card
@@ -29,12 +35,32 @@ interface Props {
 // components="card-fields"; keep this the ONLY PayPalScriptProvider on its page
 // (a second provider with different components can prevent the SDK resolving).
 export function HostedCardFields({
-  clientId, currency, createOrder, onApprove, onError, submitLabel, disabled,
+  clientId, currency, createOrder, onApprove, onError, submitLabel, disabled, googlePayAmount,
 }: Props) {
   return (
     <PayPalScriptProvider
-      options={{ clientId, currency, intent: 'capture', components: 'card-fields' }}
+      options={{
+        clientId,
+        currency,
+        intent: 'capture',
+        components: googlePayAmount ? 'card-fields,googlepay' : 'card-fields',
+      }}
     >
+      {googlePayAmount && (
+        <>
+          <PayPalGooglePayButton
+            currencyCode={currency}
+            amount={googlePayAmount}
+            createOrder={createOrder}
+            onApprove={onApprove}
+            onError={onError}
+            enabled={!disabled}
+          />
+          <div className="flex items-center gap-2 my-3 text-[11px] text-gray-400">
+            <span className="flex-1 h-px bg-gray-200" />or pay by card<span className="flex-1 h-px bg-gray-200" />
+          </div>
+        </>
+      )}
       <PayPalCardFieldsProvider
         createOrder={createOrder}
         onApprove={(data) => onApprove(data.orderID)}

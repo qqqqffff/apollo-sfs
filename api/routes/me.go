@@ -511,9 +511,52 @@ func (h *Handler) Notifications(c *gin.Context) {
 		items = append(items, h.adminNotifications(ctx)...)
 	}
 
+	dismissed, err := h.queries.ListDismissedNotificationIDs(ctx, username)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "load notifications"})
+		return
+	}
+	kept := items[:0]
+	for _, item := range items {
+		if !dismissed[item.ID] {
+			kept = append(kept, item)
+		}
+	}
+	items = kept
+
 	sort.Slice(items, func(i, j int) bool { return items[i].CreatedAt.After(items[j].CreatedAt) })
 
 	c.JSON(http.StatusOK, gin.H{"items": items})
+}
+
+type dismissNotificationsRequest struct {
+	IDs []string `json:"ids" binding:"required,min=1"`
+}
+
+// DismissNotifications handles POST /api/v1/me/notifications/dismiss.
+// Records the given notification-bell item IDs so they're excluded from the
+// user's future Notifications responses (items are re-derived from live
+// state on every request, so dismissal is tracked as a separate denylist
+// rather than a flag on the source rows).
+func (h *Handler) DismissNotifications(c *gin.Context) {
+	username := c.GetString("username")
+	if username == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	var req dismissNotificationsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ids is required"})
+		return
+	}
+
+	if err := h.queries.DismissNotifications(c.Request.Context(), username, req.IDs); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "dismiss notifications"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
 // adminNotifications assembles the admin-only bell categories. Each source is

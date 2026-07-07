@@ -5,11 +5,9 @@ import { MdCloud, MdRocketLaunch, MdCheckCircle } from 'react-icons/md'
 import { register, validateInviteToken } from '../api/auth'
 import { ApiError } from '../api/client'
 import { publicConfigQueryOptions } from '../api/interest'
-import { createPaymentOrder, capturePaymentOrder, chargePremiumGooglePay } from '../api/payments'
+import { createPaymentOrder, capturePaymentOrder } from '../api/payments'
 import { TermsOfServiceModal } from '../components/TermsOfServiceModal'
 import { HostedCardFields } from '../components/HostedCardFields'
-import { GooglePayButton } from '../components/GooglePayButton'
-import { useGooglePay } from '../hooks/useGooglePay'
 
 interface RegisterParams {
   token: string
@@ -38,7 +36,6 @@ function RouteComponent() {
     retry: false,
   })
   const { data: config } = useQuery(publicConfigQueryOptions)
-  const googlePay = useGooglePay()
 
   const [username, setUsername] = useState('')
   const [email, setEmail] = useState('')
@@ -72,21 +69,6 @@ function RouteComponent() {
       setPaid(true)
     } catch (err) {
       setPayError(err instanceof ApiError ? err.message : 'Payment could not be completed — please try again.')
-    } finally {
-      setPaying(false)
-    }
-  }
-
-  async function handlePremiumGooglePay() {
-    setPayError(null)
-    try {
-      const gpToken = await googlePay.requestToken((premiumPriceCents / 100).toFixed(2))
-      if (!gpToken) return // shopper cancelled
-      setPaying(true)
-      await chargePremiumGooglePay(gpToken)
-      setPaid(true)
-    } catch (err) {
-      setPayError(err instanceof ApiError ? err.message : 'Google Pay payment failed — please try another method.')
     } finally {
       setPaying(false)
     }
@@ -183,17 +165,6 @@ function RouteComponent() {
                   Pay for Premium{premiumPriceLabel ? ` — ${premiumPriceLabel}` : ''}
                 </h3>
                 {payError && <p className="text-sm text-red-500 m-0">{payError}</p>}
-                {googlePay.ready && (
-                  <GooglePayButton
-                    onClick={handlePremiumGooglePay}
-                    disabled={paying}
-                    loading={paying}
-                    label={`Pay${premiumPriceLabel ? ` ${premiumPriceLabel}` : ''}`}
-                  />
-                )}
-                <div className="flex items-center gap-2 text-[11px] text-gray-400">
-                  <span className="flex-1 h-px bg-gray-200" />or pay by card<span className="flex-1 h-px bg-gray-200" />
-                </div>
                 <HostedCardFields
                   clientId={config.paypal_client_id}
                   currency={config.paypal_currency || 'USD'}
@@ -202,6 +173,7 @@ function RouteComponent() {
                   onError={(msg) => setPayError(msg)}
                   disabled={paying}
                   submitLabel={`Pay by Card${premiumPriceLabel ? ` — ${premiumPriceLabel}` : ''}`}
+                  googlePayAmount={() => (premiumPriceCents / 100).toFixed(2)}
                 />
                 <p className="text-[11px] text-gray-400 text-center m-0">
                   Payments are processed securely by PayPal. Card details are entered directly into

@@ -24,7 +24,6 @@ import {
   buildCustomTibStops,
   captureExpansionOrder,
   captureStorageOrder,
-  chargeStorageGooglePay,
   createExpansionOrder,
   createStorageOrder,
   customPriceCents,
@@ -34,8 +33,7 @@ import {
   type StorageType,
 } from '../api/billing'
 import { ApiError } from '../api/client'
-import { useGooglePay } from '../hooks/useGooglePay'
-import { GooglePayButton } from './GooglePayButton'
+import { PayPalGooglePayButton } from './PayPalGooglePayButton'
 
 // Allocation threshold above which direct purchases on a server are blocked
 // and the user is steered to an expansion request. Mirrors the backend rule.
@@ -81,7 +79,6 @@ type Phase = 'select' | 'purchased' | 'expansion_requested' | 'custom_submitted'
 export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Props) {
   const queryClient = useQueryClient()
   const { data: user } = useQuery(meQueryOptions)
-  const googlePay = useGooglePay()
 
   const { data: config, isLoading: configLoading } = useQuery({
     queryKey: ['billing', 'config'],
@@ -237,31 +234,6 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
     }
   }
 
-  // Google Pay charges the full price and applies the storage immediately — so
-  // it's only offered for in-capacity direct purchases, not the 50%-deposit
-  // expansion path or custom (invoiced) requests.
-  const canGooglePay = canPay && !isExpansion && !isCustom && googlePay.ready && !!config?.paypal_client_id
-
-  async function handleGooglePayPurchase() {
-    if (!selectedPlanId || !selectedServer || isExpansion || isCustom) return
-    setBusy(true)
-    setPayError(null)
-    try {
-      const token = await googlePay.requestToken((fullPriceCents / 100).toFixed(2))
-      if (!token) return // shopper cancelled the sheet
-      const res = await chargeStorageGooglePay(selectedPlanId, storageType, selectedServer.id, token)
-      setNewQuota(res.new_quota_bytes)
-      setPhase('purchased')
-      await queryClient.invalidateQueries({ queryKey: ['me'] })
-      queryClient.invalidateQueries({ queryKey: ['storage'] })
-      onPurchased?.(res.new_quota_bytes)
-    } catch (err) {
-      setPayError(err instanceof ApiError ? err.message : 'Google Pay payment failed')
-    } finally {
-      setBusy(false)
-    }
-  }
-
   const usedPct = user && user.storage_quota_bytes > 0
     ? Math.min((user.storage_used_bytes / user.storage_quota_bytes) * 100, 100)
     : 0
@@ -277,7 +249,14 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
       >
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100 shrink-0">
-          <h3 className="text-base font-semibold text-gray-900 m-0">Add storage</h3>
+          <div className="flex items-center gap-2">
+            <h3 className="text-base font-semibold text-gray-900 m-0">Add storage</h3>
+            {config?.environment === 'sandbox' && (
+              <span className="px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider bg-purple-100 text-purple-700 rounded">
+                Sandbox payment
+              </span>
+            )}
+          </div>
           <button
             onClick={onClose}
             disabled={busy}
@@ -643,29 +622,26 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
                         : `Pay: ${formatCents(amountCents)}`
                       : 'Select a capacity to continue'}
                   </p>
-                  {/* Google Pay — direct full-price purchases only (no deposit endpoint). */}
-                  {!isExpansion && googlePay.ready && (
-                    <>
-                      <GooglePayButton
-                        onClick={handleGooglePayPurchase}
-                        disabled={!canGooglePay || busy}
-                        loading={busy}
-                        label={`Pay ${formatCents(fullPriceCents)}`}
-                        className="w-full flex items-center justify-center gap-2 px-4 py-3 mb-2 text-sm font-semibold bg-white hover:bg-gray-50 text-gray-800 border border-gray-300 rounded-lg disabled:opacity-50 transition-colors cursor-pointer"
-                      />
-                      <div className="flex items-center gap-2 mb-2 text-[11px] text-gray-400">
-                        <span className="flex-1 h-px bg-gray-200" />or<span className="flex-1 h-px bg-gray-200" />
-                      </div>
-                    </>
-                  )}
                   <PayPalScriptProvider
                     options={{
                       clientId: config.paypal_client_id,
                       currency: config.currency || 'USD',
                       intent: 'capture',
-                      components: 'buttons',
+                      components: 'buttons,googlepay',
+                      disableFunding: 'paylater',
                     }}
                   >
+                    {/* Google Pay, orchestrated by PayPal — reuses the same
+                        order create/capture as the buttons (works for deposits
+                        too). Hidden when the buyer isn't Google Pay eligible. */}
+                    <PayPalGooglePayButton
+                      currencyCode={config.currency || 'USD'}
+                      amount={() => (amountCents / 100).toFixed(2)}
+                      createOrder={handleCreateOrder}
+                      onApprove={(orderId) => handleApprove({ orderID: orderId })}
+                      onError={(msg) => { if (!payError) setPayError(msg) }}
+                      enabled={canPay}
+                    />
                     <PayPalButtons
                       disabled={!canPay}
                       style={{ layout: 'vertical', shape: 'rect', label: 'pay' }}

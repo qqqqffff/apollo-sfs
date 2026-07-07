@@ -128,28 +128,32 @@ func (q *Queries) CreateServer(ctx context.Context, p CreateServerParams) (*mode
 	return s, nil
 }
 
-// ServerCapacity holds aggregated capacity info for a single active server.
+// ServerCapacity holds aggregated capacity info for one (server, drive_type)
+// pair — a server with both an nvme and an hdd drive yields two rows, each
+// scoped to that tier's own capacity.
 type ServerCapacity struct {
 	ServerID           uuid.UUID
 	Name               string
 	State              string
 	TotalCapacityBytes int64
 	AvailableBytes     int64
-	// DriveType is "nvme" if any active drive label contains "nvme" (case-insensitive), otherwise "hdd".
+	// DriveType is "nvme" (fast) or "hdd" (standard) — the tier this row covers.
 	DriveType string
 }
 
 // ListServerCapacities returns capacity aggregated across active drives for
-// every active server, ordered by name.
+// every active server, one row per (server, drive_type), ordered by name.
+// Fast and standard tiers are never combined — a server with both shows up as
+// two separate rows so callers (e.g. the storage server picker) see each
+// tier's real total instead of one tier's total masking the other's as zero.
 func (q *Queries) ListServerCapacities(ctx context.Context) ([]ServerCapacity, error) {
 	rows, err := q.db.QueryContext(ctx, `
 		SELECT
-			s.id, s.name, s.state,
+			s.id, s.name, s.state, d.drive_type,
 			COALESCE(SUM(d.capacity_bytes), 0)                                     AS total_capacity_bytes,
-			COALESCE(SUM(GREATEST(d.capacity_bytes - COALESCE(sub.allocated, 0), 0)), 0) AS available_bytes,
-			CASE WHEN COALESCE(BOOL_OR(d.drive_type = 'nvme'), false) THEN 'nvme' ELSE 'hdd' END AS drive_type
+			COALESCE(SUM(GREATEST(d.capacity_bytes - COALESCE(sub.allocated, 0), 0)), 0) AS available_bytes
 		FROM servers s
-		LEFT JOIN drives d ON d.server_id = s.id AND d.is_active = true
+		JOIN drives d ON d.server_id = s.id AND d.is_active = true
 		LEFT JOIN (
 			SELECT uda.drive_id, SUM(u.storage_quota_bytes) AS allocated
 			FROM user_drive_allocations uda
@@ -157,8 +161,8 @@ func (q *Queries) ListServerCapacities(ctx context.Context) ([]ServerCapacity, e
 			GROUP BY uda.drive_id
 		) sub ON sub.drive_id = d.id
 		WHERE s.is_active = true
-		GROUP BY s.id
-		ORDER BY s.name ASC
+		GROUP BY s.id, s.name, s.state, d.drive_type
+		ORDER BY s.name ASC, d.drive_type ASC
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("ListServerCapacities: %w", err)
@@ -168,8 +172,8 @@ func (q *Queries) ListServerCapacities(ctx context.Context) ([]ServerCapacity, e
 	var out []ServerCapacity
 	for rows.Next() {
 		var sc ServerCapacity
-		if err := rows.Scan(&sc.ServerID, &sc.Name, &sc.State,
-			&sc.TotalCapacityBytes, &sc.AvailableBytes, &sc.DriveType); err != nil {
+		if err := rows.Scan(&sc.ServerID, &sc.Name, &sc.State, &sc.DriveType,
+			&sc.TotalCapacityBytes, &sc.AvailableBytes); err != nil {
 			return nil, fmt.Errorf("ListServerCapacities scan: %w", err)
 		}
 		out = append(out, sc)
@@ -178,17 +182,19 @@ func (q *Queries) ListServerCapacities(ctx context.Context) ([]ServerCapacity, e
 }
 
 // GetServerCapacity returns aggregated capacity info for a single active
-// server, or nil when the server does not exist or is inactive. Backs the
-// 90%-allocation purchase gate in the billing handler.
-func (q *Queries) GetServerCapacity(ctx context.Context, serverID uuid.UUID) (*ServerCapacity, error) {
+// server, scoped to one drive type (tier), or nil when the server does not
+// exist, is inactive, or has no active drives of that type. Backs the
+// 90%-allocation purchase gate in the billing handler — scoping by drive_type
+// keeps that gate per-tier (a full fast tier no longer blocks standard
+// purchases, or vice versa).
+func (q *Queries) GetServerCapacity(ctx context.Context, serverID uuid.UUID, driveType string) (*ServerCapacity, error) {
 	row := q.db.QueryRowContext(ctx, `
 		SELECT
-			s.id, s.name, s.state,
+			s.id, s.name, s.state, d.drive_type,
 			COALESCE(SUM(d.capacity_bytes), 0)                                     AS total_capacity_bytes,
-			COALESCE(SUM(GREATEST(d.capacity_bytes - COALESCE(sub.allocated, 0), 0)), 0) AS available_bytes,
-			CASE WHEN COALESCE(BOOL_OR(d.drive_type = 'nvme'), false) THEN 'nvme' ELSE 'hdd' END AS drive_type
+			COALESCE(SUM(GREATEST(d.capacity_bytes - COALESCE(sub.allocated, 0), 0)), 0) AS available_bytes
 		FROM servers s
-		LEFT JOIN drives d ON d.server_id = s.id AND d.is_active = true
+		JOIN drives d ON d.server_id = s.id AND d.is_active = true AND d.drive_type = $2
 		LEFT JOIN (
 			SELECT uda.drive_id, SUM(u.storage_quota_bytes) AS allocated
 			FROM user_drive_allocations uda
@@ -196,11 +202,11 @@ func (q *Queries) GetServerCapacity(ctx context.Context, serverID uuid.UUID) (*S
 			GROUP BY uda.drive_id
 		) sub ON sub.drive_id = d.id
 		WHERE s.is_active = true AND s.id = $1
-		GROUP BY s.id
-	`, serverID)
+		GROUP BY s.id, s.name, s.state, d.drive_type
+	`, serverID, driveType)
 	var sc ServerCapacity
-	if err := row.Scan(&sc.ServerID, &sc.Name, &sc.State,
-		&sc.TotalCapacityBytes, &sc.AvailableBytes, &sc.DriveType); err != nil {
+	if err := row.Scan(&sc.ServerID, &sc.Name, &sc.State, &sc.DriveType,
+		&sc.TotalCapacityBytes, &sc.AvailableBytes); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}

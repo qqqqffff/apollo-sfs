@@ -14,7 +14,7 @@ import (
 type Querier interface {
 	GetUserByUsername(ctx context.Context, username string) (*models.User, error)
 	GetServer(ctx context.Context, id uuid.UUID) (*models.Server, error)
-	GetServerCapacity(ctx context.Context, serverID uuid.UUID) (*db.ServerCapacity, error)
+	GetServerCapacity(ctx context.Context, serverID uuid.UUID, driveType string) (*db.ServerCapacity, error)
 	GetUserDrive(ctx context.Context, username string) (*models.UserDriveAllocation, error)
 	GetDriveAvailableBytes(ctx context.Context, driveID uuid.UUID) (int64, error)
 	AddUserQuota(ctx context.Context, username string, bytesAdded int64) (int64, error)

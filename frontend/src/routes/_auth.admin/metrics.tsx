@@ -587,6 +587,11 @@ function RouteComponent() {
                   drives only when no disks are reported (non-pooled deployments). */}
               <DriveCapacityCard items={nodeDisks.length ? nodeDisks : nodeDrives} />
               {nodeDisks.length > 0 ? (
+                <DiskUsageCarousel disks={nodeDisks} index={safeDiskIdx} onIndex={setDiskIdx} />
+              ) : (
+                <DriveUsageCarousel drives={nodeDrives} index={safeDriveIdx} onIndex={setDriveIdx} />
+              )}
+              {nodeDisks.length > 0 ? (
                 <DiskTempCarousel
                   disks={nodeDisks}
                   index={safeDiskIdx}
@@ -1212,6 +1217,98 @@ function DriveCapacityCard({ items }: { items: { total_bytes: number; used_bytes
             {pct.toFixed(1)}% of {fmtCapacity(total)} · {items.length} disk{items.length !== 1 ? 's' : ''}
           </div>
         </>
+      )}
+    </div>
+  )
+}
+
+// DiskUsageCarousel pages through the selected node's physical disks, one
+// usage bar per slide — a per-disk complement to DriveCapacityCard's node-wide
+// aggregate. Shares its index with DiskTempCarousel so paging either one keeps
+// both showing the same disk.
+function DiskUsageCarousel({ disks, index, onIndex }: {
+  disks: DiskFrame[]
+  index: number
+  onIndex: (i: number) => void
+}) {
+  const has = disks.length > 0
+  const d = has ? disks[Math.min(index, disks.length - 1)] : undefined
+  const pct = d && d.total_bytes > 0 ? (d.used_bytes / d.total_bytes) * 100 : 0
+  const step = (delta: number, e: React.MouseEvent) => {
+    e.stopPropagation()
+    if (!has) return
+    onIndex((index + delta + disks.length) % disks.length)
+  }
+  return (
+    <div className="bg-white border border-gray-200 rounded-xl px-4 py-3">
+      <div className="flex items-center justify-between mb-2">
+        <div className="text-xs text-gray-400">Disk usage</div>
+        {disks.length > 1 && (
+          <div className="flex items-center gap-1">
+            <button onClick={(e) => step(-1, e)} className="text-xs text-gray-400 hover:text-gray-700 cursor-pointer bg-transparent border-0 px-1" title="Previous disk usage">‹</button>
+            <span className="text-xs text-gray-400 tabular-nums">{index + 1}/{disks.length}</span>
+            <button onClick={(e) => step(1, e)} className="text-xs text-gray-400 hover:text-gray-700 cursor-pointer bg-transparent border-0 px-1" title="Next disk usage">›</button>
+          </div>
+        )}
+      </div>
+      {d ? (
+        <>
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-xs text-gray-600 font-medium truncate" title={d.device || d.label}>{d.label}</span>
+            <span className="text-lg font-semibold tabular-nums shrink-0 text-gray-900">{pct.toFixed(1)}%</span>
+          </div>
+          <div className="h-1.5 bg-gray-100 rounded-full mt-1.5 overflow-hidden">
+            <div className={`h-full rounded-full ${pct >= 90 ? 'bg-red-500' : pct >= 75 ? 'bg-amber-500' : 'bg-emerald-500'}`} style={{ width: `${Math.min(pct, 100)}%` }} />
+          </div>
+          <div className="text-xs text-gray-400 mt-0.5">{fmtCapacity(d.used_bytes)} / {fmtCapacity(d.total_bytes)}</div>
+        </>
+      ) : (
+        <div className="text-sm font-semibold text-gray-400">no live data</div>
+      )}
+    </div>
+  )
+}
+
+// DriveUsageCarousel is DiskUsageCarousel's fallback for non-pooled deployments
+// with no physical-disk reporting — pages through logical drives instead.
+function DriveUsageCarousel({ drives, index, onIndex }: {
+  drives: DriveFrame[]
+  index: number
+  onIndex: (i: number) => void
+}) {
+  const has = drives.length > 0
+  const d = has ? drives[Math.min(index, drives.length - 1)] : undefined
+  const pct = d && d.total_bytes > 0 ? (d.used_bytes / d.total_bytes) * 100 : 0
+  const step = (delta: number, e: React.MouseEvent) => {
+    e.stopPropagation()
+    if (!has) return
+    onIndex((index + delta + drives.length) % drives.length)
+  }
+  return (
+    <div className="bg-white border border-gray-200 rounded-xl px-4 py-3">
+      <div className="flex items-center justify-between mb-2">
+        <div className="text-xs text-gray-400">Disk usage</div>
+        {drives.length > 1 && (
+          <div className="flex items-center gap-1">
+            <button onClick={(e) => step(-1, e)} className="text-xs text-gray-400 hover:text-gray-700 cursor-pointer bg-transparent border-0 px-1" title="Previous drive usage">‹</button>
+            <span className="text-xs text-gray-400 tabular-nums">{index + 1}/{drives.length}</span>
+            <button onClick={(e) => step(1, e)} className="text-xs text-gray-400 hover:text-gray-700 cursor-pointer bg-transparent border-0 px-1" title="Next drive usage">›</button>
+          </div>
+        )}
+      </div>
+      {d ? (
+        <>
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-xs text-gray-600 font-medium truncate" title={d.label}>{d.label}</span>
+            <span className="text-lg font-semibold tabular-nums shrink-0 text-gray-900">{pct.toFixed(1)}%</span>
+          </div>
+          <div className="h-1.5 bg-gray-100 rounded-full mt-1.5 overflow-hidden">
+            <div className={`h-full rounded-full ${pct >= 90 ? 'bg-red-500' : pct >= 75 ? 'bg-amber-500' : 'bg-emerald-500'}`} style={{ width: `${Math.min(pct, 100)}%` }} />
+          </div>
+          <div className="text-xs text-gray-400 mt-0.5">{fmtCapacity(d.used_bytes)} / {fmtCapacity(d.total_bytes)} · {d.drive_type === 'nvme' ? 'Fast' : 'Standard'}</div>
+        </>
+      ) : (
+        <div className="text-sm font-semibold text-gray-400">no live data</div>
       )}
     </div>
   )

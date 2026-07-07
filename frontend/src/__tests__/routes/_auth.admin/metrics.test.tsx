@@ -141,7 +141,8 @@ describe('Admin Metrics — Node hardware', () => {
 
   test('drive-temp carousel shows the first drive temperature with colour coding', () => {
     setup()
-    expect(screen.getByText('nvme-01')).toBeInTheDocument()
+    // "nvme-01" now labels both the temp carousel and the usage carousel.
+    expect(screen.getAllByText('nvme-01').length).toBeGreaterThanOrEqual(1)
     const temp = screen.getByText('38.5°C')
     expect(temp).toBeInTheDocument()
     expect(temp.className).toContain('text-emerald-600') // < 45°C → green
@@ -228,7 +229,10 @@ describe('Admin Metrics — Packet loss card', () => {
   test('applies red colour for ≥10% packet loss', () => {
     jest.replaceProperty(SAMPLE_CLUSTER, 'server_isp_packet_loss_percent', 20)
     setup()
-    expect(screen.getByText('20.0%').className).toContain('text-red-600')
+    // "20.0%" also coincidentally matches nvme-01's usage carousel (100/500 GB) —
+    // find the packet-loss element specifically by its colour class.
+    const match = screen.getAllByText('20.0%').find(el => el.className.includes('text-red-600'))
+    expect(match).toBeTruthy()
     jest.replaceProperty(SAMPLE_CLUSTER, 'server_isp_packet_loss_percent', 0.0)
   })
 

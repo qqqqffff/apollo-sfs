@@ -510,17 +510,27 @@ func (h *Handler) validatePurchaseServer(c *gin.Context, serverIDStr, storageTyp
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid server_id"})
 		return nil, false
 	}
-	capa, err := h.queries.GetServerCapacity(c.Request.Context(), id)
+	capa, err := h.queries.GetServerCapacity(c.Request.Context(), id, storageType)
 	if err != nil {
 		log.Printf("billing validatePurchaseServer: %v", err)
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "check server capacity"})
 		return nil, false
 	}
 	if capa == nil {
-		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "server not found"})
-		return nil, false
-	}
-	if capa.DriveType != storageType {
+		// Either the server doesn't exist, or it exists but has no active
+		// drives of the requested tier — tell those two cases apart so a
+		// server that's fast-only (or standard-only) reports "wrong type"
+		// rather than a misleading 404.
+		srv, err := h.queries.GetServer(c.Request.Context(), id)
+		if err != nil {
+			log.Printf("billing validatePurchaseServer: %v", err)
+			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "check server capacity"})
+			return nil, false
+		}
+		if srv == nil || !srv.IsActive {
+			c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "server not found"})
+			return nil, false
+		}
 		c.AbortWithStatusJSON(http.StatusConflict, gin.H{
 			"error":              "server does not offer the requested storage type",
 			"requires_expansion": true,

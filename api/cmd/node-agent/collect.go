@@ -204,38 +204,45 @@ var reBlockDisk = regexp.MustCompile(`^(sd[a-z]+|mmcblk\d+)`)
 // "nvme_composite". That makes drive-to-sensor matching by key text ambiguous the
 // moment a node has more than one disk of the same type (e.g. the fast-tier node's
 // two pooled NVMes), so it silently resolved to no temperature for either drive.
-// Reading directly from the specific controller's/disk's own sysfs subtree
-// (/sys/class/nvme/<ctrl>/hwmon*/temp1_input, or for a SATA/USB disk with the
-// `drivetemp` kernel module bound, /sys/block/<disk>/device/hwmon*/temp1_input)
-// ties each reading to the exact physical device, so N identical drives can never
-// collide. Returns "" if no matching sysfs path exists (untracked device type, or
-// the kernel/host doesn't expose hwmon for it).
+//
+// Rather than guess which of several observed sysfs directory layouts a given
+// kernel/distro uses for a drive's hwmon device (that guessing is what broke the
+// standard-tier HDD — its drivetemp hwmon subdirectory didn't match either
+// assumed shape), this resolves the match the way the kernel itself guarantees:
+// every hwmon device registered with a parent exposes a `device` symlink back to
+// that exact parent (Documentation/hwmon/sysfs-interface.rst). So this computes
+// the disk's own canonical device path, then scans every hwmon device's `device`
+// symlink for the one that resolves to it — independent of how many directory
+// levels separate them.
 func driveTempPath(device string) string {
 	base := filepath.Base(device)
 
-	if ctrl := reNVMeCtrl.FindString(base); ctrl != "" {
-		matches, _ := filepath.Glob(filepath.Join(sysRoot(), "class", "nvme", ctrl, "hwmon*", "temp1_input"))
+	var wantDevice string
+	switch {
+	case reNVMeCtrl.FindString(base) != "":
+		wantDevice = filepath.Join(sysRoot(), "class", "nvme", reNVMeCtrl.FindString(base))
+	case reBlockDisk.FindString(base) != "":
+		wantDevice = filepath.Join(sysRoot(), "class", "block", reBlockDisk.FindString(base), "device")
+	default:
+		return ""
+	}
+
+	wantReal, err := filepath.EvalSymlinks(wantDevice)
+	if err != nil {
+		return ""
+	}
+
+	hwmons, _ := filepath.Glob(filepath.Join(sysRoot(), "class", "hwmon", "hwmon*"))
+	for _, h := range hwmons {
+		devReal, err := filepath.EvalSymlinks(filepath.Join(h, "device"))
+		if err != nil || devReal != wantReal {
+			continue
+		}
+		matches, _ := filepath.Glob(filepath.Join(h, "temp*_input"))
 		if len(matches) > 0 {
 			return matches[0]
 		}
-		return ""
 	}
-
-	if disk := reBlockDisk.FindString(base); disk != "" {
-		// Try both observed drivetemp sysfs layouts (kernel/distro dependent),
-		// mirroring gopsutil's own defensive handling of hwmon path variants.
-		for _, pattern := range []string{
-			filepath.Join(sysRoot(), "block", disk, "device", "hwmon", "hwmon*", "temp1_input"),
-			filepath.Join(sysRoot(), "block", disk, "device", "hwmon*", "temp1_input"),
-		} {
-			matches, _ := filepath.Glob(pattern)
-			if len(matches) > 0 {
-				return matches[0]
-			}
-		}
-		return ""
-	}
-
 	return ""
 }
 

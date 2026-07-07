@@ -439,11 +439,17 @@ curl -fsS -X POST https://files.<domain>/api/v1/admin/system/sync -H "Cookie: <a
 - Admin → **metrics** → pick the Pi node: the **Physical disks** card lists `nvme-01`
   *and* `nvme-02` with independent fill bars + temperatures; click one to graph its
   temperature history. Upload to fast and to standard to confirm routing.
-  - If either drive's temperature shows `—`, check that its sysfs hwmon path actually
-    exists on that node (`ls /sys/class/nvme/nvme*/hwmon*/temp1_input` for NVMe,
-    `ls /sys/block/sda/device/hwmon*/temp1_input` for the HDD — see 0.3's `drivetemp`
-    step). `node-agent` reads each physical disk's own hwmon path directly (never by
-    matching a generic sensor label), so this is the only real failure mode — a missing
-    or not-yet-loaded kernel driver, not an agent misconfiguration.
+  - If either drive's temperature shows `—`, the disk's `drivetemp`/NVMe hwmon device
+    isn't registered yet (or the `drivetemp` module from 0.3 isn't loaded) — `node-agent`
+    doesn't guess a fixed sysfs path depth, it matches each hwmon device's `device`
+    symlink back to the exact disk, so this is a kernel/module issue, not an agent
+    misconfiguration. Check:
+    ```bash
+    readlink -f /sys/class/block/sda/device        # the HDD's own device path
+    for h in /sys/class/hwmon/hwmon*; do echo "$h -> $(readlink -f "$h/device")"; done
+    ```
+    One `hwmonN -> device` line should match the HDD's device path exactly and sit next
+    to a `temp1_input` file. If none do, `drivetemp` hasn't bound to that disk — re-check
+    `lsmod | grep drivetemp` and `dmesg | grep -i drivetemp`.
 - `docker service logs apollo-sfs_node-agent --tail 20` on each node — pushes succeeding,
   no `NODE_AGENT_TOKEN is required` fatal.

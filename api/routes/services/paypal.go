@@ -29,11 +29,11 @@ const (
 
 // PayPalConfig is the dependency-injection bag for NewPayPalClient.
 type PayPalConfig struct {
-	Environment   string // "sandbox" or "live"
-	ClientID      string
-	ClientSecret  string
-	WebhookID     string
-	HTTPTimeout   time.Duration
+	Environment  string // "sandbox" or "live"
+	ClientID     string
+	ClientSecret string
+	WebhookID    string
+	HTTPTimeout  time.Duration
 }
 
 // PayPalClient is a tiny wrapper around the PayPal Orders v2 + Webhooks
@@ -47,6 +47,26 @@ type PayPalClient struct {
 	tokenMu sync.Mutex
 	token   string
 	expires time.Time
+}
+
+// PayPalClients bundles the live and (optional) sandbox PayPalClient
+// instances. Handlers select between them per request via For, based on
+// whether the acting admin's session-scoped "sandbox payments" toggle is on.
+type PayPalClients struct {
+	Live    *PayPalClient
+	Sandbox *PayPalClient
+}
+
+// For returns the client for the given environment ("sandbox" | "live").
+// Deliberately does NOT fall back to Live when Sandbox is nil — callers keep
+// their existing nil-check ("payments not configured") so a toggled-on admin
+// without sandbox credentials configured gets a clear error instead of being
+// silently charged on the live account.
+func (p PayPalClients) For(env string) *PayPalClient {
+	if env == PayPalEnvSandbox {
+		return p.Sandbox
+	}
+	return p.Live
 }
 
 // NewPayPalClient constructs a PayPalClient. Returns nil when ClientID or
@@ -159,8 +179,8 @@ func (p *PayPalClient) CreateOrder(ctx context.Context, in CreateOrderInput) (*C
 		},
 		"payment_source": ps,
 		"application_context": map[string]any{
-			"return_url": in.ReturnURL,
-			"cancel_url": in.CancelURL,
+			"return_url":  in.ReturnURL,
+			"cancel_url":  in.CancelURL,
 			"user_action": "PAY_NOW",
 		},
 	}
@@ -522,8 +542,8 @@ func (p *PayPalClient) directOrder(ctx context.Context, amountCents int, currenc
 		return nil, fmt.Errorf("paypal direct charge: %s: %s", resp.Status, string(raw))
 	}
 	var parsed struct {
-		ID     string `json:"id"`
-		Status string `json:"status"`
+		ID            string `json:"id"`
+		Status        string `json:"status"`
 		PurchaseUnits []struct {
 			Payments struct {
 				Captures []struct {
@@ -590,7 +610,9 @@ func (p *PayPalClient) RefundCapture(ctx context.Context, captureID string, amou
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
-		var ppErr struct{ Message string `json:"message"` }
+		var ppErr struct {
+			Message string `json:"message"`
+		}
 		if jerr := json.Unmarshal(raw, &ppErr); jerr == nil && ppErr.Message != "" {
 			return nil, fmt.Errorf("paypal refund: %s", ppErr.Message)
 		}

@@ -1,6 +1,7 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { MdComputer, MdStorage } from 'react-icons/md'
 import {
   alarmSubscriptionsQueryOptions,
   deleteAlarmSubscription,
@@ -23,6 +24,7 @@ import type { AlarmType, DiskFrame, DriveFrame, DriveStat, DriveSummary, Metrics
 import { useMetricsStream } from '../../hooks/useMetricsStream'
 import { LineGraph } from '../../components/LineGraph'
 import type { LinePoint } from '../../components/LineGraph'
+import { StorageDonut } from '../../components/StorageDonut'
 import { AlarmConfig } from '../../components/AlarmConfig'
 import { useNotification } from '../../context/NotificationContext'
 
@@ -105,6 +107,7 @@ function RouteComponent() {
   const [hours, setHours] = useState<HourWindow>(12)
   const [selectedMetric, setSelectedMetric] = useState<MetricKey>('traffic')
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
+  const [selectedServerId, setSelectedServerId] = useState<string | null>(null)
   const [driveIdx, setDriveIdx] = useState(0)
   const [diskIdx, setDiskIdx] = useState(0)
 
@@ -150,16 +153,37 @@ function RouteComponent() {
   }
   const servers = Array.from(serverMap.values())
 
+  // Default (and re-validate) the server dropdown to the first known server.
+  useEffect(() => {
+    if (servers.length === 0) return
+    if (!selectedServerId || !servers.some(s => s.serverId === selectedServerId)) {
+      setSelectedServerId(servers[0].serverId)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [servers.map(s => s.serverId).join(','), selectedServerId])
+
+  // ── Overall storage split — fast (NVMe) vs standard (HDD) capacity + allocation,
+  // combined across every synced server (not scoped to the dropdown above).
+  const fastDrives = drives.filter(d => d.drive_type === 'nvme')
+  const standardDrives = drives.filter(d => d.drive_type === 'hdd')
+  const sumBytes = (ds: DriveSummary[], key: 'capacity_bytes' | 'allocated_quota_bytes') =>
+    ds.reduce((s, d) => s + d[key], 0)
+  const fastTier = { capacityBytes: sumBytes(fastDrives, 'capacity_bytes'), allocatedBytes: sumBytes(fastDrives, 'allocated_quota_bytes') }
+  const standardTier = { capacityBytes: sumBytes(standardDrives, 'capacity_bytes'), allocatedBytes: sumBytes(standardDrives, 'allocated_quota_bytes') }
+
   // ── Node selection (drives the per-node hardware + traffic cards) ──────────────
   const latestFrame = frames[frames.length - 1]
   const liveNodes: NodeFrame[] = latestFrame?.nodes ?? []
   // Live frame per node — overlays real-time disk capacity/temp/online onto the
   // infra tree's physical-disk rows.
   const liveNodeById = new Map(liveNodes.map(n => [n.node_id, n]))
-  // Tabs come from registered nodes so a node with no live data still appears;
-  // fall back to the live stream before infrastructure has loaded.
+  // Tabs come from registered nodes (scoped to the selected server) so a node with
+  // no live data still appears; fall back to the live stream before infrastructure
+  // has loaded (unscoped — NodeFrame carries no server_id).
   const nodeTabs = nodes.length
-    ? nodes.map(n => ({ id: n.node_id, hostname: n.hostname, role: n.role as string }))
+    ? nodes
+        .filter(n => !selectedServerId || n.server_id === selectedServerId)
+        .map(n => ({ id: n.node_id, hostname: n.hostname, role: n.role as string }))
     : liveNodes.map(n => ({ id: n.node_id, hostname: n.hostname, role: n.role }))
   useEffect(() => {
     if (nodeTabs.length === 0) return
@@ -466,6 +490,18 @@ function RouteComponent() {
       <div className="flex items-center justify-between mb-6">
         <div className="flex items-center gap-3">
           <h2 className="text-lg font-semibold text-gray-900 m-0">System Metrics</h2>
+          {servers.length > 0 && (
+            <select
+              value={selectedServerId ?? ''}
+              onChange={(e) => setSelectedServerId(e.target.value || null)}
+              aria-label="Select server"
+              className="text-xs border border-gray-200 rounded-md px-2 py-1 bg-white text-gray-600 cursor-pointer focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              {servers.map(s => (
+                <option key={s.serverId} value={s.serverId}>{s.name}</option>
+              ))}
+            </select>
+          )}
           <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${
             inactive ? 'bg-gray-100 text-gray-500' :
             connected ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-600'
@@ -509,6 +545,14 @@ function RouteComponent() {
           )}
         </div>
       </div>
+
+      {/* ── Overall server storage — fast vs standard capacity + allocation ── */}
+      <section className="mb-8">
+        <h3 className="text-sm font-semibold text-gray-600 m-0 mb-3">Server storage</h3>
+        <div className="bg-white border border-gray-200 rounded-xl px-6 py-4">
+          <StorageDonut fast={fastTier} standard={standardTier} />
+        </div>
+      </section>
 
       {latest && (
         <>
@@ -571,9 +615,9 @@ function RouteComponent() {
             )}
           </section>
 
-          {/* ── Node network (traffic per node, uplink shared) ────────────── */}
+          {/* ── Server network (traffic per node, uplink shared) ──────────── */}
           <section className="mb-8">
-            <h3 className="text-sm font-semibold text-gray-600 m-0 mb-3">Node network</h3>
+            <h3 className="text-sm font-semibold text-gray-600 m-0 mb-3">Server network</h3>
             <div className="grid grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-3">
               <NetworkTrafficCard
                 sent={netSentRate ?? '—'}
@@ -1081,6 +1125,12 @@ function tempColor(c: number): string {
   return 'text-emerald-600'
 }
 
+// roleBadgeIcon differentiates managers (compute/control-plane node) from workers
+// (storage-only node, e.g. the fast-tier Pi) in the node selector.
+function roleBadgeIcon(role: string) {
+  return role === 'manager' ? <MdComputer aria-hidden /> : <MdStorage aria-hidden />
+}
+
 // NodeTabs is the per-node selector that drives the hardware + traffic cards.
 function NodeTabs({ tabs, selectedId, onSelect }: {
   tabs: { id: string; hostname: string; role: string }[]
@@ -1095,12 +1145,13 @@ function NodeTabs({ tabs, selectedId, onSelect }: {
           key={t.id}
           onClick={() => onSelect(t.id)}
           title={t.role}
-          className={`px-2.5 py-1 text-xs rounded-md border cursor-pointer transition-colors ${
+          className={`flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-md border cursor-pointer transition-colors ${
             t.id === selectedId
               ? 'bg-blue-600 text-white border-blue-600'
               : 'bg-white text-gray-600 border-gray-200 hover:border-gray-400'
           }`}
         >
+          {roleBadgeIcon(t.role)}
           {t.hostname}
         </button>
       ))}

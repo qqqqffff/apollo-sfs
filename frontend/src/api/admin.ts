@@ -739,6 +739,9 @@ export interface AdminOrder {
   storage_type?: string
   bytes_added?: number
   server_name?: string
+  // Which PayPal instance this order was created against — 'sandbox' orders
+  // came from an admin's sandbox-payments toggle, not a real customer.
+  environment: 'sandbox' | 'live'
 }
 
 export function listAdminOrders(opts: { search?: string; sort?: string; page?: number; page_size?: number } = {}) {

@@ -11,6 +11,7 @@ import (
 
 	"apollo-sfs.com/api/db"
 	"apollo-sfs.com/api/models"
+	"apollo-sfs.com/api/routes/middleware"
 	"apollo-sfs.com/api/routes/services"
 )
 
@@ -31,18 +32,21 @@ type Config struct {
 	// baking credentials into the frontend build.
 	ClientID    string
 	Environment string // "sandbox" | "live"
+	// SandboxClientID is returned instead of ClientID when the calling
+	// admin's sandbox-payments toggle is on (see GetConfig).
+	SandboxClientID string
 }
 
 // Handler wires the /api/v1/billing/storage/* endpoints.
 type Handler struct {
-	paypal  *services.PayPalClient
+	paypal  services.PayPalClients
 	queries Querier
 	cfg     Config
 }
 
-// NewHandler constructs a billing Handler. paypal may be nil during local dev
-// without PayPal credentials; all endpoints then return 503.
-func NewHandler(paypal *services.PayPalClient, q Querier, cfg Config) *Handler {
+// NewHandler constructs a billing Handler. paypal.Live may be nil during
+// local dev without PayPal credentials; all endpoints then return 503.
+func NewHandler(paypal services.PayPalClients, q Querier, cfg Config) *Handler {
 	return &Handler{paypal: paypal, queries: q, cfg: cfg}
 }
 
@@ -50,7 +54,19 @@ func NewHandler(paypal *services.PayPalClient, q Querier, cfg Config) *Handler {
 
 // GetConfig returns the public PayPal configuration the web frontend needs to
 // load the PayPal JS SDK (react-paypal-js). The client ID is public by design.
+// Returns the sandbox client ID/environment when the caller is an admin with
+// the sandbox-payments toggle on, so every PayPalScriptProvider surface
+// (storage add-ons, expansion deposits, premium, invoices) initialises
+// against the matching PayPal environment automatically.
 func (h *Handler) GetConfig(c *gin.Context) {
+	if middleware.SandboxEnabled(c) {
+		c.JSON(http.StatusOK, gin.H{
+			"paypal_client_id": h.cfg.SandboxClientID,
+			"currency":         h.currencyOrDefault(),
+			"environment":      services.PayPalEnvSandbox,
+		})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"paypal_client_id": h.cfg.ClientID,
 		"currency":         h.currencyOrDefault(),
@@ -85,7 +101,8 @@ func (h *Handler) ListMyOrders(c *gin.Context) {
 // Body: { plan_id, storage_type }.
 // Returns { order_id, approval_url }.
 func (h *Handler) CreateWalletOrder(c *gin.Context) {
-	if h.paypal == nil {
+	client, env := h.resolveClient(c)
+	if client == nil {
 		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "payments not configured"})
 		return
 	}
@@ -119,7 +136,7 @@ func (h *Handler) CreateWalletOrder(c *gin.Context) {
 		currency = "USD"
 	}
 
-	result, err := h.paypal.CreateStorageWalletOrder(
+	result, err := client.CreateStorageWalletOrder(
 		c.Request.Context(), amountCents, currency, h.cfg.ReturnURL, h.cfg.CancelURL,
 	)
 	if err != nil {
@@ -139,6 +156,7 @@ func (h *Handler) CreateWalletOrder(c *gin.Context) {
 		Status:        "created",
 		PayPalOrderID: result.OrderID,
 		ServerID:      serverID,
+		Environment:   env,
 	}
 	if err := h.queries.CreateStorageOrder(c.Request.Context(), order); err != nil {
 		log.Printf("billing CreateWalletOrder persist: %v", err)
@@ -158,10 +176,6 @@ func (h *Handler) CreateWalletOrder(c *gin.Context) {
 // purchased storage to the account.
 // Returns { new_quota_bytes }.
 func (h *Handler) CaptureWalletOrder(c *gin.Context) {
-	if h.paypal == nil {
-		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "payments not configured"})
-		return
-	}
 	username, ok := h.currentUsername(c)
 	if !ok {
 		return
@@ -184,7 +198,14 @@ func (h *Handler) CaptureWalletOrder(c *gin.Context) {
 		return
 	}
 
-	cap, err := h.paypal.CaptureOrder(c.Request.Context(), orderID)
+	// Use the environment the order was created against, not the caller's
+	// current toggle state.
+	client := h.paypal.For(existing.Environment)
+	if client == nil {
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "payments not configured"})
+		return
+	}
+	cap, err := client.CaptureOrder(c.Request.Context(), orderID)
 	if err != nil {
 		log.Printf("billing CaptureWalletOrder paypal: %v", err)
 		c.AbortWithStatusJSON(http.StatusBadGateway, gin.H{"error": "paypal capture failed"})
@@ -233,7 +254,8 @@ func (h *Handler) CaptureWalletOrder(c *gin.Context) {
 // Body: { plan_id, storage_type, order_id }.
 // Returns { new_quota_bytes }.
 func (h *Handler) CaptureHostedCard(c *gin.Context) {
-	if h.paypal == nil {
+	client, env := h.resolveClient(c)
+	if client == nil {
 		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "payments not configured"})
 		return
 	}
@@ -263,7 +285,7 @@ func (h *Handler) CaptureHostedCard(c *gin.Context) {
 		return
 	}
 
-	cap, err := h.paypal.CaptureOrder(c.Request.Context(), req.OrderID)
+	cap, err := client.CaptureOrder(c.Request.Context(), req.OrderID)
 	if err != nil {
 		log.Printf("billing CaptureHostedCard paypal capture: %v", err)
 		c.AbortWithStatusJSON(http.StatusBadGateway, gin.H{"error": "paypal capture failed"})
@@ -276,7 +298,7 @@ func (h *Handler) CaptureHostedCard(c *gin.Context) {
 		return
 	}
 
-	newQuota, err := h.persistDirectCapture(c, username, req.PlanID, req.StorageType, "hosted_card", pl, serverID, cap)
+	newQuota, err := h.persistDirectCapture(c, username, req.PlanID, req.StorageType, "hosted_card", pl, serverID, cap, env)
 	if err != nil {
 		return
 	}
@@ -290,7 +312,8 @@ func (h *Handler) CaptureHostedCard(c *gin.Context) {
 // Body: { plan_id, storage_type, card: { number, expiry_month, expiry_year, cvv, name } }.
 // Returns { new_quota_bytes }.
 func (h *Handler) ChargeCard(c *gin.Context) {
-	if h.paypal == nil {
+	client, env := h.resolveClient(c)
+	if client == nil {
 		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "payments not configured"})
 		return
 	}
@@ -326,7 +349,7 @@ func (h *Handler) ChargeCard(c *gin.Context) {
 		return
 	}
 
-	cap, err := h.paypal.DirectChargeCard(c.Request.Context(), services.CardOrderInput{
+	cap, err := client.DirectChargeCard(c.Request.Context(), services.CardOrderInput{
 		AmountCents: amountCents,
 		Currency:    h.currencyOrDefault(),
 		Number:      req.Card.Number,
@@ -341,7 +364,7 @@ func (h *Handler) ChargeCard(c *gin.Context) {
 		return
 	}
 
-	newQuota, err := h.persistDirectCapture(c, username, req.PlanID, req.StorageType, "card", pl, serverID, cap)
+	newQuota, err := h.persistDirectCapture(c, username, req.PlanID, req.StorageType, "card", pl, serverID, cap, env)
 	if err != nil {
 		return
 	}
@@ -355,7 +378,8 @@ func (h *Handler) ChargeCard(c *gin.Context) {
 // Body: { plan_id, storage_type, apple_pay_token: { version, data, signature, header, network, displayName } }.
 // Returns { new_quota_bytes }.
 func (h *Handler) ChargeApplePay(c *gin.Context) {
-	if h.paypal == nil {
+	client, env := h.resolveClient(c)
+	if client == nil {
 		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "payments not configured"})
 		return
 	}
@@ -392,7 +416,7 @@ func (h *Handler) ChargeApplePay(c *gin.Context) {
 		return
 	}
 
-	cap, err := h.paypal.DirectChargeApplePay(c.Request.Context(), services.ApplePayTokenInput{
+	cap, err := client.DirectChargeApplePay(c.Request.Context(), services.ApplePayTokenInput{
 		AmountCents: amountCents,
 		Currency:    h.currencyOrDefault(),
 		Version:     req.Token.Version,
@@ -408,7 +432,7 @@ func (h *Handler) ChargeApplePay(c *gin.Context) {
 		return
 	}
 
-	newQuota, err := h.persistDirectCapture(c, username, req.PlanID, req.StorageType, "apple_pay", pl, serverID, cap)
+	newQuota, err := h.persistDirectCapture(c, username, req.PlanID, req.StorageType, "apple_pay", pl, serverID, cap, env)
 	if err != nil {
 		return
 	}
@@ -422,7 +446,8 @@ func (h *Handler) ChargeApplePay(c *gin.Context) {
 // Body: { plan_id, storage_type, google_pay_token: "<JSON string>" }.
 // Returns { new_quota_bytes }.
 func (h *Handler) ChargeGooglePay(c *gin.Context) {
-	if h.paypal == nil {
+	client, env := h.resolveClient(c)
+	if client == nil {
 		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "payments not configured"})
 		return
 	}
@@ -452,7 +477,7 @@ func (h *Handler) ChargeGooglePay(c *gin.Context) {
 		return
 	}
 
-	cap, err := h.paypal.DirectChargeGooglePay(
+	cap, err := client.DirectChargeGooglePay(
 		c.Request.Context(), amountCents, h.currencyOrDefault(), req.GooglePayToken,
 	)
 	if err != nil {
@@ -461,7 +486,7 @@ func (h *Handler) ChargeGooglePay(c *gin.Context) {
 		return
 	}
 
-	newQuota, err := h.persistDirectCapture(c, username, req.PlanID, req.StorageType, "google_pay", pl, serverID, cap)
+	newQuota, err := h.persistDirectCapture(c, username, req.PlanID, req.StorageType, "google_pay", pl, serverID, cap, env)
 	if err != nil {
 		return
 	}
@@ -560,6 +585,7 @@ func (h *Handler) persistDirectCapture(
 	pl Plan,
 	serverID *uuid.UUID,
 	cap *services.CaptureOrderResult,
+	environment string,
 ) (int64, error) {
 	if err := h.checkDriveCapacity(c, username, pl.BytesAdded); err != nil {
 		return 0, err
@@ -578,6 +604,7 @@ func (h *Handler) persistDirectCapture(
 		PayPalCaptureID: &cap.CaptureID,
 		ServerID:        serverID,
 		RawResponse:     cap.Raw,
+		Environment:     environment,
 		CapturedAt:      &now,
 	}
 	if err := h.queries.CreateStorageOrder(c.Request.Context(), order); err != nil {
@@ -593,6 +620,18 @@ func (h *Handler) persistDirectCapture(
 		return 0, err
 	}
 	return newQuota, nil
+}
+
+// resolveClient picks the PayPal client for the calling user's current
+// sandbox-payments toggle state, along with the environment string to stamp
+// on newly created orders. Returns a nil client when that environment isn't
+// configured (callers 503).
+func (h *Handler) resolveClient(c *gin.Context) (*services.PayPalClient, string) {
+	env := services.PayPalEnvLive
+	if middleware.SandboxEnabled(c) {
+		env = services.PayPalEnvSandbox
+	}
+	return h.paypal.For(env), env
 }
 
 func (h *Handler) currentUsername(c *gin.Context) (string, bool) {

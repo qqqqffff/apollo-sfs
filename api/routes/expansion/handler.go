@@ -15,6 +15,7 @@ import (
 	"apollo-sfs.com/api/db"
 	"apollo-sfs.com/api/models"
 	"apollo-sfs.com/api/routes/billing"
+	"apollo-sfs.com/api/routes/middleware"
 	"apollo-sfs.com/api/routes/services"
 )
 
@@ -59,15 +60,27 @@ type Config struct {
 
 // Handler serves expansion-request endpoints for both users and admins.
 type Handler struct {
-	paypal   *services.PayPalClient
+	paypal   services.PayPalClients
 	emailSvc *services.EmailService
 	queries  Querier
 	cfg      Config
 }
 
 // NewHandler constructs an expansion Handler.
-func NewHandler(paypal *services.PayPalClient, email *services.EmailService, q Querier, cfg Config) *Handler {
+func NewHandler(paypal services.PayPalClients, email *services.EmailService, q Querier, cfg Config) *Handler {
 	return &Handler{paypal: paypal, emailSvc: email, queries: q, cfg: cfg}
+}
+
+// resolveClient picks the PayPal client for the calling user's current
+// sandbox-payments toggle state, along with the environment string to stamp
+// on newly created requests. Returns a nil client when that environment
+// isn't configured (callers 503).
+func (h *Handler) resolveClient(c *gin.Context) (*services.PayPalClient, string) {
+	env := services.PayPalEnvLive
+	if middleware.SandboxEnabled(c) {
+		env = services.PayPalEnvSandbox
+	}
+	return h.paypal.For(env), env
 }
 
 // ── User deposit endpoints ─────────────────────────────────────────────────────
@@ -77,7 +90,8 @@ func NewHandler(paypal *services.PayPalClient, email *services.EmailService, q Q
 // Body: { plan_id, storage_type, server_id }
 // Returns: { order_id, approval_url, deposit_cents, full_price_cents }
 func (h *Handler) CreateWalletOrder(c *gin.Context) {
-	if h.paypal == nil {
+	client, env := h.resolveClient(c)
+	if client == nil {
 		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "payments not configured"})
 		return
 	}
@@ -113,7 +127,7 @@ func (h *Handler) CreateWalletOrder(c *gin.Context) {
 	}
 
 	currency := h.currencyOrDefault()
-	result, err := h.paypal.CreateStorageWalletOrder(
+	result, err := client.CreateStorageWalletOrder(
 		c.Request.Context(), depositCents, currency, h.cfg.ReturnURL, h.cfg.CancelURL,
 	)
 	if err != nil {
@@ -144,6 +158,7 @@ func (h *Handler) CreateWalletOrder(c *gin.Context) {
 		IsCustom:           isCustom,
 		PreQuotaBytes:      user.StorageQuotaBytes,
 		ExpiresAt:          approvalDeadline(time.Now(), isCustom),
+		Environment:        env,
 	})
 	if err != nil {
 		log.Printf("expansion CreateWalletOrder persist: %v", err)
@@ -163,10 +178,6 @@ func (h *Handler) CreateWalletOrder(c *gin.Context) {
 // POST /api/v1/billing/storage/expansion/order/:order_id/capture
 // Returns: { expansion_request_id, expires_at }
 func (h *Handler) CaptureWalletOrder(c *gin.Context) {
-	if h.paypal == nil {
-		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "payments not configured"})
-		return
-	}
 	username, ok := h.currentUsername(c)
 	if !ok {
 		return
@@ -188,7 +199,12 @@ func (h *Handler) CaptureWalletOrder(c *gin.Context) {
 		return
 	}
 
-	cap, err := h.paypal.CaptureOrder(c.Request.Context(), orderID)
+	client := h.paypal.For(existing.Environment)
+	if client == nil {
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "payments not configured"})
+		return
+	}
+	cap, err := client.CaptureOrder(c.Request.Context(), orderID)
 	if err != nil {
 		log.Printf("expansion CaptureWalletOrder paypal: %v", err)
 		c.AbortWithStatusJSON(http.StatusBadGateway, gin.H{"error": "paypal capture failed"})
@@ -218,7 +234,8 @@ func (h *Handler) CaptureWalletOrder(c *gin.Context) {
 // Body: { plan_id, storage_type, server_id, order_id }.
 // Returns { expansion_request_id, expires_at }.
 func (h *Handler) CaptureHostedCardExpansion(c *gin.Context) {
-	if h.paypal == nil {
+	client, env := h.resolveClient(c)
+	if client == nil {
 		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "payments not configured"})
 		return
 	}
@@ -254,7 +271,7 @@ func (h *Handler) CaptureHostedCardExpansion(c *gin.Context) {
 		return
 	}
 
-	cap, err := h.paypal.CaptureOrder(c.Request.Context(), req.OrderID)
+	cap, err := client.CaptureOrder(c.Request.Context(), req.OrderID)
 	if err != nil {
 		log.Printf("expansion CaptureHostedCardExpansion paypal capture: %v", err)
 		c.AbortWithStatusJSON(http.StatusBadGateway, gin.H{"error": "paypal capture failed"})
@@ -267,7 +284,7 @@ func (h *Handler) CaptureHostedCardExpansion(c *gin.Context) {
 		return
 	}
 
-	r, ok := h.persistDirectExpansion(c, username, serverID, req.PlanID, req.StorageType, "hosted_card", pl, fullCents, depositCents, cap)
+	r, ok := h.persistDirectExpansion(c, username, serverID, req.PlanID, req.StorageType, "hosted_card", pl, fullCents, depositCents, cap, env)
 	if !ok {
 		return
 	}
@@ -280,7 +297,8 @@ func (h *Handler) CaptureHostedCardExpansion(c *gin.Context) {
 
 // POST /api/v1/billing/storage/expansion/card
 func (h *Handler) ChargeCardExpansion(c *gin.Context) {
-	if h.paypal == nil {
+	client, env := h.resolveClient(c)
+	if client == nil {
 		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "payments not configured"})
 		return
 	}
@@ -322,7 +340,7 @@ func (h *Handler) ChargeCardExpansion(c *gin.Context) {
 		return
 	}
 
-	cap, err := h.paypal.DirectChargeCard(c.Request.Context(), services.CardOrderInput{
+	cap, err := client.DirectChargeCard(c.Request.Context(), services.CardOrderInput{
 		AmountCents: depositCents,
 		Currency:    h.currencyOrDefault(),
 		Number:      req.Card.Number,
@@ -337,7 +355,7 @@ func (h *Handler) ChargeCardExpansion(c *gin.Context) {
 		return
 	}
 
-	r, ok := h.persistDirectExpansion(c, username, serverID, req.PlanID, req.StorageType, "card", pl, fullCents, depositCents, cap)
+	r, ok := h.persistDirectExpansion(c, username, serverID, req.PlanID, req.StorageType, "card", pl, fullCents, depositCents, cap, env)
 	if !ok {
 		return
 	}
@@ -348,7 +366,8 @@ func (h *Handler) ChargeCardExpansion(c *gin.Context) {
 // ChargeApplePayExpansion processes an Apple Pay deposit.
 // POST /api/v1/billing/storage/expansion/apple-pay
 func (h *Handler) ChargeApplePayExpansion(c *gin.Context) {
-	if h.paypal == nil {
+	client, env := h.resolveClient(c)
+	if client == nil {
 		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "payments not configured"})
 		return
 	}
@@ -391,7 +410,7 @@ func (h *Handler) ChargeApplePayExpansion(c *gin.Context) {
 		return
 	}
 
-	cap, err := h.paypal.DirectChargeApplePay(c.Request.Context(), services.ApplePayTokenInput{
+	cap, err := client.DirectChargeApplePay(c.Request.Context(), services.ApplePayTokenInput{
 		AmountCents: depositCents,
 		Currency:    h.currencyOrDefault(),
 		Version:     req.Token.Version,
@@ -407,7 +426,7 @@ func (h *Handler) ChargeApplePayExpansion(c *gin.Context) {
 		return
 	}
 
-	r, ok := h.persistDirectExpansion(c, username, serverID, req.PlanID, req.StorageType, "apple_pay", pl, fullCents, depositCents, cap)
+	r, ok := h.persistDirectExpansion(c, username, serverID, req.PlanID, req.StorageType, "apple_pay", pl, fullCents, depositCents, cap, env)
 	if !ok {
 		return
 	}
@@ -418,7 +437,8 @@ func (h *Handler) ChargeApplePayExpansion(c *gin.Context) {
 // ChargeGooglePayExpansion processes a Google Pay deposit.
 // POST /api/v1/billing/storage/expansion/google-pay
 func (h *Handler) ChargeGooglePayExpansion(c *gin.Context) {
-	if h.paypal == nil {
+	client, env := h.resolveClient(c)
+	if client == nil {
 		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "payments not configured"})
 		return
 	}
@@ -454,7 +474,7 @@ func (h *Handler) ChargeGooglePayExpansion(c *gin.Context) {
 		return
 	}
 
-	cap, err := h.paypal.DirectChargeGooglePay(
+	cap, err := client.DirectChargeGooglePay(
 		c.Request.Context(), depositCents, h.currencyOrDefault(), req.GooglePayToken,
 	)
 	if err != nil {
@@ -463,7 +483,7 @@ func (h *Handler) ChargeGooglePayExpansion(c *gin.Context) {
 		return
 	}
 
-	r, ok := h.persistDirectExpansion(c, username, serverID, req.PlanID, req.StorageType, "google_pay", pl, fullCents, depositCents, cap)
+	r, ok := h.persistDirectExpansion(c, username, serverID, req.PlanID, req.StorageType, "google_pay", pl, fullCents, depositCents, cap, env)
 	if !ok {
 		return
 	}
@@ -518,12 +538,22 @@ func (h *Handler) SubmitCustomRequest(c *gin.Context) {
 		return
 	}
 
+	// No PayPal call happens for a custom request until the invoice deposit is
+	// paid, but the environment is decided now (from the submitter's own
+	// toggle state) so CreateInvoiceDepositOrder/CaptureInvoiceDepositOrder
+	// have a stable value to read back regardless of how the admin's own
+	// toggle might change before the invoice is sent.
+	env := services.PayPalEnvLive
+	if middleware.SandboxEnabled(c) {
+		env = services.PayPalEnvSandbox
+	}
+
 	reviewDue := approvalDeadline(time.Now(), true)
 	r, err := h.queries.CreateExpansionRequest(c.Request.Context(), db.CreateExpansionRequestParams{
-		Username:    username,
-		ServerID:    serverID,
-		PlanID:      billing.CustomPlanID,
-		StorageType: req.StorageType,
+		Username:       username,
+		ServerID:       serverID,
+		PlanID:         billing.CustomPlanID,
+		StorageType:    req.StorageType,
 		BytesRequested: pl.BytesAdded,
 		// The estimate is recorded for reference; the invoice sets the final
 		// amounts on acceptance. No deposit has been collected yet.
@@ -536,6 +566,7 @@ func (h *Handler) SubmitCustomRequest(c *gin.Context) {
 		IsCustom:           true,
 		PreQuotaBytes:      user.StorageQuotaBytes,
 		ExpiresAt:          reviewDue,
+		Environment:        env,
 	})
 	if err != nil {
 		log.Printf("expansion SubmitCustomRequest persist: %v", err)
@@ -557,7 +588,8 @@ func (h *Handler) SubmitCustomRequest(c *gin.Context) {
 // CreateInvoice builds and sends the invoice for a custom request.
 // POST /api/v1/admin/expansion-requests/:id/invoice
 // Body: { line_items: [{description, amount_cents}], deposit_cents,
-//         disclosures, notes, include_review_link }
+//
+//	disclosures, notes, include_review_link }
 func (h *Handler) CreateInvoice(c *gin.Context) {
 	id, ok := h.parseID(c)
 	if !ok {
@@ -850,10 +882,6 @@ func (h *Handler) DeclineInvoice(c *gin.Context) {
 // POST /api/v1/billing/invoices/:token/order
 // Returns { order_id, approval_url, deposit_cents }
 func (h *Handler) CreateInvoiceDepositOrder(c *gin.Context) {
-	if h.paypal == nil {
-		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "payments not configured"})
-		return
-	}
 	username, ok := h.currentUsername(c)
 	if !ok {
 		return
@@ -866,8 +894,15 @@ func (h *Handler) CreateInvoiceDepositOrder(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": "invoice has no deposit — accept it directly"})
 		return
 	}
+	// Use the environment the parent request was created against, so it's
+	// stable regardless of the current caller's toggle state.
+	client := h.paypal.For(req.Environment)
+	if client == nil {
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "payments not configured"})
+		return
+	}
 
-	result, err := h.paypal.CreateStorageWalletOrder(
+	result, err := client.CreateStorageWalletOrder(
 		c.Request.Context(), int(inv.DepositCents), req.Currency, h.cfg.ReturnURL, h.cfg.CancelURL,
 	)
 	if err != nil {
@@ -886,10 +921,6 @@ func (h *Handler) CreateInvoiceDepositOrder(c *gin.Context) {
 // CaptureInvoiceDepositOrder captures the deposit and accepts the invoice.
 // POST /api/v1/billing/invoices/:token/order/:order_id/capture
 func (h *Handler) CaptureInvoiceDepositOrder(c *gin.Context) {
-	if h.paypal == nil {
-		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "payments not configured"})
-		return
-	}
 	username, ok := h.currentUsername(c)
 	if !ok {
 		return
@@ -905,7 +936,12 @@ func (h *Handler) CaptureInvoiceDepositOrder(c *gin.Context) {
 		return
 	}
 
-	cap, err := h.paypal.CaptureOrder(c.Request.Context(), orderID)
+	client := h.paypal.For(req.Environment)
+	if client == nil {
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "payments not configured"})
+		return
+	}
+	cap, err := client.CaptureOrder(c.Request.Context(), orderID)
 	if err != nil {
 		log.Printf("expansion CaptureInvoiceDepositOrder paypal: %v", err)
 		c.AbortWithStatusJSON(http.StatusBadGateway, gin.H{"error": "paypal capture failed"})
@@ -942,10 +978,6 @@ func (h *Handler) CaptureInvoiceDepositOrder(c *gin.Context) {
 // POST /api/v1/billing/storage/expansion/:id/pay-remaining/order
 // Returns: { order_id, approval_url }
 func (h *Handler) PayRemainingWalletOrder(c *gin.Context) {
-	if h.paypal == nil {
-		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "payments not configured"})
-		return
-	}
 	username, ok := h.currentUsername(c)
 	if !ok {
 		return
@@ -955,9 +987,16 @@ func (h *Handler) PayRemainingWalletOrder(c *gin.Context) {
 	if !ok {
 		return
 	}
+	// Use the environment this request was created against, not the caller's
+	// current toggle state.
+	client := h.paypal.For(req.Environment)
+	if client == nil {
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "payments not configured"})
+		return
+	}
 	remainingCents := req.FullPriceCents - req.DepositAmountCents
 
-	result, err := h.paypal.CreateStorageWalletOrder(
+	result, err := client.CreateStorageWalletOrder(
 		c.Request.Context(), remainingCents, req.Currency, h.cfg.ReturnURL, h.cfg.CancelURL,
 	)
 	if err != nil {
@@ -977,10 +1016,6 @@ func (h *Handler) PayRemainingWalletOrder(c *gin.Context) {
 // POST /api/v1/billing/storage/expansion/:id/pay-remaining/order/:order_id/capture
 // Returns: { new_quota_bytes }
 func (h *Handler) CapturePayRemainingWallet(c *gin.Context) {
-	if h.paypal == nil {
-		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "payments not configured"})
-		return
-	}
 	username, ok := h.currentUsername(c)
 	if !ok {
 		return
@@ -997,7 +1032,12 @@ func (h *Handler) CapturePayRemainingWallet(c *gin.Context) {
 		return
 	}
 
-	cap, err := h.paypal.CaptureOrder(c.Request.Context(), orderID)
+	client := h.paypal.For(req.Environment)
+	if client == nil {
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "payments not configured"})
+		return
+	}
+	cap, err := client.CaptureOrder(c.Request.Context(), orderID)
 	if err != nil {
 		log.Printf("expansion CapturePayRemaining paypal: %v", err)
 		c.AbortWithStatusJSON(http.StatusBadGateway, gin.H{"error": "paypal capture failed"})
@@ -1014,10 +1054,6 @@ func (h *Handler) CapturePayRemainingWallet(c *gin.Context) {
 // PayRemainingCard charges the remaining balance by card and adds quota.
 // POST /api/v1/billing/storage/expansion/:id/pay-remaining/card
 func (h *Handler) PayRemainingCard(c *gin.Context) {
-	if h.paypal == nil {
-		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "payments not configured"})
-		return
-	}
 	username, ok := h.currentUsername(c)
 	if !ok {
 		return
@@ -1025,6 +1061,11 @@ func (h *Handler) PayRemainingCard(c *gin.Context) {
 
 	req, ok := h.loadExpandedRequest(c, username)
 	if !ok {
+		return
+	}
+	client := h.paypal.For(req.Environment)
+	if client == nil {
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "payments not configured"})
 		return
 	}
 
@@ -1043,7 +1084,7 @@ func (h *Handler) PayRemainingCard(c *gin.Context) {
 	}
 
 	remainingCents := req.FullPriceCents - req.DepositAmountCents
-	cap, err := h.paypal.DirectChargeCard(c.Request.Context(), services.CardOrderInput{
+	cap, err := client.DirectChargeCard(c.Request.Context(), services.CardOrderInput{
 		AmountCents: remainingCents,
 		Currency:    req.Currency,
 		Number:      body.Card.Number,
@@ -1068,10 +1109,6 @@ func (h *Handler) PayRemainingCard(c *gin.Context) {
 // PayRemainingApplePay charges the remaining balance via Apple Pay.
 // POST /api/v1/billing/storage/expansion/:id/pay-remaining/apple-pay
 func (h *Handler) PayRemainingApplePay(c *gin.Context) {
-	if h.paypal == nil {
-		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "payments not configured"})
-		return
-	}
 	username, ok := h.currentUsername(c)
 	if !ok {
 		return
@@ -1079,6 +1116,11 @@ func (h *Handler) PayRemainingApplePay(c *gin.Context) {
 
 	req, ok := h.loadExpandedRequest(c, username)
 	if !ok {
+		return
+	}
+	client := h.paypal.For(req.Environment)
+	if client == nil {
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "payments not configured"})
 		return
 	}
 
@@ -1098,7 +1140,7 @@ func (h *Handler) PayRemainingApplePay(c *gin.Context) {
 	}
 
 	remainingCents := req.FullPriceCents - req.DepositAmountCents
-	cap, err := h.paypal.DirectChargeApplePay(c.Request.Context(), services.ApplePayTokenInput{
+	cap, err := client.DirectChargeApplePay(c.Request.Context(), services.ApplePayTokenInput{
 		AmountCents: remainingCents,
 		Currency:    req.Currency,
 		Version:     body.Token.Version,
@@ -1124,10 +1166,6 @@ func (h *Handler) PayRemainingApplePay(c *gin.Context) {
 // PayRemainingGooglePay charges the remaining balance via Google Pay.
 // POST /api/v1/billing/storage/expansion/:id/pay-remaining/google-pay
 func (h *Handler) PayRemainingGooglePay(c *gin.Context) {
-	if h.paypal == nil {
-		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "payments not configured"})
-		return
-	}
 	username, ok := h.currentUsername(c)
 	if !ok {
 		return
@@ -1135,6 +1173,11 @@ func (h *Handler) PayRemainingGooglePay(c *gin.Context) {
 
 	req, ok := h.loadExpandedRequest(c, username)
 	if !ok {
+		return
+	}
+	client := h.paypal.For(req.Environment)
+	if client == nil {
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "payments not configured"})
 		return
 	}
 
@@ -1147,7 +1190,7 @@ func (h *Handler) PayRemainingGooglePay(c *gin.Context) {
 	}
 
 	remainingCents := req.FullPriceCents - req.DepositAmountCents
-	cap, err := h.paypal.DirectChargeGooglePay(
+	cap, err := client.DirectChargeGooglePay(
 		c.Request.Context(), remainingCents, req.Currency, body.GooglePayToken,
 	)
 	if err != nil {
@@ -1416,12 +1459,15 @@ func (h *Handler) CancelRequest(c *gin.Context) {
 		return
 	}
 
-	if h.paypal == nil {
+	// Use the environment this request was created against, not whichever
+	// admin happens to be issuing the cancellation.
+	client := h.paypal.For(req.Environment)
+	if client == nil {
 		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "payments not configured"})
 		return
 	}
 
-	refund, err := h.paypal.RefundCapture(c.Request.Context(), *req.PayPalCaptureID, req.DepositAmountCents, req.Currency)
+	refund, err := client.RefundCapture(c.Request.Context(), *req.PayPalCaptureID, req.DepositAmountCents, req.Currency)
 	if err != nil {
 		log.Printf("expansion CancelRequest paypal refund: %v", err)
 		c.AbortWithStatusJSON(http.StatusBadGateway, gin.H{"error": "refund failed"})
@@ -1517,11 +1563,12 @@ func (h *Handler) expireOne(ctx context.Context, r *models.ServerExpansionReques
 		}
 		return
 	}
-	if h.paypal == nil {
+	client := h.paypal.For(r.Environment)
+	if client == nil {
 		log.Printf("expansion expiry %s: paypal not configured, skipping", r.ID)
 		return
 	}
-	refund, err := h.paypal.RefundCapture(ctx, *r.PayPalCaptureID, r.DepositAmountCents, r.Currency)
+	refund, err := client.RefundCapture(ctx, *r.PayPalCaptureID, r.DepositAmountCents, r.Currency)
 	if err != nil {
 		log.Printf("expansion expiry %s: paypal refund: %v", r.ID, err)
 		return
@@ -1677,6 +1724,7 @@ func (h *Handler) persistDirectExpansion(
 	pl billing.Plan,
 	fullCents, depositCents int,
 	cap *services.CaptureOrderResult,
+	environment string,
 ) (*models.ServerExpansionRequest, bool) {
 	user, err := h.queries.GetUserByUsername(c.Request.Context(), username)
 	if err != nil || user == nil {
@@ -1702,6 +1750,7 @@ func (h *Handler) persistDirectExpansion(
 		IsCustom:           isCustom,
 		PreQuotaBytes:      user.StorageQuotaBytes,
 		ExpiresAt:          approvalDeadline(time.Now(), isCustom),
+		Environment:        environment,
 	})
 	if err != nil {
 		log.Printf("expansion %s persist: %v", paymentMethod, err)

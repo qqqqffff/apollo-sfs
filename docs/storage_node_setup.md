@@ -92,6 +92,19 @@ sudo systemctl restart ssh
 Set a **static IP** (router DHCP reservation or on the box) — the port-forward and Swarm
 advertise address point here. Use the static IP for Swarm, not `.local`.
 
+Load the `drivetemp` kernel module so the HDD's temperature is exposed under
+`/sys/class/hwmon` — `node-agent` reads it from there (via the read-only `/sys` bind mount
+in `docker-stack.yml`); without it the standard tier's disk temperature never appears on
+the metrics page, no matter how the agent is configured:
+```bash
+sudo modprobe drivetemp
+echo drivetemp | sudo tee -a /etc/modules-load.d/drivetemp.conf   # persist across reboots
+ls /sys/block/sda/device/hwmon*/temp1_input   # sanity check — should list a file
+```
+NVMe temperature (fast tier, Part 5) needs no equivalent step — `CONFIG_NVME_HWMON` is
+built into current Debian/Raspberry Pi OS kernels, so `/sys/class/nvme/nvme0/hwmon*/`
+appears automatically once the drive is attached.
+
 ### 0.4 Set up the 8TB HDD as one XFS blob volume
 Reconnect the HDD if you disconnected it. **Confirm device identity before wiping —
 destructive.**
@@ -426,5 +439,11 @@ curl -fsS -X POST https://files.<domain>/api/v1/admin/system/sync -H "Cookie: <a
 - Admin → **metrics** → pick the Pi node: the **Physical disks** card lists `nvme-01`
   *and* `nvme-02` with independent fill bars + temperatures; click one to graph its
   temperature history. Upload to fast and to standard to confirm routing.
+  - If either drive's temperature shows `—`, check that its sysfs hwmon path actually
+    exists on that node (`ls /sys/class/nvme/nvme*/hwmon*/temp1_input` for NVMe,
+    `ls /sys/block/sda/device/hwmon*/temp1_input` for the HDD — see 0.3's `drivetemp`
+    step). `node-agent` reads each physical disk's own hwmon path directly (never by
+    matching a generic sensor label), so this is the only real failure mode — a missing
+    or not-yet-loaded kernel driver, not an agent misconfiguration.
 - `docker service logs apollo-sfs_node-agent --tail 20` on each node — pushes succeeding,
   no `NODE_AGENT_TOKEN is required` fatal.

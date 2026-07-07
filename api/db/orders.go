@@ -28,6 +28,10 @@ type AdminOrder struct {
 	RefundedAt    *time.Time `json:"refunded_at"`
 	// PayPalCaptureID backs the refund action (never rendered).
 	PayPalCaptureID *string `json:"-"`
+	// Environment is which PayPal instance ("sandbox" | "live") this order was
+	// created against, so refunds route to the matching client and the UI can
+	// flag sandbox test orders as distinct from real revenue.
+	Environment string `json:"environment"`
 
 	// Storage order details (zero-valued for premium payments).
 	PlanID      string `json:"plan_id,omitempty"`
@@ -44,7 +48,7 @@ const adminOrdersBase = `
 	       p.amount_cents::bigint AS amount_cents, p.currency, p.payment_method,
 	       p.paypal_order_id AS reference,
 	       'ORD-' || to_char(p.created_at, 'YYMMDD') || '-' || upper(left(replace(p.id::text,'-',''), 6)) AS invoice_number,
-	       p.created_at, p.captured_at, p.refund_id, p.refunded_at, p.paypal_capture_id,
+	       p.created_at, p.captured_at, p.refund_id, p.refunded_at, p.paypal_capture_id, p.environment,
 	       '' AS plan_id, '' AS storage_type, 0::bigint AS bytes_added, '' AS server_name
 	FROM payments p
 	UNION ALL
@@ -52,7 +56,7 @@ const adminOrdersBase = `
 	       o.amount_cents::bigint, o.currency, o.payment_method,
 	       o.paypal_order_id,
 	       'ORD-' || to_char(o.created_at, 'YYMMDD') || '-' || upper(left(replace(o.id::text,'-',''), 6)),
-	       o.created_at, o.captured_at, o.refund_id, o.refunded_at, o.paypal_capture_id,
+	       o.created_at, o.captured_at, o.refund_id, o.refunded_at, o.paypal_capture_id, o.environment,
 	       o.plan_id, o.storage_type, o.bytes_added, COALESCE(srv.name, '')
 	FROM storage_orders o
 	LEFT JOIN servers srv ON srv.id = o.server_id`
@@ -109,7 +113,7 @@ func (q *Queries) ListAdminOrders(ctx context.Context, search, sort string, limi
 			&o.ID, &o.Type, &o.Username, &o.Status,
 			&o.AmountCents, &o.Currency, &o.PaymentMethod,
 			&o.Reference, &o.InvoiceNumber,
-			&o.CreatedAt, &capturedAt, &refundID, &refundedAt, &captureID,
+			&o.CreatedAt, &capturedAt, &refundID, &refundedAt, &captureID, &o.Environment,
 			&o.PlanID, &o.StorageType, &o.BytesAdded, &o.ServerName,
 		); err != nil {
 			return nil, 0, fmt.Errorf("ListAdminOrders scan: %w", err)
@@ -159,7 +163,7 @@ func (q *Queries) ListUserOrders(ctx context.Context, username string) ([]AdminO
 			&o.ID, &o.Type, &o.Username, &o.Status,
 			&o.AmountCents, &o.Currency, &o.PaymentMethod,
 			&o.Reference, &o.InvoiceNumber,
-			&o.CreatedAt, &capturedAt, &refundID, &refundedAt, &captureID,
+			&o.CreatedAt, &capturedAt, &refundID, &refundedAt, &captureID, &o.Environment,
 			&o.PlanID, &o.StorageType, &o.BytesAdded, &o.ServerName,
 		); err != nil {
 			return nil, fmt.Errorf("ListUserOrders scan: %w", err)
@@ -203,7 +207,7 @@ func (q *Queries) GetAdminOrder(ctx context.Context, orderType string, id uuid.U
 		&o.ID, &o.Type, &o.Username, &o.Status,
 		&o.AmountCents, &o.Currency, &o.PaymentMethod,
 		&o.Reference, &o.InvoiceNumber,
-		&o.CreatedAt, &capturedAt, &refundID, &refundedAt, &captureID,
+		&o.CreatedAt, &capturedAt, &refundID, &refundedAt, &captureID, &o.Environment,
 		&o.PlanID, &o.StorageType, &o.BytesAdded, &o.ServerName,
 	); err != nil {
 		return nil, fmt.Errorf("GetAdminOrder scan: %w", err)

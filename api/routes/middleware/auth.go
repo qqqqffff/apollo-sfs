@@ -73,6 +73,16 @@ func (m *AuthMiddleware) callRefreshGrant(ctx context.Context, refreshToken stri
 //	router.Use(sessions.Sessions(middleware.SessionName, store))
 const SessionName = "apollo_session"
 
+// SandboxEnabled reports whether the current request's admin has the
+// session-scoped "sandbox payments" toggle on (set by RequireAuth from the
+// session cookie). Always false for non-admins and for Bearer/mobile
+// requests, which carry no session cookie.
+func SandboxEnabled(c *gin.Context) bool {
+	v, _ := c.Get("sandboxPaymentsEnabled")
+	enabled, _ := v.(bool)
+	return enabled
+}
+
 // AuthMiddleware holds configuration shared across all middleware handlers.
 // Methods are defined in the file that matches each middleware's concern.
 type AuthMiddleware struct {
@@ -155,10 +165,12 @@ func (m *AuthMiddleware) RequirePremium() gin.HandlerFunc {
 //
 // On success the following Gin context keys are set for downstream handlers:
 //
-//   - "username" string   — preferred_username claim
-//   - "userID"   string   — Keycloak subject claim (sub)
-//   - "exp"      int64    — token expiry Unix timestamp (consumed by ProactiveRefresh)
-//   - "roles"    []string — realm_access.roles claim (consumed by RequireAdmin)
+//   - "username"              string   — preferred_username claim
+//   - "userID"                string   — Keycloak subject claim (sub)
+//   - "exp"                   int64    — token expiry Unix timestamp (consumed by ProactiveRefresh)
+//   - "roles"                 []string — realm_access.roles claim (consumed by RequireAdmin)
+//   - "isAdmin"                bool    — realm_access.roles contains "admin"
+//   - "sandboxPaymentsEnabled" bool    — admin's session-scoped sandbox-payments toggle (see SandboxEnabled)
 //
 // Returns 401 when no valid credentials are present.
 // Also updates last_seen_at on every successful request (best-effort, non-blocking).
@@ -264,6 +276,17 @@ func (m *AuthMiddleware) RequireAuth() gin.HandlerFunc {
 		if err := m.queries.UpdateLastSeenAt(c.Request.Context(), claims.PreferredUsername, isAdmin, isPremium); err != nil {
 			log.Printf("RequireAuth: update last_seen_at for %q: %v", claims.PreferredUsername, err)
 		}
+
+		c.Set("isAdmin", isAdmin)
+
+		// Sandbox-payments toggle: a session-scoped flag (not persisted to the
+		// DB) set via PUT /me/sandbox-payments. ANDing with isAdmin means a
+		// revoked admin role — or a stale flag from before a role change —
+		// can never read back as sandbox-enabled. Bearer/mobile requests carry
+		// no session cookie, so this is always false for them.
+		session := sessions.DefaultMany(c, SessionName)
+		sandboxFlag, _ := session.Get("sandbox_payments_enabled").(bool)
+		c.Set("sandboxPaymentsEnabled", isAdmin && sandboxFlag)
 
 		c.Next()
 	}

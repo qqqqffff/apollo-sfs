@@ -1,9 +1,9 @@
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
 import { useEffect, useRef, useCallback, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { MdAddCircleOutline, MdCheck, MdClose, MdLink, MdPhotoLibrary, MdRocketLaunch, MdKey, MdStorage, MdVpnKey, MdCloudUpload, MdSpeed, MdBolt, MdRefresh } from 'react-icons/md'
+import { MdAddCircleOutline, MdCheck, MdClose, MdLink, MdPhotoLibrary, MdRocketLaunch, MdKey, MdStorage, MdVpnKey, MdCloudUpload, MdSpeed, MdBolt, MdRefresh, MdScience } from 'react-icons/md'
 import { FaApple } from 'react-icons/fa'
-import { meQueryOptions, changePassword, preferencesQueryOptions, updatePreferences, updateStorageUIPreferences, unlinkProvider } from '../../api/me'
+import { meQueryOptions, changePassword, preferencesQueryOptions, updatePreferences, updateStorageUIPreferences, updateSandboxPayments, unlinkProvider } from '../../api/me'
 import { listRoot } from '../../api/folders'
 import { ApiError } from '../../api/client'
 import { StorageUpgradeModal } from '../../components/StorageUpgradeModal'
@@ -166,6 +166,7 @@ function RouteComponent() {
       <PremiumCard
         isPremium={user.is_premium}
         isAdmin={user.is_admin}
+        sandboxPaymentsEnabled={user.sandbox_payments_enabled}
         grantedAt={user.premium_granted_at}
         onUpgrade={() => setShowUpgradeModal(true)}
       />
@@ -176,6 +177,8 @@ function RouteComponent() {
       <StorageUIPreferences />
 
       <MediaAutoUpload />
+
+      {user.is_admin && <SandboxPaymentsToggle enabled={user.sandbox_payments_enabled} />}
 
       <div className="bg-white border border-gray-200 rounded-xl px-5 py-4">
         <h3 className="text-sm font-semibold text-gray-800 mb-4">Change password</h3>
@@ -686,6 +689,43 @@ function StorageUIPreferences() {
   )
 }
 
+function SandboxPaymentsToggle({ enabled }: { enabled: boolean }) {
+  const queryClient = useQueryClient()
+  const [error, setError] = useState<string | null>(null)
+
+  const mutation = useMutation({
+    mutationFn: updateSandboxPayments,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['me'] })
+      setError(null)
+    },
+    onError: (err) => setError(err instanceof ApiError ? err.message : 'Failed to save preference'),
+  })
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-xl px-5 py-4">
+      <h3 className="text-sm font-semibold text-gray-800 mb-1 flex items-center gap-1.5">
+        <MdScience className="text-gray-500" /> Sandbox payments
+      </h3>
+      <p className="text-xs text-gray-400 mb-4">
+        Route your own premium, storage, and expansion purchases through the PayPal sandbox
+        instead of live PayPal, so you can test checkout flows safely. Resets to off when you
+        log out or your session expires.
+      </p>
+      <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+        <input
+          type="checkbox"
+          checked={enabled}
+          onChange={(e) => mutation.mutate(e.target.checked)}
+          className="cursor-pointer"
+        />
+        Use PayPal sandbox for my purchases this session
+      </label>
+      {error && <p className="text-xs text-red-500 m-0 mt-2">{error}</p>}
+    </div>
+  )
+}
+
 function MediaAutoUpload() {
   const queryClient = useQueryClient()
   const { data: prefs } = useQuery(preferencesQueryOptions)
@@ -933,10 +973,18 @@ function Row({ label, value }: { label: string; value: string }) {
 }
 
 function PremiumCard({
-  isPremium, isAdmin, grantedAt, onUpgrade,
-}: { isPremium: boolean; isAdmin: boolean; grantedAt: string | null; onUpgrade: () => void }) {
+  isPremium, isAdmin, sandboxPaymentsEnabled, grantedAt, onUpgrade,
+}: {
+  isPremium: boolean
+  isAdmin: boolean
+  sandboxPaymentsEnabled: boolean
+  grantedAt: string | null
+  onUpgrade: () => void
+}) {
   const navigate = useNavigate()
-  if (isPremium || isAdmin) {
+  // Admins are implicitly premium — but when sandbox payments mode is on,
+  // show the real upgrade flow so it can actually be tested end-to-end.
+  if (isPremium || (isAdmin && !sandboxPaymentsEnabled)) {
     return (
       <div className="bg-white border border-gray-200 rounded-xl px-5 py-4">
         <div className="flex items-start gap-3">

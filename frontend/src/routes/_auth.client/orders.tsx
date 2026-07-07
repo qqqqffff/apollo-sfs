@@ -195,7 +195,17 @@ function RouteComponent() {
                   </p>
                 </div>
                 <div className="text-right shrink-0">
-                  <p className="text-sm font-semibold text-gray-800 m-0">{formatCents(o.amount_cents)}</p>
+                  <p className="text-sm font-semibold text-gray-800 m-0">
+                    {formatCents(o.amount_cents)}
+                    {o.environment === 'sandbox' && (
+                      <span
+                        title="Made while your sandbox-payments toggle was on — not a real charge"
+                        className="ml-1.5 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider rounded bg-purple-100 text-purple-700 align-middle"
+                      >
+                        Sandbox
+                      </span>
+                    )}
+                  </p>
                   <p className={`text-[10px] font-semibold uppercase tracking-wider m-0 mt-0.5 ${
                     o.status === 'captured' ? 'text-green-600' : o.status === 'refunded' ? 'text-gray-400' : 'text-amber-600'
                   }`}>

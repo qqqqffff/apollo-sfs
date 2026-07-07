@@ -19,7 +19,7 @@ const expansionRequestColumns = `
 	ser.expires_at, ser.approval_due_at, ser.approved_at, ser.expansion_due_at,
 	ser.created_at, ser.completed_at,
 	ser.refund_id, ser.cancellation_reason, ser.payment_due_at, ser.reminder_sent_at,
-	ser.reminders_sent,
+	ser.reminders_sent, ser.environment,
 	s.name AS server_name, s.state AS server_state,
 	u.email AS user_email`
 
@@ -37,7 +37,7 @@ func scanExpansionRequest(rows interface {
 		&r.Status, &r.IsCustom, &r.PreQuotaBytes, &postQuota,
 		&r.ExpiresAt, &approvalDueAt, &approvedAt, &expansionDueAt,
 		&r.CreatedAt, &completedAt,
-		&refundID, &reason, &paymentDueAt, &reminderSentAt, &r.RemindersSent,
+		&refundID, &reason, &paymentDueAt, &reminderSentAt, &r.RemindersSent, &r.Environment,
 		&r.ServerName, &r.ServerState, &r.UserEmail,
 	)
 	if err != nil {
@@ -106,6 +106,10 @@ type CreateExpansionRequestParams struct {
 	PreQuotaBytes      int64
 	// ExpiresAt is the approval deadline (also stored in approval_due_at).
 	ExpiresAt time.Time
+	// Environment is which PayPal instance ("sandbox" | "live") this request's
+	// orders are created against — set from the admin sandbox-payments toggle.
+	// Defaults to "live" when empty.
+	Environment string
 }
 
 // CreateExpansionRequest inserts a new server expansion request.
@@ -114,18 +118,22 @@ func (q *Queries) CreateExpansionRequest(ctx context.Context, p CreateExpansionR
 	if p.PayPalCaptureID != nil {
 		captureID = *p.PayPalCaptureID
 	}
+	env := p.Environment
+	if env == "" {
+		env = "live"
+	}
 	row := q.db.QueryRowContext(ctx, `
 		INSERT INTO server_expansion_requests
 			(username, server_id, plan_id, storage_type, bytes_requested,
 			 deposit_amount_cents, full_price_cents, currency, payment_method,
 			 paypal_order_id, paypal_capture_id, status, is_custom,
-			 pre_quota_bytes, expires_at, approval_due_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$15)
+			 pre_quota_bytes, expires_at, approval_due_at, environment)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$15,$16)
 		RETURNING id, created_at
 	`,
 		p.Username, p.ServerID, p.PlanID, p.StorageType, p.BytesRequested,
 		p.DepositAmountCents, p.FullPriceCents, p.Currency, p.PaymentMethod,
-		p.PayPalOrderID, captureID, p.Status, p.IsCustom, p.PreQuotaBytes, p.ExpiresAt,
+		p.PayPalOrderID, captureID, p.Status, p.IsCustom, p.PreQuotaBytes, p.ExpiresAt, env,
 	)
 	var id uuid.UUID
 	var createdAt time.Time
@@ -351,7 +359,7 @@ func scanExpansionRequestWithInvoice(rows *sql.Rows) (*models.ServerExpansionReq
 		&r.Status, &r.IsCustom, &r.PreQuotaBytes, &postQuota,
 		&r.ExpiresAt, &approvalDueAt, &approvedAt, &expansionDueAt,
 		&r.CreatedAt, &completedAt,
-		&refundID, &reason, &paymentDueAt, &reminderSentAt, &r.RemindersSent,
+		&refundID, &reason, &paymentDueAt, &reminderSentAt, &r.RemindersSent, &r.Environment,
 		&r.ServerName, &r.ServerState, &r.UserEmail,
 		&invNumber, &invStatus, &invSentAt, &invAcceptDueAt,
 	)

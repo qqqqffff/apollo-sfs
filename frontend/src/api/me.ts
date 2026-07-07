@@ -36,6 +36,13 @@ export function updateStorageUIPreferences(prefs: {
   return put<UserPreferences>('/me/preferences/storage-ui', prefs)
 }
 
+// updateSandboxPayments toggles the admin-only, session-scoped sandbox
+// payments mode (resets on logout/session expiry — not a persisted
+// preference, hence not part of UserPreferences).
+export function updateSandboxPayments(enabled: boolean) {
+  return put<{ sandbox_payments_enabled: boolean }>('/me/sandbox-payments', { enabled })
+}
+
 export const preferencesQueryOptions = {
   queryKey: ['preferences'] as const,
   queryFn: getPreferences,

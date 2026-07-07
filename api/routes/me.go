@@ -10,8 +10,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gin-contrib/sessions"
 	"github.com/gin-gonic/gin"
 
+	"apollo-sfs.com/api/routes/middleware"
 	"apollo-sfs.com/api/routes/services"
 )
 
@@ -58,6 +60,10 @@ type meResponse struct {
 	IsPremium         bool       `json:"is_premium"`
 	PremiumGrantedAt  *time.Time `json:"premium_granted_at"`
 	LinkedProviders   []string   `json:"linked_providers"`
+	// SandboxPaymentsEnabled reflects the admin's session-scoped toggle (see
+	// middleware.SandboxEnabled) — always false for non-admins, and resets on
+	// logout/session expiry since it isn't persisted.
+	SandboxPaymentsEnabled bool `json:"sandbox_payments_enabled"`
 }
 
 // Me handles GET /api/v1/me.
@@ -141,18 +147,45 @@ func (h *Handler) Me(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, meResponse{
-		Username:          user.Username,
-		Email:             user.Email,
-		StorageUsedBytes:  user.StorageUsedBytes,
-		StorageQuotaBytes: user.StorageQuotaBytes,
-		StorageUsedPct:    usedPct,
-		LastSeenAt:        user.LastSeenAt,
-		CreatedAt:         user.CreatedAt,
-		IsAdmin:           isAdmin,
-		IsPremium:         user.IsPremium,
-		PremiumGrantedAt:  user.PremiumGrantedAt,
-		LinkedProviders:   linkedProviders,
+		Username:               user.Username,
+		Email:                  user.Email,
+		StorageUsedBytes:       user.StorageUsedBytes,
+		StorageQuotaBytes:      user.StorageQuotaBytes,
+		StorageUsedPct:         usedPct,
+		LastSeenAt:             user.LastSeenAt,
+		CreatedAt:              user.CreatedAt,
+		IsAdmin:                isAdmin,
+		IsPremium:              user.IsPremium,
+		PremiumGrantedAt:       user.PremiumGrantedAt,
+		LinkedProviders:        linkedProviders,
+		SandboxPaymentsEnabled: middleware.SandboxEnabled(c),
 	})
+}
+
+// UpdateSandboxPayments handles PUT /api/v1/me/sandbox-payments.
+// Admin-only: toggles whether the calling admin's own payment actions
+// (premium, storage add-ons, capacity expansion) run against the PayPal
+// sandbox instance instead of live. Stored in the session cookie only — it
+// resets to disabled on logout or session expiry, never persisted to the DB.
+func (h *Handler) UpdateSandboxPayments(c *gin.Context) {
+	if !c.GetBool("isAdmin") {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "admin only"})
+		return
+	}
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	session := sessions.DefaultMany(c, middleware.SessionName)
+	session.Set("sandbox_payments_enabled", req.Enabled)
+	if err := session.Save(); err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "could not save session"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"sandbox_payments_enabled": req.Enabled})
 }
 
 type socialLinkRequest struct {

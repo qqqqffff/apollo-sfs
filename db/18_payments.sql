@@ -18,7 +18,11 @@ CREATE TABLE payments (
     -- Admin refunds (90-day window from capture).
     refund_id          TEXT,
     refunded_at        TIMESTAMPTZ,
-    raw_webhook        JSONB
+    raw_webhook        JSONB,
+    -- Which PayPal environment this order was created against (admin sandbox
+    -- payments toggle). Stamped at creation so later captures/refunds always
+    -- use the matching client.
+    environment        TEXT        NOT NULL DEFAULT 'live' CHECK (environment IN ('sandbox', 'live'))
 );
 
 CREATE INDEX payments_username_idx        ON payments (username);

@@ -252,7 +252,17 @@ function OrdersTab() {
                         {o.status}
                       </span>
                     </td>
-                    <td className="px-3 py-2 font-medium text-gray-800">{fmtCents(o.amount_cents)}</td>
+                    <td className="px-3 py-2 font-medium text-gray-800">
+                      {fmtCents(o.amount_cents)}
+                      {o.environment === 'sandbox' && (
+                        <span
+                          title="Created via an admin's sandbox-payments toggle — not real revenue"
+                          className="ml-1.5 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider rounded bg-purple-100 text-purple-700"
+                        >
+                          Sandbox
+                        </span>
+                      )}
+                    </td>
                     <td className="px-3 py-2 text-gray-500">{fmtDate(o.captured_at ?? o.created_at)}</td>
                     <td className="px-3 py-2 text-gray-600">{METHOD_LABELS[o.payment_method] ?? o.payment_method}</td>
                     <td className="px-3 py-2 text-gray-400 font-mono text-xs">{o.reference}</td>
@@ -307,6 +317,7 @@ function OrderInfoModal({ order, onClose }: { order: AdminOrder; onClose: () => 
         <InfoRow label="Type" value={order.type === 'premium' ? 'Premium subscription' : 'Additional storage purchase'} />
         <InfoRow label="User" value={order.username} />
         <InfoRow label="Status" value={order.status} />
+        <InfoRow label="Environment" value={order.environment === 'sandbox' ? 'Sandbox (test)' : 'Live'} />
         <InfoRow label="Amount" value={`${fmtCents(order.amount_cents)} ${order.currency}`} />
         <InfoRow label="Method" value={METHOD_LABELS[order.payment_method] ?? order.payment_method} />
         <InfoRow label="Reference" value={order.reference} mono />

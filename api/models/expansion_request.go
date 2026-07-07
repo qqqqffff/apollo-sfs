@@ -41,6 +41,10 @@ type ServerExpansionRequest struct {
 	// revert, 1 day before the revert).
 	ReminderSentAt *time.Time `json:"reminder_sent_at"`
 	RemindersSent  int        `json:"reminders_sent"`
+	// Environment is which PayPal instance ("sandbox" | "live") this request's
+	// orders were created against — set from the admin sandbox-payments toggle
+	// at creation.
+	Environment string `json:"environment"`
 
 	// Populated by JOIN queries.
 	ServerName  string `json:"server_name"`

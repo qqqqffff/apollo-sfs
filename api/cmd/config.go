@@ -31,8 +31,8 @@ type Config struct {
 	CookieSecure bool
 
 	PostfixInternalHost string
-	MailFrom          string
-	MailDomain        string
+	MailFrom            string
+	MailDomain          string
 
 	AppBaseURL string // public-facing base URL, e.g. "https://files.example.com"
 
@@ -86,6 +86,14 @@ type Config struct {
 	PayPalWebhookID    string
 	PayPalEnvironment  string // "sandbox" | "live"
 
+	// PayPalSandboxClientID / Secret / WebhookID configure a second, always-
+	// sandbox PayPal client used only when an admin's session-scoped "sandbox
+	// payments" toggle (profile page) is on. Empty disables sandbox testing
+	// regardless of the toggle.
+	PayPalSandboxClientID     string
+	PayPalSandboxClientSecret string
+	PayPalSandboxWebhookID    string
+
 	// PremiumTierPriceCents is the one-time charge for the premium tier.
 	PremiumTierPriceCents int
 	PremiumTierCurrency   string // ISO 4217, e.g. "USD"
@@ -113,10 +121,10 @@ func loadConfig() Config {
 	quotaPct, _ := strconv.Atoi(getEnv("QUOTA_WARNING_THRESHOLD_PERCENT", "80"))
 	premiumPrice, _ := strconv.Atoi(getEnv("PREMIUM_TIER_PRICE_CENTS", "999"))
 
-	paypalEnv          := getEnv("PAYPAL_ENV", "sandbox")
-	paypalClientID     := getEnv("PAYPAL_CLIENT_ID", "")
+	paypalEnv := getEnv("PAYPAL_ENV", "sandbox")
+	paypalClientID := getEnv("PAYPAL_CLIENT_ID", "")
 	paypalClientSecret := getEnv("PAYPAL_CLIENT_SECRET", "")
-	paypalWebhookID    := getEnv("PAYPAL_WEBHOOK_ID", "")
+	paypalWebhookID := getEnv("PAYPAL_WEBHOOK_ID", "")
 
 	return Config{
 		Port: getEnv("PORT", "8080"),
@@ -145,8 +153,8 @@ func loadConfig() Config {
 		CookieSecure: os.Getenv("COOKIE_SECURE") == "true",
 
 		PostfixInternalHost: requireEnv("POSTFIX_INTERNAL_HOST"),
-		MailFrom:          requireEnv("MAIL_FROM"),
-		MailDomain:        requireEnv("MAIL_DOMAIN"),
+		MailFrom:            requireEnv("MAIL_FROM"),
+		MailDomain:          requireEnv("MAIL_DOMAIN"),
 
 		AppBaseURL: requireEnv("APP_BASE_URL"),
 
@@ -167,13 +175,16 @@ func loadConfig() Config {
 		FrontendTestURL: getEnv("FRONTEND_TEST_URL", ""),
 		FrontendE2EURL:  getEnv("FRONTEND_E2E_URL", ""),
 
-		SFSAPIKeyPepper:       requireEnv("SFS_API_KEY_PEPPER"),
-		PayPalClientID:        paypalClientID,
-		PayPalClientSecret:    paypalClientSecret,
-		PayPalWebhookID:       paypalWebhookID,
-		PayPalEnvironment:     paypalEnv,
-		PremiumTierPriceCents: premiumPrice,
-		PremiumTierCurrency:   getEnv("PREMIUM_TIER_CURRENCY", "USD"),
+		SFSAPIKeyPepper:           requireEnv("SFS_API_KEY_PEPPER"),
+		PayPalClientID:            paypalClientID,
+		PayPalClientSecret:        paypalClientSecret,
+		PayPalWebhookID:           paypalWebhookID,
+		PayPalEnvironment:         paypalEnv,
+		PayPalSandboxClientID:     getEnv("PAYPAL_SANDBOX_CLIENT_ID", ""),
+		PayPalSandboxClientSecret: getEnv("PAYPAL_SANDBOX_CLIENT_SECRET", ""),
+		PayPalSandboxWebhookID:    getEnv("PAYPAL_SANDBOX_WEBHOOK_ID", ""),
+		PremiumTierPriceCents:     premiumPrice,
+		PremiumTierCurrency:       getEnv("PREMIUM_TIER_CURRENCY", "USD"),
 
 		EmailStoragePath:      getEnv("EMAIL_STORAGE_PATH", "/home/app/service-worker-email"),
 		SendgridWebhookSecret: getEnv("SENDGRID_WEBHOOK_SECRET", ""),

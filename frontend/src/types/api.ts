@@ -10,6 +10,9 @@ export interface User {
   premium_granted_at: string | null
   active_ban?: UserBan | null
   linked_providers: string[]
+  // Admin's session-scoped sandbox-payments toggle (resets on logout/session
+  // expiry — never persisted). Always false for non-admins.
+  sandbox_payments_enabled: boolean
 }
 
 export type APIKeyOperation = 'read' | 'write' | 'delete' | 'list'

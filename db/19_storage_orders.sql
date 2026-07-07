@@ -19,6 +19,10 @@ CREATE TABLE IF NOT EXISTS storage_orders (
     refund_id         TEXT,
     refunded_at       TIMESTAMPTZ,
     raw_response      JSONB,
+    -- Which PayPal environment this order was created against (admin sandbox
+    -- payments toggle). Stamped at creation so later captures/refunds always
+    -- use the matching client.
+    environment       TEXT        NOT NULL DEFAULT 'live' CHECK (environment IN ('sandbox', 'live')),
     created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     captured_at       TIMESTAMPTZ
 );

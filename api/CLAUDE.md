@@ -155,8 +155,9 @@ The `Dockerfile.test` sidecar runs the full test suite against a live database a
 | `KEYCLOAK_PUBLIC_URL` | Used to construct OIDC discovery URL |
 | `KEY_ENCRYPTION_KEY` | Base64-encoded 32-byte master encryption key |
 | `SESSION_KEY` | Session cookie HMAC signing key |
-| `PAYPAL_CLIENT_ID` / `_CLIENT_SECRET` / `_WEBHOOK_ID` | PayPal Orders v2 |
+| `PAYPAL_CLIENT_ID` / `_CLIENT_SECRET` / `_WEBHOOK_ID` | PayPal Orders v2 (primary/live client) |
 | `PAYPAL_ENV` | `sandbox` or `live` |
+| `PAYPAL_SANDBOX_CLIENT_ID` / `_CLIENT_SECRET` / `_WEBHOOK_ID` | Optional second, always-sandbox PayPal client — backs the admin-only "sandbox payments" session toggle (profile page). Empty disables the toggle regardless of its state. |
 | `GOOGLE_WEB_CLIENT_ID` / `_OAUTH_CLIENT_SECRET` | Google OAuth for social login |
 | `CLOUDFLARE_TURNSTILE_SECRET_KEY` | Server-side Turnstile verification |
 | `SFS_API_KEY_PEPPER` | Mixed into argon2id hashes for SFS API keys |

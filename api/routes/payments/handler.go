@@ -8,6 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"apollo-sfs.com/api/models"
+	"apollo-sfs.com/api/routes/middleware"
 	"apollo-sfs.com/api/routes/services"
 )
 
@@ -16,7 +17,7 @@ import (
 // (PayPal client, payment service, KC admin) and doesn't need to share
 // state with the rest of the routes package.
 type Handler struct {
-	paypal  *services.PayPalClient
+	paypal  services.PayPalClients
 	svc     *services.PaymentService
 	queries Querier
 	cfg     Config
@@ -30,18 +31,20 @@ type Config struct {
 	AppBaseURL  string
 }
 
-// NewHandler constructs a payments Handler. paypal/svc may be nil during
+// NewHandler constructs a payments Handler. paypal.Live/svc may be nil during
 // local dev without PayPal credentials; the create-order endpoint then
 // returns 503 (not configured).
-func NewHandler(paypal *services.PayPalClient, svc *services.PaymentService, q Querier, cfg Config) *Handler {
+func NewHandler(paypal services.PayPalClients, svc *services.PaymentService, q Querier, cfg Config) *Handler {
 	return &Handler{paypal: paypal, svc: svc, queries: q, cfg: cfg}
 }
 
 // CreateOrder is POST /api/v1/payments/orders. Body: {payment_method}.
 // Refuses to create a new order if the user is already premium — avoids
-// double-charging from a stale browser tab.
+// double-charging from a stale browser tab. Admins are treated as already
+// premium too, UNLESS their sandbox-payments toggle is on, in which case the
+// premium checkout is deliberately left testable.
 func (h *Handler) CreateOrder(c *gin.Context) {
-	if h.paypal == nil || h.svc == nil {
+	if h.svc == nil {
 		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "payments not configured"})
 		return
 	}
@@ -49,8 +52,18 @@ func (h *Handler) CreateOrder(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if user.IsPremium || user.IsAdmin {
+	sandbox := middleware.SandboxEnabled(c)
+	if user.IsPremium || (user.IsAdmin && !sandbox) {
 		c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": "already premium"})
+		return
+	}
+	env := services.PayPalEnvLive
+	if sandbox {
+		env = services.PayPalEnvSandbox
+	}
+	client := h.paypal.For(env)
+	if client == nil {
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "payments not configured"})
 		return
 	}
 	var req struct {
@@ -60,7 +73,7 @@ func (h *Handler) CreateOrder(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	order, err := h.paypal.CreateOrder(c.Request.Context(), services.CreateOrderInput{
+	order, err := client.CreateOrder(c.Request.Context(), services.CreateOrderInput{
 		AmountCents:   h.cfg.AmountCents,
 		Currency:      h.cfg.Currency,
 		PaymentMethod: req.PaymentMethod,
@@ -78,6 +91,7 @@ func (h *Handler) CreateOrder(c *gin.Context) {
 		AmountCents:   h.cfg.AmountCents,
 		Currency:      h.cfg.Currency,
 		PaymentMethod: req.PaymentMethod,
+		Environment:   env,
 	}
 	if err := h.svc.CreatePending(c.Request.Context(), pending); err != nil {
 		log.Printf("payments CreateOrder persist: %v", err)
@@ -93,7 +107,7 @@ func (h *Handler) CreateOrder(c *gin.Context) {
 // CaptureOrder is POST /api/v1/payments/orders/:order_id/capture.
 // Calls PayPal CaptureOrder and applies the side effects atomically.
 func (h *Handler) CaptureOrder(c *gin.Context) {
-	if h.paypal == nil || h.svc == nil {
+	if h.svc == nil {
 		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "payments not configured"})
 		return
 	}
@@ -119,7 +133,15 @@ func (h *Handler) CaptureOrder(c *gin.Context) {
 		return
 	}
 
-	cap, err := h.paypal.CaptureOrder(c.Request.Context(), orderID)
+	// Use the environment the order was actually created against, not the
+	// caller's current toggle state — they could differ if the toggle was
+	// flipped between create and capture.
+	client := h.paypal.For(payment.Environment)
+	if client == nil {
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "payments not configured"})
+		return
+	}
+	cap, err := client.CaptureOrder(c.Request.Context(), orderID)
 	if err != nil {
 		log.Printf("payments CaptureOrder paypal: %v", err)
 		c.AbortWithStatusJSON(http.StatusBadGateway, gin.H{"error": "paypal capture failed"})
@@ -138,11 +160,14 @@ func (h *Handler) CaptureOrder(c *gin.Context) {
 }
 
 // Webhook is POST /api/v1/payments/webhook. NO auth middleware — the
-// caller is PayPal. Authenticity is enforced by verify-webhook-signature
-// against PAYPAL_WEBHOOK_ID. Handles PAYMENT.CAPTURE.COMPLETED (idempotent
-// premium grant) and PAYMENT.CAPTURE.REFUNDED / .REVERSED (revoke).
+// caller is PayPal. Authenticity is enforced by verify-webhook-signature,
+// tried against the live client first and the sandbox client as a fallback
+// (each carries its own PAYPAL_WEBHOOK_ID / PAYPAL_SANDBOX_WEBHOOK_ID) so
+// both live traffic and an admin's sandbox testing verify correctly against
+// the same public endpoint. Handles PAYMENT.CAPTURE.COMPLETED (idempotent
+// premium grant) and PAYMENT.CAPTURE.REFUNDED / .REVERSED / .DENIED (revoke).
 func (h *Handler) Webhook(c *gin.Context) {
-	if h.paypal == nil || h.svc == nil {
+	if (h.paypal.Live == nil && h.paypal.Sandbox == nil) || h.svc == nil {
 		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "payments not configured"})
 		return
 	}
@@ -151,7 +176,13 @@ func (h *Handler) Webhook(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "read body"})
 		return
 	}
-	ok, err := h.paypal.VerifyWebhook(c.Request.Context(), c.Request.Header, raw)
+	var ok bool
+	if h.paypal.Live != nil {
+		ok, err = h.paypal.Live.VerifyWebhook(c.Request.Context(), c.Request.Header, raw)
+	}
+	if (!ok || err != nil) && h.paypal.Sandbox != nil {
+		ok, err = h.paypal.Sandbox.VerifyWebhook(c.Request.Context(), c.Request.Header, raw)
+	}
 	if err != nil || !ok {
 		log.Printf("payments Webhook verify: ok=%v err=%v", ok, err)
 		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "webhook signature invalid"})
@@ -160,8 +191,8 @@ func (h *Handler) Webhook(c *gin.Context) {
 	var envelope struct {
 		EventType string `json:"event_type"`
 		Resource  struct {
-			ID                 string `json:"id"`
-			SupplementaryData  struct {
+			ID                string `json:"id"`
+			SupplementaryData struct {
 				RelatedIDs struct {
 					OrderID string `json:"order_id"`
 				} `json:"related_ids"`

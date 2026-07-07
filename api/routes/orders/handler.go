@@ -35,11 +35,11 @@ var _ Querier = (*db.Queries)(nil)
 
 // Handler wires the /api/v1/admin/orders endpoints.
 type Handler struct {
-	paypal  *services.PayPalClient
+	paypal  services.PayPalClients
 	queries Querier
 }
 
-func NewHandler(paypal *services.PayPalClient, q Querier) *Handler {
+func NewHandler(paypal services.PayPalClients, q Querier) *Handler {
 	return &Handler{paypal: paypal, queries: q}
 }
 
@@ -75,11 +75,6 @@ func (h *Handler) List(c *gin.Context) {
 // window closes 90 days after capture.
 // POST /api/v1/admin/orders/:type/:id/refund
 func (h *Handler) Refund(c *gin.Context) {
-	if h.paypal == nil {
-		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "payments not configured"})
-		return
-	}
-
 	orderType := c.Param("type")
 	if orderType != "premium" && orderType != "storage" {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "type must be premium or storage"})
@@ -112,7 +107,15 @@ func (h *Handler) Refund(c *gin.Context) {
 		return
 	}
 
-	refund, err := h.paypal.RefundCapture(c.Request.Context(), *order.PayPalCaptureID, int(order.AmountCents), order.Currency)
+	// Use the environment the order was created against, not the acting
+	// admin's own toggle state — refunds must land in the same PayPal
+	// instance the money actually moved through.
+	client := h.paypal.For(order.Environment)
+	if client == nil {
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "payments not configured"})
+		return
+	}
+	refund, err := client.RefundCapture(c.Request.Context(), *order.PayPalCaptureID, int(order.AmountCents), order.Currency)
 	if err != nil {
 		log.Printf("orders Refund paypal: %v", err)
 		c.AbortWithStatusJSON(http.StatusBadGateway, gin.H{"error": "refund failed"})

@@ -20,10 +20,10 @@ import (
 	"apollo-sfs.com/api/routes"
 	"apollo-sfs.com/api/routes/admin"
 	"apollo-sfs.com/api/routes/auth"
-	"apollo-sfs.com/api/routes/middleware"
 	"apollo-sfs.com/api/routes/billing"
 	"apollo-sfs.com/api/routes/dav"
 	"apollo-sfs.com/api/routes/expansion"
+	"apollo-sfs.com/api/routes/middleware"
 	"apollo-sfs.com/api/routes/orders"
 	"apollo-sfs.com/api/routes/payments"
 	"apollo-sfs.com/api/routes/services"
@@ -278,6 +278,16 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		ClientSecret: cfg.PayPalClientSecret,
 		WebhookID:    cfg.PayPalWebhookID,
 	})
+	// paypalSandboxClient backs the admin-only "sandbox payments" toggle (see
+	// middleware.SandboxEnabled). nil (and thus 503 from every handler) when
+	// PAYPAL_SANDBOX_CLIENT_ID/_SECRET aren't configured.
+	paypalSandboxClient := services.NewPayPalClient(services.PayPalConfig{
+		Environment:  services.PayPalEnvSandbox,
+		ClientID:     cfg.PayPalSandboxClientID,
+		ClientSecret: cfg.PayPalSandboxClientSecret,
+		WebhookID:    cfg.PayPalSandboxWebhookID,
+	})
+	paypalClients := services.PayPalClients{Live: paypalClient, Sandbox: paypalSandboxClient}
 	routes.SetPayPalClient(h, paypalClient, routes.InterestDepositConfig{
 		Currency:  cfg.PremiumTierCurrency,
 		ReturnURL: cfg.AppBaseURL + "/interest",
@@ -285,20 +295,21 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	})
 	adminHandler.SetPayPalClient(paypalClient)
 	paymentSvc := services.NewPaymentService(queries, authSvc)
-	paymentsHandler := payments.NewHandler(paypalClient, paymentSvc, queries, payments.Config{
+	paymentsHandler := payments.NewHandler(paypalClients, paymentSvc, queries, payments.Config{
 		AmountCents: cfg.PremiumTierPriceCents,
 		Currency:    cfg.PremiumTierCurrency,
 		AppBaseURL:  cfg.AppBaseURL,
 	})
 	storageHandler := storageroutes.NewHandler(queries)
-	billingHandler := billing.NewHandler(paypalClient, queries, billing.Config{
-		Currency:    cfg.PremiumTierCurrency,
-		ReturnURL:   "apollosfs://billing/storage/complete",
-		CancelURL:   "apollosfs://billing/storage/cancel",
-		ClientID:    cfg.PayPalClientID,
-		Environment: cfg.PayPalEnvironment,
+	billingHandler := billing.NewHandler(paypalClients, queries, billing.Config{
+		Currency:        cfg.PremiumTierCurrency,
+		ReturnURL:       "apollosfs://billing/storage/complete",
+		CancelURL:       "apollosfs://billing/storage/cancel",
+		ClientID:        cfg.PayPalClientID,
+		Environment:     cfg.PayPalEnvironment,
+		SandboxClientID: cfg.PayPalSandboxClientID,
 	})
-	expansionHandler := expansion.NewHandler(paypalClient, emailSvc, queries, expansion.Config{
+	expansionHandler := expansion.NewHandler(paypalClients, emailSvc, queries, expansion.Config{
 		Currency:  cfg.PremiumTierCurrency,
 		ReturnURL: "apollosfs://billing/expansion/complete",
 		CancelURL: "apollosfs://billing/expansion/cancel",
@@ -306,7 +317,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		AppName:   "Apollo SFS",
 	})
 	expansionHandler.StartExpiryLoop(context.Background())
-	ordersHandler := orders.NewHandler(paypalClient, queries)
+	ordersHandler := orders.NewHandler(paypalClients, queries)
 	metricsSvc.SetSpeedTestProvider(adminHandler)
 	go adminHandler.SpeedTestLoop(context.Background())
 
@@ -412,6 +423,8 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		// PUT /me/preferences is premium-only (media auto-upload); registered below.
 		// Storage UI toggles are available to every user.
 		protected.PUT("/me/preferences/storage-ui", h.UpdateStorageUIPreferences)
+		// Admin-only, session-scoped sandbox-payments toggle (not persisted).
+		protected.PUT("/me/sandbox-payments", h.UpdateSandboxPayments)
 		protected.POST("/me/social/link", h.LinkSocial)
 		protected.DELETE("/me/social/unlink", h.UnlinkSocial)
 

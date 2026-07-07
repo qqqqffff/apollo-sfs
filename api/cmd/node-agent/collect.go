@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/shirou/gopsutil/v4/cpu"
@@ -42,9 +43,8 @@ func collectPayload(hostname string) models.NodeMetricsPayload {
 		p.NetworkBytesRecv = int64(iocs[0].BytesRecv)
 	}
 
-	temps := readDriveSensors()
 	p.CPUTempCelsius = collectCPUTemp()
-	p.Drives = collectDrives(temps)
+	p.Drives = collectDrives()
 	return p
 }
 
@@ -140,7 +140,7 @@ func labelMounts(partitions []psdisk.PartitionStat) []diskMount {
 // otherwise from /dev/disk/by-label. Mounts that can't be read are skipped (the
 // API falls back to stored DB capacity). The label is matched to a registered
 // drive on the API side.
-func collectDrives(temps []sensors.TemperatureStat) []models.DrivePayload {
+func collectDrives() []models.DrivePayload {
 	partitions, _ := psdisk.Partitions(true)
 
 	mounts := configuredDiskMounts()
@@ -174,60 +174,85 @@ func collectDrives(temps []sensors.TemperatureStat) []models.DrivePayload {
 			UsedBytes:  int64(usage.Used),
 			FreeBytes:  int64(usage.Free),
 		}
-		d.TempCelsius = matchDriveTemp(dev, m.label, temps)
+		d.TempCelsius = readTempFile(driveTempPath(dev))
 		out = append(out, d)
 	}
 	return out
 }
 
-// reDevBase extracts the physical-disk token from a device path for matching a
-// drive to a hardware temperature sensor, e.g. "/dev/nvme0n1p1" → "nvme0".
-var reDevBase = regexp.MustCompile(`(nvme\d+|sd[a-z]+|mmcblk\d+)`)
+// sysRoot is the /sys mount point inside the container (bind-mounted read-only
+// from the host — see docker-stack.yml). Overridable via NODE_AGENT_SYS_ROOT so
+// tests can point it at a fake sysfs tree.
+func sysRoot() string {
+	if d := os.Getenv("NODE_AGENT_SYS_ROOT"); d != "" {
+		return d
+	}
+	return "/sys"
+}
 
-// readDriveSensors returns temperature readings that look like storage devices.
-func readDriveSensors() []sensors.TemperatureStat {
-	readings, err := sensors.SensorsTemperatures()
+// reNVMeCtrl and reBlockDisk extract, respectively, the NVMe controller name
+// ("nvme0") or the whole-disk block device name ("sda", "mmcblk0") from a
+// partition/namespace device path such as "/dev/nvme0n1p1" or "/dev/sda1".
+var reNVMeCtrl = regexp.MustCompile(`^nvme\d+`)
+var reBlockDisk = regexp.MustCompile(`^(sd[a-z]+|mmcblk\d+)`)
+
+// driveTempPath resolves a physical disk's own hwmon temperature file, given its
+// device path (e.g. "/dev/nvme0n1p1"). Unlike gopsutil's generic
+// sensors.SensorsTemperatures() — whose SensorKey is built purely from the hwmon
+// driver name ("nvme") plus its label ("composite"), with no per-controller
+// identity — every NVMe drive on a host reports the identical key
+// "nvme_composite". That makes drive-to-sensor matching by key text ambiguous the
+// moment a node has more than one disk of the same type (e.g. the fast-tier node's
+// two pooled NVMes), so it silently resolved to no temperature for either drive.
+// Reading directly from the specific controller's/disk's own sysfs subtree
+// (/sys/class/nvme/<ctrl>/hwmon*/temp1_input, or for a SATA/USB disk with the
+// `drivetemp` kernel module bound, /sys/block/<disk>/device/hwmon*/temp1_input)
+// ties each reading to the exact physical device, so N identical drives can never
+// collide. Returns "" if no matching sysfs path exists (untracked device type, or
+// the kernel/host doesn't expose hwmon for it).
+func driveTempPath(device string) string {
+	base := filepath.Base(device)
+
+	if ctrl := reNVMeCtrl.FindString(base); ctrl != "" {
+		matches, _ := filepath.Glob(filepath.Join(sysRoot(), "class", "nvme", ctrl, "hwmon*", "temp1_input"))
+		if len(matches) > 0 {
+			return matches[0]
+		}
+		return ""
+	}
+
+	if disk := reBlockDisk.FindString(base); disk != "" {
+		// Try both observed drivetemp sysfs layouts (kernel/distro dependent),
+		// mirroring gopsutil's own defensive handling of hwmon path variants.
+		for _, pattern := range []string{
+			filepath.Join(sysRoot(), "block", disk, "device", "hwmon", "hwmon*", "temp1_input"),
+			filepath.Join(sysRoot(), "block", disk, "device", "hwmon*", "temp1_input"),
+		} {
+			matches, _ := filepath.Glob(pattern)
+			if len(matches) > 0 {
+				return matches[0]
+			}
+		}
+		return ""
+	}
+
+	return ""
+}
+
+// readTempFile reads a hwmon temp*_input file (millidegrees Celsius) and returns
+// the value in degrees, or nil if the path is empty or unreadable.
+func readTempFile(path string) *float64 {
+	if path == "" {
+		return nil
+	}
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil
 	}
-	out := make([]sensors.TemperatureStat, 0, len(readings))
-	for _, s := range readings {
-		if s.Temperature <= 0 {
-			continue
-		}
-		key := strings.ToLower(s.SensorKey)
-		if strings.Contains(key, "nvme") || strings.Contains(key, "drivetemp") ||
-			reDevBase.MatchString(key) {
-			out = append(out, s)
-		}
-	}
-	return out
-}
-
-// matchDriveTemp maps a drive to a temperature reading, preferring a sensor whose
-// key contains the device token; falls back to the lone drive sensor when there is
-// exactly one. Returns nil otherwise.
-func matchDriveTemp(device, label string, temps []sensors.TemperatureStat) *float64 {
-	if len(temps) == 0 {
+	milliC, err := strconv.ParseFloat(strings.TrimSpace(string(raw)), 64)
+	if err != nil {
 		return nil
 	}
-	token := ""
-	if m := reDevBase.FindString(device); m != "" {
-		token = m
-	} else if m := reDevBase.FindString(label); m != "" {
-		token = m
-	}
-	if token != "" {
-		for i := range temps {
-			if strings.Contains(strings.ToLower(temps[i].SensorKey), token) {
-				t := temps[i].Temperature
-				return &t
-			}
-		}
-	}
-	if len(temps) == 1 {
-		t := temps[0].Temperature
-		return &t
-	}
-	return nil
+	t := milliC / 1000.0
+	return &t
 }

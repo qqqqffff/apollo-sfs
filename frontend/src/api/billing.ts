@@ -234,6 +234,9 @@ export interface UserOrder {
   storage_type?: string
   bytes_added?: number
   server_name?: string
+  // Which PayPal instance this order was created against — 'sandbox' means it
+  // came from an admin's sandbox-payments toggle, not a real purchase.
+  environment: 'sandbox' | 'live'
 }
 
 export async function listMyOrders(): Promise<UserOrder[]> {

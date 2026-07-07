@@ -85,6 +85,23 @@ export function captureStorageOrder(orderId: string) {
   return post<{ new_quota_bytes: number }>(`/billing/storage/order/${orderId}/capture`)
 }
 
+// Direct storage purchase via Google Pay: created + captured server-side in one
+// call, then the quota is applied. Only valid for in-capacity direct purchases
+// (not the 50%-deposit expansion path or custom requests).
+export function chargeStorageGooglePay(
+  planId: string,
+  storageType: StorageType,
+  serverId: string,
+  googlePayToken: string,
+) {
+  return post<{ new_quota_bytes: number }>('/billing/storage/google-pay', {
+    plan_id: planId,
+    storage_type: storageType,
+    server_id: serverId,
+    google_pay_token: googlePayToken,
+  })
+}
+
 // ── Expansion requests (50% deposit; server-side create + capture) ────────────
 
 export interface ExpansionOrderResult {

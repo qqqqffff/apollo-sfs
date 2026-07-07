@@ -2,6 +2,14 @@ import { post, get } from './client'
 
 export interface PublicConfig {
   turnstile_site_key: string
+  // Public PayPal config for the hosted card fields SDK on the (unauthenticated)
+  // interest and register pages. Always the live client id.
+  paypal_client_id?: string
+  paypal_currency?: string
+  paypal_environment?: string
+  // One-time premium price in cents — shown/charged on the register page's
+  // inline premium checkout.
+  premium_price_cents?: number
 }
 
 export function getPublicConfig() {

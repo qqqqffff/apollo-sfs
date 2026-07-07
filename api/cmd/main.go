@@ -329,7 +329,18 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	// ── Unauthenticated ──────────────────────────────────────────────────────
 	v1.GET("/health", routes.Health)
 	v1.GET("/config", func(c *gin.Context) {
-		c.JSON(200, gin.H{"turnstile_site_key": cfg.TurnstileSiteKey})
+		// paypal_client_id is public by design — the PayPal JS SDK needs it in
+		// the browser. Exposing it here (unauthenticated) lets the public
+		// interest/register pages load hosted card fields without a session.
+		// This is always the live client; the admin sandbox toggle only applies
+		// to the authenticated /billing/config surface.
+		c.JSON(200, gin.H{
+			"turnstile_site_key":  cfg.TurnstileSiteKey,
+			"paypal_client_id":    cfg.PayPalClientID,
+			"paypal_currency":     cfg.PremiumTierCurrency,
+			"paypal_environment":  cfg.PayPalEnvironment,
+			"premium_price_cents": cfg.PremiumTierPriceCents,
+		})
 	})
 	v1.GET("/invitations/:token", h.ValidateInvitationToken)
 	v1.POST("/interest", h.SubmitInterestForm)
@@ -519,6 +530,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 
 		// Premium upgrade — create + capture a one-time PayPal order.
 		protected.POST("/payments/orders", paymentsHandler.CreateOrder)
+		protected.POST("/payments/orders/google-pay", paymentsHandler.ChargeGooglePay)
 		protected.POST("/payments/orders/:order_id/capture", paymentsHandler.CaptureOrder)
 
 		// User-facing storage info — separate from admin routes for security.

@@ -33,6 +33,13 @@ jest.mock('../../api/client', () => ({
   },
 }))
 
+// Stub the hosted card fields — they render PayPal-hosted iframes that require
+// the PayPal JS SDK, which can't load in jsdom. The section wrapper ("or pay by
+// card") lives in interest.tsx and still renders around this stub.
+jest.mock('../../components/HostedCardFields', () => ({
+  HostedCardFields: () => null,
+}))
+
 // Render Turnstile as a button so tests can simulate captcha completion.
 // Uses forwardRef to silence the "function components cannot be given refs" warning
 // since interest.tsx passes a ref to the widget.
@@ -122,11 +129,8 @@ describe('Interest / request-access page (/interest)', () => {
 
   test('payment buttons are disabled when no plan is selected', () => {
     renderPage(null)
-    // PayPal and Card buttons exist but are disabled without a plan + captcha
-    const paypalBtn = screen.getByRole('button', { name: /paypal/i })
-    const cardBtn = screen.getByRole('button', { name: /pay by card/i })
-    expect(paypalBtn).toBeDisabled()
-    expect(cardBtn).toBeDisabled()
+    // The PayPal wallet button exists but is disabled without a plan + captcha.
+    expect(screen.getByRole('button', { name: /paypal/i })).toBeDisabled()
   })
 
   test('shows captcha error when PayPal clicked without captcha token', async () => {
@@ -145,13 +149,12 @@ describe('Interest / request-access page (/interest)', () => {
     expect(screen.getByTestId('turnstile')).toBeInTheDocument()
   })
 
-  test('selecting a plan and completing captcha enables the payment buttons', () => {
+  test('selecting a plan and completing captcha enables the PayPal button', () => {
     renderPage({ turnstile_site_key: 'key123' })
     // 256 GB NVMe = $80 → deposit $40.00
     fireEvent.click(screen.getByRole('button', { name: /256 gb/i }))
     fireEvent.click(screen.getByTestId('turnstile'))
     expect(screen.getByRole('button', { name: /paypal/i })).not.toBeDisabled()
-    expect(screen.getByRole('button', { name: /pay by card/i })).not.toBeDisabled()
     // Deposit amount visible (50% of $80 = $40)
     expect(screen.getByText(/\$40\.00 refundable deposit/i)).toBeInTheDocument()
   })
@@ -167,18 +170,19 @@ describe('Interest / request-access page (/interest)', () => {
     expect(mockCreateDepositOrder).toHaveBeenCalledWith('256gb', 'nvme', 'paypal')
   })
 
-  test('clicking Pay by Card calls createInterestDepositOrder with card method', async () => {
-    mockCreateDepositOrder.mockResolvedValue({ order_id: 'ord-2', approve_url: 'https://card.example' })
-    renderPage({ turnstile_site_key: 'key123' })
+  test('renders the hosted card fields section only when PayPal is configured', () => {
+    // Without a client id the card section is hidden…
+    const { unmount } = renderPage({ turnstile_site_key: 'key123' })
     fireEvent.click(screen.getByRole('button', { name: /128 gb/i }))
-    fireEvent.click(screen.getByTestId('turnstile'))
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: /pay by card/i }))
-    })
-    expect(mockCreateDepositOrder).toHaveBeenCalledWith('128gb', 'nvme', 'card')
+    expect(screen.queryByText(/or pay by card/i)).not.toBeInTheDocument()
+    unmount()
+    // …and shown once the public config carries a PayPal client id.
+    renderPage({ turnstile_site_key: 'key123', paypal_client_id: 'test-client' })
+    fireEvent.click(screen.getByRole('button', { name: /128 gb/i }))
+    expect(screen.getByText(/or pay by card/i)).toBeInTheDocument()
   })
 
-  test('shows Processing… on payment buttons while deposit order is pending', () => {
+  test('disables the PayPal button while a deposit order is pending', () => {
     mockCreateDepositOrder.mockReturnValue(new Promise(() => {}))
     renderPage({ turnstile_site_key: 'key123' })
     fireEvent.click(screen.getByRole('button', { name: /64 gb/i }))
@@ -186,7 +190,7 @@ describe('Interest / request-access page (/interest)', () => {
     act(() => {
       fireEvent.click(screen.getByRole('button', { name: /paypal/i }))
     })
-    expect(screen.getAllByText(/processing…/i).length).toBeGreaterThan(0)
+    expect(screen.getByRole('button', { name: /paypal/i })).toBeDisabled()
   })
 
   test('shows awaiting screen and opens URL after deposit order is created', async () => {

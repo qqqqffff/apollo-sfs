@@ -1,10 +1,15 @@
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { MdCloud, MdRocketLaunch } from 'react-icons/md'
+import { MdCloud, MdRocketLaunch, MdCheckCircle } from 'react-icons/md'
 import { register, validateInviteToken } from '../api/auth'
 import { ApiError } from '../api/client'
+import { publicConfigQueryOptions } from '../api/interest'
+import { createPaymentOrder, capturePaymentOrder, chargePremiumGooglePay } from '../api/payments'
 import { TermsOfServiceModal } from '../components/TermsOfServiceModal'
+import { HostedCardFields } from '../components/HostedCardFields'
+import { GooglePayButton } from '../components/GooglePayButton'
+import { useGooglePay } from '../hooks/useGooglePay'
 
 interface RegisterParams {
   token: string
@@ -32,6 +37,8 @@ function RouteComponent() {
     enabled: !!token,
     retry: false,
   })
+  const { data: config } = useQuery(publicConfigQueryOptions)
+  const googlePay = useGooglePay()
 
   const [username, setUsername] = useState('')
   const [email, setEmail] = useState('')
@@ -40,6 +47,50 @@ function RouteComponent() {
   const [showTerms, setShowTerms] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [step, setStep] = useState<'form' | 'plan'>('form')
+
+  // Inline premium checkout on the plan step. Registration auto-logs-in (sets
+  // the session cookie), so the protected /payments endpoints work here even
+  // though the SPA hasn't done its Keycloak login yet.
+  const [showPremiumPay, setShowPremiumPay] = useState(false)
+  const [payError, setPayError] = useState<string | null>(null)
+  const [paying, setPaying] = useState(false)
+  const [paid, setPaid] = useState(false)
+
+  const premiumPriceCents = config?.premium_price_cents ?? 0
+  const premiumPriceLabel = premiumPriceCents ? `$${(premiumPriceCents / 100).toFixed(2)}` : ''
+
+  async function createPremiumCardOrder(): Promise<string> {
+    const { order_id } = await createPaymentOrder('card')
+    return order_id
+  }
+
+  async function handlePremiumCardApprove(orderId: string) {
+    setPaying(true)
+    setPayError(null)
+    try {
+      await capturePaymentOrder(orderId)
+      setPaid(true)
+    } catch (err) {
+      setPayError(err instanceof ApiError ? err.message : 'Payment could not be completed — please try again.')
+    } finally {
+      setPaying(false)
+    }
+  }
+
+  async function handlePremiumGooglePay() {
+    setPayError(null)
+    try {
+      const gpToken = await googlePay.requestToken((premiumPriceCents / 100).toFixed(2))
+      if (!gpToken) return // shopper cancelled
+      setPaying(true)
+      await chargePremiumGooglePay(gpToken)
+      setPaid(true)
+    } catch (err) {
+      setPayError(err instanceof ApiError ? err.message : 'Google Pay payment failed — please try another method.')
+    } finally {
+      setPaying(false)
+    }
+  }
 
   const mutation = useMutation({
     mutationFn: () => register(username, email, password, token),
@@ -63,8 +114,31 @@ function RouteComponent() {
   }
 
   if (step === 'plan') {
+    const goToLogin = () => navigate({ to: '/login', search: { social_error: undefined, link_provider: undefined, link_email: undefined, link_username: undefined } })
+
+    if (paid) {
+      return (
+        <div className="min-h-screen bg-gray-50 flex items-center justify-center px-4">
+          <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-10 max-w-md w-full text-center">
+            <MdCheckCircle className="text-5xl text-green-500 mx-auto mb-3" />
+            <h1 className="text-xl font-semibold text-gray-900 m-0">Premium unlocked.</h1>
+            <p className="text-sm text-gray-500 mt-2">
+              Your payment went through and Premium is active on your account. Log in to start
+              using the SFS API and create per-directory API keys.
+            </p>
+            <button
+              onClick={goToLogin}
+              className="mt-6 px-5 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium cursor-pointer transition-colors"
+            >
+              Go to login
+            </button>
+          </div>
+        </div>
+      )
+    }
+
     return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center px-4">
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center px-4 py-12">
         <div className="w-full max-w-2xl flex flex-col gap-6">
           <div className="text-center">
             <h1 className="text-2xl font-semibold text-gray-900 m-0">Welcome aboard.</h1>
@@ -72,7 +146,7 @@ function RouteComponent() {
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <button
-              onClick={() => navigate({ to: '/login', search: { social_error: undefined, link_provider: undefined, link_email: undefined, link_username: undefined } })}
+              onClick={goToLogin}
               className="flex flex-col items-start gap-3 p-6 rounded-xl border border-gray-200 bg-white hover:border-blue-300 hover:shadow-sm cursor-pointer transition-all text-left"
             >
               <MdCloud className="text-3xl text-blue-400" />
@@ -83,17 +157,61 @@ function RouteComponent() {
               <span className="text-xs font-medium text-gray-400 mt-auto">→ Go to login</span>
             </button>
             <button
-              onClick={() => navigate({ to: '/login', search: { redirect: '/premium' } as never })}
-              className="flex flex-col items-start gap-3 p-6 rounded-xl border-2 border-amber-300 bg-amber-50 hover:border-amber-400 hover:shadow-sm cursor-pointer transition-all text-left"
+              onClick={() => setShowPremiumPay(true)}
+              className={`flex flex-col items-start gap-3 p-6 rounded-xl border-2 hover:shadow-sm cursor-pointer transition-all text-left ${
+                showPremiumPay ? 'border-amber-400 bg-amber-50' : 'border-amber-300 bg-amber-50 hover:border-amber-400'
+              }`}
             >
               <MdRocketLaunch className="text-3xl text-amber-500" />
               <div>
-                <h2 className="text-base font-semibold text-gray-900 m-0">Upgrade to Premium</h2>
+                <h2 className="text-base font-semibold text-gray-900 m-0">
+                  Upgrade to Premium{premiumPriceLabel ? ` — ${premiumPriceLabel}` : ''}
+                </h2>
                 <p className="text-sm text-gray-500 m-0 mt-1">Adds the SFS S3-compatible API and per-directory API keys. One-time payment.</p>
               </div>
-              <span className="text-xs font-medium text-amber-600 mt-auto">→ Log in and upgrade</span>
+              <span className="text-xs font-medium text-amber-600 mt-auto">
+                {showPremiumPay ? '↓ Pay below' : '→ Pay now'}
+              </span>
             </button>
           </div>
+
+          {/* Inline premium checkout: Google Pay + PCI-compliant hosted card fields. */}
+          {showPremiumPay && (
+            config?.paypal_client_id ? (
+              <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6 flex flex-col gap-3 max-w-md w-full mx-auto">
+                <h3 className="text-sm font-semibold text-gray-900 m-0">
+                  Pay for Premium{premiumPriceLabel ? ` — ${premiumPriceLabel}` : ''}
+                </h3>
+                {payError && <p className="text-sm text-red-500 m-0">{payError}</p>}
+                {googlePay.ready && (
+                  <GooglePayButton
+                    onClick={handlePremiumGooglePay}
+                    disabled={paying}
+                    loading={paying}
+                    label={`Pay${premiumPriceLabel ? ` ${premiumPriceLabel}` : ''}`}
+                  />
+                )}
+                <div className="flex items-center gap-2 text-[11px] text-gray-400">
+                  <span className="flex-1 h-px bg-gray-200" />or pay by card<span className="flex-1 h-px bg-gray-200" />
+                </div>
+                <HostedCardFields
+                  clientId={config.paypal_client_id}
+                  currency={config.paypal_currency || 'USD'}
+                  createOrder={createPremiumCardOrder}
+                  onApprove={handlePremiumCardApprove}
+                  onError={(msg) => setPayError(msg)}
+                  disabled={paying}
+                  submitLabel={`Pay by Card${premiumPriceLabel ? ` — ${premiumPriceLabel}` : ''}`}
+                />
+                <p className="text-[11px] text-gray-400 text-center m-0">
+                  Payments are processed securely by PayPal. Card details are entered directly into
+                  PayPal and never touch our servers.
+                </p>
+              </div>
+            ) : (
+              <p className="text-sm text-red-500 text-center m-0">Payments are not configured.</p>
+            )
+          )}
         </div>
       </div>
     )

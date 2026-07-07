@@ -14,25 +14,15 @@ import {
   type StorageType,
 } from '../api/interest'
 import { ApiError } from '../api/client'
+import { HostedCardFields } from '../components/HostedCardFields'
+import { GooglePayButton } from '../components/GooglePayButton'
+import { useGooglePay } from '../hooks/useGooglePay'
 
 export const Route = createFileRoute('/interest')({
   component: RouteComponent,
 })
 
 const APPLE_PAY_MERCHANT_ID = 'merchant.com.apollosfs'
-const PAYPAL_MERCHANT_ID = 'HH4449WYNCH5C'
-
-const GOOGLE_PAY_ALLOWED_METHODS = [{
-  type: 'CARD',
-  parameters: {
-    allowedAuthMethods: ['PAN_ONLY', 'CRYPTOGRAM_3DS'],
-    allowedCardNetworks: ['AMEX', 'DISCOVER', 'MASTERCARD', 'VISA'],
-  },
-  tokenizationSpecification: {
-    type: 'PAYMENT_GATEWAY',
-    parameters: { gateway: 'paypal', gatewayMerchantId: PAYPAL_MERCHANT_ID },
-  },
-}]
 
 interface Plan {
   id: string
@@ -77,7 +67,7 @@ function RouteComponent() {
   const [error, setError] = useState<string | null>(null)
   const [pendingOrderId, setPendingOrderId] = useState<string | null>(null)
   const [canApplePay, setCanApplePay] = useState(false)
-  const [canGooglePay, setCanGooglePay] = useState(false)
+  const googlePay = useGooglePay()
   const turnstileRef = useRef<TurnstileInstance>(null)
 
   const selectedPlan = PLANS.find((p) => p.id === selectedPlanId) ?? null
@@ -88,28 +78,6 @@ function RouteComponent() {
     if (ApplePaySession?.canMakePayments) {
       try { setCanApplePay(ApplePaySession.canMakePayments(APPLE_PAY_MERCHANT_ID)) }
       catch { /* not available */ }
-    }
-  }, [])
-
-  // Load Google Pay JS and detect availability
-  useEffect(() => {
-    if ((window as any).google?.payments?.api) {
-      checkGooglePay()
-      return
-    }
-    const script = document.createElement('script')
-    script.src = 'https://pay.google.com/gp/p/js/pay.js'
-    script.async = true
-    script.onload = () => checkGooglePay()
-    document.head.appendChild(script)
-
-    function checkGooglePay() {
-      try {
-        const client = new (window as any).google.payments.api.PaymentsClient({ environment: 'PRODUCTION' })
-        client.isReadyToPay({ apiVersion: 2, apiVersionMinor: 0, allowedPaymentMethods: GOOGLE_PAY_ALLOWED_METHODS })
-          .then((res: { result: boolean }) => setCanGooglePay(res.result))
-          .catch(() => {})
-      } catch { /* not available */ }
     }
   }, [])
 
@@ -214,28 +182,36 @@ function RouteComponent() {
 
   // ── Google Pay ───────────────────────────────────────────────────────────────
 
-  async function handleGooglePay(e: React.MouseEvent) {
-    e.preventDefault()
+  async function handleGooglePay() {
     if (!validateForm() || !selectedPlan) return
     setError(null)
-    const amount = depositAmt(selectedPlan, storageType)
     try {
-      const client = new (window as any).google.payments.api.PaymentsClient({ environment: 'PRODUCTION' })
-      const paymentData = await client.loadPaymentData({
-        apiVersion: 2,
-        apiVersionMinor: 0,
-        allowedPaymentMethods: GOOGLE_PAY_ALLOWED_METHODS,
-        merchantInfo: { merchantName: 'Apollo SFS' },
-        transactionInfo: { totalPriceStatus: 'FINAL', totalPrice: amount, currencyCode: 'USD', countryCode: 'US' },
-      })
+      const token = await googlePay.requestToken(depositAmt(selectedPlan, storageType))
+      if (!token) return // shopper cancelled the sheet
       setStep('pending')
-      const token = paymentData.paymentMethodData.tokenizationData.token
       const { order_id } = await createGooglePayInterestDeposit(selectedPlanId!, storageType, token)
       submitMutation.mutate(order_id)
-    } catch (err: any) {
-      if (err?.statusCode !== 'CANCELED') {
-        setError('Google Pay payment failed — please try another method.')
-      }
+    } catch {
+      setError('Google Pay payment failed — please try another method.')
+      setStep('form')
+    }
+  }
+
+  // ── Hosted card fields (PCI-compliant inline entry) ───────────────────────────
+
+  async function createCardOrder(): Promise<string> {
+    if (!validateForm()) throw new Error('Please complete the required fields.')
+    const { order_id } = await createInterestDepositOrder(selectedPlanId!, storageType, 'card')
+    return order_id
+  }
+
+  async function handleCardApprove(orderId: string) {
+    setStep('pending')
+    try {
+      await captureInterestDepositOrder(orderId)
+      submitMutation.mutate(orderId)
+    } catch {
+      setError('Payment could not be completed — please try again.')
       setStep('form')
     }
   }
@@ -470,34 +446,14 @@ function RouteComponent() {
               </button>
             )}
 
-            {canGooglePay && (
-              <button
-                type="button"
+            {googlePay.ready && (
+              <GooglePayButton
                 onClick={handleGooglePay}
                 disabled={!formReady || isPending}
-                className="w-full flex items-center justify-center gap-2 px-4 py-3 text-sm font-semibold bg-white hover:bg-gray-50 text-gray-800 border border-gray-300 rounded-xl disabled:opacity-50 transition-colors cursor-pointer"
-              >
-                <svg viewBox="0 0 41 17" className="h-4 fill-current" aria-hidden="true">
-                  <path d="M19.526 2.635v4.083h2.518c.6 0 1.096-.202 1.488-.605.403-.402.605-.882.605-1.437 0-.544-.202-1.018-.605-1.422-.392-.413-.888-.62-1.488-.62h-2.518zm0 5.52v4.736h-1.504V1.198h3.99c1.013 0 1.873.337 2.582 1.012.72.675 1.08 1.497 1.08 2.466 0 .991-.36 1.819-1.08 2.482-.697.652-1.559.978-2.583.978h-2.485zm7.668 2.287c0 .676.239 1.234.718 1.673.48.44 1.057.659 1.732.659.937 0 1.71-.352 2.32-1.056l.928.603c-.773 1.09-1.905 1.635-3.396 1.635-1.208 0-2.179-.39-2.914-1.172-.724-.78-1.086-1.763-1.086-2.948 0-1.17.362-2.146 1.086-2.927.735-.792 1.683-1.188 2.846-1.188 1.185 0 2.12.433 2.805 1.3.697.854 1.045 1.92 1.045 3.199l-.016.222h-5.068zm3.556-1.173c-.056-.658-.29-1.177-.7-1.557-.41-.38-.924-.57-1.544-.57-.62 0-1.145.19-1.576.57-.43.38-.682.9-.756 1.557h4.576zm-13.78 7.738h1.518l-5.555-14.96H11.44L5.872 16.994h1.518l1.483-4.013h5.68l1.419 4.013zm-5.695-5.47 2.262-6.11 2.262 6.11H11.275zm-8.96-8.52v3.58h2.327c.627 0 1.15-.214 1.568-.643.43-.44.645-.976.645-1.609 0-.62-.215-1.147-.645-1.581-.418-.43-.941-.644-1.568-.644H2.315V2.52H.8v14.474h1.515v-7.5h2.327c1.078 0 1.99-.378 2.735-1.133.745-.756 1.118-1.674 1.118-2.754 0-1.079-.373-1.997-1.118-2.753C6.632 2.1 5.72 1.722 4.642 1.722H2.315z" />
-                </svg>
-                {isPending ? 'Processing…' : `Pay${selectedPlan ? ` ${depositDisplay(selectedPlan, storageType)}` : ''}`}
-              </button>
+                loading={isPending}
+                label={`Pay${selectedPlan ? ` ${depositDisplay(selectedPlan, storageType)}` : ''}`}
+              />
             )}
-
-            <button
-              type="button"
-              onClick={() => handleRedirectPay('card')}
-              disabled={!formReady || isPending}
-              className="w-full flex items-center justify-center gap-2 px-4 py-3 text-sm font-semibold bg-white hover:bg-gray-50 text-gray-800 border border-gray-300 rounded-xl disabled:opacity-50 transition-colors cursor-pointer"
-            >
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <rect x="1" y="4" width="22" height="16" rx="2" ry="2" />
-                <line x1="1" y1="10" x2="23" y2="10" />
-              </svg>
-              {isPending
-                ? 'Processing…'
-                : `Pay by Card${selectedPlan ? ` — ${depositDisplay(selectedPlan, storageType)}` : ''}`}
-            </button>
 
             <button
               type="button"
@@ -514,6 +470,25 @@ function RouteComponent() {
                 </span>
               )}
             </button>
+
+            {/* Hosted card fields: PCI-compliant inline card entry (card data is
+                keyed into PayPal-hosted iframes, never our page). */}
+            {config?.paypal_client_id && (
+              <div className={`mt-1 ${formReady && !isPending ? '' : 'opacity-50 pointer-events-none'}`}>
+                <div className="flex items-center gap-2 mb-3 text-[11px] text-gray-400">
+                  <span className="flex-1 h-px bg-gray-200" />or pay by card<span className="flex-1 h-px bg-gray-200" />
+                </div>
+                <HostedCardFields
+                  clientId={config.paypal_client_id}
+                  currency={config.paypal_currency || 'USD'}
+                  createOrder={createCardOrder}
+                  onApprove={handleCardApprove}
+                  onError={(msg) => setError(msg)}
+                  disabled={!formReady || isPending}
+                  submitLabel={`Pay by Card${selectedPlan ? ` — ${depositDisplay(selectedPlan, storageType)}` : ''}`}
+                />
+              </div>
+            )}
 
             {!formReady && !error && (
               <p className="text-xs text-gray-400 text-center">

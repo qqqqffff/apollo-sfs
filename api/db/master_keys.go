@@ -54,16 +54,36 @@ func (q *Queries) CreateMasterKey(ctx context.Context, k *models.MasterKey) erro
 	return nil
 }
 
-// RetireMasterKey sets the key's status to "retiring" and stamps retired_at.
-func (q *Queries) RetireMasterKey(ctx context.Context, id string, retiredAt time.Time) error {
-	_, err := q.db.ExecContext(ctx,
-		`UPDATE master_keys SET status = $2, retired_at = $3 WHERE id = $1`,
-		id, models.MasterKeyStatusRetiring, retiredAt,
-	)
+// RetireAndCreateMasterKey retires the current active key and inserts the new
+// key as "active" in a single transaction. The retire UPDATE must happen
+// before the INSERT: master_keys_one_active_idx (a partial unique index on
+// status = 'active') allows only one active row at a time, so creating the
+// new active row while the old one is still active would violate it. Doing
+// both in one transaction also avoids ever leaving zero active keys visible
+// to other sessions (e.g. LoadMasterKeys on startup would otherwise mistake
+// the gap for a first-boot state and bootstrap a fresh "v1").
+func (q *Queries) RetireAndCreateMasterKey(ctx context.Context, oldID string, retiredAt time.Time, newKey *models.MasterKey) error {
+	tx, err := q.pool.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("RetireMasterKey %q: %w", id, err)
+		return fmt.Errorf("RetireAndCreateMasterKey: begin: %w", err)
 	}
-	return nil
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE master_keys SET status = $2, retired_at = $3 WHERE id = $1`,
+		oldID, models.MasterKeyStatusRetiring, retiredAt,
+	); err != nil {
+		return fmt.Errorf("RetireAndCreateMasterKey: retire %q: %w", oldID, err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO master_keys (id, encrypted_key_material, key_nonce, status, created_at)
+		VALUES ($1, $2, $3, $4, NOW())
+	`, newKey.ID, newKey.EncryptedKeyMaterial, newKey.KeyNonce, newKey.Status); err != nil {
+		return fmt.Errorf("RetireAndCreateMasterKey: create %q: %w", newKey.ID, err)
+	}
+
+	return tx.Commit()
 }
 
 // PurgeMasterKey zeros key material and marks the key as "deleted".

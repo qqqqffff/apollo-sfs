@@ -23,7 +23,12 @@ There are three concerns:
    - **Apple Pay** (if you plan to offer it — see §3)
 5. Repeat the same steps under *Live* once you have a verified PayPal business account.
 
-The environment variable `PAYPAL_ENV` selects which set of credentials is used at runtime (`sandbox` or `live`). The API auto-routes calls to `https://api-m.sandbox.paypal.com` or `https://api-m.paypal.com` accordingly, and reads the matching `SANDBOX_PAYPAL_*` or `PAYPAL_*` credential variables.
+The API always constructs **two** PayPal clients side by side, not one selected by a global switch:
+
+- **Live/primary** — `PAYPAL_CLIENT_ID` / `PAYPAL_CLIENT_SECRET` / `PAYPAL_WEBHOOK_ID`, at the base URL selected by `PAYPAL_ENV` (`sandbox` or `live`). This is the client every non-admin user's payments go through, and the one admins use with the toggle below off.
+- **Sandbox-only** — `PAYPAL_SANDBOX_CLIENT_ID` / `PAYPAL_SANDBOX_CLIENT_SECRET` / `PAYPAL_SANDBOX_WEBHOOK_ID`, always at `https://api-m.sandbox.paypal.com`. This client only gets used for an admin whose own "sandbox payments" toggle (Profile page) is turned on for their current session — see `api/routes/services/paypal.go`'s `PayPalClients`. Leaving these three empty simply disables the toggle (admins get a 503 "payments not configured" if they turn it on anyway); it does not affect the live/primary client at all.
+
+Don't confuse this with the *old* `SANDBOX_PAYPAL_*` naming from before this dual-client toggle existed — that scheme (documented in older revisions of this file) had `PAYPAL_ENV` pick between two mutually-exclusive credential sets for the *whole app*. It's gone; the variable names below are current.
 
 ---
 
@@ -143,29 +148,27 @@ The API's `apollo-sfs-api` confidential client already has the service account p
 
 ## 5. Environment variables
 
-Add the following to `.env` at the project root.
-
-The API reads `SANDBOX_PAYPAL_*` variables when `PAYPAL_ENV=sandbox` and `PAYPAL_*` (no prefix) when `PAYPAL_ENV=live`. Only the variables for the active environment need to be populated.
+Add the following to `.env` at the project root, and to `docker-stack.yml`'s `api` service `environment:` block if you're adding a variable that isn't already forwarded there (Swarm services only see env vars explicitly listed in the stack file — sourcing `.env` alone is not enough).
 
 | Variable                         | Required | Example              | Notes                                                                 |
 | -------------------------------- | -------- | -------------------- | --------------------------------------------------------------------- |
 | `SFS_API_KEY_PEPPER`             | yes      | `<openssl rand -base64 48>` | ≥ 32 bytes. Mixed into argon2id over every API key secret.   |
-| `PAYPAL_ENV`                     | yes      | `sandbox`            | `sandbox` or `live`. Controls which credential set is read.           |
-| `SANDBOX_PAYPAL_CLIENT_ID`       | sandbox  | `AYNJ...`            | Client ID from the sandbox app page.                                  |
-| `SANDBOX_PAYPAL_SECRET_KEY`      | sandbox  | `ELk...`             | Secret from the sandbox app page.                                     |
-| `SANDBOX_PAYPAL_WEBHOOK_ID`      | sandbox  | `2N9...`             | Webhook ID from the sandbox app's Webhooks panel.                     |
-| `PAYPAL_CLIENT_ID`               | live     | `AYNJ...`            | Client ID from the live app page.                                     |
-| `PAYPAL_SECRET_KEY`              | live     | `ELk...`             | Secret from the live app page.                                        |
-| `PAYPAL_WEBHOOK_ID`              | live     | `2N9...`             | Webhook ID from the live app's Webhooks panel.                        |
+| `PAYPAL_ENV`                     | yes      | `sandbox`            | `sandbox` or `live`. Base URL for the live/primary client only.        |
+| `PAYPAL_CLIENT_ID`               | yes      | `AYNJ...`            | Client ID — live/primary app.                                          |
+| `PAYPAL_CLIENT_SECRET`           | yes      | `ELk...`             | Secret — live/primary app.                                             |
+| `PAYPAL_WEBHOOK_ID`              | yes      | `2N9...`             | Webhook ID — live/primary app's Webhooks panel.                        |
+| `PAYPAL_SANDBOX_CLIENT_ID`       | no       | `AYNJ...`            | Client ID — dedicated sandbox app, backs the admin profile toggle.     |
+| `PAYPAL_SANDBOX_CLIENT_SECRET`   | no       | `ELk...`             | Secret — dedicated sandbox app.                                        |
+| `PAYPAL_SANDBOX_WEBHOOK_ID`      | no       | `2N9...`             | Webhook ID — dedicated sandbox app's Webhooks panel.                   |
 | `PREMIUM_TIER_PRICE_CENTS`       | no       | `100`                | Charge in minor units. Default `999`. Planned: `100` monthly / `1000` annual. |
 | `PREMIUM_TIER_CURRENCY`          | no       | `USD`                | ISO 4217 currency code. Default `USD`.                                |
 
 > **Planned subscription pricing**: premium will be offered as **$1.00/month** or **$10.00/year**. The current `PREMIUM_TIER_PRICE_CENTS` is a placeholder for the one-time flow; the subscription billing implementation will replace it with per-plan price variables.
 
-Restart the API so it picks up the variables:
+Redeploy so the API picks up the variables (`docker-compose.yml`/`docker compose restart api` is deprecated for this project — see root `CLAUDE.md`):
 
 ```bash
-docker compose restart api
+./deploy.sh --deploy-only
 ```
 
 The `SFS_API_KEY_PEPPER` is **mandatory** even if you have no immediate plans to issue API keys — the service refuses to start without it because rotating it after-the-fact invalidates every issued key.
@@ -190,9 +193,11 @@ If something is broken on the webhook path, the PayPal *Webhook simulator* (unde
 When you're satisfied with sandbox behaviour:
 
 1. Update `PAYPAL_ENV` to `live`.
-2. Populate `PAYPAL_CLIENT_ID`, `PAYPAL_SECRET_KEY`, and `PAYPAL_WEBHOOK_ID` with the values from the *Live* tab of the same app. The sandbox credentials remain in `.env` unchanged and are simply ignored.
+2. Populate `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, and `PAYPAL_WEBHOOK_ID` with the values from the *Live* tab of the same app.
 3. Re-verify the Apple Pay domain if you changed hosts.
-4. Restart the API: `docker compose restart api`.
+4. Redeploy: `./deploy.sh --deploy-only`.
 5. Pay yourself $0.01 — easier to refund — to confirm the full flow.
+
+Once live, you can still exercise the checkout flows against sandbox at any time — as an admin, flip "sandbox payments" on in your Profile page for the current session instead of touching `PAYPAL_ENV` (see §1). That requires `PAYPAL_SANDBOX_CLIENT_ID`/`_CLIENT_SECRET`/`_WEBHOOK_ID` to be populated with a *separate* sandbox app's credentials, independent of whatever `PAYPAL_ENV` is set to.
 
 Refunds processed in the PayPal dashboard send `PAYMENT.CAPTURE.REFUNDED` to the webhook, which flips the user's `is_premium` flag back to false, removes them from the Keycloak group, and bulk-revokes their API keys.

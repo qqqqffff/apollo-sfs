@@ -109,11 +109,20 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
   const [customResult, setCustomResult] = useState<{ reviewDueAt: string; estimateCents: number } | null>(null)
   const [newQuota, setNewQuota] = useState<number | null>(null)
 
-  // Default server selection once servers load.
+  // Default server selection once servers load, and re-select a server
+  // matching the active storage type tab whenever it changes. Without this,
+  // the previously selected server (e.g. the standard-tier one, if it sorts
+  // first alphabetically) stays selected after switching to "Fast", making
+  // every plan look unavailable even when the fast tier has room.
   useEffect(() => {
     if (!servers || servers.length === 0) return
-    setSelectedServerId((prev) => (prev && servers.some((s) => s.id === prev) ? prev : servers[0].id))
-  }, [servers])
+    setSelectedServerId((prev) => {
+      const prevServer = prev ? servers.find((s) => s.id === prev) : undefined
+      if (prevServer && prevServer.drive_type === storageType) return prev
+      const match = servers.find((s) => s.drive_type === storageType)
+      return (match ?? servers[0]).id
+    })
+  }, [servers, storageType])
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => { if (e.key === 'Escape' && !busy) onClose() }

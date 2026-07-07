@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"apollo-sfs.com/api/db"
 	"apollo-sfs.com/api/models"
@@ -182,9 +183,11 @@ func (s *EncryptionService) DecryptFile(userKey, nonce, ciphertext []byte) ([]by
 }
 
 // CreateAndActivateMasterKey generates a new 256-bit master key, encrypts it
-// with the KEK, stores it in the DB as "active", and caches it in memory.
-// Called by the key rotation service to promote a new key before re-wrapping users.
-func (s *EncryptionService) CreateAndActivateMasterKey(ctx context.Context, version string) error {
+// with the KEK, retires oldVersion and stores the new key as "active" in the
+// DB (both in one transaction — see RetireAndCreateMasterKey), and caches the
+// new key in memory. Called by the key rotation service to promote a new key
+// before re-wrapping users.
+func (s *EncryptionService) CreateAndActivateMasterKey(ctx context.Context, oldVersion, version string) error {
 	masterKey := make([]byte, 32)
 	if _, err := io.ReadFull(rand.Reader, masterKey); err != nil {
 		return fmt.Errorf("create master key %q: generate: %w", version, err)
@@ -196,7 +199,7 @@ func (s *EncryptionService) CreateAndActivateMasterKey(ctx context.Context, vers
 		return fmt.Errorf("create master key %q: encrypt: %w", version, err)
 	}
 
-	if err := s.queries.CreateMasterKey(ctx, &models.MasterKey{
+	if err := s.queries.RetireAndCreateMasterKey(ctx, oldVersion, time.Now().UTC(), &models.MasterKey{
 		ID:                   version,
 		EncryptedKeyMaterial: encrypted,
 		KeyNonce:             nonce,

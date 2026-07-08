@@ -3,11 +3,18 @@ package db
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
 	"apollo-sfs.com/api/models"
 )
+
+// masterKeyBootstrapLockKey is an arbitrary constant used with
+// pg_advisory_xact_lock to serialize concurrent first-boot bootstrap
+// attempts (see BootstrapMasterKey). Any fixed int64 works; it just needs to
+// be unique among this codebase's advisory lock keys.
+const masterKeyBootstrapLockKey = 727100001
 
 func scanMasterKey(row *sql.Row) (*models.MasterKey, error) {
 	var k models.MasterKey
@@ -42,16 +49,55 @@ func (q *Queries) GetActiveMasterKey(ctx context.Context) (*models.MasterKey, er
 	return k, nil
 }
 
-// CreateMasterKey inserts a new master key row.
-func (q *Queries) CreateMasterKey(ctx context.Context, k *models.MasterKey) error {
-	_, err := q.db.ExecContext(ctx, `
+// BootstrapMasterKey inserts k as the first active master key, but only if no
+// active key exists. It serializes concurrent callers (e.g. two containers
+// briefly overlapping during a restart) with a Postgres advisory lock scoped
+// to the transaction, then re-checks for an active key while holding it —
+// otherwise two processes can both pass the "no active key yet" check before
+// either has inserted, and the loser's INSERT violates
+// master_keys_one_active_idx.
+//
+// If another process already won the race, that pre-existing key is
+// returned with insertedNew=false and the caller should adopt it instead of
+// the key material it generated (which was never stored). insertedNew=true
+// means k itself was stored and should be used as-is.
+func (q *Queries) BootstrapMasterKey(ctx context.Context, k *models.MasterKey) (winner *models.MasterKey, insertedNew bool, err error) {
+	tx, err := q.pool.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, false, fmt.Errorf("BootstrapMasterKey: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, masterKeyBootstrapLockKey); err != nil {
+		return nil, false, fmt.Errorf("BootstrapMasterKey: acquire lock: %w", err)
+	}
+
+	row := tx.QueryRowContext(ctx, `
+		SELECT id, encrypted_key_material, key_nonce, status, created_at, retired_at, deleted_at
+		FROM master_keys WHERE status = $1
+	`, models.MasterKeyStatusActive)
+	switch existing, scanErr := scanMasterKey(row); {
+	case scanErr == nil:
+		// Someone else already bootstrapped while we were waiting for the lock.
+		if err := tx.Commit(); err != nil {
+			return nil, false, fmt.Errorf("BootstrapMasterKey: commit (existing): %w", err)
+		}
+		return existing, false, nil
+	case !errors.Is(scanErr, sql.ErrNoRows):
+		return nil, false, fmt.Errorf("BootstrapMasterKey: check existing: %w", scanErr)
+	}
+
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO master_keys (id, encrypted_key_material, key_nonce, status, created_at)
 		VALUES ($1, $2, $3, $4, NOW())
-	`, k.ID, k.EncryptedKeyMaterial, k.KeyNonce, k.Status)
-	if err != nil {
-		return fmt.Errorf("CreateMasterKey %q: %w", k.ID, err)
+	`, k.ID, k.EncryptedKeyMaterial, k.KeyNonce, k.Status); err != nil {
+		return nil, false, fmt.Errorf("BootstrapMasterKey: insert %q: %w", k.ID, err)
 	}
-	return nil
+
+	if err := tx.Commit(); err != nil {
+		return nil, false, fmt.Errorf("BootstrapMasterKey: commit: %w", err)
+	}
+	return k, true, nil
 }
 
 // RetireAndCreateMasterKey retires the current active key and inserts the new

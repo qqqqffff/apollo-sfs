@@ -279,13 +279,28 @@ func (s *EncryptionService) bootstrapMasterKey(ctx context.Context) error {
 	}
 
 	const firstVersion = "v1"
-	if err := s.queries.CreateMasterKey(ctx, &models.MasterKey{
+	winner, insertedNew, err := s.queries.BootstrapMasterKey(ctx, &models.MasterKey{
 		ID:                   firstVersion,
 		EncryptedKeyMaterial: encrypted,
 		KeyNonce:             nonce,
 		Status:               models.MasterKeyStatusActive,
-	}); err != nil {
+	})
+	if err != nil {
+		zeroBytes(masterKey)
 		return fmt.Errorf("bootstrap master key: store: %w", err)
+	}
+
+	if !insertedNew {
+		// Another process won the race while we were waiting on the lock —
+		// our generated key was never stored; adopt the winner's instead.
+		zeroBytes(masterKey)
+		if err := s.cacheKey(winner.ID, winner.EncryptedKeyMaterial, winner.KeyNonce); err != nil {
+			return fmt.Errorf("bootstrap master key: decrypt concurrent winner %q: %w", winner.ID, err)
+		}
+		s.mu.Lock()
+		s.activeVer = winner.ID
+		s.mu.Unlock()
+		return nil
 	}
 
 	s.mu.Lock()

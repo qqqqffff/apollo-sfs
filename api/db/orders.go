@@ -335,18 +335,6 @@ func (q *Queries) MarkStorageOrderRefunded(ctx context.Context, id uuid.UUID, re
 	return n > 0, nil
 }
 
-// RevokePremium clears the premium flag after a premium payment refund.
-func (q *Queries) RevokePremium(ctx context.Context, username string) error {
-	_, err := q.db.ExecContext(ctx, `
-		UPDATE users SET is_premium = FALSE, premium_granted_at = NULL
-		WHERE username = $1
-	`, username)
-	if err != nil {
-		return fmt.Errorf("RevokePremium: %w", err)
-	}
-	return nil
-}
-
 // MarkPaymentAllocationReverted records that a captured sandbox premium
 // payment's granted premium access was undone (admin "Revert allocation"
 // button or the 7-day auto-revert loop) without a PayPal refund — the order

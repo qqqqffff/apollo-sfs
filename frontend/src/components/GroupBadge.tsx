@@ -5,12 +5,6 @@
 
 export type AccountGroup = 'admin' | 'premium' | 'user'
 
-export function groupOf(u: { is_admin?: boolean; is_premium?: boolean } | null | undefined): AccountGroup {
-  if (u?.is_admin) return 'admin'
-  if (u?.is_premium) return 'premium'
-  return 'user'
-}
-
 const THEME: Record<AccountGroup, { label: string; className: string }> = {
   admin:   { label: 'Admin',   className: 'bg-purple-100 text-purple-700' },
   premium: { label: 'Premium', className: 'bg-amber-100 text-amber-700' },
@@ -33,6 +27,51 @@ export function GroupBadge({ group, className = '', title }: Props) {
       className={`inline-block text-xs font-medium px-2 py-0.5 rounded-full whitespace-nowrap ${theme.className} ${className}`}
     >
       {theme.label}
+    </span>
+  )
+}
+
+interface AccountBadgesUser {
+  is_admin?: boolean
+  is_premium?: boolean
+  // Distinguishes an admin who actually completed a premium purchase from
+  // one who only has is_premium via the implicit admin-includes-premium
+  // rule (see api/routes/middleware/auth.go). Absent/false is treated as
+  // "not purchased" — safe for callers that don't have the field yet.
+  premium_purchased?: boolean
+}
+
+interface AccountBadgesProps {
+  user: AccountBadgesUser | null | undefined
+  className?: string
+}
+
+// AccountBadges renders every badge that applies to an account: normally
+// just one ("Admin", "Premium", or "User"), but both "Admin" and "Premium"
+// together when an admin has completed an actual premium purchase — so a
+// paying admin's badge reflects the purchase instead of being hidden behind
+// the implicit admin-includes-premium rule.
+export function AccountBadges({ user, className = '' }: AccountBadgesProps) {
+  if (!user) return null
+  const showAdmin = !!user.is_admin
+  const showPremium = !!user.is_premium && (!user.is_admin || !!user.premium_purchased)
+
+  if (!showAdmin && !showPremium) {
+    return <GroupBadge group="user" className={className} />
+  }
+
+  return (
+    <span className="inline-flex items-center gap-1">
+      {showAdmin && (
+        <GroupBadge
+          group="admin"
+          className={className}
+          title={showPremium ? undefined : 'Admin (premium included)'}
+        />
+      )}
+      {showPremium && (
+        <GroupBadge group="premium" className={className} title="Premium subscriber" />
+      )}
     </span>
   )
 }

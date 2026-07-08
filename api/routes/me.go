@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"math/big"
 	"net"
 	"net/http"
@@ -180,6 +181,11 @@ type meResponse struct {
 	IsAdmin           bool       `json:"is_admin"`
 	IsPremium         bool       `json:"is_premium"`
 	PremiumGrantedAt  *time.Time `json:"premium_granted_at"`
+	// PremiumPurchased is true when the user has an active premium payment of
+	// their own — see models.User.PremiumPurchased. Lets the frontend show a
+	// separate "Premium" badge alongside "Admin" only when an admin actually
+	// paid, rather than for every admin (who get IsPremium implicitly).
+	PremiumPurchased bool `json:"premium_purchased"`
 	LinkedProviders   []string   `json:"linked_providers"`
 	// SandboxPaymentsEnabled reflects the admin's session-scoped toggle (see
 	// middleware.SandboxEnabled) — always false for non-admins, and resets on
@@ -267,6 +273,11 @@ func (h *Handler) Me(c *gin.Context) {
 		}
 	}
 
+	premiumPurchased, err := h.queries.HasActivePremiumPurchase(ctx, uname)
+	if err != nil {
+		log.Printf("Me: check premium purchase for %q: %v", uname, err)
+	}
+
 	c.JSON(http.StatusOK, meResponse{
 		Username:               user.Username,
 		Email:                  user.Email,
@@ -278,6 +289,7 @@ func (h *Handler) Me(c *gin.Context) {
 		IsAdmin:                isAdmin,
 		IsPremium:              user.IsPremium,
 		PremiumGrantedAt:       user.PremiumGrantedAt,
+		PremiumPurchased:       premiumPurchased,
 		LinkedProviders:        linkedProviders,
 		SandboxPaymentsEnabled: middleware.SandboxEnabled(c),
 	})

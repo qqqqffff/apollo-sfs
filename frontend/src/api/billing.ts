@@ -60,6 +60,7 @@ export interface BillingConfig {
   paypal_client_id: string
   currency: string
   environment: 'sandbox' | 'live'
+  premium_price_cents: number
 }
 
 export function getBillingConfig() {

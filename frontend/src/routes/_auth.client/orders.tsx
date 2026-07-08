@@ -105,6 +105,12 @@ function RouteComponent() {
     mutationFn: (o: UserOrder) => revertAdminOrderAllocation(o.type, o.id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['billing', 'orders', 'mine'] })
+      // Mirrors StorageUpgradeModal's post-purchase invalidation — reverting
+      // a storage/premium allocation changes the same 'me' fields a purchase
+      // does, so the nav bar, profile, and upload-capacity checks must not
+      // keep showing the pre-revert quota/premium state.
+      queryClient.invalidateQueries({ queryKey: ['me'] })
+      queryClient.invalidateQueries({ queryKey: ['storage'] })
       notify('success', 'Allocation reverted')
     },
     onError: (err) => notify('error', err instanceof ApiError ? err.message : 'Revert failed'),

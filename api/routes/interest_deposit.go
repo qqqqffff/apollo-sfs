@@ -65,7 +65,7 @@ func (h *Handler) CreateInterestDepositOrder(c *gin.Context) {
 	}
 
 	currency := h.currencyOrDefault()
-	result, err := h.paypal.CreateStorageWalletOrder(
+	result, err := h.paypal.CreateWalletOrder(
 		c.Request.Context(), depositCents, currency, h.interestDepositCfg.ReturnURL, h.interestDepositCfg.CancelURL,
 	)
 	if err != nil {

@@ -106,14 +106,22 @@ func (q *Queries) ListUsers(ctx context.Context, in PageInput) (*PageResult[mode
 		return nil, fmt.Errorf("ListUsers: %w", err)
 	}
 
-	// Include each user's active ban (if any) via a lateral join.
+	// Include each user's active ban (if any) via a lateral join, plus whether
+	// they have an active premium payment of their own (see
+	// models.User.PremiumPurchased) so the frontend can tell an admin who
+	// actually paid for premium apart from one who only has it implicitly.
 	// Columns are fully qualified with u. to avoid ambiguity with user_bans.username.
 	rows, err := q.db.QueryContext(ctx, `
 		SELECT u.username, u.email, u.encrypted_key, u.key_nonce, u.master_key_version,
 		       u.storage_used_bytes, u.storage_quota_bytes, u.last_seen_at, u.created_at, u.is_admin,
 		       u.is_premium, u.premium_granted_at,
 		       b.id, b.ban_type, b.violation_code, b.comments, b.banned_by,
-		       b.banned_at, b.expires_at, b.pardoned_at, b.pardoned_by
+		       b.banned_at, b.expires_at, b.pardoned_at, b.pardoned_by,
+		       EXISTS (
+		         SELECT 1 FROM payments p
+		         WHERE p.username = u.username AND p.status = 'captured'
+		           AND p.allocation_reverted_at IS NULL
+		       ) AS premium_purchased
 		FROM   users u
 		LEFT JOIN LATERAL (
 		  SELECT * FROM user_bans
@@ -168,6 +176,7 @@ func scanUserWithBanRow(rows *sql.Rows) (*models.User, error) {
 		&u.IsPremium, &premiumGrantedAt,
 		&banID, &banType, &violationCode, &comments, &bannedBy,
 		&bannedAt, &expiresAt, &pardonedAt, &pardonedBy,
+		&u.PremiumPurchased,
 	)
 	if err != nil {
 		return nil, err
@@ -258,6 +267,24 @@ func (q *Queries) SetUserPremium(ctx context.Context, username string, isPremium
 		return fmt.Errorf("SetUserPremium %q: %w", username, err)
 	}
 	return nil
+}
+
+// HasActivePremiumPurchase reports whether username has an active (captured,
+// not refunded or allocation-reverted) premium payment of their own. See
+// models.User.PremiumPurchased — used by the Me handler so an admin's own
+// profile can distinguish a real purchase from admin-implied premium.
+func (q *Queries) HasActivePremiumPurchase(ctx context.Context, username string) (bool, error) {
+	var purchased bool
+	err := q.db.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM payments
+			WHERE username = $1 AND status = 'captured' AND allocation_reverted_at IS NULL
+		)
+	`, username).Scan(&purchased)
+	if err != nil {
+		return false, fmt.Errorf("HasActivePremiumPurchase %q: %w", username, err)
+	}
+	return purchased, nil
 }
 
 // UpdateUsername renames a user in the app DB. The caller must also rename the

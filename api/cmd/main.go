@@ -302,12 +302,13 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	})
 	storageHandler := storageroutes.NewHandler(queries)
 	billingHandler := billing.NewHandler(paypalClients, queries, billing.Config{
-		Currency:        cfg.PremiumTierCurrency,
-		ReturnURL:       "apollosfs://billing/storage/complete",
-		CancelURL:       "apollosfs://billing/storage/cancel",
-		ClientID:        cfg.PayPalClientID,
-		Environment:     cfg.PayPalEnvironment,
-		SandboxClientID: cfg.PayPalSandboxClientID,
+		Currency:          cfg.PremiumTierCurrency,
+		ReturnURL:         "apollosfs://billing/storage/complete",
+		CancelURL:         "apollosfs://billing/storage/cancel",
+		ClientID:          cfg.PayPalClientID,
+		Environment:       cfg.PayPalEnvironment,
+		SandboxClientID:   cfg.PayPalSandboxClientID,
+		PremiumPriceCents: cfg.PremiumTierPriceCents,
 	})
 	expansionHandler := expansion.NewHandler(paypalClients, emailSvc, queries, expansion.Config{
 		Currency:  cfg.PremiumTierCurrency,
@@ -317,7 +318,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		AppName:   "Apollo SFS",
 	})
 	expansionHandler.StartExpiryLoop(context.Background())
-	ordersHandler := orders.NewHandler(paypalClients, queries)
+	ordersHandler := orders.NewHandler(paypalClients, queries, paymentSvc)
 	ordersHandler.StartAllocationRevertLoop(context.Background())
 	metricsSvc.SetSpeedTestProvider(adminHandler)
 	go adminHandler.SpeedTestLoop(context.Background())
@@ -532,6 +533,9 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 
 		// Premium upgrade — create + capture a one-time PayPal order.
 		protected.POST("/payments/orders", paymentsHandler.CreateOrder)
+		// Generic wallet order (PayPal button / Google Pay / hosted card fields)
+		// backing the embedded premium checkout modal on the profile page.
+		protected.POST("/payments/orders/wallet", paymentsHandler.CreateWalletOrder)
 		protected.POST("/payments/orders/:order_id/capture", paymentsHandler.CaptureOrder)
 
 		// User-facing storage info — separate from admin routes for security.

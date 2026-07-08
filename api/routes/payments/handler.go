@@ -38,11 +38,37 @@ func NewHandler(paypal services.PayPalClients, svc *services.PaymentService, q Q
 	return &Handler{paypal: paypal, svc: svc, queries: q, cfg: cfg}
 }
 
+// resolveOrderClient validates that the caller isn't already premium and
+// returns the PayPal client + environment string to create a new order
+// against. Shared by CreateOrder (single funding source, chosen up front) and
+// CreateWalletOrder (generic, funding source chosen at approval time).
+// Admins are treated as already premium too, UNLESS their sandbox-payments
+// toggle is on, in which case the premium checkout is deliberately left
+// testable. Writes the error response itself and returns ok=false on
+// failure; callers should return immediately.
+func (h *Handler) resolveOrderClient(c *gin.Context, user *models.User) (client *services.PayPalClient, env string, ok bool) {
+	sandbox := middleware.SandboxEnabled(c)
+	if user.IsPremium || (user.IsAdmin && !sandbox) {
+		c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": "already premium"})
+		return nil, "", false
+	}
+	env = services.PayPalEnvLive
+	if sandbox {
+		env = services.PayPalEnvSandbox
+	}
+	client = h.paypal.For(env)
+	if client == nil {
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "payments not configured"})
+		return nil, "", false
+	}
+	return client, env, true
+}
+
 // CreateOrder is POST /api/v1/payments/orders. Body: {payment_method}.
+// Locks the resulting order to a single funding source chosen up front —
+// used by the legacy full-page-redirect premium checkout (/premium route).
 // Refuses to create a new order if the user is already premium — avoids
-// double-charging from a stale browser tab. Admins are treated as already
-// premium too, UNLESS their sandbox-payments toggle is on, in which case the
-// premium checkout is deliberately left testable.
+// double-charging from a stale browser tab.
 func (h *Handler) CreateOrder(c *gin.Context) {
 	if h.svc == nil {
 		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "payments not configured"})
@@ -52,18 +78,8 @@ func (h *Handler) CreateOrder(c *gin.Context) {
 	if !ok {
 		return
 	}
-	sandbox := middleware.SandboxEnabled(c)
-	if user.IsPremium || (user.IsAdmin && !sandbox) {
-		c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": "already premium"})
-		return
-	}
-	env := services.PayPalEnvLive
-	if sandbox {
-		env = services.PayPalEnvSandbox
-	}
-	client := h.paypal.For(env)
-	if client == nil {
-		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "payments not configured"})
+	client, env, ok := h.resolveOrderClient(c, user)
+	if !ok {
 		return
 	}
 	var req struct {
@@ -95,6 +111,54 @@ func (h *Handler) CreateOrder(c *gin.Context) {
 	}
 	if err := h.svc.CreatePending(c.Request.Context(), pending); err != nil {
 		log.Printf("payments CreateOrder persist: %v", err)
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "persist pending payment"})
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{
+		"order_id":    order.OrderID,
+		"approve_url": order.ApproveURL,
+	})
+}
+
+// CreateWalletOrder is POST /api/v1/payments/orders/wallet. No body — unlike
+// CreateOrder, the resulting order carries no payment_source restriction, so
+// it works with the PayPal wallet button, Google Pay, and hosted card fields
+// against the same order (mirrors billing.CreateWalletOrder, used for
+// storage add-ons). Backs the embedded premium checkout modal. Capture goes
+// through the existing CaptureOrder endpoint below, which is agnostic to how
+// the order was created.
+func (h *Handler) CreateWalletOrder(c *gin.Context) {
+	if h.svc == nil {
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "payments not configured"})
+		return
+	}
+	user, ok := h.loadCurrentUser(c)
+	if !ok {
+		return
+	}
+	client, env, ok := h.resolveOrderClient(c, user)
+	if !ok {
+		return
+	}
+	order, err := client.CreateWalletOrder(
+		c.Request.Context(), h.cfg.AmountCents, h.cfg.Currency,
+		h.cfg.AppBaseURL+"/premium?status=approved", h.cfg.AppBaseURL+"/premium?status=cancelled",
+	)
+	if err != nil {
+		log.Printf("payments CreateWalletOrder paypal: %v", err)
+		c.AbortWithStatusJSON(http.StatusBadGateway, gin.H{"error": "paypal error"})
+		return
+	}
+	pending := &models.Payment{
+		Username:      user.Username,
+		PayPalOrderID: order.OrderID,
+		AmountCents:   h.cfg.AmountCents,
+		Currency:      h.cfg.Currency,
+		PaymentMethod: "paypal",
+		Environment:   env,
+	}
+	if err := h.svc.CreatePending(c.Request.Context(), pending); err != nil {
+		log.Printf("payments CreateWalletOrder persist: %v", err)
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "persist pending payment"})
 		return
 	}

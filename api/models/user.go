@@ -21,4 +21,11 @@ type User struct {
 	// ActiveBan is populated by the admin ListUsers query via a lateral join.
 	// It is nil when the user has no active ban or suspension.
 	ActiveBan *UserBan `json:"active_ban,omitempty"`
+	// PremiumPurchased is true when the user has an active (captured, not
+	// refunded or allocation-reverted) premium payment of their own — as
+	// opposed to IsPremium, which is also true for every admin regardless of
+	// whether they ever paid (see middleware.RequireAuth's isAdmin-implies-
+	// isPremium override). Populated by ListUsers (lateral join) and Me
+	// (dedicated query); zero-value false everywhere else.
+	PremiumPurchased bool `json:"premium_purchased"`
 }

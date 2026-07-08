@@ -10,7 +10,7 @@ import { clearSkipDeleteCookie } from '../components/DeleteConfirmModal'
 import { useImpersonation } from '../context/ImpersonationContext'
 import { useNotification } from '../context/NotificationContext'
 import { BanSuspendModal } from '../components/BanSuspendModal'
-import { GroupBadge, groupOf } from '../components/GroupBadge'
+import { AccountBadges } from '../components/GroupBadge'
 import { NotificationBell } from '../components/NotificationBell'
 import type { UserBan } from '../types/api'
 
@@ -229,11 +229,7 @@ function RouteComponent() {
             <MdPerson className="text-sm shrink-0" />
             <span className="truncate">{user?.username}</span>
             {(user?.is_premium || user?.is_admin) && (
-              <GroupBadge
-                group={groupOf(user)}
-                title={user.is_admin ? 'Admin (premium included)' : 'Premium subscriber'}
-                className="text-[9px] px-1.5 py-px shrink-0"
-              />
+              <AccountBadges user={user} className="text-[9px] px-1.5 py-px shrink-0" />
             )}
           </Link>
           <button

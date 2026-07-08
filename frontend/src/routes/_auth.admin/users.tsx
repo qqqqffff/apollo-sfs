@@ -21,7 +21,7 @@ import { VIOLATION_CODES } from '../../types/api'
 import { useNotification } from '../../context/NotificationContext'
 import { useImpersonation } from '../../context/ImpersonationContext'
 import { BanSuspendModal } from '../../components/BanSuspendModal'
-import { GroupBadge, groupOf } from '../../components/GroupBadge'
+import { AccountBadges } from '../../components/GroupBadge'
 
 export const Route = createFileRoute('/_auth/admin/users')({
   // focus: username to auto-expand when arriving from the admin Orders page.
@@ -156,7 +156,7 @@ function AuditLogModal({ username, onClose }: { username: string; onClose: () =>
 // ── Role badge ────────────────────────────────────────────────────────────────
 
 function RoleBadge({ user }: { user: User }) {
-  return <GroupBadge group={groupOf(user)} />
+  return <AccountBadges user={user} />
 }
 
 // ── Per-user storage detail (expandable subtable) ─────────────────────────────

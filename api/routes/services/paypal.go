@@ -345,18 +345,22 @@ func (p *PayPalClient) doAuthed(ctx context.Context, method, path string, body i
 	return resp, nil
 }
 
-// ── Storage add-on orders ─────────────────────────────────────────────────────
+// ── Wallet orders (no payment_source restriction) ────────────────────────────
 
-// CreateStorageWalletOrder creates a PayPal wallet order for a storage add-on
-// and returns the order ID + approval URL. The mobile app opens the URL, waits
-// for the user to approve in the browser, then calls CaptureOrder.
 // isWebURL reports whether u is an http(s) URL — the only schemes PayPal's
 // REST Orders API accepts for application_context return/cancel URLs.
 func isWebURL(u string) bool {
 	return strings.HasPrefix(u, "http://") || strings.HasPrefix(u, "https://")
 }
 
-func (p *PayPalClient) CreateStorageWalletOrder(ctx context.Context, amountCents int, currency, returnURL, cancelURL string) (*CreateOrderResult, error) {
+// CreateWalletOrder creates a PayPal order with no payment_source set, and
+// returns the order ID + approval URL. Leaving payment_source unset lets the
+// buyer complete via the PayPal wallet button, Google Pay, or hosted card
+// fields against the SAME order — unlike CreateOrder, which locks the order
+// to a single funding source chosen up front. Used for storage add-ons and
+// the premium checkout modal. The mobile app opens the approval URL, waits
+// for the user to approve in the browser, then calls CaptureOrder.
+func (p *PayPalClient) CreateWalletOrder(ctx context.Context, amountCents int, currency, returnURL, cancelURL string) (*CreateOrderResult, error) {
 	if amountCents <= 0 {
 		return nil, errors.New("paypal: amount must be > 0")
 	}
@@ -396,7 +400,7 @@ func (p *PayPalClient) CreateStorageWalletOrder(ctx context.Context, amountCents
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusCreated {
 		b, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("paypal create storage wallet order: %s: %s", resp.Status, string(b))
+		return nil, fmt.Errorf("paypal create wallet order: %s: %s", resp.Status, string(b))
 	}
 	var out struct {
 		ID    string `json:"id"`

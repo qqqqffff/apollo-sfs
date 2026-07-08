@@ -37,7 +37,7 @@ import { StorageUpgradeModal, STORAGE_PROMPT_THRESHOLD } from '../../components/
 import { ShareModal } from '../../components/ShareModal'
 import { DeleteConfirmModal, readSkipDeleteCookie } from '../../components/DeleteConfirmModal'
 import { FolderBreadcrumb } from '../../components/FolderBreadcrumb'
-import { GroupBadge, groupOf } from '../../components/GroupBadge'
+import { AccountBadges } from '../../components/GroupBadge'
 import { TierIcon } from '../../components/TierIcon'
 import { UploadToast } from '../../components/UploadToast'
 import { SortControls } from '../../components/SortControls'
@@ -498,7 +498,7 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
             {readOnly ? `${impersonatedUser!.username}'s Files` : 'My Files'}
           </h2>
           {(user?.is_premium || user?.is_admin) && (
-            <GroupBadge group={groupOf(user)} className="text-[10px]" />
+            <AccountBadges user={user} className="text-[10px]" />
           )}
         </div>
       )}

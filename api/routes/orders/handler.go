@@ -17,6 +17,14 @@ import (
 	"apollo-sfs.com/api/routes/services"
 )
 
+// PremiumRevoker is the subset of *services.PaymentService used to tear down
+// premium access (KC group, API keys) when an order's allocation is undone.
+// Captured behind an interface so it stays swappable/testable independent of
+// the concrete payment-service wiring.
+type PremiumRevoker interface {
+	RevokePremiumAllocation(ctx context.Context, username string) error
+}
+
 // refundWindowDays is how long after capture an order stays refundable.
 const refundWindowDays = 90
 
@@ -33,24 +41,25 @@ type Querier interface {
 	MarkPaymentRefundedByID(ctx context.Context, id uuid.UUID, refundID string) (bool, error)
 	MarkStorageOrderRefunded(ctx context.Context, id uuid.UUID, refundID string) (bool, error)
 	AddUserQuota(ctx context.Context, username string, bytesAdded int64) (int64, error)
-	RevokePremium(ctx context.Context, username string) error
 	MarkPaymentAllocationReverted(ctx context.Context, id uuid.UUID) (bool, error)
 	MarkStorageOrderAllocationReverted(ctx context.Context, id uuid.UUID) (bool, error)
 	ListSandboxOrdersDueForAutoRevert(ctx context.Context, cutoff time.Time) ([]db.AdminOrder, error)
 	InsertAuditLog(ctx context.Context, in db.AuditInput) error
 }
 
-// Compile-time check.
+// Compile-time checks.
 var _ Querier = (*db.Queries)(nil)
+var _ PremiumRevoker = (*services.PaymentService)(nil)
 
 // Handler wires the /api/v1/admin/orders endpoints.
 type Handler struct {
-	paypal  services.PayPalClients
-	queries Querier
+	paypal     services.PayPalClients
+	queries    Querier
+	paymentSvc PremiumRevoker
 }
 
-func NewHandler(paypal services.PayPalClients, q Querier) *Handler {
-	return &Handler{paypal: paypal, queries: q}
+func NewHandler(paypal services.PayPalClients, q Querier, paymentSvc PremiumRevoker) *Handler {
+	return &Handler{paypal: paypal, queries: q, paymentSvc: paymentSvc}
 }
 
 // List returns searched, sorted, offset-paginated combined orders.
@@ -145,7 +154,7 @@ func (h *Handler) Refund(c *gin.Context) {
 	}
 	if applied {
 		if orderType == "premium" {
-			if err := h.queries.RevokePremium(c.Request.Context(), order.Username); err != nil {
+			if err := h.paymentSvc.RevokePremiumAllocation(c.Request.Context(), order.Username); err != nil {
 				log.Printf("orders Refund revoke premium: %v", err)
 			}
 		} else if order.BytesAdded > 0 {
@@ -234,7 +243,7 @@ func (h *Handler) applyAllocationRevert(ctx context.Context, order *db.AdminOrde
 	}
 
 	if order.Type == "premium" {
-		if err := h.queries.RevokePremium(ctx, order.Username); err != nil {
+		if err := h.paymentSvc.RevokePremiumAllocation(ctx, order.Username); err != nil {
 			log.Printf("orders applyAllocationRevert revoke premium: %v", err)
 		}
 	} else if order.BytesAdded > 0 {

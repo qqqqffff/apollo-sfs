@@ -127,7 +127,7 @@ func (h *Handler) CreateWalletOrder(c *gin.Context) {
 	}
 
 	currency := h.currencyOrDefault()
-	result, err := client.CreateStorageWalletOrder(
+	result, err := client.CreateWalletOrder(
 		c.Request.Context(), depositCents, currency, h.cfg.ReturnURL, h.cfg.CancelURL,
 	)
 	if err != nil {
@@ -902,7 +902,7 @@ func (h *Handler) CreateInvoiceDepositOrder(c *gin.Context) {
 		return
 	}
 
-	result, err := client.CreateStorageWalletOrder(
+	result, err := client.CreateWalletOrder(
 		c.Request.Context(), int(inv.DepositCents), req.Currency, h.cfg.ReturnURL, h.cfg.CancelURL,
 	)
 	if err != nil {
@@ -996,7 +996,7 @@ func (h *Handler) PayRemainingWalletOrder(c *gin.Context) {
 	}
 	remainingCents := req.FullPriceCents - req.DepositAmountCents
 
-	result, err := client.CreateStorageWalletOrder(
+	result, err := client.CreateWalletOrder(
 		c.Request.Context(), remainingCents, req.Currency, h.cfg.ReturnURL, h.cfg.CancelURL,
 	)
 	if err != nil {

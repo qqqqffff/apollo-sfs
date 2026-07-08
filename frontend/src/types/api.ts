@@ -8,6 +8,11 @@ export interface User {
   is_admin: boolean
   is_premium: boolean
   premium_granted_at: string | null
+  // True when the user has an active premium payment of their own — distinct
+  // from is_premium, which is also true for every admin regardless of
+  // whether they ever paid. Lets the UI show a separate Premium badge
+  // alongside Admin only when an admin actually completed a purchase.
+  premium_purchased: boolean
   active_ban?: UserBan | null
   linked_providers: string[]
   // Admin's session-scoped sandbox-payments toggle (resets on logout/session

@@ -16,6 +16,7 @@ import (
 type Querier interface {
 	// Me
 	GetUserByUsername(ctx context.Context, username string) (*models.User, error)
+	HasActivePremiumPurchase(ctx context.Context, username string) (bool, error)
 
 	// Change-password two-factor codes
 	CreatePasswordChangeCode(ctx context.Context, username, code string, expiresAt time.Time) error

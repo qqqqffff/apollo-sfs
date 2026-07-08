@@ -35,6 +35,10 @@ type Config struct {
 	// SandboxClientID is returned instead of ClientID when the calling
 	// admin's sandbox-payments toggle is on (see GetConfig).
 	SandboxClientID string
+	// PremiumPriceCents is echoed back by GetConfig so the premium checkout
+	// modal can display the price without a second round-trip to the
+	// unauthenticated /config endpoint.
+	PremiumPriceCents int
 }
 
 // Handler wires the /api/v1/billing/storage/* endpoints.
@@ -61,16 +65,18 @@ func NewHandler(paypal services.PayPalClients, q Querier, cfg Config) *Handler {
 func (h *Handler) GetConfig(c *gin.Context) {
 	if middleware.SandboxEnabled(c) {
 		c.JSON(http.StatusOK, gin.H{
-			"paypal_client_id": h.cfg.SandboxClientID,
-			"currency":         h.currencyOrDefault(),
-			"environment":      services.PayPalEnvSandbox,
+			"paypal_client_id":    h.cfg.SandboxClientID,
+			"currency":            h.currencyOrDefault(),
+			"environment":         services.PayPalEnvSandbox,
+			"premium_price_cents": h.cfg.PremiumPriceCents,
 		})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"paypal_client_id": h.cfg.ClientID,
-		"currency":         h.currencyOrDefault(),
-		"environment":      h.cfg.Environment,
+		"paypal_client_id":    h.cfg.ClientID,
+		"currency":            h.currencyOrDefault(),
+		"environment":         h.cfg.Environment,
+		"premium_price_cents": h.cfg.PremiumPriceCents,
 	})
 }
 
@@ -136,7 +142,7 @@ func (h *Handler) CreateWalletOrder(c *gin.Context) {
 		currency = "USD"
 	}
 
-	result, err := client.CreateStorageWalletOrder(
+	result, err := client.CreateWalletOrder(
 		c.Request.Context(), amountCents, currency, h.cfg.ReturnURL, h.cfg.CancelURL,
 	)
 	if err != nil {

@@ -174,6 +174,7 @@ function RouteComponent() {
                   disabled={paying}
                   submitLabel={`Pay by Card${premiumPriceLabel ? ` — ${premiumPriceLabel}` : ''}`}
                   googlePayAmount={() => (premiumPriceCents / 100).toFixed(2)}
+                  environment={config.paypal_environment === 'sandbox' ? 'sandbox' : 'live'}
                 />
                 <p className="text-[11px] text-gray-400 text-center m-0">
                   Payments are processed securely by PayPal. Card details are entered directly into

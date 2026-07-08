@@ -456,6 +456,7 @@ function RouteComponent() {
                   disabled={!formReady || isPending}
                   submitLabel={`Pay by Card${selectedPlan ? ` — ${depositDisplay(selectedPlan, storageType)}` : ''}`}
                   googlePayAmount={() => (selectedPlan ? depositAmt(selectedPlan, storageType) : '0.00')}
+                  environment={config.paypal_environment === 'sandbox' ? 'sandbox' : 'live'}
                 />
               </div>
             )}

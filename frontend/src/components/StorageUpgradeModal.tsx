@@ -5,6 +5,7 @@ import {
   PayPalButtons,
 } from '@paypal/react-paypal-js'
 import {
+  MdArrowBack,
   MdBolt,
   MdCheckCircle,
   MdClose,
@@ -34,6 +35,7 @@ import {
 } from '../api/billing'
 import { ApiError } from '../api/client'
 import { PayPalGooglePayButton } from './PayPalGooglePayButton'
+import { HostedCardFields } from './HostedCardFields'
 
 // Allocation threshold above which direct purchases on a server are blocked
 // and the user is steered to an expansion request. Mirrors the backend rule.
@@ -110,6 +112,7 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
   const [selectedServerKey, setSelectedServerKey] = useState<string | null>(null)
   const [serverListOpen, setServerListOpen] = useState(false)
   const [phase, setPhase] = useState<Phase>('select')
+  const [showCardForm, setShowCardForm] = useState(false)
   const [busy, setBusy] = useState(false)
   const [payError, setPayError] = useState<string | null>(null)
   const [expansionResult, setExpansionResult] = useState<{ id: string; expiresAt: string } | null>(null)
@@ -344,7 +347,55 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
             </div>
           )}
 
-          {phase === 'select' && (
+          {phase === 'select' && showCardForm && (
+            <>
+              <button
+                onClick={() => { setShowCardForm(false); setPayError(null) }}
+                disabled={busy}
+                className="inline-flex items-center gap-1 text-sm text-gray-500 hover:text-gray-900 cursor-pointer bg-transparent border-0 p-0 transition-colors disabled:opacity-40"
+              >
+                <MdArrowBack className="text-base" /> Back
+              </button>
+
+              {selectedServer && selectedPlanId && (
+                <div className="border border-gray-200 rounded-xl px-4 py-3">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium text-gray-800">
+                        {isCustom ? `Custom — ${formatSize(customBytes)}` : selectedPlan?.label}
+                      </span>
+                      <TierBadge type={storageType} />
+                    </div>
+                    <span className="text-sm font-semibold text-gray-800">
+                      {isExpansion ? `${formatCents(amountCents)} deposit` : formatCents(amountCents)}
+                    </span>
+                  </div>
+                  <p className="text-xs text-gray-400 m-0 mt-1">{selectedServer.name}</p>
+                </div>
+              )}
+
+              {payError && <p className="text-xs text-red-500 m-0">{payError}</p>}
+              {busy && <p className="text-xs text-gray-500 m-0">Verifying payment…</p>}
+
+              {config?.paypal_client_id && (
+                <HostedCardFields
+                  clientId={config.paypal_client_id}
+                  currency={config.currency || 'USD'}
+                  createOrder={handleCreateOrder}
+                  onApprove={(orderId) => handleApprove({ orderID: orderId })}
+                  onError={(msg) => { if (!payError) setPayError(msg) }}
+                  disabled={!canPay}
+                  submitLabel={isExpansion ? `Pay deposit — ${formatCents(amountCents)}` : `Pay ${formatCents(amountCents)}`}
+                />
+              )}
+              <p className="text-[11px] text-gray-400 text-center m-0">
+                Payments are processed securely by PayPal. Card details are entered directly into
+                PayPal and never touch our servers.
+              </p>
+            </>
+          )}
+
+          {phase === 'select' && !showCardForm && (
             <>
               {promptReason && (
                 <div className="flex items-start gap-2 px-3 py-2.5 bg-amber-50 border border-amber-200 rounded-lg">
@@ -628,13 +679,19 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
                       currency: config.currency || 'USD',
                       intent: 'capture',
                       components: 'buttons,googlepay',
-                      disableFunding: 'paylater',
+                      // 'card' is disabled here because that funding source
+                      // sends the shopper to PayPal's hosted guest-checkout
+                      // page (extra "ship to billing address" / age-confirm
+                      // copy we don't want) — the "Pay with card" button below
+                      // uses HostedCardFields instead, which stays in-modal.
+                      disableFunding: 'paylater,card',
                     }}
                   >
                     {/* Google Pay, orchestrated by PayPal — reuses the same
                         order create/capture as the buttons (works for deposits
                         too). Hidden when the buyer isn't Google Pay eligible. */}
                     <PayPalGooglePayButton
+                      environment={config.environment}
                       currencyCode={config.currency || 'USD'}
                       amount={() => (amountCents / 100).toFixed(2)}
                       createOrder={handleCreateOrder}
@@ -653,6 +710,13 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
                       onCancel={() => setPayError(null)}
                     />
                   </PayPalScriptProvider>
+                  <button
+                    onClick={() => { setPayError(null); setShowCardForm(true) }}
+                    disabled={!canPay}
+                    className="w-full mt-2 px-4 py-2.5 text-sm border border-gray-300 text-gray-700 rounded-lg font-medium hover:bg-gray-50 disabled:opacity-50 cursor-pointer transition-colors"
+                  >
+                    Pay with card
+                  </button>
                   <p className="text-[11px] text-gray-400 text-center m-0">
                     Payments are processed securely by PayPal.
                   </p>

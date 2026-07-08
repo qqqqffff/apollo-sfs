@@ -108,6 +108,49 @@ func TestDismissNotifications_PersistsIDs(t *testing.T) {
 	}
 }
 
+func TestDismissNotifications_ByCategory(t *testing.T) {
+	provisioned := sampleExpansionRequest("expanded")     // -> Storage category (capacity_provisioned)
+	invoiceSent := sampleExpansionRequest("invoice_sent") // -> Billing category (action_pending)
+	q := &stubQuerier{expansionRequests: []models.ServerExpansionRequest{provisioned, invoiceSent}}
+	h := newRoutesHandler(q, nil)
+
+	r := newEngine()
+	ginContext(r, "user-uuid-123", "alice", false)
+	r.POST("/me/notifications/dismiss", h.DismissNotifications)
+
+	// Category matching is case-insensitive against the bell's category names.
+	w := doRequest(r, httptest.NewRequest(http.MethodPost, "/me/notifications/dismiss?category=STORAGE", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body: %s)", w.Code, w.Body.String())
+	}
+	if len(q.dismissedCalls) != 1 {
+		t.Fatalf("expected one DismissNotifications call, got %v", q.dismissedCalls)
+	}
+	got := q.dismissedCalls[0]
+	wantID := provisioned.ID.String() + ":provisioned"
+	if len(got) != 1 || got[0] != wantID {
+		t.Fatalf("expected only the Storage-category item (%s) dismissed, got %v", wantID, got)
+	}
+}
+
+func TestDismissNotifications_UnknownCategory_DismissesNothing(t *testing.T) {
+	req := sampleExpansionRequest("expanded")
+	q := &stubQuerier{expansionRequests: []models.ServerExpansionRequest{req}}
+	h := newRoutesHandler(q, nil)
+
+	r := newEngine()
+	ginContext(r, "user-uuid-123", "alice", false)
+	r.POST("/me/notifications/dismiss", h.DismissNotifications)
+
+	w := doRequest(r, httptest.NewRequest(http.MethodPost, "/me/notifications/dismiss?category=bogus", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body: %s)", w.Code, w.Body.String())
+	}
+	if len(q.dismissedCalls) != 1 || len(q.dismissedCalls[0]) != 0 {
+		t.Fatalf("expected DismissNotifications called with 0 ids, got %v", q.dismissedCalls)
+	}
+}
+
 func TestDismissNotifications_EmptyIDs_Returns400(t *testing.T) {
 	q := &stubQuerier{}
 	h := newRoutesHandler(q, nil)

@@ -318,6 +318,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	})
 	expansionHandler.StartExpiryLoop(context.Background())
 	ordersHandler := orders.NewHandler(paypalClients, queries)
+	ordersHandler.StartAllocationRevertLoop(context.Background())
 	metricsSvc.SetSpeedTestProvider(adminHandler)
 	go adminHandler.SpeedTestLoop(context.Background())
 
@@ -656,6 +657,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 			// Combined orders view (premium payments + storage purchases).
 			adminGroup.GET("/orders", ordersHandler.List)
 			adminGroup.POST("/orders/:type/:id/refund", ordersHandler.Refund)
+			adminGroup.POST("/orders/:type/:id/revert-allocation", ordersHandler.RevertAllocation)
 			adminGroup.POST("/expansion-requests/:id/cancel", expansionHandler.CancelRequest)
 
 			adminGroup.GET("/interest", adminHandler.ListInterestSubmissions)

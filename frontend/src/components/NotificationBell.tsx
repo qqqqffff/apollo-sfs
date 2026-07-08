@@ -15,7 +15,13 @@ import {
   MdChevronRight,
   MdClose,
 } from 'react-icons/md'
-import { listNotifications, dismissNotifications, type AppNotification, type NotificationKind } from '../api/billing'
+import {
+  listNotifications,
+  dismissNotifications,
+  dismissNotificationCategory,
+  type AppNotification,
+  type NotificationKind,
+} from '../api/billing'
 
 interface KindMeta {
   icon: React.ComponentType<{ className?: string }>
@@ -82,6 +88,24 @@ export function NotificationBell() {
       return { previous }
     },
     onError: (_err, _ids, context) => {
+      if (context?.previous) queryClient.setQueryData(['me', 'notifications'], context.previous)
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ['me', 'notifications'] })
+    },
+  })
+
+  const dismissCategoryMutation = useMutation({
+    mutationFn: (category: string) => dismissNotificationCategory(category),
+    onMutate: async (category: string) => {
+      await queryClient.cancelQueries({ queryKey: ['me', 'notifications'] })
+      const previous = queryClient.getQueryData<AppNotification[]>(['me', 'notifications'])
+      queryClient.setQueryData<AppNotification[]>(['me', 'notifications'], (prev) =>
+        (prev ?? []).filter((n) => (KIND_META[n.kind] ?? FALLBACK_META).category !== category),
+      )
+      return { previous }
+    },
+    onError: (_err, _category, context) => {
       if (context?.previous) queryClient.setQueryData(['me', 'notifications'], context.previous)
     },
     onSettled: () => {
@@ -164,7 +188,7 @@ export function NotificationBell() {
                         {category} ({categoryItems.length})
                       </button>
                       <button
-                        onClick={() => dismissMutation.mutate(categoryItems.map((n) => n.id))}
+                        onClick={() => dismissCategoryMutation.mutate(category)}
                         className="text-[10px] font-medium text-gray-400 hover:text-gray-600 bg-transparent border-0 p-0 cursor-pointer"
                       >
                         Dismiss all

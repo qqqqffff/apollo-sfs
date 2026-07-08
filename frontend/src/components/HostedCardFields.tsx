@@ -27,6 +27,9 @@ interface Props {
   // amount in major units for the Google Pay sheet. Google Pay reuses the same
   // createOrder/onApprove as the card fields.
   googlePayAmount?: () => string
+  // PayPal environment — required for Google Pay to pick its TEST/PRODUCTION
+  // environment. Defaults to 'live'. Only relevant when googlePayAmount is set.
+  environment?: 'sandbox' | 'live'
 }
 
 // HostedCardFields renders PayPal's PCI-compliant hosted card fields — the card
@@ -36,6 +39,7 @@ interface Props {
 // (a second provider with different components can prevent the SDK resolving).
 export function HostedCardFields({
   clientId, currency, createOrder, onApprove, onError, submitLabel, disabled, googlePayAmount,
+  environment = 'live',
 }: Props) {
   return (
     <PayPalScriptProvider
@@ -49,6 +53,7 @@ export function HostedCardFields({
       {googlePayAmount && (
         <>
           <PayPalGooglePayButton
+            environment={environment}
             currencyCode={currency}
             amount={googlePayAmount}
             createOrder={createOrder}

@@ -413,6 +413,31 @@ const adminNotificationWindow = 7 * 24 * time.Hour
 // or inbound mail can't flood the dropdown.
 const adminNotificationLimit = 15
 
+// notificationCategory maps a notification kind to the category header it's
+// grouped under in the bell dropdown. Kept in sync by hand with KIND_META in
+// frontend/src/components/NotificationBell.tsx — used server-side only to
+// resolve the `category` query param on DismissNotifications.
+func notificationCategory(kind string) string {
+	switch kind {
+	case "capacity_provisioned":
+		return "Storage"
+	case "payment_required", "action_pending":
+		return "Billing"
+	case "share_received":
+		return "Shares"
+	case "invitation_accepted":
+		return "Invitations"
+	case "order_received":
+		return "Orders"
+	case "email_received":
+		return "Emails"
+	case "alarm_triggered":
+		return "Alarms"
+	default:
+		return ""
+	}
+}
+
 // Notifications handles GET /api/v1/me/notifications.
 // Derives the user's pending-action notifications from live state: provisioned
 // capacity awaiting its balance, invoices awaiting review, and recent shares.
@@ -424,12 +449,42 @@ func (h *Handler) Notifications(c *gin.Context) {
 	}
 	ctx := c.Request.Context()
 
+	items, err := h.gatherNotificationItems(ctx, username, c.GetBool("isAdmin"))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "load notifications"})
+		return
+	}
+
+	dismissed, err := h.queries.ListDismissedNotificationIDs(ctx, username)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "load notifications"})
+		return
+	}
+	kept := items[:0]
+	for _, item := range items {
+		if !dismissed[item.ID] {
+			kept = append(kept, item)
+		}
+	}
+	items = kept
+
+	sort.Slice(items, func(i, j int) bool { return items[i].CreatedAt.After(items[j].CreatedAt) })
+
+	c.JSON(http.StatusOK, gin.H{"items": items})
+}
+
+// gatherNotificationItems assembles the full, undismissed-and-unfiltered
+// notification-bell item list for a user: provisioned capacity awaiting its
+// balance, invoices awaiting review, recent shares, plus (for admins) recent
+// account/infrastructure activity. Shared by Notifications and
+// DismissNotifications (category dismissal needs the same live-derived set to
+// resolve which IDs a category currently contains).
+func (h *Handler) gatherNotificationItems(ctx context.Context, username string, isAdmin bool) ([]notificationItem, error) {
 	items := []notificationItem{}
 
 	requests, err := h.queries.ListUserExpansionRequests(ctx, username)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "load notifications"})
-		return
+		return nil, err
 	}
 	for _, r := range requests {
 		capacity := formatCapacityShort(r.BytesRequested)
@@ -507,26 +562,11 @@ func (h *Handler) Notifications(c *gin.Context) {
 	// Admin-only categories: recent account/infrastructure activity, so alerts
 	// that previously only lived on the admin pages (or in email) surface in
 	// the same bell, grouped by kind on the frontend.
-	if c.GetBool("isAdmin") {
+	if isAdmin {
 		items = append(items, h.adminNotifications(ctx)...)
 	}
 
-	dismissed, err := h.queries.ListDismissedNotificationIDs(ctx, username)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "load notifications"})
-		return
-	}
-	kept := items[:0]
-	for _, item := range items {
-		if !dismissed[item.ID] {
-			kept = append(kept, item)
-		}
-	}
-	items = kept
-
-	sort.Slice(items, func(i, j int) bool { return items[i].CreatedAt.After(items[j].CreatedAt) })
-
-	c.JSON(http.StatusOK, gin.H{"items": items})
+	return items, nil
 }
 
 type dismissNotificationsRequest struct {
@@ -534,14 +574,44 @@ type dismissNotificationsRequest struct {
 }
 
 // DismissNotifications handles POST /api/v1/me/notifications/dismiss.
-// Records the given notification-bell item IDs so they're excluded from the
-// user's future Notifications responses (items are re-derived from live
-// state on every request, so dismissal is tracked as a separate denylist
-// rather than a flag on the source rows).
+// Records notification-bell item IDs so they're excluded from the user's
+// future Notifications responses (items are re-derived from live state on
+// every request, so dismissal is tracked as a separate denylist rather than a
+// flag on the source rows).
+//
+// Two ways to select what gets dismissed:
+//   - ?category=<name> (e.g. "emails", "orders", "alarms" — matches the bell's
+//     category headers, case-insensitively) dismisses every item currently in
+//     that category, re-derived live server-side — no body required.
+//   - a JSON body {"ids": [...]} dismisses exactly those IDs (used for
+//     dismissing a single item).
+//
+// If both are given, category wins and the body is ignored.
 func (h *Handler) DismissNotifications(c *gin.Context) {
 	username := c.GetString("username")
 	if username == "" {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+	ctx := c.Request.Context()
+
+	if category := c.Query("category"); category != "" {
+		items, err := h.gatherNotificationItems(ctx, username, c.GetBool("isAdmin"))
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "dismiss notifications"})
+			return
+		}
+		ids := make([]string, 0, len(items))
+		for _, item := range items {
+			if strings.EqualFold(notificationCategory(item.Kind), category) {
+				ids = append(ids, item.ID)
+			}
+		}
+		if err := h.queries.DismissNotifications(ctx, username, ids); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "dismiss notifications"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true, "dismissed": len(ids)})
 		return
 	}
 
@@ -551,7 +621,7 @@ func (h *Handler) DismissNotifications(c *gin.Context) {
 		return
 	}
 
-	if err := h.queries.DismissNotifications(c.Request.Context(), username, req.IDs); err != nil {
+	if err := h.queries.DismissNotifications(ctx, username, req.IDs); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "dismiss notifications"})
 		return
 	}

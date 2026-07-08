@@ -735,6 +735,10 @@ export interface AdminOrder {
   captured_at: string | null
   refund_id: string | null
   refunded_at: string | null
+  // Set once the order's local quota/premium grant has been undone via the
+  // "Revert allocation" action or the 7-day sandbox auto-revert loop —
+  // independent of refunded_at (no PayPal call is made).
+  allocation_reverted_at: string | null
   plan_id?: string
   storage_type?: string
   bytes_added?: number
@@ -756,4 +760,11 @@ export function listAdminOrders(opts: { search?: string; sort?: string; page?: n
 
 export function refundAdminOrder(type: 'premium' | 'storage', id: string) {
   return post<{ refund_id: string }>(`/admin/orders/${type}/${id}/refund`, {})
+}
+
+// Reverts the local quota/premium grant of a captured sandbox order without
+// a PayPal refund. Separate from refundAdminOrder — see RevertAllocation
+// in api/routes/orders/handler.go for why the two stay independent.
+export function revertAdminOrderAllocation(type: 'premium' | 'storage', id: string) {
+  return post<{ ok: boolean }>(`/admin/orders/${type}/${id}/revert-allocation`, {})
 }

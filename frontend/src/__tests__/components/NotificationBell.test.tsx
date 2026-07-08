@@ -10,13 +10,27 @@ jest.mock('@tanstack/react-router', () => ({
 jest.mock('../../api/billing', () => ({
   listNotifications: jest.fn(),
   dismissNotifications: jest.fn(),
+  dismissNotificationCategory: jest.fn(),
 }))
 
-import { listNotifications, dismissNotifications, type AppNotification } from '../../api/billing'
+import {
+  listNotifications,
+  dismissNotifications,
+  dismissNotificationCategory,
+  type AppNotification,
+} from '../../api/billing'
 import { NotificationBell } from '../../components/NotificationBell'
 
 const mockListNotifications = listNotifications as jest.Mock
 const mockDismissNotifications = dismissNotifications as jest.Mock
+const mockDismissNotificationCategory = dismissNotificationCategory as jest.Mock
+
+// Mirrors the kind→category map in NotificationBell.tsx, just for the two
+// kinds these tests use.
+const CATEGORY_BY_KIND: Record<string, string> = {
+  share_received: 'Shares',
+  email_received: 'Emails',
+}
 
 function makeNotification(overrides: Partial<AppNotification>): AppNotification {
   return {
@@ -30,14 +44,19 @@ function makeNotification(overrides: Partial<AppNotification>): AppNotification 
   }
 }
 
-// listNotifications/dismissNotifications share a mutable in-memory list so a
-// dismiss-triggered refetch (onSettled invalidation) sees the item actually
-// gone server-side, the same as the real API filtering dismissed IDs out.
+// listNotifications/dismissNotifications(Category) share a mutable in-memory
+// list so a dismiss-triggered refetch (onSettled invalidation) sees the item
+// actually gone server-side, the same as the real API filtering dismissed
+// IDs/category out.
 function renderBell(items: AppNotification[]) {
   let current = items
   mockListNotifications.mockImplementation(() => Promise.resolve(current))
   mockDismissNotifications.mockImplementation((ids: string[]) => {
     current = current.filter((n) => !ids.includes(n.id))
+    return Promise.resolve()
+  })
+  mockDismissNotificationCategory.mockImplementation((category: string) => {
+    current = current.filter((n) => CATEGORY_BY_KIND[n.kind] !== category)
     return Promise.resolve()
   })
   const client = new QueryClient({
@@ -101,7 +120,7 @@ describe('NotificationBell', () => {
 
     fireEvent.click(screen.getByText('Dismiss all'))
 
-    await waitFor(() => expect(mockDismissNotifications).toHaveBeenCalledWith(expect.arrayContaining(['s1', 's2'])))
+    await waitFor(() => expect(mockDismissNotificationCategory).toHaveBeenCalledWith('Shares'))
     await waitFor(() => expect(screen.queryByText('Share one')).not.toBeInTheDocument())
     expect(screen.queryByText('Share two')).not.toBeInTheDocument()
   })

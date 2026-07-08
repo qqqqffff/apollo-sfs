@@ -20,6 +20,12 @@ import (
 // refundWindowDays is how long after capture an order stays refundable.
 const refundWindowDays = 90
 
+// allocationRevertDays is how long a captured sandbox order can carry its
+// quota/premium grant before the background loop (StartAllocationRevertLoop)
+// reverts it automatically. The manual "Revert allocation" button has no
+// window of its own — this is just the backstop for orders nobody clicked.
+const allocationRevertDays = 7
+
 // Querier is the subset of *db.Queries used by the orders handler.
 type Querier interface {
 	ListAdminOrders(ctx context.Context, search, sort string, limit, offset int) ([]db.AdminOrder, int, error)
@@ -28,6 +34,10 @@ type Querier interface {
 	MarkStorageOrderRefunded(ctx context.Context, id uuid.UUID, refundID string) (bool, error)
 	AddUserQuota(ctx context.Context, username string, bytesAdded int64) (int64, error)
 	RevokePremium(ctx context.Context, username string) error
+	MarkPaymentAllocationReverted(ctx context.Context, id uuid.UUID) (bool, error)
+	MarkStorageOrderAllocationReverted(ctx context.Context, id uuid.UUID) (bool, error)
+	ListSandboxOrdersDueForAutoRevert(ctx context.Context, cutoff time.Time) ([]db.AdminOrder, error)
+	InsertAuditLog(ctx context.Context, in db.AuditInput) error
 }
 
 // Compile-time check.
@@ -146,4 +156,150 @@ func (h *Handler) Refund(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"refund_id": refund.RefundID})
+}
+
+// RevertAllocation undoes the storage/premium grant of a captured sandbox
+// order without touching PayPal — sandbox captures move fake money, so
+// there's nothing to refund, only the local allocation to undo. Deliberately
+// kept separate from Refund (which issues a real PayPal refund) so the two
+// stay independently triggerable. Orders nobody reverts manually are swept
+// up by the 7-day auto-revert loop (see StartAllocationRevertLoop).
+// POST /api/v1/admin/orders/:type/:id/revert-allocation
+func (h *Handler) RevertAllocation(c *gin.Context) {
+	orderType := c.Param("type")
+	if orderType != "premium" && orderType != "storage" {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "type must be premium or storage"})
+		return
+	}
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+
+	order, err := h.queries.GetAdminOrder(c.Request.Context(), orderType, id)
+	if err != nil {
+		log.Printf("orders RevertAllocation load: %v", err)
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "load order"})
+		return
+	}
+	if order == nil {
+		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "order not found"})
+		return
+	}
+	if order.Environment != "sandbox" {
+		c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": "only sandbox orders can have their allocation reverted"})
+		return
+	}
+	if order.Status != "captured" {
+		c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": "order is not captured"})
+		return
+	}
+	if order.AllocationRevertedAt != nil {
+		c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": "allocation already reverted"})
+		return
+	}
+
+	actor := c.GetString("username")
+	if err := h.applyAllocationRevert(c.Request.Context(), order, actor, "manual"); err != nil {
+		log.Printf("orders RevertAllocation: %v", err)
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "revert allocation"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// applyAllocationRevert undoes a captured sandbox order's local grant —
+// subtracting quota for a storage order, revoking premium for a payment —
+// and records an audit entry. Used by both RevertAllocation (trigger
+// "manual") and the auto-revert loop (trigger "auto:7-day") so the two are
+// distinguishable in the user's audit history. Idempotent: if the order is
+// no longer an eligible captured/unreverted sandbox row (already reverted by
+// a concurrent call), the Mark* query reports no rows affected and this is a
+// silent no-op.
+func (h *Handler) applyAllocationRevert(ctx context.Context, order *db.AdminOrder, actorUsername, trigger string) error {
+	var applied bool
+	var err error
+	if order.Type == "premium" {
+		applied, err = h.queries.MarkPaymentAllocationReverted(ctx, order.ID)
+	} else {
+		applied, err = h.queries.MarkStorageOrderAllocationReverted(ctx, order.ID)
+	}
+	if err != nil {
+		return err
+	}
+	if !applied {
+		return nil
+	}
+
+	if order.Type == "premium" {
+		if err := h.queries.RevokePremium(ctx, order.Username); err != nil {
+			log.Printf("orders applyAllocationRevert revoke premium: %v", err)
+		}
+	} else if order.BytesAdded > 0 {
+		if _, err := h.queries.AddUserQuota(ctx, order.Username, -order.BytesAdded); err != nil {
+			log.Printf("orders applyAllocationRevert subtract quota: %v", err)
+		}
+	}
+
+	action := order.Type + ".allocation_reverted"
+	resourceType := order.Type
+	resourceID := order.ID
+	resourceName := trigger
+	if err := h.queries.InsertAuditLog(ctx, db.AuditInput{
+		TargetUsername: order.Username,
+		ActorUsername:  actorUsername,
+		Action:         action,
+		ResourceType:   &resourceType,
+		ResourceID:     &resourceID,
+		ResourceName:   &resourceName,
+	}); err != nil {
+		log.Printf("orders applyAllocationRevert audit log: %v", err)
+	}
+	return nil
+}
+
+// ── Background auto-revert loop ───────────────────────────────────────────────
+
+// StartAllocationRevertLoop spawns a goroutine that, once an hour, auto-
+// reverts any captured sandbox order whose allocation is still standing 7
+// calendar days after capture — sandbox test purchases are expected to be
+// cleaned up rather than left granting real quota/premium indefinitely.
+// Mirrors expansion.Handler.StartExpiryLoop.
+func (h *Handler) StartAllocationRevertLoop(ctx context.Context) {
+	go func() {
+		ticker := time.NewTicker(time.Hour)
+		defer ticker.Stop()
+		log.Printf("orders: allocation-revert loop started")
+		for {
+			select {
+			case <-ctx.Done():
+				log.Printf("orders: allocation-revert loop stopped")
+				return
+			case <-ticker.C:
+				h.processDueAllocationReverts(ctx)
+			}
+		}
+	}()
+}
+
+// processDueAllocationReverts auto-reverts every captured sandbox order
+// captured more than allocationRevertDays calendar days ago that hasn't
+// already been reverted. The acting audit "actor" is the order's own owner,
+// matching this codebase's convention for system-triggered reverts (e.g.
+// expansion.processUnpaidBalances) — there is no admin behind the action.
+func (h *Handler) processDueAllocationReverts(ctx context.Context) {
+	cutoff := time.Now().AddDate(0, 0, -allocationRevertDays)
+	due, err := h.queries.ListSandboxOrdersDueForAutoRevert(ctx, cutoff)
+	if err != nil {
+		log.Printf("orders: list due allocation reverts: %v", err)
+		return
+	}
+	for i := range due {
+		o := &due[i]
+		if err := h.applyAllocationRevert(ctx, o, o.Username, "auto:7-day"); err != nil {
+			log.Printf("orders: auto-revert %s %s: %v", o.Type, o.ID, err)
+		}
+	}
 }

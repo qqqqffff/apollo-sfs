@@ -1,6 +1,6 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
 import { useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { MdBolt, MdReceiptLong, MdStorage } from 'react-icons/md'
 import {
   formatCents,
@@ -9,6 +9,10 @@ import {
   type ExpansionRequest,
   type UserOrder,
 } from '../../api/billing'
+import { revertAdminOrderAllocation } from '../../api/admin'
+import { ApiError } from '../../api/client'
+import { useAuth } from '../../auth'
+import { useNotification } from '../../context/NotificationContext'
 import { PayRemainingModal } from '../../components/PayRemainingModal'
 
 export const Route = createFileRoute('/_auth/client/orders')({
@@ -79,6 +83,9 @@ const REQUEST_STATUS_LABELS: Record<ExpansionRequest['status'], string> = {
 
 function RouteComponent() {
   const { pay } = Route.useSearch()
+  const { admin } = useAuth()
+  const queryClient = useQueryClient()
+  const { notify } = useNotification()
   const { data: requests = [] } = useQuery({
     queryKey: ['billing', 'expansion-requests'],
     queryFn: listMyExpansionRequests,
@@ -90,6 +97,18 @@ function RouteComponent() {
 
   const [payTarget, setPayTarget] = useState<ExpansionRequest | null>(null)
   const [autoOpened, setAutoOpened] = useState(false)
+
+  // Admin-only: undoes a sandbox test order's local quota/premium grant, no
+  // PayPal call. Only admins can create sandbox orders (session toggle on the
+  // Profile page), so this button only ever shows on an admin's own orders.
+  const revertMutation = useMutation({
+    mutationFn: (o: UserOrder) => revertAdminOrderAllocation(o.type, o.id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['billing', 'orders', 'mine'] })
+      notify('success', 'Allocation reverted')
+    },
+    onError: (err) => notify('error', err instanceof ApiError ? err.message : 'Revert failed'),
+  })
 
   // Deep link: ?pay=<request id> opens the balance form once data arrives.
   const reqList = Array.isArray(requests) ? requests : []
@@ -211,6 +230,20 @@ function RouteComponent() {
                   }`}>
                     {o.status}
                   </p>
+                  {admin && o.environment === 'sandbox' && o.status === 'captured' && (
+                    o.allocation_reverted_at ? (
+                      <p className="text-[10px] text-gray-400 m-0 mt-1">Allocation reverted</p>
+                    ) : (
+                      <button
+                        onClick={() => revertMutation.mutate(o)}
+                        disabled={revertMutation.isPending}
+                        title="Revert the granted quota/premium — no PayPal refund"
+                        className="mt-1 px-2 py-0.5 text-[10px] border border-purple-200 rounded-lg text-purple-600 hover:bg-purple-50 disabled:opacity-40 cursor-pointer disabled:cursor-not-allowed transition-colors"
+                      >
+                        Revert allocation
+                      </button>
+                    )
+                  )}
                 </div>
               </div>
             ))}

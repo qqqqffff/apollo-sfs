@@ -247,6 +247,9 @@ export interface UserOrder {
   created_at: string
   captured_at: string | null
   refunded_at: string | null
+  // Set once the order's local quota/premium grant has been undone via the
+  // admin "Revert allocation" action or the 7-day sandbox auto-revert loop.
+  allocation_reverted_at: string | null
   plan_id?: string
   storage_type?: string
   bytes_added?: number
@@ -284,6 +287,14 @@ export async function listNotifications(): Promise<AppNotification[]> {
 
 export async function dismissNotifications(ids: string[]): Promise<void> {
   await post('/me/notifications/dismiss', { ids })
+}
+
+// dismissNotificationCategory dismisses every notification currently in the
+// given category (matching the bell's category headers, e.g. "Emails",
+// case-insensitively) — resolved and persisted server-side, so it also
+// clears any matching item the client hasn't fetched yet.
+export async function dismissNotificationCategory(category: string): Promise<void> {
+  await post(`/me/notifications/dismiss?category=${encodeURIComponent(category)}`)
 }
 
 // ── Pay-remaining (after admin marks the capacity expanded) ───────────────────

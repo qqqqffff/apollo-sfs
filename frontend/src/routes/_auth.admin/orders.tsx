@@ -17,6 +17,7 @@ import {
   listAdminOrders,
   listExpansionRequests,
   refundAdminOrder,
+  revertAdminOrderAllocation,
   type AdminInvoicePayload,
   type AdminOrder,
 } from '../../api/admin'
@@ -189,6 +190,7 @@ function OrdersTab() {
   const [page, setPage] = useState(1)
   const [infoOrder, setInfoOrder] = useState<AdminOrder | null>(null)
   const [refundTarget, setRefundTarget] = useState<AdminOrder | null>(null)
+  const [revertTarget, setRevertTarget] = useState<AdminOrder | null>(null)
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['admin', 'orders', { search, sort, page }],
@@ -203,6 +205,16 @@ function OrdersTab() {
       notify('success', 'Refund issued')
     },
     onError: (err) => notify('error', err instanceof ApiError ? err.message : 'Refund failed'),
+  })
+
+  const revertMutation = useMutation({
+    mutationFn: (o: AdminOrder) => revertAdminOrderAllocation(o.type, o.id),
+    onSuccess: () => {
+      setRevertTarget(null)
+      queryClient.invalidateQueries({ queryKey: ['admin', 'orders'] })
+      notify('success', 'Allocation reverted')
+    },
+    onError: (err) => notify('error', err instanceof ApiError ? err.message : 'Revert failed'),
   })
 
   const pageCount = data ? Math.ceil(data.total / PAGE_SIZE) : 1
@@ -244,6 +256,14 @@ function OrdersTab() {
               {data.items.map((o) => {
                 const refundOpen = o.status === 'captured' && o.captured_at
                   && Date.now() - new Date(o.captured_at).getTime() <= REFUND_WINDOW_DAYS * DAY_MS
+                const revertOpen = o.environment === 'sandbox' && o.status === 'captured' && !o.allocation_reverted_at
+                const revertTitle = o.allocation_reverted_at
+                  ? `Reverted ${fmtDate(o.allocation_reverted_at)}`
+                  : o.environment !== 'sandbox'
+                  ? 'Only sandbox orders can have their allocation reverted'
+                  : o.status !== 'captured'
+                  ? 'Order is not captured'
+                  : 'Revert the granted quota/premium — no PayPal refund'
                 return (
                   <tr key={`${o.type}-${o.id}`} className="border-t border-gray-100">
                     <td className="px-3 py-2"><UserLink username={o.username} /></td>
@@ -262,6 +282,14 @@ function OrdersTab() {
                           Sandbox
                         </span>
                       )}
+                      {o.allocation_reverted_at && (
+                        <span
+                          title={`Allocation reverted ${fmtDate(o.allocation_reverted_at)}`}
+                          className="ml-1.5 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider rounded bg-gray-100 text-gray-500"
+                        >
+                          Reverted
+                        </span>
+                      )}
                     </td>
                     <td className="px-3 py-2 text-gray-500">{fmtDate(o.captured_at ?? o.created_at)}</td>
                     <td className="px-3 py-2 text-gray-600">{METHOD_LABELS[o.payment_method] ?? o.payment_method}</td>
@@ -275,6 +303,16 @@ function OrdersTab() {
                       >
                         <MdInfoOutline /> Info
                       </button>
+                      {o.environment === 'sandbox' && (
+                        <button
+                          onClick={() => setRevertTarget(o)}
+                          disabled={!revertOpen}
+                          title={revertTitle}
+                          className="inline-flex items-center gap-1 px-2 py-1 text-xs border border-purple-200 rounded-lg text-purple-600 hover:bg-purple-50 disabled:opacity-40 disabled:hover:bg-transparent cursor-pointer disabled:cursor-not-allowed transition-colors mr-1.5"
+                        >
+                          Revert allocation
+                        </button>
+                      )}
                       <button
                         onClick={() => setRefundTarget(o)}
                         disabled={!refundOpen}
@@ -306,6 +344,20 @@ function OrdersTab() {
           onCancel={() => setRefundTarget(null)}
         />
       )}
+
+      {revertTarget && (
+        <ConfirmModal
+          title="Revert allocation?"
+          body={(revertTarget.type === 'premium'
+            ? `This revokes the premium access ${revertTarget.username} got from this sandbox payment.`
+            : `This removes the ${fmtCapacity(revertTarget.bytes_added ?? 0)} this sandbox order added to ${revertTarget.username}'s quota.`)
+            + ' No PayPal refund is issued — this is a sandbox test order, so nothing needs to be sent back.'}
+          confirmLabel={revertMutation.isPending ? 'Reverting…' : 'Revert allocation'}
+          disabled={revertMutation.isPending}
+          onConfirm={() => revertMutation.mutate(revertTarget)}
+          onCancel={() => setRevertTarget(null)}
+        />
+      )}
     </div>
   )
 }
@@ -325,6 +377,7 @@ function OrderInfoModal({ order, onClose }: { order: AdminOrder; onClose: () => 
         <InfoRow label="Created" value={new Date(order.created_at).toLocaleString()} />
         <InfoRow label="Captured" value={order.captured_at ? new Date(order.captured_at).toLocaleString() : '—'} />
         {order.refund_id && <InfoRow label="Refund" value={`${order.refund_id} (${fmtDate(order.refunded_at)})`} mono />}
+        {order.allocation_reverted_at && <InfoRow label="Allocation reverted" value={fmtDate(order.allocation_reverted_at)} />}
         {order.type === 'storage' && (
           <>
             <InfoRow label="Plan" value={order.plan_id ?? '—'} />

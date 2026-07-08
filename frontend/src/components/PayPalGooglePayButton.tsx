@@ -22,6 +22,10 @@ function loadGooglePayJs(): Promise<void> {
 }
 
 interface Props {
+  // Which PayPal environment the SDK is running against. Google Pay MUST use its
+  // 'TEST' environment when PayPal is in sandbox and 'PRODUCTION' when live —
+  // mismatching them fails with Google's OR_BIBED_11 ("merchant can't accept").
+  environment: 'sandbox' | 'live'
   // Currency for the Google Pay sheet (must match the PayPal order's currency).
   currencyCode: string
   // Current amount in major units (e.g. "30.00"), read at click time so the
@@ -44,7 +48,7 @@ interface Props {
 // `googlepay` in `components`. Renders nothing if the buyer/merchant isn't
 // Google Pay eligible, so the surrounding PayPal buttons/card fields remain the
 // fallback.
-export function PayPalGooglePayButton({ currencyCode, amount, createOrder, onApprove, onError, enabled }: Props) {
+export function PayPalGooglePayButton({ environment, currencyCode, amount, createOrder, onApprove, onError, enabled }: Props) {
   const [{ isResolved }] = usePayPalScriptReducer()
   const containerRef = useRef<HTMLDivElement>(null)
   const [visible, setVisible] = useState(false)
@@ -69,7 +73,9 @@ export function PayPalGooglePayButton({ currencyCode, amount, createOrder, onApp
         const config = await googlepay.config()
         if (cancelled || !config?.isEligible) return
 
-        const client = new google.payments.api.PaymentsClient({ environment: 'PRODUCTION' })
+        const client = new google.payments.api.PaymentsClient({
+          environment: environment === 'sandbox' ? 'TEST' : 'PRODUCTION',
+        })
         const rtp = await client.isReadyToPay({
           apiVersion: config.apiVersion,
           apiVersionMinor: config.apiVersionMinor,

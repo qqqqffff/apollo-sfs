@@ -40,6 +40,10 @@ export const Route = createFileRoute('/_auth/admin/orders')({
 const PAGE_SIZE = 25
 const DAY_MS = 24 * 60 * 60 * 1000
 const REFUND_WINDOW_DAYS = 90
+// Mirrors allocationRevertDays in api/routes/orders/handler.go — the
+// background loop that auto-reverts a captured sandbox order's granted
+// quota/premium 7 calendar days after capture.
+const ALLOCATION_REVERT_DAYS = 7
 const TIB = 1024 ** 4
 
 const METHOD_LABELS: Record<string, string> = {
@@ -57,6 +61,22 @@ function fmtCents(cents: number): string {
 
 function fmtDate(iso: string | null | undefined): string {
   return iso ? new Date(iso).toLocaleDateString() : '—'
+}
+
+// cleanupDueAt returns when a captured sandbox order's allocation auto-reverts.
+function cleanupDueAt(capturedAt: string): Date {
+  return new Date(new Date(capturedAt).getTime() + ALLOCATION_REVERT_DAYS * DAY_MS)
+}
+
+function fmtCountdown(dueAt: Date): string {
+  const msLeft = dueAt.getTime() - Date.now()
+  if (msLeft <= 0) return 'cleanup pending'
+  const days = Math.floor(msLeft / DAY_MS)
+  const hours = Math.floor((msLeft % DAY_MS) / (60 * 60 * 1000))
+  const minutes = Math.floor((msLeft % (60 * 60 * 1000)) / (60 * 1000))
+  if (days > 0) return `${days}d ${hours}h`
+  if (hours > 0) return `${hours}h ${minutes}m`
+  return `${minutes}m`
 }
 
 function fmtCapacity(bytes: number): string {
@@ -290,6 +310,14 @@ function OrdersTab() {
                           Reverted
                         </span>
                       )}
+                      {revertOpen && o.captured_at && (
+                        <span
+                          title={`Allocation auto-reverts ${cleanupDueAt(o.captured_at).toLocaleString()} unless reverted sooner`}
+                          className="ml-1.5 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider rounded bg-purple-50 text-purple-500 whitespace-nowrap"
+                        >
+                          Cleanup in {fmtCountdown(cleanupDueAt(o.captured_at))}
+                        </span>
+                      )}
                     </td>
                     <td className="px-3 py-2 text-gray-500">{fmtDate(o.captured_at ?? o.created_at)}</td>
                     <td className="px-3 py-2 text-gray-600">{METHOD_LABELS[o.payment_method] ?? o.payment_method}</td>
@@ -378,6 +406,12 @@ function OrderInfoModal({ order, onClose }: { order: AdminOrder; onClose: () => 
         <InfoRow label="Captured" value={order.captured_at ? new Date(order.captured_at).toLocaleString() : '—'} />
         {order.refund_id && <InfoRow label="Refund" value={`${order.refund_id} (${fmtDate(order.refunded_at)})`} mono />}
         {order.allocation_reverted_at && <InfoRow label="Allocation reverted" value={fmtDate(order.allocation_reverted_at)} />}
+        {order.environment === 'sandbox' && order.status === 'captured' && !order.allocation_reverted_at && order.captured_at && (
+          <InfoRow
+            label="Auto-revert"
+            value={`${cleanupDueAt(order.captured_at).toLocaleString()} (in ${fmtCountdown(cleanupDueAt(order.captured_at))})`}
+          />
+        )}
         {order.type === 'storage' && (
           <>
             <InfoRow label="Plan" value={order.plan_id ?? '—'} />

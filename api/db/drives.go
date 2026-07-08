@@ -282,13 +282,16 @@ func (q *Queries) AutoSyncDriveCapacities(ctx context.Context, capacityBytes int
 	return nil
 }
 
-// SyncAllDriveCapacities updates capacity_bytes for ALL drives unconditionally.
-// Used at startup to ensure the stored capacity always reflects the actual disk size.
-func (q *Queries) SyncAllDriveCapacities(ctx context.Context, capacityBytes int64) error {
+// SyncDriveCapacitiesByType updates capacity_bytes for every active drive of
+// the given tier ("nvme" or "hdd"). Used at startup to refresh capacity from a
+// node-local disk stat — that stat only ever describes the tier physically
+// mounted on the node the caller is running on, so it must never be applied
+// across tiers (a node-local reading can't describe a drive on another node).
+func (q *Queries) SyncDriveCapacitiesByType(ctx context.Context, driveType string, capacityBytes int64) error {
 	_, err := q.db.ExecContext(ctx,
-		`UPDATE drives SET capacity_bytes = $1`, capacityBytes)
+		`UPDATE drives SET capacity_bytes = $1 WHERE drive_type = $2`, capacityBytes, driveType)
 	if err != nil {
-		return fmt.Errorf("SyncAllDriveCapacities: %w", err)
+		return fmt.Errorf("SyncDriveCapacitiesByType: %w", err)
 	}
 	return nil
 }

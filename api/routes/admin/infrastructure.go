@@ -254,8 +254,13 @@ func (h *Handler) AddDrive(c *gin.Context) {
 		return
 	}
 
-	// Auto-detect capacity from disk if the stats path is configured.
-	if h.diskStatsPath != "" {
+	// Auto-detect capacity from disk if the stats path is configured. Only
+	// valid for the standard (HDD) tier: this container's local disk stats
+	// path reflects the node it runs on (the manager), never the fast/NVMe
+	// tier, which lives on a different physical node. Fast-tier drives get
+	// their capacity from SyncInfrastructure (reads the tier's own MinIO
+	// endpoint over the network) or manual entry.
+	if h.diskStatsPath != "" && driveType == "hdd" {
 		if usage, err := psdisk.Usage(h.diskStatsPath); err == nil {
 			if updated, err := h.queries.UpdateDriveCapacity(ctx, drive.ID, int64(usage.Used+usage.Free)); err == nil {
 				drive = updated
@@ -386,6 +391,15 @@ func (h *Handler) SyncDriveCapacity(c *gin.Context) {
 	existing, err := h.queries.GetDrive(ctx, driveID)
 	if err != nil || existing == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "drive not found"})
+		return
+	}
+
+	// This container's local disk stats path only reflects the node it runs
+	// on (the manager, standard/HDD tier) — it can never describe the
+	// fast/NVMe tier, which lives on a different physical node. Re-run
+	// Infrastructure Sync to refresh fast-tier capacity instead.
+	if existing.DriveType != "hdd" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "local disk stats only cover the standard tier; use Infrastructure Sync to refresh this drive"})
 		return
 	}
 

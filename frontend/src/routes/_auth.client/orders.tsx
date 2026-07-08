@@ -25,6 +25,27 @@ export const Route = createFileRoute('/_auth/client/orders')({
 })
 
 const TIB = 1024 ** 4
+const DAY_MS = 24 * 60 * 60 * 1000
+// Mirrors allocationRevertDays in api/routes/orders/handler.go — the
+// background loop that auto-reverts a captured sandbox order's granted
+// quota/premium 7 calendar days after capture.
+const ALLOCATION_REVERT_DAYS = 7
+
+// cleanupDueAt returns when a captured sandbox order's allocation auto-reverts.
+function cleanupDueAt(capturedAt: string): Date {
+  return new Date(new Date(capturedAt).getTime() + ALLOCATION_REVERT_DAYS * DAY_MS)
+}
+
+function fmtCountdown(dueAt: Date): string {
+  const msLeft = dueAt.getTime() - Date.now()
+  if (msLeft <= 0) return 'cleanup pending'
+  const days = Math.floor(msLeft / DAY_MS)
+  const hours = Math.floor((msLeft % DAY_MS) / (60 * 60 * 1000))
+  const minutes = Math.floor((msLeft % (60 * 60 * 1000)) / (60 * 1000))
+  if (days > 0) return `${days}d ${hours}h`
+  if (hours > 0) return `${hours}h ${minutes}m`
+  return `${minutes}m`
+}
 
 function formatCapacity(bytes: number): string {
   if (bytes >= 1024 * TIB) return `${(bytes / (1024 * TIB)).toFixed(1).replace(/\.0$/, '')} PB`
@@ -236,6 +257,14 @@ function RouteComponent() {
                   }`}>
                     {o.status}
                   </p>
+                  {o.environment === 'sandbox' && o.status === 'captured' && !o.allocation_reverted_at && o.captured_at && (
+                    <p
+                      title={`Auto-reverts ${cleanupDueAt(o.captured_at).toLocaleString()} unless reverted sooner`}
+                      className="text-[10px] text-purple-500 m-0 mt-1"
+                    >
+                      Auto-reverts in {fmtCountdown(cleanupDueAt(o.captured_at))}
+                    </p>
+                  )}
                   {admin && o.environment === 'sandbox' && o.status === 'captured' && (
                     o.allocation_reverted_at ? (
                       <p className="text-[10px] text-gray-400 m-0 mt-1">Allocation reverted</p>

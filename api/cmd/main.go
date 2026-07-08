@@ -100,15 +100,21 @@ func main() {
 		log.Fatalf("startup seed: %v", err)
 	}
 
-	// Sync capacity_bytes for all drives from the real disk on every startup so
-	// the value is always current (not just when a drive is first added).
+	// Sync capacity_bytes for the standard (HDD) tier from the real disk on
+	// every startup so the value is always current (not just when a drive is
+	// first added). This container's local disk stats path only ever reflects
+	// the node it runs on (the manager, tier=standard) — never the fast/NVMe
+	// tier, which lives on the Pi 5 and is synced separately (SyncInfrastructure
+	// reads it from its own MinIO endpoint over the network). Applying a
+	// node-local reading to every drive would overwrite the fast tier's real
+	// capacity with the standard tier's.
 	if cfg.DiskStatsPath != "" {
 		if usage, err := psdisk.Usage(cfg.DiskStatsPath); err == nil {
 			total := int64(usage.Used) + int64(usage.Free)
-			if err := queries.SyncAllDriveCapacities(context.Background(), total); err != nil {
+			if err := queries.SyncDriveCapacitiesByType(context.Background(), "hdd", total); err != nil {
 				log.Printf("warning: sync drive capacities: %v", err)
 			} else {
-				log.Printf("startup: synced all drives to %d bytes capacity", total)
+				log.Printf("startup: synced standard-tier drive capacities to %d bytes", total)
 			}
 		} else {
 			log.Printf("warning: could not read disk stats for sync: %v", err)

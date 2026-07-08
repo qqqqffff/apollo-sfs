@@ -167,6 +167,21 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
   const isExpansion = !!selectedPlanId && !isCustom && !!selectedServer &&
     (serverAtCapacity || serverTypeMismatch || serverLacksCapacity)
 
+  // The server list holds one row per (server, drive_type) — a server exposing
+  // both tiers yields two rows with the same id (see ServerWithPing.row_key).
+  // Group them back into one entry per physical server for the picker so
+  // e.g. "NH-0001" appears once, with a badge per tier it actually has,
+  // instead of as two separate list entries.
+  const groupedServers = useMemo(() => {
+    const byId = new Map<string, { id: string; name: string; rows: ServerWithPing[] }>()
+    for (const s of servers ?? []) {
+      const group = byId.get(s.id)
+      if (group) group.rows.push(s)
+      else byId.set(s.id, { id: s.id, name: s.name, rows: [s] })
+    }
+    return [...byId.values()]
+  }, [servers])
+
   const fastAvailable = useMemo(
     () => (servers ?? []).filter((s) => s.drive_type === 'nvme').reduce((sum, s) => sum + s.available_bytes, 0),
     [servers],
@@ -467,28 +482,60 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
                     </button>
                     {serverListOpen && (
                       <div className="border-t border-gray-100 divide-y divide-gray-50">
-                        {servers.map((s) => (
-                          <button
-                            key={s.row_key}
-                            onClick={() => { setSelectedServerKey(s.row_key); setServerListOpen(false) }}
-                            className={`flex items-center gap-3 w-full px-4 py-2.5 border-0 cursor-pointer text-left transition-colors ${
-                              s.row_key === selectedServerKey ? 'bg-blue-50' : 'bg-transparent hover:bg-gray-50'
-                            }`}
-                          >
-                            <div className="flex-1 min-w-0">
-                              <div className="flex items-center gap-2">
-                                <span className={`text-sm ${s.row_key === selectedServerKey ? 'font-semibold text-blue-700' : 'font-medium text-gray-800'}`}>
-                                  {s.name}
-                                </span>
-                                <TierBadge type={s.drive_type} />
+                        {groupedServers.map((group) => {
+                          const preferred = group.rows.find((r) => r.drive_type === storageType) ?? group.rows[0]
+                          const isSelected = group.rows.some((r) => r.row_key === selectedServerKey)
+                          return (
+                            <button
+                              key={group.id}
+                              onClick={() => {
+                                setStorageType(preferred.drive_type)
+                                setSelectedServerKey(preferred.row_key)
+                                setServerListOpen(false)
+                              }}
+                              className={`flex items-center gap-3 w-full px-4 py-2.5 border-0 cursor-pointer text-left transition-colors ${
+                                isSelected ? 'bg-blue-50' : 'bg-transparent hover:bg-gray-50'
+                              }`}
+                            >
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2">
+                                  <span className={`text-sm ${isSelected ? 'font-semibold text-blue-700' : 'font-medium text-gray-800'}`}>
+                                    {group.name}
+                                  </span>
+                                  {group.rows.map((s) => (
+                                    <span
+                                      key={s.row_key}
+                                      role="button"
+                                      tabIndex={0}
+                                      onClick={(e) => {
+                                        e.stopPropagation()
+                                        setStorageType(s.drive_type)
+                                        setSelectedServerKey(s.row_key)
+                                        setServerListOpen(false)
+                                      }}
+                                      onKeyDown={(e) => {
+                                        if (e.key !== 'Enter' && e.key !== ' ') return
+                                        e.stopPropagation()
+                                        setStorageType(s.drive_type)
+                                        setSelectedServerKey(s.row_key)
+                                        setServerListOpen(false)
+                                      }}
+                                      className={`rounded ${s.row_key === selectedServerKey ? 'ring-2 ring-blue-400' : ''}`}
+                                    >
+                                      <TierBadge type={s.drive_type} />
+                                    </span>
+                                  ))}
+                                </div>
+                                <p className="text-xs text-gray-400 m-0 mt-0.5">
+                                  {group.rows[0]?.ping_ms != null ? `${group.rows[0].ping_ms} ms · ` : ''}
+                                  {group.rows
+                                    .map((s) => `${s.drive_type === 'nvme' ? 'Fast' : 'Standard'} ${formatSize(s.available_bytes)} available · ${s.allocated_pct.toFixed(0)}% allocated`)
+                                    .join('  ·  ')}
+                                </p>
                               </div>
-                              <p className="text-xs text-gray-400 m-0 mt-0.5">
-                                {s.ping_ms != null ? `${s.ping_ms} ms · ` : ''}
-                                {formatSize(s.available_bytes)} available · {s.allocated_pct.toFixed(0)}% allocated
-                              </p>
-                            </div>
-                          </button>
-                        ))}
+                            </button>
+                          )
+                        })}
                       </div>
                     )}
                     <div className="flex items-center gap-3 px-4 py-2 border-t border-gray-100 bg-gray-50 text-[11px] text-gray-500">

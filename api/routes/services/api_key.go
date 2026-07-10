@@ -11,10 +11,12 @@ import (
 	"io"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"golang.org/x/crypto/argon2"
+	"golang.org/x/time/rate"
 
 	"apollo-sfs.com/api/db"
 	"apollo-sfs.com/api/models"
@@ -40,6 +42,21 @@ const (
 	argonKeyLen  = 32
 )
 
+// Per-key rate limit bounds (requests/minute against the SFS API).
+// MaxRateLimitPerMin is the global ceiling no key may exceed, regardless of
+// what the owner requests via the UI or API.
+const (
+	MinRateLimitPerMin     = 1
+	MaxRateLimitPerMin     = 1000
+	DefaultRateLimitPerMin = 300
+)
+
+// MaxAPIKeyTTL bounds how far out an explicit expiry may be set (10 years).
+// A zero TTL / nil expiry ("no expiry") is unaffected — this only bounds a
+// finite one. Mirrors the routes/api_keys.go request binding (max=3650) so
+// the limit also holds for any caller that reaches Issue/Update directly.
+const MaxAPIKeyTTL = 3650 * 24 * time.Hour
+
 // Sentinel errors. Callers should treat them as 401s unless noted.
 var (
 	ErrAPIKeyMalformed     = errors.New("api key: malformed token")
@@ -53,10 +70,35 @@ var (
 // All persistence runs through db.Queries; argon2id parameters are package
 // constants. The pepper is loaded once at construction and mixed into the
 // hash so a stolen database cannot be brute-forced offline.
+//
+// It also owns the per-key rate limiters enforced by the SFS middleware
+// (Allow). These are in-memory only — safe because every Swarm service in
+// docker-stack.yml runs a single replica (see api/CLAUDE.md); a multi-replica
+// deployment would need a shared store (e.g. Redis) instead.
 type APIKeyService struct {
 	queries *db.Queries
 	pepper  []byte
+
+	limiterMu sync.Mutex
+	limiters  map[uuid.UUID]*keyLimiter
 }
+
+// keyLimiter pairs a token-bucket limiter with the rate it was built at (so
+// Allow can detect an edit changed the limit) and the last time it was used
+// (so the background sweep can evict idle entries).
+type keyLimiter struct {
+	limiter    *rate.Limiter
+	perMin     int
+	lastAccess time.Time
+}
+
+// keyLimiterTTL/keyLimiterSweepInterval mirror the eviction pattern in
+// routes/middleware/rate_limit.go so idle keys' limiters don't accumulate
+// forever in memory.
+const (
+	keyLimiterTTL           = 10 * time.Minute
+	keyLimiterSweepInterval = 5 * time.Minute
+)
 
 // NewAPIKeyService constructs the service. pepper must be at least 32 bytes
 // of random data sourced from SFS_API_KEY_PEPPER; the constructor panics on
@@ -66,7 +108,71 @@ func NewAPIKeyService(q *db.Queries, pepper []byte) *APIKeyService {
 	if len(pepper) < 32 {
 		panic("api key service: SFS_API_KEY_PEPPER must be at least 32 bytes")
 	}
-	return &APIKeyService{queries: q, pepper: pepper}
+	s := &APIKeyService{queries: q, pepper: pepper, limiters: make(map[uuid.UUID]*keyLimiter)}
+	go s.sweepLimiters()
+	return s
+}
+
+func (s *APIKeyService) sweepLimiters() {
+	ticker := time.NewTicker(keyLimiterSweepInterval)
+	defer ticker.Stop()
+	for range ticker.C {
+		cutoff := time.Now().Add(-keyLimiterTTL)
+		s.limiterMu.Lock()
+		for id, l := range s.limiters {
+			if l.lastAccess.Before(cutoff) {
+				delete(s.limiters, id)
+			}
+		}
+		s.limiterMu.Unlock()
+	}
+}
+
+// Allow reports whether keyID may make another request right now, given its
+// current rate_limit_per_min. Builds (or rebuilds, if the rate changed since
+// last seen — e.g. via Update) a token-bucket limiter per key, burst equal to
+// the per-minute rate so a key can spend its whole allowance immediately
+// after being idle, then must trickle in at the sustained rate.
+func (s *APIKeyService) Allow(keyID uuid.UUID, ratePerMin int) bool {
+	if ratePerMin <= 0 {
+		ratePerMin = DefaultRateLimitPerMin
+	}
+	s.limiterMu.Lock()
+	l, ok := s.limiters[keyID]
+	if !ok || l.perMin != ratePerMin {
+		l = &keyLimiter{
+			limiter: rate.NewLimiter(rate.Limit(float64(ratePerMin)/60.0), ratePerMin),
+			perMin:  ratePerMin,
+		}
+		s.limiters[keyID] = l
+	}
+	l.lastAccess = time.Now()
+	limiter := l.limiter
+	s.limiterMu.Unlock()
+	return limiter.Allow()
+}
+
+// resetLimiter drops keyID's cached limiter so the next Allow call rebuilds
+// it — used after Update in case the rate limit changed but Allow hasn't
+// happened to notice via the perMin check yet (e.g. immediately after a
+// large decrease, we want the new, smaller burst to apply right away rather
+// than after the old limiter drains).
+func (s *APIKeyService) resetLimiter(keyID uuid.UUID) {
+	s.limiterMu.Lock()
+	delete(s.limiters, keyID)
+	s.limiterMu.Unlock()
+}
+
+// normalizeRateLimit applies the "0 means default" convention and enforces
+// [MinRateLimitPerMin, MaxRateLimitPerMin].
+func normalizeRateLimit(perMin int) (int, error) {
+	if perMin == 0 {
+		return DefaultRateLimitPerMin, nil
+	}
+	if perMin < MinRateLimitPerMin || perMin > MaxRateLimitPerMin {
+		return 0, fmt.Errorf("api key: rate_limit_per_min must be between %d and %d", MinRateLimitPerMin, MaxRateLimitPerMin)
+	}
+	return perMin, nil
 }
 
 // IssuedKey is the once-only issuance result. RawKey is the only place the
@@ -79,10 +185,11 @@ type IssuedKey struct {
 
 // IssueInput is the user-facing parameter set for Issue.
 type IssueInput struct {
-	Username string
-	Name     string
-	Scopes   []models.APIKeyScope
-	TTL      time.Duration // 0 → no expiry
+	Username        string
+	Name            string
+	Scopes          []models.APIKeyScope
+	TTL             time.Duration // 0 → no expiry
+	RateLimitPerMin int           // 0 → DefaultRateLimitPerMin
 }
 
 // Issue generates a new API key, persists it (plus its scopes) inside a
@@ -100,6 +207,13 @@ func (s *APIKeyService) Issue(ctx context.Context, userID uuid.UUID, in IssueInp
 		if _, ok := validOperations[sc.Operation]; !ok {
 			return nil, fmt.Errorf("api key: invalid operation %q", sc.Operation)
 		}
+	}
+	rateLimit, err := normalizeRateLimit(in.RateLimitPerMin)
+	if err != nil {
+		return nil, err
+	}
+	if in.TTL > MaxAPIKeyTTL {
+		return nil, fmt.Errorf("api key: ttl_days must be at most %d", int(MaxAPIKeyTTL/(24*time.Hour)))
 	}
 	prefix, secret, err := generateKeyHalves()
 	if err != nil {
@@ -119,12 +233,13 @@ func (s *APIKeyService) Issue(ctx context.Context, userID uuid.UUID, in IssueInp
 		expires = &t
 	}
 	stored, err := q.CreateAPIKey(ctx, db.CreateAPIKeyInput{
-		Username:  in.Username,
-		Name:      in.Name,
-		KeyPrefix: prefix,
-		KeyHash:   hash,
-		Scopes:    in.Scopes,
-		ExpiresAt: expires,
+		Username:        in.Username,
+		Name:            in.Name,
+		KeyPrefix:       prefix,
+		KeyHash:         hash,
+		Scopes:          in.Scopes,
+		ExpiresAt:       expires,
+		RateLimitPerMin: rateLimit,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("api key: persist: %w", err)
@@ -210,6 +325,62 @@ func (s *APIKeyService) List(ctx context.Context, userID uuid.UUID) ([]models.AP
 	}
 	defer func() { _ = tx.Rollback() }()
 	return q.ListAPIKeys(ctx)
+}
+
+// UpdateInput is the user-facing parameter set for Update. It mirrors
+// IssueInput but targets an existing key — every field is replaced
+// wholesale, matching the edit panel's "full form" UX (there is no partial
+// PATCH semantics here).
+type UpdateInput struct {
+	Name            string
+	Scopes          []models.APIKeyScope
+	ExpiresAt       *time.Time // nil → no expiry
+	RateLimitPerMin int        // 0 → DefaultRateLimitPerMin
+}
+
+// Update rewrites an existing key's name, scopes, expiry, and rate limit.
+// RLS in ForUser ensures only the owner's key can be edited. Editing never
+// touches key_prefix/key_hash — the raw secret shown at issuance keeps
+// working against the new rules immediately.
+func (s *APIKeyService) Update(ctx context.Context, userID, keyID uuid.UUID, in UpdateInput) (*models.APIKey, error) {
+	if len(in.Scopes) == 0 {
+		return nil, errors.New("api key: at least one scope is required")
+	}
+	for _, sc := range in.Scopes {
+		if _, ok := validOperations[sc.Operation]; !ok {
+			return nil, fmt.Errorf("api key: invalid operation %q", sc.Operation)
+		}
+	}
+	rateLimit, err := normalizeRateLimit(in.RateLimitPerMin)
+	if err != nil {
+		return nil, err
+	}
+	if in.ExpiresAt != nil && in.ExpiresAt.After(time.Now().Add(MaxAPIKeyTTL)) {
+		return nil, fmt.Errorf("api key: ttl_days must be at most %d", int(MaxAPIKeyTTL/(24*time.Hour)))
+	}
+	q, tx, err := s.queries.ForUser(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("api key: tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	updated, err := q.UpdateAPIKey(ctx, db.UpdateAPIKeyInput{
+		ID:              keyID,
+		Name:            in.Name,
+		Scopes:          in.Scopes,
+		ExpiresAt:       in.ExpiresAt,
+		RateLimitPerMin: rateLimit,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("api key: update: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("api key: commit: %w", err)
+	}
+	// The rate limit may have changed; drop the cached limiter so the next
+	// request rebuilds it at the new rate instead of finishing out the old
+	// bucket's window.
+	s.resetLimiter(keyID)
+	return updated, nil
 }
 
 // Revoke marks the given key revoked. RLS in ForUser ensures only the

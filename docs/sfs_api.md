@@ -200,7 +200,13 @@ The `403 scope_required` response includes additional fields so clients can show
 
 ## Rate limiting
 
-SFS endpoints inherit the standard per-IP rate limit applied to every public route. There is no per-key limit in v1 — issue separate keys per consumer if you need per-consumer rate-limiting at the application layer.
+SFS endpoints inherit the standard per-IP rate limit applied to every public route, and are additionally capped per key. Every key carries its own `rate_limit_per_min` (requests/minute), settable when the key is created or edited, up to a global ceiling of **1000/min**. The default for new keys is 300/min. Exceeding it returns `429` with the key's current limit in the body:
+
+```json
+{ "error": "api key rate limit exceeded", "limit": 300 }
+```
+
+Issue separate keys per consumer if you want independent rate budgets for different scripts or apps sharing an account.
 
 ---
 

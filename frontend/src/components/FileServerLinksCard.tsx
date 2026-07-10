@@ -40,7 +40,8 @@ export function FileServerLinksCard() {
         </button>
       </div>
       <p className="text-xs text-gray-400 mt-0 mb-3">
-        Mount a storage server as a network drive and manage your files from it — one link per server.
+        Mount a storage drive as a network drive and manage your files from it — one link per
+        server/tier combination you own capacity on.
       </p>
 
       {linksLoading && <p className="text-xs text-gray-400 m-0">Loading…</p>}
@@ -54,6 +55,15 @@ export function FileServerLinksCard() {
             <div className="flex items-center justify-between gap-2">
               <span className="flex items-center gap-2 min-w-0">
                 <span className="text-sm text-gray-800 font-medium truncate">{link.server_name}</span>
+                <span
+                  className={`text-[10px] font-medium rounded px-1.5 py-0.5 shrink-0 ${
+                    link.drive_type === 'nvme'
+                      ? 'text-emerald-700 bg-emerald-100'
+                      : 'text-sky-700 bg-sky-100'
+                  }`}
+                >
+                  {link.drive_type === 'nvme' ? 'Fast' : 'Standard'}
+                </span>
                 {link.enhanced_security && (
                   <span className="text-[10px] font-medium text-green-700 bg-green-50 rounded px-1.5 py-0.5 shrink-0">
                     enhanced security

@@ -227,6 +227,25 @@ type ExpansionRequestFilter struct {
 	Sort string
 }
 
+// invJoin exposes the latest invoice per request (custom requests only carry
+// one) — its status/token summary and the review token used to build the
+// in-app /invoice/:token link. Shared by the admin listing and the user's
+// own listing.
+const invJoin = `
+	LEFT JOIN LATERAL (
+		SELECT ei.invoice_number, ei.status AS invoice_status,
+		       ei.sent_at AS invoice_sent_at, ei.accept_due_at AS invoice_accept_due_at,
+		       ei.review_token
+		FROM expansion_invoices ei
+		WHERE ei.request_id = ser.id
+		ORDER BY ei.created_at DESC
+		LIMIT 1
+	) inv ON TRUE`
+
+// invJoinColumns are the extra columns invJoin adds to a SELECT, consumed by
+// scanExpansionRequestWithInvoice.
+const invJoinColumns = `inv.invoice_number, inv.invoice_status, inv.invoice_sent_at, inv.invoice_accept_due_at, inv.review_token`
+
 // ListExpansionRequests returns a filtered, searched, offset-paginated page of
 // expansion requests plus the total row count for the filter. Each row carries
 // its latest invoice summary (custom requests).
@@ -266,17 +285,6 @@ func (q *Queries) ListExpansionRequests(ctx context.Context, f ExpansionRequestF
 			OR COALESCE(inv.invoice_number, '') ILIKE $%d)`, n, n, n, n, n)
 	}
 
-	// invJoin exposes the latest invoice per request for the custom tab.
-	const invJoin = `
-		LEFT JOIN LATERAL (
-			SELECT ei.invoice_number, ei.status AS invoice_status,
-			       ei.sent_at AS invoice_sent_at, ei.accept_due_at AS invoice_accept_due_at
-			FROM expansion_invoices ei
-			WHERE ei.request_id = ser.id
-			ORDER BY ei.created_at DESC
-			LIMIT 1
-		) inv ON TRUE`
-
 	var total int
 	countQuery := fmt.Sprintf(`
 		SELECT COUNT(*)
@@ -313,7 +321,7 @@ func (q *Queries) ListExpansionRequests(ctx context.Context, f ExpansionRequestF
 	args = append(args, limit, offset)
 	query := fmt.Sprintf(`
 		SELECT %s,
-		       inv.invoice_number, inv.invoice_status, inv.invoice_sent_at, inv.invoice_accept_due_at
+		       %s
 		FROM server_expansion_requests ser
 		JOIN servers s ON s.id = ser.server_id
 		JOIN users   u ON u.username = ser.username
@@ -321,7 +329,7 @@ func (q *Queries) ListExpansionRequests(ctx context.Context, f ExpansionRequestF
 		%s
 		ORDER BY %s
 		LIMIT $%d OFFSET $%d
-	`, expansionRequestColumns, invJoin, where, orderBy, len(args)-1, len(args))
+	`, expansionRequestColumns, invJoinColumns, invJoin, where, orderBy, len(args)-1, len(args))
 
 	rows, err := q.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -344,13 +352,14 @@ func (q *Queries) ListExpansionRequests(ctx context.Context, f ExpansionRequestF
 }
 
 // scanExpansionRequestWithInvoice scans a row produced by the admin listing
-// query, which appends the latest-invoice summary columns.
+// query or the user listing query, both of which append the latest-invoice
+// summary columns (see invJoin).
 func scanExpansionRequestWithInvoice(rows *sql.Rows) (*models.ServerExpansionRequest, error) {
 	var r models.ServerExpansionRequest
 	var captureID, refundID, reason sql.NullString
 	var postQuota sql.NullInt64
 	var completedAt, paymentDueAt, approvalDueAt, approvedAt, expansionDueAt, reminderSentAt sql.NullTime
-	var invNumber, invStatus sql.NullString
+	var invNumber, invStatus, reviewToken sql.NullString
 	var invSentAt, invAcceptDueAt sql.NullTime
 	err := rows.Scan(
 		&r.ID, &r.Username, &r.ServerID, &r.PlanID, &r.StorageType,
@@ -361,7 +370,7 @@ func scanExpansionRequestWithInvoice(rows *sql.Rows) (*models.ServerExpansionReq
 		&r.CreatedAt, &completedAt,
 		&refundID, &reason, &paymentDueAt, &reminderSentAt, &r.RemindersSent, &r.Environment,
 		&r.ServerName, &r.ServerState, &r.UserEmail,
-		&invNumber, &invStatus, &invSentAt, &invAcceptDueAt,
+		&invNumber, &invStatus, &invSentAt, &invAcceptDueAt, &reviewToken,
 	)
 	if err != nil {
 		return nil, err
@@ -395,6 +404,7 @@ func scanExpansionRequestWithInvoice(rows *sql.Rows) (*models.ServerExpansionReq
 	setNullString(&r.InvoiceStatus, invStatus)
 	setNullTime(&r.InvoiceSentAt, invSentAt)
 	setNullTime(&r.InvoiceAcceptDueAt, invAcceptDueAt)
+	setNullString(&r.InvoiceReviewToken, reviewToken)
 	return &r, nil
 }
 
@@ -674,13 +684,18 @@ func (q *Queries) ListExpiredApprovedRequests(ctx context.Context) ([]models.Ser
 }
 
 // ListUserExpansionRequests returns the user's expansion requests, newest
-// first. Backs the web profile page's request list.
+// first, each carrying its latest invoice summary (custom requests) —
+// including the review token so the orders page can link straight to
+// /invoice/:token without waiting on the emailed link. Backs the web
+// profile/orders pages' request lists.
 func (q *Queries) ListUserExpansionRequests(ctx context.Context, username string) ([]models.ServerExpansionRequest, error) {
 	rows, err := q.db.QueryContext(ctx, `
-		SELECT `+expansionRequestColumns+`
+		SELECT `+expansionRequestColumns+`,
+		       `+invJoinColumns+`
 		FROM server_expansion_requests ser
 		JOIN servers s ON s.id = ser.server_id
 		JOIN users   u ON u.username = ser.username
+		`+invJoin+`
 		WHERE ser.username = $1
 		ORDER BY ser.created_at DESC
 		LIMIT 50
@@ -692,7 +707,7 @@ func (q *Queries) ListUserExpansionRequests(ctx context.Context, username string
 
 	var out []models.ServerExpansionRequest
 	for rows.Next() {
-		r, err := scanExpansionRequest(rows)
+		r, err := scanExpansionRequestWithInvoice(rows)
 		if err != nil {
 			return nil, fmt.Errorf("ListUserExpansionRequests scan: %w", err)
 		}

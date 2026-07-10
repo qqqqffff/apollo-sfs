@@ -16,7 +16,7 @@ import { useAuth } from '../../auth'
 import { useNotification } from '../../context/NotificationContext'
 import { PayRemainingModal } from '../../components/PayRemainingModal'
 
-type Tab = 'storage' | 'premium'
+type Tab = 'storage' | 'requests' | 'premium'
 
 export const Route = createFileRoute('/_auth/client/orders')({
   // pay: request id whose remaining-balance form should open on load
@@ -24,7 +24,7 @@ export const Route = createFileRoute('/_auth/client/orders')({
   // tab: which section is active — mirrors the admin Orders page pattern.
   validateSearch: (search: Record<string, unknown>): { pay?: string; tab?: Tab } => ({
     pay: typeof search.pay === 'string' ? search.pay : undefined,
-    tab: search.tab === 'premium' ? 'premium' : search.tab === 'storage' ? 'storage' : undefined,
+    tab: search.tab === 'premium' ? 'premium' : search.tab === 'requests' ? 'requests' : search.tab === 'storage' ? 'storage' : undefined,
   }),
   component: RouteComponent,
 })
@@ -109,16 +109,20 @@ function requestGroup(r: ExpansionRequest): Group {
   }
 }
 
-const REQUEST_STATUS_LABELS: Record<ExpansionRequest['status'], string> = {
-  opened: 'Awaiting review',
-  invoice_sent: 'Invoice awaiting your review',
-  accepted: 'Invoice accepted — awaiting approval',
-  approved: 'Approved — expansion in progress',
-  expanded: 'Capacity provisioned — balance due',
-  completed: 'Completed',
-  expired: 'Expired',
-  refunded: 'Refunded',
-  rejected: 'Rejected',
+// Per-status badge shown on each request row (distinct from the broader
+// Group section it sorts into — several statuses share a Group, e.g.
+// 'invoice_sent' and 'expanded' both land in "action", so the row itself
+// still needs to say which one it actually is).
+const REQUEST_STATUS_META: Record<ExpansionRequest['status'], { label: string; className: string }> = {
+  opened:       { label: 'Awaiting review',    className: 'bg-amber-50 text-amber-700' },
+  invoice_sent: { label: 'Invoice sent',       className: 'bg-blue-50 text-blue-700' },
+  accepted:     { label: 'Invoice accepted',   className: 'bg-blue-50 text-blue-700' },
+  approved:     { label: 'Approved',           className: 'bg-blue-50 text-blue-700' },
+  expanded:     { label: 'Balance due',        className: 'bg-purple-50 text-purple-700' },
+  completed:    { label: 'Completed',          className: 'bg-green-50 text-green-700' },
+  expired:      { label: 'Expired',            className: 'bg-gray-100 text-gray-500' },
+  refunded:     { label: 'Refunded',           className: 'bg-gray-100 text-gray-500' },
+  rejected:     { label: 'Rejected',           className: 'bg-red-50 text-red-600' },
 }
 
 // PremiumRow normalizes the two premium data sources — legacy one-time
@@ -269,6 +273,7 @@ function RouteComponent() {
       <div className="flex gap-1 border-b border-gray-200">
         {([
           { key: 'storage', label: 'Storage' },
+          { key: 'requests', label: 'Requests' },
           { key: 'premium', label: 'Premium' },
         ] as { key: Tab; label: string }[]).map(({ key, label }) => (
           <button
@@ -286,10 +291,13 @@ function RouteComponent() {
         ))}
       </div>
 
-      {activeTab === 'storage' && (
+      {activeTab === 'requests' && (
         <>
-          {reqList.length === 0 && storageOrders.length === 0 && (
-            <p className="text-sm text-gray-400">No storage orders yet. Purchases and expansion requests will appear here.</p>
+          {reqList.length === 0 && (
+            <p className="text-sm text-gray-400">
+              No expansion or custom capacity requests yet. Requests you submit from the Add storage
+              modal will appear here.
+            </p>
           )}
 
           {/* Expansion / custom requests grouped by state */}
@@ -302,44 +310,79 @@ function RouteComponent() {
                 <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mt-0 mb-1">{meta.title}</h3>
                 {meta.hint && <p className="text-xs text-gray-400 mt-0 mb-2">{meta.hint}</p>}
                 <div className="bg-white border border-gray-200 rounded-xl divide-y divide-gray-100">
-                  {items.map((r) => (
-                    <div key={r.id} className="px-4 py-3 flex items-center gap-3">
-                      <div className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 ${
-                        r.storage_type === 'nvme' ? 'bg-blue-50' : 'bg-amber-50'
-                      }`}>
-                        {r.storage_type === 'nvme'
-                          ? <MdBolt className="text-blue-600 text-sm" />
-                          : <MdStorage className="text-amber-500 text-sm" />}
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm font-medium text-gray-800 m-0">
-                          {formatCapacity(r.bytes_requested)} {r.storage_type === 'nvme' ? 'Fast' : 'Standard'} expansion
-                          {r.is_custom ? ' (custom)' : ''} — {r.server_name}
-                        </p>
-                        <p className="text-xs text-gray-400 m-0 mt-0.5">
-                          {REQUEST_STATUS_LABELS[r.status] ?? r.status} · requested {new Date(r.created_at).toLocaleDateString()}
-                          {r.status === 'expanded' && (
-                            <> · balance {formatCents(r.full_price_cents - r.deposit_amount_cents)}</>
+                  {items.map((r) => {
+                    const statusMeta = REQUEST_STATUS_META[r.status] ?? { label: r.status, className: 'bg-gray-100 text-gray-500' }
+                    return (
+                      <div key={r.id} className="px-4 py-3 flex items-center gap-3">
+                        <div className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 ${
+                          r.storage_type === 'nvme' ? 'bg-blue-50' : 'bg-amber-50'
+                        }`}>
+                          {r.storage_type === 'nvme'
+                            ? <MdBolt className="text-blue-600 text-sm" />
+                            : <MdStorage className="text-amber-500 text-sm" />}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <p className="text-sm font-medium text-gray-800 m-0">
+                              {formatCapacity(r.bytes_requested)} {r.storage_type === 'nvme' ? 'Fast' : 'Standard'} expansion
+                              {r.is_custom ? ' (custom)' : ''} — {r.server_name}
+                            </p>
+                            <span className={`px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider rounded ${statusMeta.className}`}>
+                              {statusMeta.label}
+                            </span>
+                          </div>
+                          <p className="text-xs text-gray-400 m-0 mt-0.5">
+                            requested {new Date(r.created_at).toLocaleDateString()}
+                            {r.status === 'expanded' && (
+                              <> · balance {formatCents(r.full_price_cents - r.deposit_amount_cents)}</>
+                            )}
+                          </p>
+                        </div>
+                        <div className="shrink-0 flex flex-col items-end gap-1.5">
+                          {r.status === 'expanded' && r.full_price_cents > r.deposit_amount_cents && (
+                            <button
+                              onClick={() => setPayTarget(r)}
+                              className="px-3 py-1.5 text-xs bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium cursor-pointer transition-colors"
+                            >
+                              Pay balance
+                            </button>
                           )}
-                        </p>
+                          {r.status === 'invoice_sent' && (
+                            r.invoice_review_token ? (
+                              <Link
+                                to={`/invoice/${r.invoice_review_token}` as never}
+                                className="px-3 py-1.5 text-xs bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium no-underline text-center transition-colors"
+                              >
+                                Review invoice
+                              </Link>
+                            ) : (
+                              <span className="text-xs text-amber-600 text-right">Check your email for the invoice</span>
+                            )
+                          )}
+                          {r.invoice_review_token && r.status !== 'invoice_sent' && (
+                            <Link
+                              to={`/invoice/${r.invoice_review_token}` as never}
+                              className="text-xs text-blue-600 hover:text-blue-700 no-underline hover:underline"
+                            >
+                              View invoice
+                            </Link>
+                          )}
+                        </div>
                       </div>
-                      {r.status === 'expanded' && r.full_price_cents > r.deposit_amount_cents && (
-                        <button
-                          onClick={() => setPayTarget(r)}
-                          className="shrink-0 px-3 py-1.5 text-xs bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium cursor-pointer transition-colors"
-                        >
-                          Pay balance
-                        </button>
-                      )}
-                      {r.status === 'invoice_sent' && (
-                        <span className="shrink-0 text-xs text-amber-600">Check your email for the invoice</span>
-                      )}
-                    </div>
-                  ))}
+                    )
+                  })}
                 </div>
               </div>
             )
           })}
+        </>
+      )}
+
+      {activeTab === 'storage' && (
+        <>
+          {storageOrders.length === 0 && (
+            <p className="text-sm text-gray-400">No storage purchases yet. Add storage from your profile page to see it here.</p>
+          )}
 
           {/* Storage payment history */}
           {storageOrders.length > 0 && (

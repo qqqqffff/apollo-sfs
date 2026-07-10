@@ -17,14 +17,14 @@ import (
 
 const fileServerLinkColumns = `
 	l.id, l.token, l.username, l.user_id, l.server_id, l.drive_id,
-	l.enhanced_security, l.created_at, l.last_used_at, s.name`
+	l.enhanced_security, l.created_at, l.last_used_at, s.name, d.drive_type`
 
 func scanFileServerLink(scan func(dest ...any) error) (*models.FileServerLink, error) {
 	var l models.FileServerLink
 	var lastUsed sql.NullTime
 	if err := scan(
 		&l.ID, &l.Token, &l.Username, &l.UserID, &l.ServerID, &l.DriveID,
-		&l.EnhancedSecurity, &l.CreatedAt, &lastUsed, &l.ServerName,
+		&l.EnhancedSecurity, &l.CreatedAt, &lastUsed, &l.ServerName, &l.DriveType,
 	); err != nil {
 		return nil, err
 	}
@@ -44,7 +44,7 @@ func (q *Queries) CreateFileServerLink(ctx context.Context, l *models.FileServer
 			RETURNING *
 		)
 		SELECT `+fileServerLinkColumns+`
-		FROM ins l JOIN servers s ON s.id = l.server_id
+		FROM ins l JOIN servers s ON s.id = l.server_id JOIN drives d ON d.id = l.drive_id
 	`, l.Token, l.Username, l.UserID, l.ServerID, l.DriveID, l.EnhancedSecurity)
 	created, err := scanFileServerLink(row.Scan)
 	if err != nil {
@@ -58,7 +58,7 @@ func (q *Queries) CreateFileServerLink(ctx context.Context, l *models.FileServer
 func (q *Queries) GetFileServerLinkByToken(ctx context.Context, token string) (*models.FileServerLink, error) {
 	row := q.db.QueryRowContext(ctx, `
 		SELECT `+fileServerLinkColumns+`
-		FROM file_server_links l JOIN servers s ON s.id = l.server_id
+		FROM file_server_links l JOIN servers s ON s.id = l.server_id JOIN drives d ON d.id = l.drive_id
 		WHERE l.token = $1
 	`, token)
 	l, err := scanFileServerLink(row.Scan)
@@ -71,19 +71,19 @@ func (q *Queries) GetFileServerLinkByToken(ctx context.Context, token string) (*
 	return l, nil
 }
 
-// GetFileServerLinkByServer returns the user's link for a server, if any.
-func (q *Queries) GetFileServerLinkByServer(ctx context.Context, username string, serverID uuid.UUID) (*models.FileServerLink, error) {
+// GetFileServerLinkByDrive returns the user's link for a drive, if any.
+func (q *Queries) GetFileServerLinkByDrive(ctx context.Context, username string, driveID uuid.UUID) (*models.FileServerLink, error) {
 	row := q.db.QueryRowContext(ctx, `
 		SELECT `+fileServerLinkColumns+`
-		FROM file_server_links l JOIN servers s ON s.id = l.server_id
-		WHERE l.username = $1 AND l.server_id = $2
-	`, username, serverID)
+		FROM file_server_links l JOIN servers s ON s.id = l.server_id JOIN drives d ON d.id = l.drive_id
+		WHERE l.username = $1 AND l.drive_id = $2
+	`, username, driveID)
 	l, err := scanFileServerLink(row.Scan)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, err
 		}
-		return nil, fmt.Errorf("GetFileServerLinkByServer: %w", err)
+		return nil, fmt.Errorf("GetFileServerLinkByDrive: %w", err)
 	}
 	return l, nil
 }
@@ -92,7 +92,7 @@ func (q *Queries) GetFileServerLinkByServer(ctx context.Context, username string
 func (q *Queries) ListFileServerLinks(ctx context.Context, username string) ([]models.FileServerLink, error) {
 	rows, err := q.db.QueryContext(ctx, `
 		SELECT `+fileServerLinkColumns+`
-		FROM file_server_links l JOIN servers s ON s.id = l.server_id
+		FROM file_server_links l JOIN servers s ON s.id = l.server_id JOIN drives d ON d.id = l.drive_id
 		WHERE l.username = $1
 		ORDER BY l.created_at DESC
 	`, username)
@@ -266,44 +266,50 @@ func (q *Queries) ListFolderChildren(ctx context.Context, userID uuid.UUID, pare
 	return out, rows.Err()
 }
 
-// ListFilesByFolderOnServer returns the user's files inside folderID (nil =
-// root) that are stored on one of serverID's drives, name-ordered,
-// unpaginated. files has RLS: call through a ForUser transaction.
-func (q *Queries) ListFilesByFolderOnServer(ctx context.Context, userID uuid.UUID, folderID *uuid.UUID, serverID uuid.UUID) ([]models.File, error) {
+// ListFilesByFolderOnDrive returns the user's files inside folderID (nil =
+// root) that are stored on driveID, name-ordered, unpaginated. files has
+// RLS: call through a ForUser transaction.
+func (q *Queries) ListFilesByFolderOnDrive(ctx context.Context, userID uuid.UUID, folderID *uuid.UUID, driveID uuid.UUID) ([]models.File, error) {
 	rows, err := q.db.QueryContext(ctx, `
 		SELECT `+fileColumns+`
 		FROM files
 		WHERE user_id = $1
 		  AND (($2::uuid IS NULL AND folder_id IS NULL) OR folder_id = $2)
-		  AND drive_id IN (SELECT id FROM drives WHERE server_id = $3)
+		  AND drive_id = $3
 		ORDER BY name ASC
-	`, userID, uuidPtrToNull(folderID), serverID)
+	`, userID, uuidPtrToNull(folderID), driveID)
 	if err != nil {
-		return nil, fmt.Errorf("ListFilesByFolderOnServer: %w", err)
+		return nil, fmt.Errorf("ListFilesByFolderOnDrive: %w", err)
 	}
 	defer rows.Close()
 	var out []models.File
 	for rows.Next() {
 		f, err := scanFileRow(rows)
 		if err != nil {
-			return nil, fmt.Errorf("ListFilesByFolderOnServer scan: %w", err)
+			return nil, fmt.Errorf("ListFilesByFolderOnDrive scan: %w", err)
 		}
 		out = append(out, *f)
 	}
 	return out, rows.Err()
 }
 
-// DriveBelongsToServer reports whether driveID is one of serverID's drives.
-// drives has no RLS, so this is callable outside a ForUser transaction.
-func (q *Queries) DriveBelongsToServer(ctx context.Context, driveID, serverID uuid.UUID) (bool, error) {
-	var ok bool
-	err := q.db.QueryRowContext(ctx, `
-		SELECT EXISTS (SELECT 1 FROM drives WHERE id = $1 AND server_id = $2)
-	`, driveID, serverID).Scan(&ok)
+// GetDriveCapacityAndUsage reports driveID's total physical capacity and
+// userID's own bytes stored on it — the same per-drive figures shown on the
+// storage page (GetUserDrives), used here to report accurate WebDAV quota
+// properties instead of the account-wide quota. drives has no RLS, so this
+// is callable outside a ForUser transaction.
+func (q *Queries) GetDriveCapacityAndUsage(ctx context.Context, driveID, userID uuid.UUID) (capacityBytes, usedBytes int64, err error) {
+	err = q.db.QueryRowContext(ctx, `
+		SELECT d.capacity_bytes, COALESCE(SUM(f.size_bytes), 0)
+		FROM drives d
+		LEFT JOIN files f ON f.drive_id = d.id AND f.user_id = $2
+		WHERE d.id = $1
+		GROUP BY d.capacity_bytes
+	`, driveID, userID).Scan(&capacityBytes, &usedBytes)
 	if err != nil {
-		return false, fmt.Errorf("DriveBelongsToServer: %w", err)
+		return 0, 0, fmt.Errorf("GetDriveCapacityAndUsage: %w", err)
 	}
-	return ok, nil
+	return capacityBytes, usedBytes, nil
 }
 
 func uuidPtrToNull(p *uuid.UUID) uuid.NullUUID {

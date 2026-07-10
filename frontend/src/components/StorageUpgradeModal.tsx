@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useNavigate } from '@tanstack/react-router'
 import {
   MdBolt,
   MdCheckCircle,
@@ -12,6 +13,7 @@ import {
 } from 'react-icons/md'
 import { meQueryOptions } from '../api/me'
 import { listServers, pingServer, type PublicServer } from '../api/storage'
+import { useBillingConfig } from '../hooks/useBillingConfig'
 import {
   STORAGE_PLANS,
   CUSTOM_PLAN_ID,
@@ -24,13 +26,18 @@ import {
   createStorageOrder,
   customPriceCents,
   formatCents,
-  getBillingConfig,
+  listMyExpansionRequests,
   submitCustomRequest,
   type StorageType,
 } from '../api/billing'
 import { ApiError } from '../api/client'
 import { PayPalCheckoutOptions, CheckoutBackButton } from './PayPalCheckoutOptions'
 import { HostedCardFields } from './HostedCardFields'
+
+// Requests still working their way through review/provisioning — anything not
+// in this closed set counts as "in progress" for blocking a duplicate custom
+// request. Mirrors the closed-request check implied by orders.tsx's grouping.
+const CLOSED_EXPANSION_STATUSES = new Set(['completed', 'expired', 'refunded', 'rejected'])
 
 // Allocation threshold above which direct purchases on a server are blocked
 // and the user is steered to an expansion request. Mirrors the backend rule.
@@ -53,8 +60,7 @@ function formatSize(bytes: number): string {
   return `${(bytes / 1024).toFixed(1)} KB`
 }
 
-interface ServerWithPing extends PublicServer {
-  ping_ms: number | null
+interface ServerRow extends PublicServer {
   allocated_pct: number
   // One logical server can expose both tiers, yielding two rows with the SAME
   // server id (one per drive_type). Selecting by bare id always resolves to
@@ -75,30 +81,41 @@ type Phase = 'select' | 'purchased' | 'expansion_requested' | 'custom_submitted'
 
 export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Props) {
   const queryClient = useQueryClient()
+  const navigate = useNavigate()
   const { data: user } = useQuery(meQueryOptions)
 
-  const { data: config, isLoading: configLoading } = useQuery({
-    queryKey: ['billing', 'config'],
-    queryFn: getBillingConfig,
-    staleTime: 60 * 60 * 1000,
-  })
+  const { data: config, isLoading: configLoading } = useBillingConfig()
 
   const { data: servers, isLoading: serversLoading, error: serversError } = useQuery({
-    queryKey: ['storage', 'servers', 'with-ping'],
-    queryFn: async (): Promise<ServerWithPing[]> => {
+    queryKey: ['storage', 'servers'],
+    queryFn: async (): Promise<ServerRow[]> => {
       const list = await listServers()
-      return Promise.all(
-        list.map(async (s) => ({
-          ...s,
-          ping_ms: await pingServer(s.ping_url).catch(() => null),
-          allocated_pct: s.total_capacity_bytes > 0
-            ? ((s.total_capacity_bytes - s.available_bytes) / s.total_capacity_bytes) * 100
-            : 0,
-          row_key: `${s.id}:${s.drive_type}`,
-        })),
-      )
+      return list.map((s) => ({
+        ...s,
+        allocated_pct: s.total_capacity_bytes > 0
+          ? ((s.total_capacity_bytes - s.available_bytes) / s.total_capacity_bytes) * 100
+          : 0,
+        row_key: `${s.id}:${s.drive_type}`,
+      }))
     },
     staleTime: 60 * 1000,
+  })
+
+  // Single latency reading against the manager (the node that actually serves
+  // the API/frontend) rather than one ping per server row — every row's ping
+  // URL round-trips through the same manager-hosted API regardless of which
+  // storage tier it names, so per-row pings only ever showed the same number
+  // twice with sampling jitter, not a real fast-vs-standard difference.
+  const { data: managerPingMs } = useQuery({
+    queryKey: ['storage', 'manager-ping'],
+    queryFn: () => pingServer('/api/v1/health'),
+    staleTime: 30 * 1000,
+    retry: false,
+  })
+
+  const { data: myExpansionRequests } = useQuery({
+    queryKey: ['billing', 'expansion-requests'],
+    queryFn: listMyExpansionRequests,
   })
 
   const [storageType, setStorageType] = useState<StorageType>('nvme')
@@ -162,13 +179,33 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
   const isExpansion = !!selectedPlanId && !isCustom && !!selectedServer &&
     (serverAtCapacity || serverTypeMismatch || serverLacksCapacity)
 
+  // An already-open custom request for this exact server + storage type —
+  // submitting another would just duplicate manual review work, so the
+  // custom option is replaced with a link to the existing request instead.
+  const existingCustomRequest = useMemo(
+    () => (myExpansionRequests ?? []).find((r) =>
+      r.is_custom &&
+      r.server_id === selectedServer?.id &&
+      r.storage_type === storageType &&
+      !CLOSED_EXPANSION_STATUSES.has(r.status),
+    ),
+    [myExpansionRequests, selectedServer, storageType],
+  )
+
+  // Clear an active custom selection if it becomes blocked underneath the
+  // user (e.g. they had it selected, then switched server/tier onto a
+  // combination that already has an in-progress custom request).
+  useEffect(() => {
+    if (isCustom && existingCustomRequest) setSelectedPlanId(null)
+  }, [isCustom, existingCustomRequest])
+
   // The server list holds one row per (server, drive_type) — a server exposing
-  // both tiers yields two rows with the same id (see ServerWithPing.row_key).
+  // both tiers yields two rows with the same id (see ServerRow.row_key).
   // Group them back into one entry per physical server for the picker so
   // e.g. "NH-0001" appears once, with a badge per tier it actually has,
   // instead of as two separate list entries.
   const groupedServers = useMemo(() => {
-    const byId = new Map<string, { id: string; name: string; rows: ServerWithPing[] }>()
+    const byId = new Map<string, { id: string; name: string; rows: ServerRow[] }>()
     for (const s of servers ?? []) {
       const group = byId.get(s.id)
       if (group) group.rows.push(s)
@@ -432,7 +469,12 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
 
               {/* Server picker */}
               <div>
-                <SectionLabel>Server</SectionLabel>
+                <div className="flex items-center justify-between">
+                  <SectionLabel>Server</SectionLabel>
+                  {managerPingMs != null && (
+                    <span className="text-[11px] text-gray-400 mb-2">{managerPingMs} ms to server</span>
+                  )}
+                </div>
                 {serversLoading ? (
                   <p className="text-sm text-gray-400 m-0">Finding servers…</p>
                 ) : serversError || !servers || servers.length === 0 ? (
@@ -459,7 +501,6 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
                               )}
                             </div>
                             <p className="text-xs text-gray-400 m-0 mt-0.5">
-                              {selectedServer.ping_ms != null ? `${selectedServer.ping_ms} ms · ` : ''}
                               {formatSize(selectedServer.available_bytes)} available · {selectedServer.allocated_pct.toFixed(0)}% allocated
                             </p>
                           </>
@@ -516,7 +557,6 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
                                   ))}
                                 </div>
                                 <p className="text-xs text-gray-400 m-0 mt-0.5">
-                                  {group.rows[0]?.ping_ms != null ? `${group.rows[0].ping_ms} ms · ` : ''}
                                   {group.rows
                                     .map((s) => `${s.drive_type === 'nvme' ? 'Fast' : 'Standard'} ${formatSize(s.available_bytes)} available · ${s.allocated_pct.toFixed(0)}% allocated`)
                                     .join('  ·  ')}
@@ -598,50 +638,68 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
                   })}
 
                   {/* Custom capacity */}
-                  <button
-                    onClick={() => setSelectedPlanId(CUSTOM_PLAN_ID)}
-                    className={`flex flex-col px-4 py-3 rounded-xl border cursor-pointer text-left transition-colors ${
-                      isCustom ? 'border-blue-600 bg-blue-50' : 'border-gray-200 bg-white hover:bg-gray-50'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between w-full">
-                      <div>
-                        <span className={`text-sm font-semibold ${isCustom ? 'text-blue-700' : 'text-gray-800'}`}>
-                          Custom {isCustom ? `— ${formatSize(customBytes)}` : ''}
-                        </span>
-                        <p className="text-xs text-gray-400 m-0 mt-0.5">
-                          Above 1 TB, up to 10 PB · manually reviewed within 3 business days
-                        </p>
-                      </div>
-                      <span className={`text-sm font-semibold text-right ${isCustom ? 'text-blue-700' : 'text-gray-600'}`}>
-                        {isCustom
-                          ? <>est. {formatCents(customPriceCents(customBytes, storageType))}</>
-                          : `est. from ${formatCents(customPriceCents(2 * TIB, storageType))}`}
-                      </span>
+                  {existingCustomRequest ? (
+                    <div className="flex flex-col px-4 py-3 rounded-xl border border-dashed border-gray-300 bg-gray-50">
+                      <span className="text-sm font-semibold text-gray-800">Custom</span>
+                      <p className="text-xs text-gray-500 m-0 mt-0.5">
+                        You already have an in-progress custom request for this server and storage type.
+                      </p>
+                      <button
+                        onClick={() => {
+                          onClose()
+                          navigate({ to: '/client/orders' as never, search: { tab: 'requests' } as never })
+                        }}
+                        className="self-start text-xs text-blue-600 hover:text-blue-700 bg-transparent border-0 p-0 mt-2 cursor-pointer font-medium transition-colors"
+                      >
+                        View request in your orders →
+                      </button>
                     </div>
-                    {isCustom && (
-                      <div className="mt-3 w-full" onClick={(e) => e.stopPropagation()}>
-                        <input
-                          type="range"
-                          min={0}
-                          max={CUSTOM_TIB_STOPS.length - 1}
-                          step={1}
-                          value={customStopIdx}
-                          onChange={(e) => setCustomStopIdx(Number(e.target.value))}
-                          className="w-full cursor-pointer accent-blue-600"
-                        />
-                        <div className="flex justify-between text-[10px] text-gray-400">
-                          <span>2 TB</span>
-                          <span>10 PB</span>
+                  ) : (
+                    <button
+                      onClick={() => setSelectedPlanId(CUSTOM_PLAN_ID)}
+                      className={`flex flex-col px-4 py-3 rounded-xl border cursor-pointer text-left transition-colors ${
+                        isCustom ? 'border-blue-600 bg-blue-50' : 'border-gray-200 bg-white hover:bg-gray-50'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between w-full">
+                        <div>
+                          <span className={`text-sm font-semibold ${isCustom ? 'text-blue-700' : 'text-gray-800'}`}>
+                            Custom {isCustom ? `— ${formatSize(customBytes)}` : ''}
+                          </span>
+                          <p className="text-xs text-gray-400 m-0 mt-0.5">
+                            Above 1 TB, up to 10 PB · manually reviewed within 3 business days
+                          </p>
                         </div>
-                        <p className="text-[11px] text-gray-400 m-0 mt-1">
-                          Estimated at {formatCents(CUSTOM_PER_TIB_CENTS[storageType])} per TB.
-                          The final price is confirmed by invoice after a 3-business-day manual review —
-                          no payment is taken now.
-                        </p>
+                        <span className={`text-sm font-semibold text-right ${isCustom ? 'text-blue-700' : 'text-gray-600'}`}>
+                          {isCustom
+                            ? <>est. {formatCents(customPriceCents(customBytes, storageType))}</>
+                            : `est. from ${formatCents(customPriceCents(2 * TIB, storageType))}`}
+                        </span>
                       </div>
-                    )}
-                  </button>
+                      {isCustom && (
+                        <div className="mt-3 w-full" onClick={(e) => e.stopPropagation()}>
+                          <input
+                            type="range"
+                            min={0}
+                            max={CUSTOM_TIB_STOPS.length - 1}
+                            step={1}
+                            value={customStopIdx}
+                            onChange={(e) => setCustomStopIdx(Number(e.target.value))}
+                            className="w-full cursor-pointer accent-blue-600"
+                          />
+                          <div className="flex justify-between text-[10px] text-gray-400">
+                            <span>2 TB</span>
+                            <span>10 PB</span>
+                          </div>
+                          <p className="text-[11px] text-gray-400 m-0 mt-1">
+                            Estimated at {formatCents(CUSTOM_PER_TIB_CENTS[storageType])} per TB.
+                            The final price is confirmed by invoice after a 3-business-day manual review —
+                            no payment is taken now.
+                          </p>
+                        </div>
+                      )}
+                    </button>
+                  )}
                 </div>
               </div>
 

@@ -46,6 +46,10 @@ function RouteComponent() {
     mutationFn: logout,
     onSettled: async () => {
       clearSkipDeleteCookie()
+      // Flip the shared `me` query synchronously before clearing the cache —
+      // see the comment in __root.tsx's session-expired handler for why
+      // clear() alone can leave `isAuthenticated` observers stale.
+      queryClient.setQueryData(meQueryOptions.queryKey, null)
       queryClient.clear()
       navigate({ to: '/login', search: { social_error: undefined, link_provider: undefined, link_email: undefined, link_username: undefined } })
     },

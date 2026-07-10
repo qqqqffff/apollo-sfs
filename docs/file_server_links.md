@@ -1,11 +1,21 @@
 # File Server Links (Premium WebDAV Mounts)
 
-Premium users can generate one mount link per storage server they own capacity
-on. The link (`https://apollo-sfs.com/dav/<token>`) mounts that server as a
-network drive using the WebDAV protocol, which is natively supported by
-Windows (Map Network Drive), macOS Finder (Connect to Server), iOS Files
-(Connect to Server), Android WebDAV file managers, and Linux (GNOME Files
-`davs://` or `davfs2`).
+Premium users can generate one mount link per **drive** — a single server +
+storage tier (fast/NVMe or standard/HDD) — they own capacity on. A server
+that exposes both tiers to a user yields two independently mountable links,
+one per drive. The link (`https://apollo-sfs.com/dav/<token>`) mounts that
+drive as a network drive using the WebDAV protocol, which is natively
+supported by Windows (Map Network Drive), macOS Finder (Connect to Server),
+iOS Files (Connect to Server), Android WebDAV file managers, and Linux
+(GNOME Files `davs://` or `davfs2`).
+
+The token is human-readable — `<server-slug>-<tier>-<8 random chars>`, e.g.
+`attic-fast-a3k9zq2m` — rather than an opaque blob, since it's what the user
+sees as the network location once mounted (Explorer's drive properties,
+Finder's sidebar, `net use` output, etc.). It isn't a bearer secret on its
+own: the random suffix (36^8 combinations) only needs to avoid collisions,
+since every DAV request still requires the owner's login credentials
+regardless of what the token looks like.
 
 ## Security model
 
@@ -27,14 +37,22 @@ Windows (Map Network Drive), macOS Finder (Connect to Server), iOS Files
   encrypted in MinIO and are only ever decrypted and streamed — never
   executed or rendered server-side. Management verbs touch only metadata
   rows and MinIO blobs.
-- **Server-scoped.** The mount exposes only files stored on the link's
-  server's drives; uploads and copies are hard-pinned to the owner's
-  allocated drive on that server (no fallback routing), and only files on
-  that server can be deleted, moved or overwritten. Folders belong to the
-  user's global tree, so folder renames/moves apply account-wide, and a
-  folder DELETE keeps any folder that still holds files on other servers.
-- **One link per server**, enforced by a unique index. Attempting to create a
-  second link returns the existing one.
+- **Drive-scoped.** The mount exposes only files stored on the link's exact
+  drive (not other drives/tiers on the same server); uploads and copies are
+  hard-pinned to that drive (no fallback routing), and only files on it can
+  be deleted, moved or overwritten. Folders belong to the user's global tree,
+  so folder renames/moves apply account-wide, and a folder DELETE keeps any
+  folder that still holds files on other drives.
+- **One link per drive**, enforced by a unique index on (username, drive_id).
+  Attempting to create a second link for the same drive returns the existing
+  one; a server exposing both a fast and standard tier to a user allows one
+  link per tier.
+- **Reported capacity matches the drive.** The mount root reports RFC 4331
+  `quota-used-bytes`/`quota-available-bytes` computed from that specific
+  drive's physical capacity and the user's own usage on it (the same figures
+  shown on the storage page) — so a fast-tier and standard-tier mount on the
+  same server correctly show different capacities in Windows/macOS drive
+  properties instead of both echoing one account-wide number.
 - **Destroyed on premium loss or deletion.** Deleting a link removes the row
   (locations cascade); the auth middleware's premium sync and the payment
   refund path both destroy all of a user's links when premium lapses. Every
@@ -56,13 +74,13 @@ owner's account, which is the second factor. Verification tokens expire after
 
 | Piece | Location |
 |-------|----------|
-| Schema | `db/35_file_server_links.sql`, migration `db/migrations/033_file_server_links.sql` |
+| Schema | `db/35_file_server_links.sql`, migrations `db/migrations/033_file_server_links.sql` (initial) + `044_file_server_links_per_drive.sql` (per-drive unique index) |
 | DAV handler | `api/routes/dav/handler.go` + `api/routes/dav/manage.go` (registered at `/dav/:token`, outside `/api/v1`) |
 | Link service | `api/routes/services/file_server_link.go` |
 | Management API | `GET/POST/PATCH/DELETE /api/v1/me/file-server-links[...]`, `POST .../verify-location` |
 | Verification email | `api/templates/file_server_verify_location.html` |
 | nginx | `location /dav/` block in `nginx/conf.d/apollo-sfs.conf` (streamed uploads, long timeouts) |
-| Frontend | Profile page card + `frontend/src/components/FileServerLinkModal.tsx` (server picker, per-device mount guide accordion, enhanced-security toggle), `frontend/src/routes/verify-location.$token.tsx` |
+| Frontend | Profile page card (`FileServerLinksCard.tsx`, shows a Fast/Standard tier badge per link) + `frontend/src/components/FileServerLinkModal.tsx` (server + tier picker, per-device mount guide accordion, enhanced-security toggle), `frontend/src/routes/verify-location.$token.tsx` |
 
 The creation modal shows a personalized mount guide (accordion, auto-expanded
 on first link) based on the detected device OS — Windows, macOS, iOS, Android

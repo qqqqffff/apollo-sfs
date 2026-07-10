@@ -51,10 +51,15 @@ type ServerExpansionRequest struct {
 	ServerState string `json:"server_state"`
 	UserEmail   string `json:"user_email"`
 
-	// Latest invoice summary, populated only by the admin listing query for
-	// custom requests.
+	// Latest invoice summary, populated by the admin listing query and the
+	// user's own listing query, for custom requests.
 	InvoiceNumber      *string    `json:"invoice_number,omitempty"`
 	InvoiceStatus      *string    `json:"invoice_status,omitempty"`
 	InvoiceSentAt      *time.Time `json:"invoice_sent_at,omitempty"`
 	InvoiceAcceptDueAt *time.Time `json:"invoice_accept_due_at,omitempty"`
+	// InvoiceReviewToken lets the owning user's own orders page link straight
+	// to the token-gated /invoice/:token review page in-app, instead of
+	// relying on the emailed link. Only set when the invoice was created with
+	// IncludeReviewLink=true.
+	InvoiceReviewToken *string `json:"invoice_review_token,omitempty"`
 }

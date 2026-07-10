@@ -41,7 +41,7 @@ const GUIDES: Record<DeviceOS, string[]> = {
   windows: [
     'Open File Explorer and right-click "This PC", then choose "Map network drive…".',
     'Pick a drive letter, paste the link below into "Folder", and tick "Connect using different credentials".',
-    'Click Finish, then enter your Apollo SFS username and password when prompted.',
+    'Click Finish, then sign in with your Apollo SFS username (not your email address) and password when prompted.',
     'The file server appears as a network drive — drag files onto it to upload, or copy them off it to download.',
   ],
   macos: [
@@ -111,6 +111,23 @@ function MountGuide({ mountUrl, defaultOpen }: { mountUrl: string | null; defaul
               <li key={i} className="text-xs text-gray-600 leading-relaxed">{step}</li>
             ))}
           </ol>
+          {os === 'windows' && (
+            <div className="text-[11px] text-gray-500 bg-amber-50 border border-amber-100 rounded-md px-2.5 py-2 space-y-1">
+              <p className="font-semibold text-amber-700 m-0">Troubleshooting</p>
+              <p className="m-0">
+                <strong>"Windows cannot access… Error 0x80070043, the network name cannot be found"</strong> — the
+                WebClient service (Windows' built-in WebDAV client) isn't running. Open <code>services.msc</code>,
+                find <strong>WebClient</strong>, set it to Automatic, and start it, then retry.
+              </p>
+              <p className="m-0">
+                <strong>Credentials keep getting rejected, or Windows shows "Microsoft Account\your@email"</strong> —
+                sign in with your Apollo SFS <strong>username</strong>, not your email address. Typing an email
+                address that matches a Microsoft account signed into the PC can cause Windows to substitute its own
+                account instead of sending what you typed. If a wrong entry got cached, remove it first via Control
+                Panel → Credential Manager → Windows Credentials (look for an entry for apollo-sfs.com).
+              </p>
+            </div>
+          )}
           {mountUrl && (
             <div className="text-[11px] text-gray-500 bg-gray-50 rounded-md px-2 py-1.5 font-mono break-all">
               {mountUrl}
@@ -130,8 +147,14 @@ function MountGuide({ mountUrl, defaultOpen }: { mountUrl: string | null; defaul
 
 interface Props {
   onClose: () => void
-  // Links that already exist, so the picker can flag servers that have one.
+  // Links that already exist, so the picker can flag drives that have one.
   existingLinks: FileServerLink[]
+}
+
+// tierLabel matches the Fast/Standard convention used elsewhere in the app
+// (see the storage upgrade and admin drive-usage views).
+function tierLabel(driveType: 'nvme' | 'hdd'): string {
+  return driveType === 'nvme' ? 'Fast' : 'Standard'
 }
 
 export function copyToClipboard(text: string): Promise<void> {
@@ -154,13 +177,13 @@ export function FileServerLinkModal({ onClose, existingLinks }: Props) {
   // First-time creation (no links existed before) auto-expands the guide.
   const isFirstLink = existingLinks.length === 0
 
-  const linkByServer = useMemo(() => {
+  const linkByDrive = useMemo(() => {
     const m = new Map<string, FileServerLink>()
-    for (const l of existingLinks) m.set(l.server_id, l)
+    for (const l of existingLinks) m.set(l.drive_id, l)
     return m
   }, [existingLinks])
 
-  const existingForSelected = selected ? linkByServer.get(selected) : undefined
+  const existingForSelected = selected ? linkByDrive.get(selected) : undefined
 
   const createMutation = useMutation({
     mutationFn: () => createFileServerLink(selected!, enhanced),
@@ -215,9 +238,10 @@ export function FileServerLinkModal({ onClose, existingLinks }: Props) {
           ) : (
             <>
               <p className="text-xs text-gray-500 m-0">
-                Pick one of your storage servers. The link mounts that server as a network
-                drive on your device — you'll sign in with your Apollo SFS credentials when
-                connecting. Only one link can exist per server.
+                Pick one of your storage servers and its tier. The link mounts that specific
+                drive as a network drive on your device — you'll sign in with your Apollo SFS
+                credentials when connecting. A server exposing both Fast and Standard tiers to
+                you can have a separate link for each; only one link can exist per drive.
               </p>
 
               {isLoading && <p className="text-xs text-gray-400">Loading your servers…</p>}
@@ -227,13 +251,13 @@ export function FileServerLinkModal({ onClose, existingLinks }: Props) {
 
               <div className="space-y-2">
                 {servers.map((srv: MyServer) => {
-                  const has = linkByServer.has(srv.server_id)
-                  const isSel = selected === srv.server_id
+                  const has = linkByDrive.has(srv.drive_id)
+                  const isSel = selected === srv.drive_id
                   return (
                     <button
-                      key={srv.server_id}
+                      key={srv.drive_id}
                       type="button"
-                      onClick={() => { setSelected(srv.server_id); setError(null) }}
+                      onClick={() => { setSelected(srv.drive_id); setError(null) }}
                       className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg border text-left transition-colors cursor-pointer ${
                         isSel ? 'border-blue-500 bg-blue-50/50' : 'border-gray-200 bg-white hover:border-gray-300'
                       }`}
@@ -241,6 +265,15 @@ export function FileServerLinkModal({ onClose, existingLinks }: Props) {
                       <span className="flex items-center gap-2 min-w-0">
                         <MdDns className={`shrink-0 ${isSel ? 'text-blue-600' : 'text-gray-400'}`} />
                         <span className="text-sm text-gray-800 truncate">{srv.name}</span>
+                        <span
+                          className={`text-[10px] font-medium rounded px-1.5 py-0.5 shrink-0 ${
+                            srv.drive_type === 'nvme'
+                              ? 'text-emerald-700 bg-emerald-100'
+                              : 'text-sky-700 bg-sky-100'
+                          }`}
+                        >
+                          {tierLabel(srv.drive_type)}
+                        </span>
                         {srv.is_primary && (
                           <span className="text-[10px] font-medium text-blue-600 bg-blue-50 rounded px-1.5 py-0.5">primary</span>
                         )}
@@ -258,7 +291,7 @@ export function FileServerLinkModal({ onClose, existingLinks }: Props) {
               {existingForSelected ? (
                 <div className="space-y-3">
                   <p className="text-xs text-amber-600 m-0">
-                    A link already exists for this server. You can copy it below, or delete it
+                    A link already exists for this drive. You can copy it below, or delete it
                     from your profile page to create a new one.
                   </p>
                   <LinkDisplay link={existingForSelected} />

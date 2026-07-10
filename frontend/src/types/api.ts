@@ -38,6 +38,8 @@ export interface APIKey {
   username: string
   name: string
   key_prefix: string
+  // Requests/minute this key is allowed to make against the SFS API.
+  rate_limit_per_min: number
   created_at: string
   last_used_at: string | null
   expires_at: string | null
@@ -45,6 +47,16 @@ export interface APIKey {
   scopes?: APIKeyScope[]
   matching_operations?: APIKeyOperation[]
 }
+
+// Global ceiling no key's rate limit may exceed — mirrors
+// services.MaxRateLimitPerMin on the backend.
+export const API_KEY_MAX_RATE_LIMIT_PER_MIN = 1000
+export const API_KEY_DEFAULT_RATE_LIMIT_PER_MIN = 300
+
+// Longest expiry a key can be given (10 years) — mirrors the backend's
+// binding max on ttl_days and services.MaxAPIKeyTTL. A ttl_days of 0 (no
+// expiry) is unaffected by this cap.
+export const API_KEY_MAX_TTL_DAYS = 3650
 
 export interface IssuedAPIKey {
   raw_key: string

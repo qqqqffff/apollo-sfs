@@ -16,7 +16,7 @@ import (
 // login credentials.
 
 type createFileServerLinkRequest struct {
-	ServerID         string `json:"server_id" binding:"required"`
+	DriveID          string `json:"drive_id" binding:"required"`
 	EnhancedSecurity bool   `json:"enhanced_security"`
 }
 
@@ -48,9 +48,9 @@ func (h *Handler) CreateFileServerLink(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	serverID, err := uuid.Parse(req.ServerID)
+	driveID, err := uuid.Parse(req.DriveID)
 	if err != nil {
-		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid server id"})
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid drive id"})
 		return
 	}
 	userID, err := uuid.Parse(c.GetString("userID"))
@@ -58,9 +58,9 @@ func (h *Handler) CreateFileServerLink(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "invalid user id"})
 		return
 	}
-	link, created, err := h.fileServerLinks.Create(c.Request.Context(), userID, user.Username, serverID, req.EnhancedSecurity)
+	link, created, err := h.fileServerLinks.Create(c.Request.Context(), userID, user.Username, driveID, req.EnhancedSecurity)
 	if err != nil {
-		if errors.Is(err, services.ErrLinkServerNotOwned) {
+		if errors.Is(err, services.ErrLinkDriveNotOwned) {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": err.Error()})
 			return
 		}

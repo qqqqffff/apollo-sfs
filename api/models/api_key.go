@@ -15,10 +15,13 @@ type APIKey struct {
 	Name       string     `json:"name"         db:"name"`
 	KeyPrefix  string     `json:"key_prefix"   db:"key_prefix"`
 	KeyHash    string     `json:"-"            db:"key_hash"`
-	CreatedAt  time.Time  `json:"created_at"   db:"created_at"`
-	LastUsedAt *time.Time `json:"last_used_at" db:"last_used_at"`
-	ExpiresAt  *time.Time `json:"expires_at"   db:"expires_at"`
-	RevokedAt  *time.Time `json:"revoked_at"   db:"revoked_at"`
+	// RateLimitPerMin caps requests/minute this key may make against the SFS
+	// API (1-1000, enforced by routes/middleware/apikey.go).
+	RateLimitPerMin int        `json:"rate_limit_per_min" db:"rate_limit_per_min"`
+	CreatedAt       time.Time  `json:"created_at"   db:"created_at"`
+	LastUsedAt      *time.Time `json:"last_used_at" db:"last_used_at"`
+	ExpiresAt       *time.Time `json:"expires_at"   db:"expires_at"`
+	RevokedAt       *time.Time `json:"revoked_at"   db:"revoked_at"`
 
 	// Scopes is populated by ListAPIKeys / GetAPIKey when requested.
 	Scopes []APIKeyScope `json:"scopes,omitempty"`

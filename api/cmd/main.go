@@ -394,10 +394,11 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 
 	// ── SFS S3-like API (API-key auth, premium only) ─────────────────────────
 	// Authenticated via Authorization: Bearer <sfs_..._...> (NOT cookie).
-	// IPRateLimit runs first (anti-stuffing); per-key limit could be added
-	// after RequireAPIKey but a single shared limit is sufficient for v1.
+	// mw.RateLimit() runs first (anti-stuffing, shared per-IP); the per-key
+	// limit (owner-configurable up to 1000/min) runs after RequireAPIKey
+	// since it needs the resolved key row.
 	sfsGroup := v1.Group("/sfs")
-	sfsGroup.Use(mw.RateLimit(), apiKeyMW.RequireAPIKey(), apiKeyMW.RequirePremiumAPI())
+	sfsGroup.Use(mw.RateLimit(), apiKeyMW.RequireAPIKey(), apiKeyMW.RequirePremiumAPI(), apiKeyMW.RequireKeyRateLimit())
 	{
 		sfsGroup.POST("/buckets/:bucket_id/put", sfsHandler.Put)
 		sfsGroup.POST("/buckets/:bucket_id/get", sfsHandler.Get)
@@ -542,6 +543,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		// non-premium callers receive 402 from the handler.
 		protected.GET("/me/api-keys", h.ListAPIKeys)
 		protected.POST("/me/api-keys", h.CreateAPIKey)
+		protected.PATCH("/me/api-keys/:id", h.UpdateAPIKey)
 		protected.DELETE("/me/api-keys/:id", h.RevokeAPIKey)
 
 		// File-server mount links (premium WebDAV feature). Premium users

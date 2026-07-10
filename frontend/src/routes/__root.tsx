@@ -3,6 +3,7 @@ import { useEffect, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import type { QueryClient } from '@tanstack/react-query'
 import { AuthContext, AuthProvider, useAuth } from '../auth'
+import { meQueryOptions } from '../api/me'
 import { AppIcon } from '../components/AppIcon'
 import { clearSkipDeleteCookie } from '../components/DeleteConfirmModal'
 import { NotificationProvider, useNotification } from '../context/NotificationContext'
@@ -50,6 +51,13 @@ function RootLayout() {
       if (window.location.pathname === '/login') return
       wasAuthenticated.current = false
       clearSkipDeleteCookie()
+      // Synchronously flip every `useQuery(meQueryOptions)` observer to
+      // logged-out *before* clearing the cache. clear() alone removes the
+      // query and leaves mounted observers to notice and refetch on their
+      // own — that refetch races the /login route's own beforeLoad fetch for
+      // the same key, and the observer can end up never picking up the
+      // failure, leaving `isAuthenticated` stuck true until a full reload.
+      queryClient.setQueryData(meQueryOptions.queryKey, null)
       queryClient.clear()
       notify('error', 'Your session has expired. Please sign in again.')
       navigate({ to: '/login', search: { social_error: undefined, link_provider: undefined, link_email: undefined, link_username: undefined } })

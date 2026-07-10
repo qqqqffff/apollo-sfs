@@ -540,7 +540,7 @@ func (h *Handler) gatherNotificationItems(ctx context.Context, username string, 
 				Kind:      "capacity_provisioned",
 				Title:     "Additional capacity provisioned",
 				Body:      fmt.Sprintf("%s of %s storage on %s is now available on your account.", capacity, tier, r.ServerName),
-				Link:      "/client/orders",
+				Link:      "/client/orders?tab=requests",
 				CreatedAt: provisionedAt,
 			})
 			if remaining := r.FullPriceCents - r.DepositAmountCents; remaining > 0 {
@@ -549,12 +549,12 @@ func (h *Handler) gatherNotificationItems(ctx context.Context, username string, 
 					Kind:      "payment_required",
 					Title:     "Payment required",
 					Body:      fmt.Sprintf("The remaining balance of %s for your %s expansion is due.", formatCentsShort(remaining), capacity),
-					Link:      "/client/orders?pay=" + r.ID.String(),
+					Link:      "/client/orders?tab=requests&pay=" + r.ID.String(),
 					CreatedAt: provisionedAt,
 				})
 			}
 		case "invoice_sent":
-			link := "/client/orders"
+			link := "/client/orders?tab=requests"
 			if inv, err := h.queries.GetLatestExpansionInvoice(ctx, r.ID); err == nil && inv != nil && inv.ReviewToken != nil {
 				link = "/invoice/" + *inv.ReviewToken
 			}

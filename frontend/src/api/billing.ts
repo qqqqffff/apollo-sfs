@@ -227,11 +227,14 @@ export interface ExpansionRequest {
   completed_at: string | null
   cancellation_reason: string | null
   paypal_capture_id: string | null
-  // Latest invoice summary (admin listing, custom requests only).
+  // Latest invoice summary (custom requests only).
   invoice_number?: string
   invoice_status?: string
   invoice_sent_at?: string
   invoice_accept_due_at?: string
+  // Set only when the invoice was created with a review link — lets the
+  // owning user's orders page link straight to /invoice/:token in-app.
+  invoice_review_token?: string
 }
 
 export async function listMyExpansionRequests(): Promise<ExpansionRequest[]> {

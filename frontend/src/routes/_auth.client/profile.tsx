@@ -502,7 +502,7 @@ function ExpansionRequestsCard() {
       <div className="flex items-center justify-between mb-1">
         <h3 className="text-sm font-semibold text-gray-800 m-0">Capacity expansion requests</h3>
         <button
-          onClick={() => navigate({ to: '/client/orders' as never })}
+          onClick={() => navigate({ to: '/client/orders' as never, search: { tab: 'requests' } as never })}
           className="text-xs text-blue-600 hover:text-blue-700 bg-transparent border-0 p-0 cursor-pointer font-medium transition-colors"
         >
           View all orders
@@ -803,6 +803,10 @@ function UsernameRow({ currentUsername }: { currentUsername: string }) {
       // The current token still holds the old username; sign out so the next
       // login mints a token with the new identity.
       try { await logout() } catch { /* ignore — redirect regardless */ }
+      // Flip the shared `me` query synchronously before clearing the cache —
+      // see the comment in __root.tsx's session-expired handler for why
+      // clear() alone can leave `isAuthenticated` observers stale.
+      queryClient.setQueryData(meQueryOptions.queryKey, null)
       queryClient.clear()
       navigate({ to: '/login', search: { social_error: undefined, link_provider: undefined, link_email: undefined, link_username: undefined } })
     },

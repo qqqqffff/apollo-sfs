@@ -8,11 +8,16 @@ export interface User {
   is_admin: boolean
   is_premium: boolean
   premium_granted_at: string | null
-  // True when the user has an active premium payment of their own — distinct
-  // from is_premium, which is also true for every admin regardless of
-  // whether they ever paid. Lets the UI show a separate Premium badge
-  // alongside Admin only when an admin actually completed a purchase.
-  premium_purchased: boolean
+  // True when the user has an active/suspended premium subscription of their
+  // own — distinct from is_premium, which is also true for every admin
+  // regardless of whether they ever subscribed. Lets the UI show a separate
+  // Premium badge alongside Admin only when an admin actually subscribed, and
+  // gates the real upgrade flow's visibility.
+  premium_subscribed: boolean
+  // Present only when premium_subscribed is true.
+  premium_environment?: 'sandbox' | 'live'
+  premium_plan?: 'monthly' | 'annual'
+  premium_current_period_end?: string | null
   active_ban?: UserBan | null
   linked_providers: string[]
   // Admin's session-scoped sandbox-payments toggle (resets on logout/session

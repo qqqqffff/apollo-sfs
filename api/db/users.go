@@ -107,9 +107,9 @@ func (q *Queries) ListUsers(ctx context.Context, in PageInput) (*PageResult[mode
 	}
 
 	// Include each user's active ban (if any) via a lateral join, plus whether
-	// they have an active premium payment of their own (see
-	// models.User.PremiumPurchased) so the frontend can tell an admin who
-	// actually paid for premium apart from one who only has it implicitly.
+	// they have an active premium subscription of their own (see
+	// models.User.PremiumSubscribed) so the frontend can tell an admin who
+	// actually subscribed apart from one who only has premium implicitly.
 	// Columns are fully qualified with u. to avoid ambiguity with user_bans.username.
 	rows, err := q.db.QueryContext(ctx, `
 		SELECT u.username, u.email, u.encrypted_key, u.key_nonce, u.master_key_version,
@@ -118,10 +118,9 @@ func (q *Queries) ListUsers(ctx context.Context, in PageInput) (*PageResult[mode
 		       b.id, b.ban_type, b.violation_code, b.comments, b.banned_by,
 		       b.banned_at, b.expires_at, b.pardoned_at, b.pardoned_by,
 		       EXISTS (
-		         SELECT 1 FROM payments p
-		         WHERE p.username = u.username AND p.status = 'captured'
-		           AND p.allocation_reverted_at IS NULL
-		       ) AS premium_purchased
+		         SELECT 1 FROM premium_subscriptions ps
+		         WHERE ps.username = u.username AND ps.status IN ('active', 'suspended')
+		       ) AS premium_subscribed
 		FROM   users u
 		LEFT JOIN LATERAL (
 		  SELECT * FROM user_bans
@@ -160,15 +159,15 @@ func scanUserWithBanRow(rows *sql.Rows) (*models.User, error) {
 	var lastSeenAt, premiumGrantedAt sql.NullTime
 	// Ban columns — all nullable because of the LEFT JOIN.
 	var (
-		banID            sql.NullInt64
-		banType          sql.NullString
-		violationCode    sql.NullString
-		comments         sql.NullString
-		bannedBy         sql.NullString
-		bannedAt         sql.NullTime
-		expiresAt        sql.NullTime
-		pardonedAt       sql.NullTime
-		pardonedBy       sql.NullString
+		banID         sql.NullInt64
+		banType       sql.NullString
+		violationCode sql.NullString
+		comments      sql.NullString
+		bannedBy      sql.NullString
+		bannedAt      sql.NullTime
+		expiresAt     sql.NullTime
+		pardonedAt    sql.NullTime
+		pardonedBy    sql.NullString
 	)
 	err := rows.Scan(
 		&u.Username, &u.Email, &u.EncryptedKey, &u.KeyNonce, &u.MasterKeyVersion,
@@ -176,7 +175,7 @@ func scanUserWithBanRow(rows *sql.Rows) (*models.User, error) {
 		&u.IsPremium, &premiumGrantedAt,
 		&banID, &banType, &violationCode, &comments, &bannedBy,
 		&bannedAt, &expiresAt, &pardonedAt, &pardonedBy,
-		&u.PremiumPurchased,
+		&u.PremiumSubscribed,
 	)
 	if err != nil {
 		return nil, err
@@ -267,24 +266,6 @@ func (q *Queries) SetUserPremium(ctx context.Context, username string, isPremium
 		return fmt.Errorf("SetUserPremium %q: %w", username, err)
 	}
 	return nil
-}
-
-// HasActivePremiumPurchase reports whether username has an active (captured,
-// not refunded or allocation-reverted) premium payment of their own. See
-// models.User.PremiumPurchased — used by the Me handler so an admin's own
-// profile can distinguish a real purchase from admin-implied premium.
-func (q *Queries) HasActivePremiumPurchase(ctx context.Context, username string) (bool, error) {
-	var purchased bool
-	err := q.db.QueryRowContext(ctx, `
-		SELECT EXISTS (
-			SELECT 1 FROM payments
-			WHERE username = $1 AND status = 'captured' AND allocation_reverted_at IS NULL
-		)
-	`, username).Scan(&purchased)
-	if err != nil {
-		return false, fmt.Errorf("HasActivePremiumPurchase %q: %w", username, err)
-	}
-	return purchased, nil
 }
 
 // UpdateUsername renames a user in the app DB. The caller must also rename the

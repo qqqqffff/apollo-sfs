@@ -302,19 +302,31 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	adminHandler.SetPayPalClient(paypalClient)
 	paymentSvc := services.NewPaymentService(queries, authSvc)
 	paymentsHandler := payments.NewHandler(paypalClients, paymentSvc, queries, payments.Config{
-		AmountCents: cfg.PremiumTierPriceCents,
-		Currency:    cfg.PremiumTierCurrency,
-		AppBaseURL:  cfg.AppBaseURL,
+		AppBaseURL: cfg.AppBaseURL,
+		PlanIDs: map[string]string{
+			"monthly": cfg.PayPalPlanIDMonthly,
+			"annual":  cfg.PayPalPlanIDAnnual,
+		},
+		SandboxPlanIDs: map[string]string{
+			"monthly": cfg.PayPalSandboxPlanIDMonthly,
+			"annual":  cfg.PayPalSandboxPlanIDAnnual,
+		},
+		PlanPrices: map[string]int{
+			"monthly": cfg.PremiumMonthlyPriceCents,
+			"annual":  cfg.PremiumAnnualPriceCents,
+		},
+		Currency: cfg.PremiumTierCurrency,
 	})
 	storageHandler := storageroutes.NewHandler(queries)
 	billingHandler := billing.NewHandler(paypalClients, queries, billing.Config{
-		Currency:          cfg.PremiumTierCurrency,
-		ReturnURL:         "apollosfs://billing/storage/complete",
-		CancelURL:         "apollosfs://billing/storage/cancel",
-		ClientID:          cfg.PayPalClientID,
-		Environment:       cfg.PayPalEnvironment,
-		SandboxClientID:   cfg.PayPalSandboxClientID,
-		PremiumPriceCents: cfg.PremiumTierPriceCents,
+		Currency:                 cfg.PremiumTierCurrency,
+		ReturnURL:                "apollosfs://billing/storage/complete",
+		CancelURL:                "apollosfs://billing/storage/cancel",
+		ClientID:                 cfg.PayPalClientID,
+		Environment:              cfg.PayPalEnvironment,
+		SandboxClientID:          cfg.PayPalSandboxClientID,
+		PremiumMonthlyPriceCents: cfg.PremiumMonthlyPriceCents,
+		PremiumAnnualPriceCents:  cfg.PremiumAnnualPriceCents,
 	})
 	expansionHandler := expansion.NewHandler(paypalClients, emailSvc, queries, expansion.Config{
 		Currency:  cfg.PremiumTierCurrency,
@@ -326,6 +338,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	expansionHandler.StartExpiryLoop(context.Background())
 	ordersHandler := orders.NewHandler(paypalClients, queries, paymentSvc)
 	ordersHandler.StartAllocationRevertLoop(context.Background())
+	paymentsHandler.StartSubscriptionReconcileLoop(context.Background())
 	metricsSvc.SetSpeedTestProvider(adminHandler)
 	go adminHandler.SpeedTestLoop(context.Background())
 
@@ -343,11 +356,14 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		// This is always the live client; the admin sandbox toggle only applies
 		// to the authenticated /billing/config surface.
 		c.JSON(200, gin.H{
-			"turnstile_site_key":  cfg.TurnstileSiteKey,
-			"paypal_client_id":    cfg.PayPalClientID,
-			"paypal_currency":     cfg.PremiumTierCurrency,
-			"paypal_environment":  cfg.PayPalEnvironment,
-			"premium_price_cents": cfg.PremiumTierPriceCents,
+			"turnstile_site_key": cfg.TurnstileSiteKey,
+			"paypal_client_id":   cfg.PayPalClientID,
+			"paypal_currency":    cfg.PremiumTierCurrency,
+			"paypal_environment": cfg.PayPalEnvironment,
+			"premium_plans": []gin.H{
+				{"plan": "monthly", "price_cents": cfg.PremiumMonthlyPriceCents},
+				{"plan": "annual", "price_cents": cfg.PremiumAnnualPriceCents},
+			},
 		})
 	})
 	v1.GET("/invitations/:token", h.ValidateInvitationToken)
@@ -537,12 +553,11 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		protected.DELETE("/me/file-server-links/:id", h.DeleteFileServerLink)
 		protected.POST("/me/file-server-links/verify-location", h.VerifyFileServerLocation)
 
-		// Premium upgrade — create + capture a one-time PayPal order.
-		protected.POST("/payments/orders", paymentsHandler.CreateOrder)
-		// Generic wallet order (PayPal button / Google Pay / hosted card fields)
-		// backing the embedded premium checkout modal on the profile page.
-		protected.POST("/payments/orders/wallet", paymentsHandler.CreateWalletOrder)
-		protected.POST("/payments/orders/:order_id/capture", paymentsHandler.CaptureOrder)
+		// Premium upgrade — recurring PayPal subscription (monthly/annual).
+		protected.POST("/payments/subscriptions", paymentsHandler.CreateSubscription)
+		protected.GET("/payments/subscriptions", paymentsHandler.ListMySubscriptions)
+		protected.POST("/payments/subscriptions/:id/confirm", paymentsHandler.ConfirmSubscription)
+		protected.POST("/payments/subscriptions/cancel", paymentsHandler.CancelSubscription)
 
 		// User-facing storage info — separate from admin routes for security.
 		protected.GET("/storage/servers", storageHandler.ListServers)
@@ -668,6 +683,9 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 			adminGroup.GET("/orders", ordersHandler.List)
 			adminGroup.POST("/orders/:type/:id/refund", ordersHandler.Refund)
 			adminGroup.POST("/orders/:type/:id/revert-allocation", ordersHandler.RevertAllocation)
+			adminGroup.GET("/subscriptions", ordersHandler.ListSubscriptions)
+			adminGroup.POST("/subscriptions/:id/cancel", ordersHandler.CancelSubscription)
+			adminGroup.POST("/subscriptions/:id/revert-allocation", ordersHandler.RevertSubscriptionAllocation)
 			adminGroup.POST("/expansion-requests/:id/cancel", expansionHandler.CancelRequest)
 
 			adminGroup.GET("/interest", adminHandler.ListInterestSubmissions)

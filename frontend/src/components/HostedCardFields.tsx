@@ -2,8 +2,12 @@ import { useState } from 'react'
 import {
   PayPalScriptProvider,
   PayPalCardFieldsProvider,
-  PayPalCardFieldsForm,
+  PayPalNameField,
+  PayPalNumberField,
+  PayPalExpiryField,
+  PayPalCVVField,
   usePayPalCardFields,
+  type PayPalCardFieldsStateObject,
 } from '@paypal/react-paypal-js'
 import { PayPalGooglePayButton } from './PayPalGooglePayButton'
 
@@ -71,31 +75,56 @@ export function HostedCardFields({
         onApprove={(data) => onApprove(data.orderID)}
         onError={(err) => onError?.(err instanceof Error ? err.message : 'Card payment failed')}
       >
-        <PayPalCardFieldsForm />
-        <BillingAddressAndSubmit submitLabel={submitLabel} disabled={disabled} onError={onError} />
+        <CardDetailsAndAddress submitLabel={submitLabel} disabled={disabled} onError={onError} />
       </PayPalCardFieldsProvider>
     </PayPalScriptProvider>
   )
 }
 
+// Shared with the plain <input> billing fields below so the hosted PayPal
+// iframes (card number/expiry/CVV/name) read as the same form as everything
+// else: same height, border, radius and focus ring. `focus-within` lights the
+// ring up when the iframe inside gets focus, since the div itself never does.
 const inputClass = 'border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent'
+const hostedFieldBaseClass = 'h-[38px] px-3 border rounded-lg focus-within:ring-2 focus-within:ring-blue-500 focus-within:border-transparent transition-colors'
 
-// Cardholder name lives inside PayPal's hosted NameField (bundled into
-// PayPalCardFieldsForm above), so we can't render our own <input> for it or
-// read its value — only whether it's empty, via getState(). Billing address
-// isn't a hosted field at all; PayPal expects it as plain values passed to
-// submit(), so it's collected here as ordinary controlled inputs. Both are
-// required so declines get AVS/CVV-backed liability shift instead of running
-// as card-only charges.
-function BillingAddressAndSubmit({
+// Injected into the hosted iframes so their text matches the surrounding
+// text-sm / text-gray-900 inputs (PayPal only accepts styling this way — the
+// iframe content is cross-origin).
+const CARD_FIELD_STYLE = {
+  input: { 'font-size': '14px', 'font-family': 'inherit', color: '#111827' },
+  '::placeholder': { color: '#9ca3af' },
+}
+
+function hostedFieldClass(field?: { isEmpty: boolean; isValid: boolean }) {
+  const invalid = !!field && !field.isEmpty && !field.isValid
+  return `${hostedFieldBaseClass} ${invalid ? 'border-red-300' : 'border-gray-300'}`
+}
+
+function SectionLabel({ children }: { children: React.ReactNode }) {
+  return <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">{children}</span>
+}
+
+// Cardholder name lives inside PayPal's hosted NameField, so we can't render
+// our own <input> for it or read its value — only whether it's empty, via
+// getState(). Billing address isn't a hosted field at all; PayPal expects it
+// as plain values passed to submit(), so it's collected here as ordinary
+// controlled inputs. Both are required so declines get AVS/CVV-backed
+// liability shift instead of running as card-only charges.
+function CardDetailsAndAddress({
   submitLabel, disabled, onError,
 }: { submitLabel: string; disabled?: boolean; onError?: (message: string) => void }) {
   const { cardFieldsForm } = usePayPalCardFields()
   const [submitting, setSubmitting] = useState(false)
   const [fieldError, setFieldError] = useState<string | null>(null)
+  const [fieldStates, setFieldStates] = useState<PayPalCardFieldsStateObject['fields'] | null>(null)
   const [address, setAddress] = useState({
     addressLine1: '', addressLine2: '', city: '', state: '', postalCode: '',
   })
+
+  function handleFieldChange(data: PayPalCardFieldsStateObject) {
+    setFieldStates(data.fields)
+  }
 
   async function handleSubmit() {
     if (!cardFieldsForm) {
@@ -137,51 +166,84 @@ function BillingAddressAndSubmit({
   }
 
   return (
-    <div className="mt-3 flex flex-col gap-2">
-      <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Billing address</span>
-      <input
-        value={address.addressLine1}
-        onChange={(e) => setAddress((a) => ({ ...a, addressLine1: e.target.value }))}
-        placeholder="Address line 1"
-        autoComplete="address-line1"
-        required
-        className={inputClass}
-      />
-      <input
-        value={address.addressLine2}
-        onChange={(e) => setAddress((a) => ({ ...a, addressLine2: e.target.value }))}
-        placeholder="Address line 2 (optional)"
-        autoComplete="address-line2"
-        className={inputClass}
-      />
-      <div className="grid grid-cols-[1fr_72px] gap-2">
+    <div className="mt-3 flex flex-col gap-4">
+      <div className="flex flex-col gap-2">
+        <SectionLabel>Card details</SectionLabel>
+        <PayPalNameField
+          placeholder="Name on card"
+          style={CARD_FIELD_STYLE}
+          inputEvents={{ onChange: handleFieldChange }}
+          className={hostedFieldClass(fieldStates?.cardNameField)}
+        />
+        <PayPalNumberField
+          placeholder="Card number"
+          style={CARD_FIELD_STYLE}
+          inputEvents={{ onChange: handleFieldChange }}
+          className={hostedFieldClass(fieldStates?.cardNumberField)}
+        />
+        <div className="grid grid-cols-2 gap-2">
+          <PayPalExpiryField
+            placeholder="MM / YY"
+            style={CARD_FIELD_STYLE}
+            inputEvents={{ onChange: handleFieldChange }}
+            className={hostedFieldClass(fieldStates?.cardExpiryField)}
+          />
+          <PayPalCVVField
+            placeholder="CVV"
+            style={CARD_FIELD_STYLE}
+            inputEvents={{ onChange: handleFieldChange }}
+            className={hostedFieldClass(fieldStates?.cardCvvField)}
+          />
+        </div>
+      </div>
+
+      <div className="flex flex-col gap-2">
+        <SectionLabel>Billing address</SectionLabel>
         <input
-          value={address.city}
-          onChange={(e) => setAddress((a) => ({ ...a, city: e.target.value }))}
-          placeholder="City"
-          autoComplete="address-level2"
+          value={address.addressLine1}
+          onChange={(e) => setAddress((a) => ({ ...a, addressLine1: e.target.value }))}
+          placeholder="Address line 1"
+          autoComplete="address-line1"
           required
           className={inputClass}
         />
         <input
-          value={address.state}
-          onChange={(e) => setAddress((a) => ({ ...a, state: e.target.value.toUpperCase() }))}
-          placeholder="State"
-          autoComplete="address-level1"
-          maxLength={2}
+          value={address.addressLine2}
+          onChange={(e) => setAddress((a) => ({ ...a, addressLine2: e.target.value }))}
+          placeholder="Address line 2 (optional)"
+          autoComplete="address-line2"
+          className={inputClass}
+        />
+        <div className="grid grid-cols-[1fr_72px] gap-2">
+          <input
+            value={address.city}
+            onChange={(e) => setAddress((a) => ({ ...a, city: e.target.value }))}
+            placeholder="City"
+            autoComplete="address-level2"
+            required
+            className={inputClass}
+          />
+          <input
+            value={address.state}
+            onChange={(e) => setAddress((a) => ({ ...a, state: e.target.value.toUpperCase() }))}
+            placeholder="State"
+            autoComplete="address-level1"
+            maxLength={2}
+            required
+            className={inputClass}
+          />
+        </div>
+        <input
+          value={address.postalCode}
+          onChange={(e) => setAddress((a) => ({ ...a, postalCode: e.target.value }))}
+          placeholder="ZIP code"
+          autoComplete="postal-code"
           required
           className={inputClass}
         />
       </div>
-      <input
-        value={address.postalCode}
-        onChange={(e) => setAddress((a) => ({ ...a, postalCode: e.target.value }))}
-        placeholder="ZIP code"
-        autoComplete="postal-code"
-        required
-        className={inputClass}
-      />
-      {fieldError && <p className="text-xs text-red-500 m-0 mt-1">{fieldError}</p>}
+
+      {fieldError && <p className="text-xs text-red-500 m-0">{fieldError}</p>}
       <button
         type="button"
         onClick={handleSubmit}

@@ -155,9 +155,11 @@ The `Dockerfile.test` sidecar runs the full test suite against a live database a
 | `KEYCLOAK_PUBLIC_URL` | Used to construct OIDC discovery URL |
 | `KEY_ENCRYPTION_KEY` | Base64-encoded 32-byte master encryption key |
 | `SESSION_KEY` | Session cookie HMAC signing key |
-| `PAYPAL_CLIENT_ID` / `_CLIENT_SECRET` / `_WEBHOOK_ID` | PayPal Orders v2 (primary/live client) |
+| `PAYPAL_CLIENT_ID` / `_CLIENT_SECRET` / `_WEBHOOK_ID` | PayPal primary/live client — Orders v2 (storage add-ons) + Subscriptions v1 (premium) |
 | `PAYPAL_ENV` | `sandbox` or `live` |
 | `PAYPAL_SANDBOX_CLIENT_ID` / `_CLIENT_SECRET` / `_WEBHOOK_ID` | Optional second, always-sandbox PayPal client — backs the admin-only "sandbox payments" session toggle (profile page). Empty disables the toggle regardless of its state. |
+| `PAYPAL_PLAN_ID_MONTHLY` / `_ANNUAL` | Live PayPal Billing Plan ids premium subscriptions are created against (see `docs/paypal_setup.md`) |
+| `PAYPAL_SANDBOX_PLAN_ID_MONTHLY` / `_ANNUAL` | Sandbox-app counterparts, used when the sandbox-payments toggle is on |
 | `GOOGLE_WEB_CLIENT_ID` / `_OAUTH_CLIENT_SECRET` | Google OAuth for social login |
 | `CLOUDFLARE_TURNSTILE_SECRET_KEY` | Server-side Turnstile verification |
 | `SFS_API_KEY_PEPPER` | Mixed into argon2id hashes for SFS API keys |

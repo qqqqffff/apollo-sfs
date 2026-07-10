@@ -16,7 +16,7 @@ import (
 type Querier interface {
 	// Me
 	GetUserByUsername(ctx context.Context, username string) (*models.User, error)
-	HasActivePremiumPurchase(ctx context.Context, username string) (bool, error)
+	GetActiveSubscriptionForUser(ctx context.Context, username string) (*models.PremiumSubscription, error)
 
 	// Change-password two-factor codes
 	CreatePasswordChangeCode(ctx context.Context, username, code string, expiresAt time.Time) error
@@ -31,6 +31,7 @@ type Querier interface {
 	ListUserExpansionRequests(ctx context.Context, username string) ([]models.ServerExpansionRequest, error)
 	GetLatestExpansionInvoice(ctx context.Context, requestID uuid.UUID) (*models.ExpansionInvoice, error)
 	ListSharesForRecipient(ctx context.Context, email string) ([]models.Share, error)
+	ListRecentAdminCancelledSubscriptionsForUser(ctx context.Context, username string, since time.Time) ([]models.PremiumSubscription, error)
 
 	// Notification bell — admin-only categories
 	ListRecentlyAcceptedInvitations(ctx context.Context, since time.Time) ([]models.Invitation, error)

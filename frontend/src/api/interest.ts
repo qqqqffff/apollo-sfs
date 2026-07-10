@@ -1,5 +1,10 @@
 import { post, get } from './client'
 
+export interface PublicPremiumPlanOption {
+  plan: 'monthly' | 'annual'
+  price_cents: number
+}
+
 export interface PublicConfig {
   turnstile_site_key: string
   // Public PayPal config for the hosted card fields SDK on the (unauthenticated)
@@ -7,9 +12,9 @@ export interface PublicConfig {
   paypal_client_id?: string
   paypal_currency?: string
   paypal_environment?: string
-  // One-time premium price in cents — shown/charged on the register page's
-  // inline premium checkout.
-  premium_price_cents?: number
+  // Recurring premium plan prices — shown on the register page's inline
+  // premium subscribe flow.
+  premium_plans?: PublicPremiumPlanOption[]
 }
 
 export function getPublicConfig() {

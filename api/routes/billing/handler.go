@@ -35,10 +35,20 @@ type Config struct {
 	// SandboxClientID is returned instead of ClientID when the calling
 	// admin's sandbox-payments toggle is on (see GetConfig).
 	SandboxClientID string
-	// PremiumPriceCents is echoed back by GetConfig so the premium checkout
-	// modal can display the price without a second round-trip to the
-	// unauthenticated /config endpoint.
-	PremiumPriceCents int
+	// PremiumMonthlyPriceCents / PremiumAnnualPriceCents are echoed back by
+	// GetConfig as premium_plans so the premium checkout modal can display
+	// prices without a second round-trip to the unauthenticated /config
+	// endpoint. Display-only — see cmd/config.go's Premium*PriceCents doc.
+	PremiumMonthlyPriceCents int
+	PremiumAnnualPriceCents  int
+}
+
+// PremiumPlanOption is one entry of the premium_plans array in GetConfig's
+// response — the plan name the frontend passes to POST /payments/subscriptions
+// paired with its display price.
+type PremiumPlanOption struct {
+	Plan       string `json:"plan"`
+	PriceCents int    `json:"price_cents"`
 }
 
 // Handler wires the /api/v1/billing/storage/* endpoints.
@@ -65,19 +75,26 @@ func NewHandler(paypal services.PayPalClients, q Querier, cfg Config) *Handler {
 func (h *Handler) GetConfig(c *gin.Context) {
 	if middleware.SandboxEnabled(c) {
 		c.JSON(http.StatusOK, gin.H{
-			"paypal_client_id":    h.cfg.SandboxClientID,
-			"currency":            h.currencyOrDefault(),
-			"environment":         services.PayPalEnvSandbox,
-			"premium_price_cents": h.cfg.PremiumPriceCents,
+			"paypal_client_id": h.cfg.SandboxClientID,
+			"currency":         h.currencyOrDefault(),
+			"environment":      services.PayPalEnvSandbox,
+			"premium_plans":    h.premiumPlans(),
 		})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"paypal_client_id":    h.cfg.ClientID,
-		"currency":            h.currencyOrDefault(),
-		"environment":         h.cfg.Environment,
-		"premium_price_cents": h.cfg.PremiumPriceCents,
+		"paypal_client_id": h.cfg.ClientID,
+		"currency":         h.currencyOrDefault(),
+		"environment":      h.cfg.Environment,
+		"premium_plans":    h.premiumPlans(),
 	})
+}
+
+func (h *Handler) premiumPlans() []PremiumPlanOption {
+	return []PremiumPlanOption{
+		{Plan: "monthly", PriceCents: h.cfg.PremiumMonthlyPriceCents},
+		{Plan: "annual", PriceCents: h.cfg.PremiumAnnualPriceCents},
+	}
 }
 
 // ── GET /api/v1/billing/orders ────────────────────────────────────────────────

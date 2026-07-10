@@ -94,9 +94,22 @@ type Config struct {
 	PayPalSandboxClientSecret string
 	PayPalSandboxWebhookID    string
 
-	// PremiumTierPriceCents is the one-time charge for the premium tier.
-	PremiumTierPriceCents int
-	PremiumTierCurrency   string // ISO 4217, e.g. "USD"
+	// PremiumMonthlyPriceCents / PremiumAnnualPriceCents are the recurring
+	// premium plan prices, for display only — the actual charge amount is
+	// whatever each PayPal Plan (below) was configured with in the dashboard;
+	// keep these in sync with that when changing pricing.
+	PremiumMonthlyPriceCents int
+	PremiumAnnualPriceCents  int
+	PremiumTierCurrency      string // ISO 4217, e.g. "USD"
+
+	// PayPalPlanIDMonthly / PayPalPlanIDAnnual are the live PayPal Billing Plan
+	// ids created per docs/paypal_setup.md. PayPalSandboxPlanID* are their
+	// sandbox-app counterparts, used when the admin sandbox-payments toggle is
+	// on (mirrors the PayPalSandboxClientID pattern above).
+	PayPalPlanIDMonthly        string
+	PayPalPlanIDAnnual         string
+	PayPalSandboxPlanIDMonthly string
+	PayPalSandboxPlanIDAnnual  string
 
 	// ── Inbound email (SendGrid Inbound Parse) ──────────────────────────────
 	// EmailStoragePath is the absolute directory inbound emails are written to,
@@ -119,7 +132,8 @@ type Config struct {
 
 func loadConfig() Config {
 	quotaPct, _ := strconv.Atoi(getEnv("QUOTA_WARNING_THRESHOLD_PERCENT", "80"))
-	premiumPrice, _ := strconv.Atoi(getEnv("PREMIUM_TIER_PRICE_CENTS", "999"))
+	premiumMonthlyPrice, _ := strconv.Atoi(getEnv("PREMIUM_MONTHLY_PRICE_CENTS", "100"))
+	premiumAnnualPrice, _ := strconv.Atoi(getEnv("PREMIUM_ANNUAL_PRICE_CENTS", "1000"))
 
 	paypalEnv := getEnv("PAYPAL_ENV", "sandbox")
 	paypalClientID := getEnv("PAYPAL_CLIENT_ID", "")
@@ -183,8 +197,15 @@ func loadConfig() Config {
 		PayPalSandboxClientID:     getEnv("PAYPAL_SANDBOX_CLIENT_ID", ""),
 		PayPalSandboxClientSecret: getEnv("PAYPAL_SANDBOX_CLIENT_SECRET", ""),
 		PayPalSandboxWebhookID:    getEnv("PAYPAL_SANDBOX_WEBHOOK_ID", ""),
-		PremiumTierPriceCents:     premiumPrice,
-		PremiumTierCurrency:       getEnv("PREMIUM_TIER_CURRENCY", "USD"),
+
+		PremiumMonthlyPriceCents: premiumMonthlyPrice,
+		PremiumAnnualPriceCents:  premiumAnnualPrice,
+		PremiumTierCurrency:      getEnv("PREMIUM_TIER_CURRENCY", "USD"),
+
+		PayPalPlanIDMonthly:        getEnv("PAYPAL_PLAN_ID_MONTHLY", ""),
+		PayPalPlanIDAnnual:         getEnv("PAYPAL_PLAN_ID_ANNUAL", ""),
+		PayPalSandboxPlanIDMonthly: getEnv("PAYPAL_SANDBOX_PLAN_ID_MONTHLY", ""),
+		PayPalSandboxPlanIDAnnual:  getEnv("PAYPAL_SANDBOX_PLAN_ID_ANNUAL", ""),
 
 		EmailStoragePath:      getEnv("EMAIL_STORAGE_PATH", "/home/app/service-worker-email"),
 		SendgridWebhookSecret: getEnv("SENDGRID_WEBHOOK_SECRET", ""),

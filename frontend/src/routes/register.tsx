@@ -5,9 +5,10 @@ import { MdCloud, MdRocketLaunch, MdCheckCircle } from 'react-icons/md'
 import { register, validateInviteToken } from '../api/auth'
 import { ApiError } from '../api/client'
 import { publicConfigQueryOptions } from '../api/interest'
-import { createPaymentOrder, capturePaymentOrder } from '../api/payments'
+import { createPremiumSubscription, confirmPremiumSubscription, type PremiumPlan } from '../api/payments'
 import { TermsOfServiceModal } from '../components/TermsOfServiceModal'
-import { HostedCardFields } from '../components/HostedCardFields'
+import { PayPalSubscribeButton } from '../components/PayPalSubscribeButton'
+import { PremiumPlanSelector } from '../components/PremiumPlanSelector'
 
 interface RegisterParams {
   token: string
@@ -49,26 +50,34 @@ function RouteComponent() {
   // the session cookie), so the protected /payments endpoints work here even
   // though the SPA hasn't done its Keycloak login yet.
   const [showPremiumPay, setShowPremiumPay] = useState(false)
+  const [premiumPlan, setPremiumPlan] = useState<PremiumPlan>('monthly')
   const [payError, setPayError] = useState<string | null>(null)
   const [paying, setPaying] = useState(false)
   const [paid, setPaid] = useState(false)
 
-  const premiumPriceCents = config?.premium_price_cents ?? 0
-  const premiumPriceLabel = premiumPriceCents ? `$${(premiumPriceCents / 100).toFixed(2)}` : ''
+  const premiumPlans = config?.premium_plans ?? []
+  const selectedPriceCents = premiumPlans.find((p) => p.plan === premiumPlan)?.price_cents ?? 0
+  const premiumPriceLabel = selectedPriceCents ? `$${(selectedPriceCents / 100).toFixed(2)}` : ''
 
-  async function createPremiumCardOrder(): Promise<string> {
-    const { order_id } = await createPaymentOrder('card')
-    return order_id
+  async function handleCreatePremiumSubscription(): Promise<string> {
+    setPayError(null)
+    try {
+      const { subscription_id } = await createPremiumSubscription(premiumPlan)
+      return subscription_id
+    } catch (err) {
+      setPayError(err instanceof ApiError ? err.message : 'Could not start checkout')
+      throw err
+    }
   }
 
-  async function handlePremiumCardApprove(orderId: string) {
+  async function handlePremiumApprove(subscriptionId: string) {
     setPaying(true)
     setPayError(null)
     try {
-      await capturePaymentOrder(orderId)
+      await confirmPremiumSubscription(subscriptionId)
       setPaid(true)
     } catch (err) {
-      setPayError(err instanceof ApiError ? err.message : 'Payment could not be completed — please try again.')
+      setPayError(err instanceof ApiError ? err.message : 'Subscription could not be confirmed — please try again.')
     } finally {
       setPaying(false)
     }
@@ -149,7 +158,7 @@ function RouteComponent() {
                 <h2 className="text-base font-semibold text-gray-900 m-0">
                   Upgrade to Premium{premiumPriceLabel ? ` — ${premiumPriceLabel}` : ''}
                 </h2>
-                <p className="text-sm text-gray-500 m-0 mt-1">Adds the SFS S3-compatible API and per-directory API keys. One-time payment.</p>
+                <p className="text-sm text-gray-500 m-0 mt-1">Adds the SFS S3-compatible API and per-directory API keys. Recurring subscription, cancel anytime.</p>
               </div>
               <span className="text-xs font-medium text-amber-600 mt-auto">
                 {showPremiumPay ? '↓ Pay below' : '→ Pay now'}
@@ -157,29 +166,24 @@ function RouteComponent() {
             </button>
           </div>
 
-          {/* Inline premium checkout: Google Pay + PCI-compliant hosted card fields. */}
+          {/* Inline premium checkout: plan selector + PayPal subscribe button.
+              Same flow/styling as the premium upgrade modal. */}
           {showPremiumPay && (
             config?.paypal_client_id ? (
               <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6 flex flex-col gap-3 max-w-md w-full mx-auto">
                 <h3 className="text-sm font-semibold text-gray-900 m-0">
-                  Pay for Premium{premiumPriceLabel ? ` — ${premiumPriceLabel}` : ''}
+                  Subscribe to Premium{premiumPriceLabel ? ` — ${premiumPriceLabel}` : ''}
                 </h3>
                 {payError && <p className="text-sm text-red-500 m-0">{payError}</p>}
-                <HostedCardFields
+                <PremiumPlanSelector plans={premiumPlans} selected={premiumPlan} onSelect={setPremiumPlan} disabled={paying} />
+                <PayPalSubscribeButton
                   clientId={config.paypal_client_id}
-                  currency={config.paypal_currency || 'USD'}
-                  createOrder={createPremiumCardOrder}
-                  onApprove={handlePremiumCardApprove}
+                  createSubscription={handleCreatePremiumSubscription}
+                  onApprove={handlePremiumApprove}
                   onError={(msg) => setPayError(msg)}
+                  onCancel={() => setPayError(null)}
                   disabled={paying}
-                  submitLabel={`Pay by Card${premiumPriceLabel ? ` — ${premiumPriceLabel}` : ''}`}
-                  googlePayAmount={() => (premiumPriceCents / 100).toFixed(2)}
-                  environment={config.paypal_environment === 'sandbox' ? 'sandbox' : 'live'}
                 />
-                <p className="text-[11px] text-gray-400 text-center m-0">
-                  Payments are processed securely by PayPal. Card details are entered directly into
-                  PayPal and never touch our servers.
-                </p>
               </div>
             ) : (
               <p className="text-sm text-red-500 text-center m-0">Payments are not configured.</p>

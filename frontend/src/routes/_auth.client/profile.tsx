@@ -1,7 +1,7 @@
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
 import { useEffect, useRef, useCallback, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { MdAddCircleOutline, MdCheck, MdClose, MdEdit, MdPhotoLibrary, MdRocketLaunch, MdKey, MdShield, MdStorage, MdBolt, MdRefresh, MdScience } from 'react-icons/md'
+import { MdAddCircleOutline, MdCheck, MdClose, MdEdit, MdPhotoLibrary, MdRocketLaunch, MdShield, MdStorage, MdBolt, MdRefresh, MdScience } from 'react-icons/md'
 import { FaApple } from 'react-icons/fa'
 import { meQueryOptions, updateUsername, preferencesQueryOptions, updatePreferences, updateStorageUIPreferences, updateSandboxPayments, unlinkProvider } from '../../api/me'
 import { logout } from '../../api/auth'
@@ -12,7 +12,9 @@ import { PremiumUpgradeModal } from '../../components/PremiumUpgradeModal'
 import { AccountBadges } from '../../components/GroupBadge'
 import { FileServerLinksCard } from '../../components/FileServerLinksCard'
 import { useNotification } from '../../context/NotificationContext'
-import { formatCents, getBillingConfig, listMyExpansionRequests, type ExpansionRequest } from '../../api/billing'
+import { formatCents, listMyExpansionRequests, type ExpansionRequest } from '../../api/billing'
+import { useBillingConfig } from '../../hooks/useBillingConfig'
+import { cancelPremiumSubscription } from '../../api/payments'
 import {
   getStorageBreakdown,
   listMyServers,
@@ -121,6 +123,10 @@ function RouteComponent() {
         isAdmin={user.is_admin}
         sandboxPaymentsEnabled={user.sandbox_payments_enabled}
         grantedAt={user.premium_granted_at}
+        premiumSubscribed={user.premium_subscribed}
+        premiumEnvironment={user.premium_environment ?? null}
+        premiumPlan={user.premium_plan ?? null}
+        premiumCurrentPeriodEnd={user.premium_current_period_end ?? null}
         onUpgrade={() => setShowUpgradeModal(true)}
       />
       {showUpgradeModal && <PremiumUpgradeModal onClose={() => setShowUpgradeModal(false)} />}
@@ -259,7 +265,7 @@ function StorageInfraCard() {
       {/* Storage + Servers card */}
       <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
         <div className="px-5 py-4">
-          <h3 className="text-sm font-semibold text-gray-800 mb-3">Infrastructure</h3>
+          <h3 className="text-sm font-semibold text-gray-800 mb-3">Your Storage Infrastructure</h3>
 
           {breakdownLoading && !breakdown ? (
             <p className="text-sm text-gray-400">Loading…</p>
@@ -597,7 +603,12 @@ function SandboxPaymentsToggle({ enabled }: { enabled: boolean }) {
   const mutation = useMutation({
     mutationFn: updateSandboxPayments,
     onSuccess: () => {
+      // Both queries encode the toggle's effect (which PayPal environment is
+      // "sandbox" for this session) — invalidating only 'me' left billing
+      // config's 1-hour cache serving a stale environment after the toggle
+      // flipped or across a logout/login cycle.
       queryClient.invalidateQueries({ queryKey: ['me'] })
+      queryClient.invalidateQueries({ queryKey: ['billing', 'config'] })
       setError(null)
     },
     onError: (err) => setError(err instanceof ApiError ? err.message : 'Failed to save preference'),
@@ -860,43 +871,118 @@ function UsernameRow({ currentUsername }: { currentUsername: string }) {
 }
 
 function PremiumCard({
-  isPremium, isAdmin, sandboxPaymentsEnabled, grantedAt, onUpgrade,
+  isPremium, isAdmin, sandboxPaymentsEnabled, grantedAt,
+  premiumSubscribed, premiumEnvironment, premiumPlan, premiumCurrentPeriodEnd,
+  onUpgrade,
 }: {
   isPremium: boolean
   isAdmin: boolean
   sandboxPaymentsEnabled: boolean
   grantedAt: string | null
+  premiumSubscribed: boolean
+  premiumEnvironment: 'sandbox' | 'live' | null
+  premiumPlan: 'monthly' | 'annual' | null
+  premiumCurrentPeriodEnd: string | null
   onUpgrade: () => void
 }) {
-  const navigate = useNavigate()
-  const { data: billingConfig } = useQuery({
-    queryKey: ['billing', 'config'],
-    queryFn: getBillingConfig,
-    staleTime: 60 * 60 * 1000,
+  const queryClient = useQueryClient()
+  const { data: billingConfig } = useBillingConfig()
+  const [confirmingCancel, setConfirmingCancel] = useState(false)
+  const [cancelError, setCancelError] = useState<string | null>(null)
+
+  const cancelMutation = useMutation({
+    mutationFn: cancelPremiumSubscription,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['me'] })
+      setConfirmingCancel(false)
+    },
+    onError: (err) => setCancelError(err instanceof ApiError ? err.message : 'Could not cancel subscription'),
   })
 
-  // Admins are implicitly premium — but when sandbox payments mode is on,
-  // show the real upgrade flow so it can actually be tested end-to-end.
-  if (isPremium || (isAdmin && !sandboxPaymentsEnabled)) {
+  // Admins are implicitly premium — but a non-admin's is_premium always
+  // reflects a real grant of their own (subscription or legacy one-time
+  // purchase), so only admins need the extra premiumSubscribed check to tell
+  // a genuine subscription apart from the implicit admin grant.
+  const genuinelyPremium = isAdmin ? premiumSubscribed : isPremium
+
+  // When sandbox payments mode is on, show the real upgrade flow so it can
+  // actually be tested end-to-end even for an admin.
+  if (genuinelyPremium || (isAdmin && !sandboxPaymentsEnabled)) {
+    const planPrice = billingConfig?.premium_plans?.find((p) => p.plan === premiumPlan)?.price_cents
+    const periodEnd = premiumCurrentPeriodEnd ? new Date(premiumCurrentPeriodEnd) : null
+    const daysLeft = periodEnd ? Math.max(0, Math.ceil((periodEnd.getTime() - Date.now()) / 86_400_000)) : null
+
     return (
       <div className="bg-white border border-gray-200 rounded-xl px-5 py-4">
         <div className="flex items-start gap-3">
           <MdCheck className="text-green-500 text-xl shrink-0 mt-0.5" />
           <div className="flex-1">
-            <h3 className="text-sm font-semibold text-gray-800 m-0">Premium</h3>
-            <p className="text-xs text-gray-500 m-0 mt-1">
-              {isAdmin
-                ? 'Included with your admin account.'
-                : grantedAt ? `Activated on ${new Date(grantedAt).toLocaleDateString()}.` : 'Active.'}
-            </p>
+            <div className="flex items-center gap-2">
+              <h3 className="text-sm font-semibold text-gray-800 m-0">Premium</h3>
+              {premiumSubscribed && premiumEnvironment === 'sandbox' && (
+                <span className="px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider bg-purple-100 text-purple-700 rounded">
+                  Sandbox
+                </span>
+              )}
+            </div>
+            {premiumSubscribed ? (
+              <div className="text-xs text-gray-500 mt-1 flex flex-col gap-0.5">
+                {periodEnd && (
+                  <p className="m-0">
+                    Renews {periodEnd.toLocaleDateString()}
+                    {daysLeft !== null ? ` (${daysLeft} day${daysLeft === 1 ? '' : 's'})` : ''}
+                  </p>
+                )}
+                {planPrice !== undefined && periodEnd && (
+                  <p className="m-0">Next payment: {formatCents(planPrice)} on {periodEnd.toLocaleDateString()}</p>
+                )}
+              </div>
+            ) : (
+              <p className="text-xs text-gray-500 m-0 mt-1">
+                {isAdmin
+                  ? 'Included with your admin account.'
+                  : grantedAt ? `Since ${new Date(grantedAt).toLocaleDateString()}.` : 'Active.'}
+              </p>
+            )}
           </div>
-          <button
-            onClick={() => navigate({ to: '/settings/api-keys' as never })}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs border border-gray-200 rounded-lg text-gray-700 hover:bg-gray-50 cursor-pointer transition-colors"
-          >
-            <MdKey /> Manage API keys
-          </button>
         </div>
+
+        {premiumSubscribed && (
+          <div className="mt-3 pt-3 border-t border-gray-100">
+            {!confirmingCancel ? (
+              <button
+                onClick={() => { setCancelError(null); setConfirmingCancel(true) }}
+                className="text-xs text-red-500 hover:text-red-600 cursor-pointer bg-transparent border-0 p-0 transition-colors"
+              >
+                Cancel Premium Membership
+              </button>
+            ) : (
+              <div className="flex flex-col gap-2">
+                <p className="text-xs text-gray-600 m-0">
+                  This immediately revokes access — your SFS API keys and file-server links stop
+                  working right away. You&rsquo;d need to subscribe again to restore access.
+                </p>
+                {cancelError && <p className="text-xs text-red-500 m-0">{cancelError}</p>}
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => cancelMutation.mutate()}
+                    disabled={cancelMutation.isPending}
+                    className="px-3 py-1.5 text-xs bg-red-600 hover:bg-red-700 text-white rounded-lg font-medium disabled:opacity-50 cursor-pointer transition-colors"
+                  >
+                    {cancelMutation.isPending ? 'Cancelling…' : 'Yes, cancel membership'}
+                  </button>
+                  <button
+                    onClick={() => setConfirmingCancel(false)}
+                    disabled={cancelMutation.isPending}
+                    className="px-3 py-1.5 text-xs border border-gray-200 rounded-lg text-gray-700 hover:bg-gray-50 disabled:opacity-50 cursor-pointer transition-colors"
+                  >
+                    Never mind
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </div>
     )
   }
@@ -916,9 +1002,6 @@ function PremiumCard({
         <MdRocketLaunch className="text-amber-500 text-2xl shrink-0 mt-0.5" />
         <div className="flex-1">
           <h3 className="text-sm font-semibold text-gray-900 m-0">Upgrade to Premium</h3>
-          <p className="text-xs text-gray-600 m-0 mt-1">
-            Unlocks the SFS S3-like API and per-directory API keys. One-time payment.
-          </p>
         </div>
         <button
           onClick={onUpgrade}

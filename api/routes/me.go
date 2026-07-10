@@ -181,12 +181,19 @@ type meResponse struct {
 	IsAdmin           bool       `json:"is_admin"`
 	IsPremium         bool       `json:"is_premium"`
 	PremiumGrantedAt  *time.Time `json:"premium_granted_at"`
-	// PremiumPurchased is true when the user has an active premium payment of
-	// their own — see models.User.PremiumPurchased. Lets the frontend show a
-	// separate "Premium" badge alongside "Admin" only when an admin actually
-	// paid, rather than for every admin (who get IsPremium implicitly).
-	PremiumPurchased bool `json:"premium_purchased"`
-	LinkedProviders   []string   `json:"linked_providers"`
+	// PremiumSubscribed is true when the user has an active/suspended premium
+	// subscription of their own — see models.User.PremiumSubscribed. Lets the
+	// frontend show a separate "Premium" badge alongside "Admin" only when an
+	// admin actually subscribed, rather than for every admin (who get
+	// IsPremium implicitly), and gates the real upgrade flow's visibility.
+	PremiumSubscribed bool `json:"premium_subscribed"`
+	// PremiumEnvironment/PremiumPlan/PremiumCurrentPeriodEnd describe the
+	// user's own active subscription (nil when they have none of their own —
+	// e.g. a non-subscribed admin). Populated from GetActiveSubscriptionForUser.
+	PremiumEnvironment      *string    `json:"premium_environment,omitempty"`
+	PremiumPlan             *string    `json:"premium_plan,omitempty"`
+	PremiumCurrentPeriodEnd *time.Time `json:"premium_current_period_end,omitempty"`
+	LinkedProviders         []string   `json:"linked_providers"`
 	// SandboxPaymentsEnabled reflects the admin's session-scoped toggle (see
 	// middleware.SandboxEnabled) — always false for non-admins, and resets on
 	// logout/session expiry since it isn't persisted.
@@ -273,25 +280,39 @@ func (h *Handler) Me(c *gin.Context) {
 		}
 	}
 
-	premiumPurchased, err := h.queries.HasActivePremiumPurchase(ctx, uname)
+	var (
+		premiumSubscribed       bool
+		premiumEnvironment      *string
+		premiumPlan             *string
+		premiumCurrentPeriodEnd *time.Time
+	)
+	sub, err := h.queries.GetActiveSubscriptionForUser(ctx, uname)
 	if err != nil {
-		log.Printf("Me: check premium purchase for %q: %v", uname, err)
+		log.Printf("Me: check premium subscription for %q: %v", uname, err)
+	} else if sub != nil {
+		premiumSubscribed = true
+		premiumEnvironment = &sub.Environment
+		premiumPlan = &sub.Plan
+		premiumCurrentPeriodEnd = sub.CurrentPeriodEnd
 	}
 
 	c.JSON(http.StatusOK, meResponse{
-		Username:               user.Username,
-		Email:                  user.Email,
-		StorageUsedBytes:       user.StorageUsedBytes,
-		StorageQuotaBytes:      user.StorageQuotaBytes,
-		StorageUsedPct:         usedPct,
-		LastSeenAt:             user.LastSeenAt,
-		CreatedAt:              user.CreatedAt,
-		IsAdmin:                isAdmin,
-		IsPremium:              user.IsPremium,
-		PremiumGrantedAt:       user.PremiumGrantedAt,
-		PremiumPurchased:       premiumPurchased,
-		LinkedProviders:        linkedProviders,
-		SandboxPaymentsEnabled: middleware.SandboxEnabled(c),
+		Username:                user.Username,
+		Email:                   user.Email,
+		StorageUsedBytes:        user.StorageUsedBytes,
+		StorageQuotaBytes:       user.StorageQuotaBytes,
+		StorageUsedPct:          usedPct,
+		LastSeenAt:              user.LastSeenAt,
+		CreatedAt:               user.CreatedAt,
+		IsAdmin:                 isAdmin,
+		IsPremium:               user.IsPremium,
+		PremiumGrantedAt:        user.PremiumGrantedAt,
+		PremiumSubscribed:       premiumSubscribed,
+		PremiumEnvironment:      premiumEnvironment,
+		PremiumPlan:             premiumPlan,
+		PremiumCurrentPeriodEnd: premiumCurrentPeriodEnd,
+		LinkedProviders:         linkedProviders,
+		SandboxPaymentsEnabled:  middleware.SandboxEnabled(c),
 	})
 }
 
@@ -400,9 +421,9 @@ func (h *Handler) UnlinkSocial(c *gin.Context) {
 // ── Notifications ─────────────────────────────────────────────────────────────
 
 // notificationItem is one entry in the bell dropdown. Kind is one of:
-// capacity_provisioned | payment_required | action_pending | share_received
-// and, for admins: invitation_accepted | order_received | email_received |
-// alarm_triggered. The frontend groups the dropdown by kind.
+// capacity_provisioned | payment_required | action_pending | share_received |
+// subscription_cancelled and, for admins: invitation_accepted |
+// order_received | email_received | alarm_triggered. The frontend groups the dropdown by kind.
 type notificationItem struct {
 	ID        string    `json:"id"`
 	Kind      string    `json:"kind"`
@@ -415,6 +436,10 @@ type notificationItem struct {
 // shareNotificationWindow bounds how long a received share keeps showing in
 // the bell dropdown.
 const shareNotificationWindow = 30 * 24 * time.Hour
+
+// subscriptionCancelNotificationWindow bounds how long an admin-cancelled
+// subscription keeps showing in the bell dropdown.
+const subscriptionCancelNotificationWindow = 30 * 24 * time.Hour
 
 // adminNotificationWindow bounds how long admin activity (accepted
 // invitations, captured orders, inbound emails, fired alarms) keeps showing
@@ -433,7 +458,7 @@ func notificationCategory(kind string) string {
 	switch kind {
 	case "capacity_provisioned":
 		return "Storage"
-	case "payment_required", "action_pending":
+	case "payment_required", "action_pending", "subscription_cancelled":
 		return "Billing"
 	case "share_received":
 		return "Shares"
@@ -569,6 +594,35 @@ func (h *Handler) gatherNotificationItems(ctx context.Context, username string, 
 				})
 			}
 		}
+	}
+
+	// Subscriptions an admin cancelled (cancellation_reason set — the
+	// self-service cancel and PayPal webhooks never set it) within the
+	// window, surfacing the admin's reason and any prorated refund.
+	cancelled, err := h.queries.ListRecentAdminCancelledSubscriptionsForUser(ctx, username, time.Now().Add(-subscriptionCancelNotificationWindow))
+	if err != nil {
+		return nil, err
+	}
+	for _, s := range cancelled {
+		body := fmt.Sprintf("Your %s premium subscription was cancelled by an admin.", s.Plan)
+		if s.RefundAmountCents != nil && *s.RefundAmountCents > 0 {
+			body += fmt.Sprintf(" A prorated refund of %s was issued.", formatCentsShort(*s.RefundAmountCents))
+		}
+		if s.CancellationReason != nil && *s.CancellationReason != "" {
+			body += fmt.Sprintf(" Reason: %s", *s.CancellationReason)
+		}
+		cancelledAt := s.UpdatedAt
+		if s.CancelledAt != nil {
+			cancelledAt = *s.CancelledAt
+		}
+		items = append(items, notificationItem{
+			ID:        s.ID.String() + ":subscription-cancelled",
+			Kind:      "subscription_cancelled",
+			Title:     "Premium subscription cancelled",
+			Body:      body,
+			Link:      "/client/orders?tab=premium",
+			CreatedAt: cancelledAt,
+		})
 	}
 
 	// Admin-only categories: recent account/infrastructure activity, so alerts

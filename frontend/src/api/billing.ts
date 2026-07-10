@@ -56,11 +56,16 @@ export function formatCents(cents: number): string {
 
 // ── PayPal config ──────────────────────────────────────────────────────────────
 
+export interface PremiumPlanOption {
+  plan: 'monthly' | 'annual'
+  price_cents: number
+}
+
 export interface BillingConfig {
   paypal_client_id: string
   currency: string
   environment: 'sandbox' | 'live'
-  premium_price_cents: number
+  premium_plans: PremiumPlanOption[]
 }
 
 export function getBillingConfig() {
@@ -269,6 +274,7 @@ export async function listMyOrders(): Promise<UserOrder[]> {
 
 export type NotificationKind =
   | 'capacity_provisioned' | 'payment_required' | 'action_pending' | 'share_received'
+  | 'subscription_cancelled'
   // Admin-only categories (empty for non-admin users).
   | 'invitation_accepted' | 'order_received' | 'email_received' | 'alarm_triggered'
 

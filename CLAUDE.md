@@ -110,7 +110,7 @@ All secrets live in `.env` (never commit this file). Key groups:
 | `KEYCLOAK_*` | Realm, client, admin, and public URL |
 | `KEY_ENCRYPTION_KEY` | Master key for AES-256 per-user key wrapping |
 | `SESSION_KEY` | Session cookie signing key |
-| `PAYPAL_*` | PayPal Orders v2 credentials |
+| `PAYPAL_*` | PayPal credentials — Orders v2 (storage add-ons) + Subscriptions v1 (premium) |
 | `GOOGLE_*` | Google OAuth client for web login |
 | `CLOUDFLARE_*` | API token (DDNS), Turnstile site/secret keys |
 | `SENDGRID_*` | SMTP password (via Postfix relay) and inbound webhook secret |

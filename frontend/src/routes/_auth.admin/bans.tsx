@@ -10,10 +10,17 @@ import {
   pardonUser,
 } from '../../api/admin'
 import { useNotification } from '../../context/NotificationContext'
-import type { BannedIP, UserBan } from '../../types/api'
+import type { BanType, BannedIP, UserBan } from '../../types/api'
 import { VIOLATION_CODES } from '../../types/api'
 
+type Tab = 'suspensions' | 'bans' | 'ips'
+
 export const Route = createFileRoute('/_auth/admin/bans')({
+  validateSearch: (search: Record<string, unknown>): { tab?: Tab } => {
+    const tab = search.tab === 'suspensions' || search.tab === 'bans' || search.tab === 'ips'
+      ? search.tab : undefined
+    return { tab }
+  },
   component: RouteComponent,
 })
 
@@ -36,209 +43,37 @@ function formatRelative(iso: string): string {
 // ── Main component ────────────────────────────────────────────────────────────
 
 function RouteComponent() {
-  const queryClient = useQueryClient()
-  const { notify } = useNotification()
-  const [ipStatus, setIpStatus] = useState<StatusFilter>('active')
-  const [banStatus, setBanStatus] = useState<StatusFilter>('active')
-
-  // ── Banned IPs ──────────────────────────────────────────────────────────────
-
-  const {
-    data: ipData,
-    isLoading: ipLoading,
-    hasNextPage: ipHasNext,
-    isFetchingNextPage: ipFetching,
-    fetchNextPage: ipFetchNext,
-  } = useInfiniteQuery({
-    queryKey: ['admin', 'banned-ips', ipStatus],
-    queryFn: ({ pageParam }: { pageParam: string | undefined }) =>
-      listBannedIPs(ipStatus, pageParam),
-    initialPageParam: undefined as string | undefined,
-    getNextPageParam: (last) => last.next_token || undefined,
-  })
-
-  const unbanMutation = useMutation({
-    mutationFn: unbanIP,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['admin', 'banned-ips'] })
-      notify('success', 'IP marked as unbanned')
-    },
-    onError: () => notify('error', 'Failed to unban IP'),
-  })
-
-  const extendMutation = useMutation({
-    mutationFn: extendBan,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['admin', 'banned-ips'] })
-      notify('success', 'Ban extended')
-    },
-    onError: () => notify('error', 'Failed to extend ban'),
-  })
-
-  // ── User bans ───────────────────────────────────────────────────────────────
-
-  const {
-    data: banData,
-    isLoading: banLoading,
-    hasNextPage: banHasNext,
-    isFetchingNextPage: banFetching,
-    fetchNextPage: banFetchNext,
-  } = useInfiniteQuery({
-    queryKey: ['admin', 'bans', banStatus],
-    queryFn: ({ pageParam }: { pageParam: string | undefined }) =>
-      listUserBans(banStatus, pageParam),
-    initialPageParam: undefined as string | undefined,
-    getNextPageParam: (last) => last.next_token || undefined,
-  })
-
-  const pardonMutation = useMutation({
-    mutationFn: pardonUser,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['admin', 'bans'] })
-      queryClient.invalidateQueries({ queryKey: ['admin', 'users'] })
-      notify('success', 'User pardoned')
-    },
-    onError: () => notify('error', 'Failed to pardon user'),
-  })
-
-  const ips = ipData?.pages.flatMap((p) => p.items) ?? []
-  const bans = banData?.pages.flatMap((p) => p.items) ?? []
+  const { tab } = Route.useSearch()
+  const [activeTab, setActiveTab] = useState<Tab>(tab ?? 'suspensions')
 
   return (
-    <div className="space-y-10">
-      <h2 className="text-lg font-semibold text-gray-900 mt-0 mb-0">Bans &amp; Suspensions</h2>
+    <div>
+      <h2 className="text-lg font-semibold text-gray-900 mb-6 mt-0">Bans &amp; Suspensions</h2>
 
-      {/* ── User bans / suspensions ─────────────────────────────────────────── */}
-      <section>
-        <div className="flex items-center justify-between mb-4">
-          <div className="flex items-center gap-3">
-            <h3 className="text-sm font-semibold text-gray-700 m-0">Banned / Suspended Users</h3>
-            {bans.length > 0 && (
-              <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-red-100 text-red-700">
-                {bans.length}{banHasNext ? '+' : ''}
-              </span>
-            )}
-          </div>
-          <FilterTabs value={banStatus} onChange={setBanStatus} />
-        </div>
-
-        {banLoading && <p className="text-sm text-gray-400">Loading…</p>}
-
-        {!banLoading && bans.length === 0 && (
-          <div className="flex flex-col items-center py-10 gap-2 text-gray-400">
-            <MdBlock className="text-4xl" />
-            <p className="text-sm m-0">
-              {banStatus === 'active' ? 'No active bans or suspensions.' : 'No ban records found.'}
-            </p>
-          </div>
-        )}
-
-        {bans.length > 0 && (
-          <div className="bg-white rounded-xl border border-gray-200 overflow-x-auto">
-            <table className="w-full min-w-200 text-sm border-collapse">
-              <thead>
-                <tr className="bg-gray-50 border-b border-gray-200">
-                  {['User', 'Type', 'Violation', 'Comments', 'Banned by', 'Banned at', 'Expires', ''].map((h) => (
-                    <th key={h} className="text-left px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wider">
-                      {h}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100">
-                {bans.map((ban) => (
-                  <UserBanRow
-                    key={ban.id}
-                    ban={ban}
-                    onPardon={() => {
-                      if (confirm(`Pardon ${ban.username}?`)) pardonMutation.mutate(ban.username)
-                    }}
-                    pendingPardon={pardonMutation.isPending && pardonMutation.variables === ban.username}
-                  />
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-
-        {banHasNext && (
+      <div className="flex gap-1 mb-6 border-b border-gray-200">
+        {([
+          { key: 'suspensions', label: 'Suspensions' },
+          { key: 'bans',        label: 'Bans' },
+          { key: 'ips',         label: 'Banned IPs' },
+        ] as { key: Tab; label: string }[]).map(({ key, label }) => (
           <button
-            onClick={() => banFetchNext()}
-            disabled={banFetching}
-            className="mt-3 text-sm text-blue-600 hover:text-blue-700 cursor-pointer bg-transparent border-0 disabled:opacity-50"
+            key={key}
+            type="button"
+            onClick={() => setActiveTab(key)}
+            className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors cursor-pointer ${
+              activeTab === key
+                ? 'border-blue-600 text-blue-600'
+                : 'border-transparent text-gray-500 hover:text-gray-800'
+            }`}
           >
-            {banFetching ? 'Loading…' : 'Load more'}
+            {label}
           </button>
-        )}
-      </section>
+        ))}
+      </div>
 
-      {/* ── Banned IPs ──────────────────────────────────────────────────────── */}
-      <section>
-        <div className="flex items-center justify-between mb-4">
-          <div className="flex items-center gap-3">
-            <h3 className="text-sm font-semibold text-gray-700 m-0">Banned IPs</h3>
-            {ips.length > 0 && (
-              <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-orange-100 text-orange-700">
-                {ips.length}{ipHasNext ? '+' : ''}
-              </span>
-            )}
-          </div>
-          <FilterTabs value={ipStatus} onChange={setIpStatus} />
-        </div>
-
-        {ipLoading && <p className="text-sm text-gray-400">Loading…</p>}
-
-        {!ipLoading && ips.length === 0 && (
-          <div className="flex flex-col items-center py-10 gap-2 text-gray-400">
-            <MdBlock className="text-4xl" />
-            <p className="text-sm m-0">
-              {ipStatus === 'active' ? 'No active IP bans.' : 'No IP ban records found.'}
-            </p>
-          </div>
-        )}
-
-        {ips.length > 0 && (
-          <div className="bg-white rounded-xl border border-gray-200 overflow-x-auto">
-            <table className="w-full min-w-180 text-sm border-collapse">
-              <thead>
-                <tr className="bg-gray-50 border-b border-gray-200">
-                  {['IP Address', 'Location', 'Banned At', 'Bans', 'Jail', ''].map((h) => (
-                    <th key={h} className="text-left px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wider">
-                      {h}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100">
-                {ips.map((ban) => (
-                  <IPBanRow
-                    key={ban.id}
-                    ban={ban}
-                    onUnban={() => {
-                      if (confirm(`Remove ban for ${ban.ip}?\n\nNote: the nginx deny rule will remain until fail2ban's timer expires or you run:\nfail2ban-client set nginx-api-scan unbanip ${ban.ip}`)) {
-                        unbanMutation.mutate(ban.id)
-                      }
-                    }}
-                    onExtend={() => extendMutation.mutate(ban.id)}
-                    pendingUnban={unbanMutation.isPending && unbanMutation.variables === ban.id}
-                    pendingExtend={extendMutation.isPending && extendMutation.variables === ban.id}
-                  />
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-
-        {ipHasNext && (
-          <button
-            onClick={() => ipFetchNext()}
-            disabled={ipFetching}
-            className="mt-3 text-sm text-blue-600 hover:text-blue-700 cursor-pointer bg-transparent border-0 disabled:opacity-50"
-          >
-            {ipFetching ? 'Loading…' : 'Load more'}
-          </button>
-        )}
-      </section>
+      {activeTab === 'suspensions' && <UserBansTab banType="suspended" />}
+      {activeTab === 'bans' && <UserBansTab banType="banned" />}
+      {activeTab === 'ips' && <IPsTab />}
     </div>
   )
 }
@@ -265,6 +100,220 @@ function FilterTabs({ value, onChange }: { value: StatusFilter; onChange: (v: St
   )
 }
 
+// ── Suspensions / Bans tab ───────────────────────────────────────────────────────
+
+function UserBansTab({ banType }: { banType: BanType }) {
+  const queryClient = useQueryClient()
+  const { notify } = useNotification()
+  const [status, setStatus] = useState<StatusFilter>('active')
+
+  const {
+    data,
+    isLoading,
+    hasNextPage,
+    isFetchingNextPage,
+    fetchNextPage,
+  } = useInfiniteQuery({
+    // Same queryKey shape as before (no type filter server-side) so switching
+    // between the Suspensions/Bans tabs at the same status reuses the cache
+    // instead of double-fetching — filtering by ban_type happens client-side.
+    queryKey: ['admin', 'bans', status],
+    queryFn: ({ pageParam }: { pageParam: string | undefined }) =>
+      listUserBans(status, pageParam),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (last) => last.next_token || undefined,
+  })
+
+  const pardonMutation = useMutation({
+    mutationFn: pardonUser,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['admin', 'bans'] })
+      queryClient.invalidateQueries({ queryKey: ['admin', 'users'] })
+      notify('success', 'User pardoned')
+    },
+    onError: () => notify('error', 'Failed to pardon user'),
+  })
+
+  const bans = (data?.pages.flatMap((p) => p.items) ?? []).filter((b) => b.ban_type === banType)
+  const label = banType === 'banned' ? 'bans' : 'suspensions'
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center gap-3">
+          {bans.length > 0 && (
+            <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${
+              banType === 'banned' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'
+            }`}>
+              {bans.length}{hasNextPage ? '+' : ''}
+            </span>
+          )}
+        </div>
+        <FilterTabs value={status} onChange={setStatus} />
+      </div>
+
+      {isLoading && <p className="text-sm text-gray-400">Loading…</p>}
+
+      {!isLoading && bans.length === 0 && (
+        <div className="flex flex-col items-center py-10 gap-2 text-gray-400">
+          <MdBlock className="text-4xl" />
+          <p className="text-sm m-0">
+            {status === 'active' ? `No active ${label}.` : `No ${label} records found.`}
+          </p>
+        </div>
+      )}
+
+      {bans.length > 0 && (
+        <div className="bg-white rounded-xl border border-gray-200 overflow-x-auto">
+          <table className="w-full min-w-175 text-sm border-collapse">
+            <thead>
+              <tr className="bg-gray-50 border-b border-gray-200">
+                {['User', 'Violation', 'Comments', `${banType === 'banned' ? 'Banned' : 'Suspended'} by`, `${banType === 'banned' ? 'Banned' : 'Suspended'} at`, 'Expires', ''].map((h) => (
+                  <th key={h} className="text-left px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                    {h}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100">
+              {bans.map((ban) => (
+                <UserBanRow
+                  key={ban.id}
+                  ban={ban}
+                  onPardon={() => {
+                    if (confirm(`Pardon ${ban.username}?`)) pardonMutation.mutate(ban.username)
+                  }}
+                  pendingPardon={pardonMutation.isPending && pardonMutation.variables === ban.username}
+                />
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {hasNextPage && (
+        <button
+          onClick={() => fetchNextPage()}
+          disabled={isFetchingNextPage}
+          className="mt-3 text-sm text-blue-600 hover:text-blue-700 cursor-pointer bg-transparent border-0 disabled:opacity-50"
+        >
+          {isFetchingNextPage ? 'Loading…' : 'Load more'}
+        </button>
+      )}
+    </div>
+  )
+}
+
+// ── Banned IPs tab ────────────────────────────────────────────────────────────
+
+function IPsTab() {
+  const queryClient = useQueryClient()
+  const { notify } = useNotification()
+  const [status, setStatus] = useState<StatusFilter>('active')
+
+  const {
+    data,
+    isLoading,
+    hasNextPage,
+    isFetchingNextPage,
+    fetchNextPage,
+  } = useInfiniteQuery({
+    queryKey: ['admin', 'banned-ips', status],
+    queryFn: ({ pageParam }: { pageParam: string | undefined }) =>
+      listBannedIPs(status, pageParam),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (last) => last.next_token || undefined,
+  })
+
+  const unbanMutation = useMutation({
+    mutationFn: unbanIP,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['admin', 'banned-ips'] })
+      notify('success', 'IP marked as unbanned')
+    },
+    onError: () => notify('error', 'Failed to unban IP'),
+  })
+
+  const extendMutation = useMutation({
+    mutationFn: extendBan,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['admin', 'banned-ips'] })
+      notify('success', 'Ban extended')
+    },
+    onError: () => notify('error', 'Failed to extend ban'),
+  })
+
+  const ips = data?.pages.flatMap((p) => p.items) ?? []
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center gap-3">
+          {ips.length > 0 && (
+            <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-orange-100 text-orange-700">
+              {ips.length}{hasNextPage ? '+' : ''}
+            </span>
+          )}
+        </div>
+        <FilterTabs value={status} onChange={setStatus} />
+      </div>
+
+      {isLoading && <p className="text-sm text-gray-400">Loading…</p>}
+
+      {!isLoading && ips.length === 0 && (
+        <div className="flex flex-col items-center py-10 gap-2 text-gray-400">
+          <MdBlock className="text-4xl" />
+          <p className="text-sm m-0">
+            {status === 'active' ? 'No active IP bans.' : 'No IP ban records found.'}
+          </p>
+        </div>
+      )}
+
+      {ips.length > 0 && (
+        <div className="bg-white rounded-xl border border-gray-200 overflow-x-auto">
+          <table className="w-full min-w-180 text-sm border-collapse">
+            <thead>
+              <tr className="bg-gray-50 border-b border-gray-200">
+                {['IP Address', 'Location', 'Banned At', 'Bans', 'Jail', ''].map((h) => (
+                  <th key={h} className="text-left px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                    {h}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100">
+              {ips.map((ban) => (
+                <IPBanRow
+                  key={ban.id}
+                  ban={ban}
+                  onUnban={() => {
+                    if (confirm(`Remove ban for ${ban.ip}?\n\nNote: the nginx deny rule will remain until fail2ban's timer expires or you run:\nfail2ban-client set nginx-api-scan unbanip ${ban.ip}`)) {
+                      unbanMutation.mutate(ban.id)
+                    }
+                  }}
+                  onExtend={() => extendMutation.mutate(ban.id)}
+                  pendingUnban={unbanMutation.isPending && unbanMutation.variables === ban.id}
+                  pendingExtend={extendMutation.isPending && extendMutation.variables === ban.id}
+                />
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {hasNextPage && (
+        <button
+          onClick={() => fetchNextPage()}
+          disabled={isFetchingNextPage}
+          className="mt-3 text-sm text-blue-600 hover:text-blue-700 cursor-pointer bg-transparent border-0 disabled:opacity-50"
+        >
+          {isFetchingNextPage ? 'Loading…' : 'Load more'}
+        </button>
+      )}
+    </div>
+  )
+}
+
 // ── User ban row ──────────────────────────────────────────────────────────────
 
 function UserBanRow({ ban, onPardon, pendingPardon }: {
@@ -273,22 +322,10 @@ function UserBanRow({ ban, onPardon, pendingPardon }: {
   pendingPardon: boolean
 }) {
   const isActive = ban.pardoned_at === null
-  const isBanned = ban.ban_type === 'banned'
 
   return (
     <tr className="hover:bg-gray-50 transition-colors">
       <td className="px-4 py-3 font-medium text-gray-900">{ban.username}</td>
-      <td className="px-4 py-3">
-        {isBanned ? (
-          <span className="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full bg-red-100 text-red-700">
-            <MdBlock className="text-xs" /> Banned
-          </span>
-        ) : (
-          <span className="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full bg-amber-100 text-amber-700">
-            <MdLockClock className="text-xs" /> Suspended
-          </span>
-        )}
-      </td>
       <td className="px-4 py-3 text-gray-600 text-xs max-w-40">
         <span title={ban.violation_code}>
           {VIOLATION_CODES[ban.violation_code] ?? ban.violation_code}

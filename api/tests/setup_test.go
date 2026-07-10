@@ -93,10 +93,15 @@ type stubQuerier struct {
 	dismissErr          error
 	dismissedCalls      [][]string
 	expansionRequests   []models.ServerExpansionRequest
+	activeSub           *models.PremiumSubscription
+	activeSubErr        error
 }
 
 func (s *stubQuerier) GetUserByUsername(_ context.Context, _ string) (*models.User, error) {
 	return s.user, s.userErr
+}
+func (s *stubQuerier) GetActiveSubscriptionForUser(_ context.Context, _ string) (*models.PremiumSubscription, error) {
+	return s.activeSub, s.activeSubErr
 }
 func (s *stubQuerier) GetActiveBan(_ context.Context, _ string) (*models.UserBan, error) {
 	return s.activeBan, s.activeBanErr
@@ -127,6 +132,9 @@ func (s *stubQuerier) GetLatestExpansionInvoice(_ context.Context, _ uuid.UUID) 
 	return nil, nil
 }
 func (s *stubQuerier) ListSharesForRecipient(_ context.Context, _ string) ([]models.Share, error) {
+	return nil, nil
+}
+func (s *stubQuerier) ListRecentAdminCancelledSubscriptionsForUser(_ context.Context, _ string, _ time.Time) ([]models.PremiumSubscription, error) {
 	return nil, nil
 }
 func (s *stubQuerier) ListRecentlyAcceptedInvitations(_ context.Context, _ time.Time) ([]models.Invitation, error) {

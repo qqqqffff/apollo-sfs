@@ -1,11 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  PayPalScriptProvider,
-  PayPalButtons,
-} from '@paypal/react-paypal-js'
-import {
-  MdArrowBack,
   MdBolt,
   MdCheckCircle,
   MdClose,
@@ -34,7 +29,7 @@ import {
   type StorageType,
 } from '../api/billing'
 import { ApiError } from '../api/client'
-import { PayPalGooglePayButton } from './PayPalGooglePayButton'
+import { PayPalCheckoutOptions, CheckoutBackButton } from './PayPalCheckoutOptions'
 import { HostedCardFields } from './HostedCardFields'
 
 // Allocation threshold above which direct purchases on a server are blocked
@@ -364,13 +359,7 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
 
           {phase === 'select' && showCardForm && (
             <>
-              <button
-                onClick={() => { setShowCardForm(false); setPayError(null) }}
-                disabled={busy}
-                className="inline-flex items-center gap-1 text-sm text-gray-500 hover:text-gray-900 cursor-pointer bg-transparent border-0 p-0 transition-colors disabled:opacity-40"
-              >
-                <MdArrowBack className="text-base" /> Back
-              </button>
+              <CheckoutBackButton onClick={() => { setShowCardForm(false); setPayError(null) }} disabled={busy} />
 
               {selectedServer && selectedPlanId && (
                 <div className="border border-gray-200 rounded-xl px-4 py-3">
@@ -712,7 +701,7 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
               ) : !config?.paypal_client_id ? (
                 <p className="text-sm text-red-500 m-0">Payments are not configured.</p>
               ) : (
-                <div className={canPay ? '' : 'opacity-50 pointer-events-none'}>
+                <div>
                   <p className="text-xs text-gray-500 mb-2 mt-0">
                     {selectedPlanId
                       ? isExpansion
@@ -720,53 +709,18 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
                         : `Pay: ${formatCents(amountCents)}`
                       : 'Select a capacity to continue'}
                   </p>
-                  <PayPalScriptProvider
-                    options={{
-                      clientId: config.paypal_client_id,
-                      currency: config.currency || 'USD',
-                      intent: 'capture',
-                      components: 'buttons,googlepay',
-                      // 'card' is disabled here because that funding source
-                      // sends the shopper to PayPal's hosted guest-checkout
-                      // page (extra "ship to billing address" / age-confirm
-                      // copy we don't want) — the "Pay with card" button below
-                      // uses HostedCardFields instead, which stays in-modal.
-                      disableFunding: 'paylater,card',
-                    }}
-                  >
-                    {/* Google Pay, orchestrated by PayPal — reuses the same
-                        order create/capture as the buttons (works for deposits
-                        too). Hidden when the buyer isn't Google Pay eligible. */}
-                    <PayPalGooglePayButton
-                      environment={config.environment}
-                      currencyCode={config.currency || 'USD'}
-                      amount={() => (amountCents / 100).toFixed(2)}
-                      createOrder={handleCreateOrder}
-                      onApprove={(orderId) => handleApprove({ orderID: orderId })}
-                      onError={(msg) => { if (!payError) setPayError(msg) }}
-                      enabled={canPay}
-                    />
-                    <PayPalButtons
-                      disabled={!canPay}
-                      style={{ layout: 'vertical', shape: 'rect', label: 'pay' }}
-                      createOrder={handleCreateOrder}
-                      onApprove={handleApprove}
-                      onError={(err) => {
-                        if (!payError) setPayError(err instanceof Error ? err.message : 'Payment failed')
-                      }}
-                      onCancel={() => setPayError(null)}
-                    />
-                  </PayPalScriptProvider>
-                  <button
-                    onClick={() => { setPayError(null); setShowCardForm(true) }}
-                    disabled={!canPay}
-                    className="w-full mt-2 px-4 py-2.5 text-sm border border-gray-300 text-gray-700 rounded-lg font-medium hover:bg-gray-50 disabled:opacity-50 cursor-pointer transition-colors"
-                  >
-                    Pay with card
-                  </button>
-                  <p className="text-[11px] text-gray-400 text-center m-0">
-                    Payments are processed securely by PayPal.
-                  </p>
+                  <PayPalCheckoutOptions
+                    clientId={config.paypal_client_id}
+                    currency={config.currency || 'USD'}
+                    environment={config.environment}
+                    amount={() => (amountCents / 100).toFixed(2)}
+                    createOrder={handleCreateOrder}
+                    onApprove={(orderId) => handleApprove({ orderID: orderId })}
+                    onError={(msg) => { if (!payError) setPayError(msg) }}
+                    onCancel={() => setPayError(null)}
+                    canPay={canPay}
+                    onChooseCard={() => { setPayError(null); setShowCardForm(true) }}
+                  />
                 </div>
               )}
             </>

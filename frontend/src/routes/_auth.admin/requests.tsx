@@ -18,7 +18,13 @@ import { STORAGE_PLANS } from '../../api/billing'
 import { ApiError } from '../../api/client'
 import { useNotification } from '../../context/NotificationContext'
 
+type Tab = 'access' | 'invitations'
+
 export const Route = createFileRoute('/_auth/admin/requests')({
+  validateSearch: (search: Record<string, unknown>): { tab?: Tab } => {
+    const tab = search.tab === 'access' || search.tab === 'invitations' ? search.tab : undefined
+    return { tab }
+  },
   component: RouteComponent,
 })
 
@@ -36,21 +42,35 @@ function formatQuota(bytes: number): string {
 }
 
 function RouteComponent() {
+  const { tab } = Route.useSearch()
+  const [activeTab, setActiveTab] = useState<Tab>(tab ?? 'access')
+
   return (
     <div>
       <h2 className="text-lg font-semibold text-gray-900 mb-6 mt-0">Requests</h2>
-      <section className="mb-10">
-        <h3 className="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-4 pb-2 border-b border-gray-200">
-          Invitations
-        </h3>
-        <InvitationsSection />
-      </section>
-      <section>
-        <h3 className="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-4 pb-2 border-b border-gray-200">
-          Access requests
-        </h3>
-        <InterestSection />
-      </section>
+
+      <div className="flex gap-1 mb-6 border-b border-gray-200">
+        {([
+          { key: 'access',      label: 'Access Requests' },
+          { key: 'invitations', label: 'Invitations' },
+        ] as { key: Tab; label: string }[]).map(({ key, label }) => (
+          <button
+            key={key}
+            type="button"
+            onClick={() => setActiveTab(key)}
+            className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors cursor-pointer ${
+              activeTab === key
+                ? 'border-blue-600 text-blue-600'
+                : 'border-transparent text-gray-500 hover:text-gray-800'
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {activeTab === 'access' && <InterestSection />}
+      {activeTab === 'invitations' && <InvitationsSection />}
     </div>
   )
 }

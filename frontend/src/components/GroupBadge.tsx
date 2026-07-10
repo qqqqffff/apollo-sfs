@@ -34,11 +34,11 @@ export function GroupBadge({ group, className = '', title }: Props) {
 interface AccountBadgesUser {
   is_admin?: boolean
   is_premium?: boolean
-  // Distinguishes an admin who actually completed a premium purchase from
-  // one who only has is_premium via the implicit admin-includes-premium
-  // rule (see api/routes/middleware/auth.go). Absent/false is treated as
-  // "not purchased" — safe for callers that don't have the field yet.
-  premium_purchased?: boolean
+  // Distinguishes an admin who actually subscribed to premium from one who
+  // only has is_premium via the implicit admin-includes-premium rule (see
+  // api/routes/middleware/auth.go). Absent/false is treated as "not
+  // subscribed" — safe for callers that don't have the field yet.
+  premium_subscribed?: boolean
 }
 
 interface AccountBadgesProps {
@@ -48,13 +48,13 @@ interface AccountBadgesProps {
 
 // AccountBadges renders every badge that applies to an account: normally
 // just one ("Admin", "Premium", or "User"), but both "Admin" and "Premium"
-// together when an admin has completed an actual premium purchase — so a
-// paying admin's badge reflects the purchase instead of being hidden behind
+// together when an admin has an actual premium subscription of their own —
+// so a subscribed admin's badge reflects that instead of being hidden behind
 // the implicit admin-includes-premium rule.
 export function AccountBadges({ user, className = '' }: AccountBadgesProps) {
   if (!user) return null
   const showAdmin = !!user.is_admin
-  const showPremium = !!user.is_premium && (!user.is_admin || !!user.premium_purchased)
+  const showPremium = !!user.is_premium && (!user.is_admin || !!user.premium_subscribed)
 
   if (!showAdmin && !showPremium) {
     return <GroupBadge group="user" className={className} />

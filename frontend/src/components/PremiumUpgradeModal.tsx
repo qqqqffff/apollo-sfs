@@ -1,22 +1,17 @@
 import { useEffect, useState } from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQueryClient } from '@tanstack/react-query'
 import {
-  PayPalScriptProvider,
-  PayPalButtons,
-} from '@paypal/react-paypal-js'
-import {
-  MdArrowBack,
   MdCheck,
   MdCheckCircle,
   MdClose,
   MdRemove,
   MdRocketLaunch,
 } from 'react-icons/md'
-import { getBillingConfig, formatCents } from '../api/billing'
-import { createPremiumWalletOrder, capturePaymentOrder } from '../api/payments'
+import { useBillingConfig } from '../hooks/useBillingConfig'
+import { createPremiumSubscription, confirmPremiumSubscription, type PremiumPlan } from '../api/payments'
 import { ApiError } from '../api/client'
-import { PayPalGooglePayButton } from './PayPalGooglePayButton'
-import { HostedCardFields } from './HostedCardFields'
+import { PayPalSubscribeButton } from './PayPalSubscribeButton'
+import { PremiumPlanSelector } from './PremiumPlanSelector'
 
 interface Props {
   onClose: () => void
@@ -40,14 +35,10 @@ const COMPARISON: { label: string; base: boolean; premium: boolean }[] = [
 export function PremiumUpgradeModal({ onClose }: Props) {
   const queryClient = useQueryClient()
 
-  const { data: config, isLoading: configLoading } = useQuery({
-    queryKey: ['billing', 'config'],
-    queryFn: getBillingConfig,
-    staleTime: 60 * 60 * 1000,
-  })
+  const { data: config, isLoading: configLoading } = useBillingConfig()
 
   const [phase, setPhase] = useState<Phase>('select')
-  const [showCardForm, setShowCardForm] = useState(false)
+  const [plan, setPlan] = useState<PremiumPlan>('monthly')
   const [busy, setBusy] = useState(false)
   const [payError, setPayError] = useState<string | null>(null)
 
@@ -62,14 +53,15 @@ export function PremiumUpgradeModal({ onClose }: Props) {
     return () => { document.body.style.overflow = '' }
   }, [])
 
-  const priceCents = config?.premium_price_cents ?? 0
-  const canPay = phase === 'select' && !busy && priceCents > 0
+  const plans = config?.premium_plans ?? []
+  const selectedPrice = plans.find((p) => p.plan === plan)?.price_cents ?? 0
+  const canPay = phase === 'select' && !busy && selectedPrice > 0
 
-  async function handleCreateOrder(): Promise<string> {
+  async function handleCreateSubscription(): Promise<string> {
     setPayError(null)
     try {
-      const res = await createPremiumWalletOrder()
-      return res.order_id
+      const res = await createPremiumSubscription(plan)
+      return res.subscription_id
     } catch (err) {
       const msg = err instanceof ApiError ? err.message : 'Could not start checkout'
       setPayError(msg)
@@ -77,15 +69,15 @@ export function PremiumUpgradeModal({ onClose }: Props) {
     }
   }
 
-  async function handleApprove(orderId: string) {
+  async function handleApprove(subscriptionId: string) {
     setBusy(true)
     setPayError(null)
     try {
-      await capturePaymentOrder(orderId)
+      await confirmPremiumSubscription(subscriptionId)
       setPhase('purchased')
       await queryClient.invalidateQueries({ queryKey: ['me'] })
     } catch (err) {
-      setPayError(err instanceof ApiError ? err.message : 'Payment capture failed')
+      setPayError(err instanceof ApiError ? err.message : 'Subscription confirmation failed')
     } finally {
       setBusy(false)
     }
@@ -126,8 +118,12 @@ export function PremiumUpgradeModal({ onClose }: Props) {
               <MdCheckCircle className="text-5xl text-green-500" />
               <h4 className="text-lg font-semibold text-gray-900 m-0">Premium activated</h4>
               <p className="text-sm text-gray-500 m-0 max-w-sm">
-                You now have access to the SFS S3-compatible API, per-directory API keys, and
-                premium file-server mounts.
+                You now have access to
+                <ol>
+                  <li>The SFS API, with per-directory API keys, and file-server mounts.</li>
+                  <li>The automated Google account backup.</li>
+                  <li>Photo collections and automated photo organization.</li>
+                </ol>
               </p>
               <button
                 onClick={onClose}
@@ -138,45 +134,7 @@ export function PremiumUpgradeModal({ onClose }: Props) {
             </div>
           )}
 
-          {phase === 'select' && showCardForm && (
-            <>
-              <button
-                onClick={() => { setShowCardForm(false); setPayError(null) }}
-                disabled={busy}
-                className="inline-flex items-center gap-1 text-sm text-gray-500 hover:text-gray-900 cursor-pointer bg-transparent border-0 p-0 transition-colors disabled:opacity-40"
-              >
-                <MdArrowBack className="text-base" /> Back
-              </button>
-
-              <div className="border border-gray-200 rounded-xl px-4 py-3 flex items-center justify-between">
-                <span className="text-sm font-medium text-gray-800">Premium — one-time payment</span>
-                <span className="text-sm font-semibold text-gray-800">{formatCents(priceCents)}</span>
-              </div>
-
-              {payError && <p className="text-xs text-red-500 m-0">{payError}</p>}
-              {busy && <p className="text-xs text-gray-500 m-0">Verifying payment…</p>}
-
-              {config?.paypal_client_id && (
-                <HostedCardFields
-                  clientId={config.paypal_client_id}
-                  currency={config.currency || 'USD'}
-                  createOrder={handleCreateOrder}
-                  onApprove={handleApprove}
-                  onError={(msg) => { if (!payError) setPayError(msg) }}
-                  disabled={!canPay}
-                  submitLabel={`Pay ${formatCents(priceCents)}`}
-                  googlePayAmount={() => (priceCents / 100).toFixed(2)}
-                  environment={config.environment}
-                />
-              )}
-              <p className="text-[11px] text-gray-400 text-center m-0">
-                Payments are processed securely by PayPal. Card details are entered directly into
-                PayPal and never touch our servers.
-              </p>
-            </>
-          )}
-
-          {phase === 'select' && !showCardForm && (
+          {phase === 'select' && (
             <>
               {/* Base vs Premium comparison */}
               <div>
@@ -208,60 +166,26 @@ export function PremiumUpgradeModal({ onClose }: Props) {
               </div>
 
               {payError && <p className="text-xs text-red-500 m-0">{payError}</p>}
-              {busy && <p className="text-xs text-gray-500 m-0">Verifying payment…</p>}
+              {busy && <p className="text-xs text-gray-500 m-0">Confirming subscription…</p>}
 
               {configLoading ? (
                 <p className="text-sm text-gray-400 m-0">Loading payment options…</p>
               ) : !config?.paypal_client_id ? (
                 <p className="text-sm text-red-500 m-0">Payments are not configured.</p>
               ) : (
-                <div className={canPay ? '' : 'opacity-50 pointer-events-none'}>
-                  <p className="text-xs text-gray-500 mb-2 mt-0">
-                    One-time payment: {formatCents(priceCents)}
-                  </p>
-                  <PayPalScriptProvider
-                    options={{
-                      clientId: config.paypal_client_id,
-                      currency: config.currency || 'USD',
-                      intent: 'capture',
-                      components: 'buttons,googlepay',
-                      // 'card' is disabled here for the same reason as the storage
-                      // modal — that funding source sends the shopper to PayPal's
-                      // hosted guest-checkout page. "Pay with card" below uses
-                      // HostedCardFields instead, which stays in-modal.
-                      disableFunding: 'paylater,card',
-                    }}
-                  >
-                    <PayPalGooglePayButton
-                      environment={config.environment}
-                      currencyCode={config.currency || 'USD'}
-                      amount={() => (priceCents / 100).toFixed(2)}
-                      createOrder={handleCreateOrder}
-                      onApprove={handleApprove}
-                      onError={(msg) => { if (!payError) setPayError(msg) }}
-                      enabled={canPay}
-                    />
-                    <PayPalButtons
-                      disabled={!canPay}
-                      style={{ layout: 'vertical', shape: 'rect', label: 'pay' }}
-                      createOrder={handleCreateOrder}
-                      onApprove={(data) => handleApprove(data.orderID)}
-                      onError={(err) => {
-                        if (!payError) setPayError(err instanceof Error ? err.message : 'Payment failed')
-                      }}
-                      onCancel={() => setPayError(null)}
-                    />
-                  </PayPalScriptProvider>
-                  <button
-                    onClick={() => { setPayError(null); setShowCardForm(true) }}
+                <div className="flex flex-col gap-3">
+                  <div>
+                    <SectionLabel>Choose a plan</SectionLabel>
+                    <PremiumPlanSelector plans={plans} selected={plan} onSelect={setPlan} disabled={busy} />
+                  </div>
+                  <PayPalSubscribeButton
+                    clientId={config.paypal_client_id}
+                    createSubscription={handleCreateSubscription}
+                    onApprove={handleApprove}
+                    onError={(msg) => { if (!payError) setPayError(msg) }}
+                    onCancel={() => setPayError(null)}
                     disabled={!canPay}
-                    className="w-full mt-2 px-4 py-2.5 text-sm border border-gray-300 text-gray-700 rounded-lg font-medium hover:bg-gray-50 disabled:opacity-50 cursor-pointer transition-colors"
-                  >
-                    Pay with card
-                  </button>
-                  <p className="text-[11px] text-gray-400 text-center m-0">
-                    Payments are processed securely by PayPal.
-                  </p>
+                  />
                 </div>
               )}
             </>

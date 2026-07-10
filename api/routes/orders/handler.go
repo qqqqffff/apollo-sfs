@@ -4,7 +4,11 @@ package orders
 
 import (
 	"context"
+	"database/sql"
+	"errors"
+	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -14,15 +18,18 @@ import (
 	"github.com/google/uuid"
 
 	"apollo-sfs.com/api/db"
+	"apollo-sfs.com/api/models"
 	"apollo-sfs.com/api/routes/services"
 )
 
 // PremiumRevoker is the subset of *services.PaymentService used to tear down
-// premium access (KC group, API keys) when an order's allocation is undone.
-// Captured behind an interface so it stays swappable/testable independent of
-// the concrete payment-service wiring.
+// premium access (KC group, API keys) when an order's or subscription's
+// allocation is undone. Captured behind an interface so it stays
+// swappable/testable independent of the concrete payment-service wiring.
 type PremiumRevoker interface {
 	RevokePremiumAllocation(ctx context.Context, username string) error
+	RevokeSubscription(ctx context.Context, subscriptionID, status, reason string) error
+	RevertSubscriptionAllocation(ctx context.Context, subscriptionID, actorUsername string) error
 }
 
 // refundWindowDays is how long after capture an order stays refundable.
@@ -45,6 +52,10 @@ type Querier interface {
 	MarkStorageOrderAllocationReverted(ctx context.Context, id uuid.UUID) (bool, error)
 	ListSandboxOrdersDueForAutoRevert(ctx context.Context, cutoff time.Time) ([]db.AdminOrder, error)
 	InsertAuditLog(ctx context.Context, in db.AuditInput) error
+	ListAdminSubscriptions(ctx context.Context, search, sort string, limit, offset int) ([]db.AdminSubscription, int, error)
+	GetSubscriptionByID(ctx context.Context, id uuid.UUID) (*models.PremiumSubscription, error)
+	MarkSubscriptionRefunded(ctx context.Context, id uuid.UUID, refundID string, refundAmountCents int) error
+	MarkSubscriptionCancellationReason(ctx context.Context, id uuid.UUID, reason string) error
 }
 
 // Compile-time checks.
@@ -87,6 +98,257 @@ func (h *Handler) List(c *gin.Context) {
 		items = []db.AdminOrder{}
 	}
 	c.JSON(http.StatusOK, gin.H{"items": items, "total": total, "page": page, "page_size": pageSize})
+}
+
+// ListSubscriptions returns searched, sorted, offset-paginated premium
+// subscriptions across all users — the admin Orders page's Subscriptions tab.
+// GET /api/v1/admin/subscriptions?search=&sort=&page=&page_size=
+// sort: "date" (default) | "amount".
+func (h *Handler) ListSubscriptions(c *gin.Context) {
+	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "25"))
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	if page < 1 {
+		page = 1
+	}
+
+	items, total, err := h.queries.ListAdminSubscriptions(
+		c.Request.Context(),
+		strings.TrimSpace(c.Query("search")),
+		c.Query("sort"),
+		pageSize, (page-1)*pageSize,
+	)
+	if err != nil {
+		log.Printf("orders ListSubscriptions: %v", err)
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "list failed"})
+		return
+	}
+	if items == nil {
+		items = []db.AdminSubscription{}
+	}
+	c.JSON(http.StatusOK, gin.H{"items": items, "total": total, "page": page, "page_size": pageSize})
+}
+
+// CancelSubscription cancels an active/suspended subscription on PayPal's
+// side and refunds the prorated remainder of its current billing period —
+// the fraction of time left until current_period_end, valued against the
+// subscription's per-cycle price. Stronger than the ordinary user-initiated
+// self-service cancel (routes/payments), which stops future billing but
+// issues no refund. Works for both live and sandbox subscriptions: a sandbox
+// refund just moves fake money through the sandbox PayPal app, same as the
+// Refund action above for one-time sandbox orders — see RevertSubscription-
+// Allocation below for the no-PayPal-call sandbox alternative.
+// The admin-supplied reason is required — it's persisted on the subscription
+// row and, combined with the refund amount, surfaced to the cancelled user
+// as a notification-bell item (see routes/me.go gatherNotificationItems).
+// POST /api/v1/admin/subscriptions/:id/cancel
+func (h *Handler) CancelSubscription(c *gin.Context) {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+
+	var body struct {
+		Reason string `json:"reason" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "reason is required"})
+		return
+	}
+	reason := strings.TrimSpace(body.Reason)
+	if reason == "" {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "reason is required"})
+		return
+	}
+
+	sub, err := h.queries.GetSubscriptionByID(c.Request.Context(), id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "subscription not found"})
+			return
+		}
+		log.Printf("orders CancelSubscription load: %v", err)
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "load subscription"})
+		return
+	}
+	if sub.Status != "active" && sub.Status != "suspended" {
+		c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": "subscription is not active"})
+		return
+	}
+
+	// Use the environment the subscription was created against, not the
+	// acting admin's own toggle state — cancellation/refund must land in the
+	// same PayPal instance the money actually moved through.
+	client := h.paypal.For(sub.Environment)
+	if client == nil {
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "payments not configured"})
+		return
+	}
+
+	var refundID string
+	var refundCents int
+	if sub.CurrentPeriodEnd != nil {
+		refundCents = prorateRefundCents(sub.Plan, sub.AmountCents, *sub.CurrentPeriodEnd, time.Now())
+		if refundCents > 0 {
+			periodStart := subscriptionPeriodStart(sub.Plan, *sub.CurrentPeriodEnd)
+			txs, txErr := client.ListSubscriptionTransactions(c.Request.Context(), sub.PayPalSubscriptionID, periodStart.Add(-48*time.Hour), time.Now())
+			if txErr != nil {
+				log.Printf("orders CancelSubscription list transactions: %v", txErr)
+			}
+			if saleID := latestCompletedSaleID(txs); saleID != "" {
+				refund, err := client.RefundSale(c.Request.Context(), saleID, refundCents, sub.Currency)
+				if err != nil {
+					log.Printf("orders CancelSubscription paypal refund: %v", err)
+					c.AbortWithStatusJSON(http.StatusBadGateway, gin.H{"error": "refund failed"})
+					return
+				}
+				refundID = refund.RefundID
+			} else {
+				// No completed billing-period transaction found (e.g. the
+				// PayPal transactions API had nothing to report) — proceed
+				// with cancellation but skip the refund rather than blocking
+				// the admin's primary intent of stopping the subscription.
+				log.Printf("orders CancelSubscription: no completed transaction found for %s, cancelling without refund", sub.PayPalSubscriptionID)
+				refundCents = 0
+			}
+		}
+	}
+
+	if err := client.CancelSubscription(c.Request.Context(), sub.PayPalSubscriptionID, reason); err != nil {
+		log.Printf("orders CancelSubscription paypal cancel: %v", err)
+		c.AbortWithStatusJSON(http.StatusBadGateway, gin.H{"error": "cancel failed"})
+		return
+	}
+
+	if err := h.queries.MarkSubscriptionCancellationReason(c.Request.Context(), sub.ID, reason); err != nil {
+		log.Printf("orders CancelSubscription mark reason: %v", err)
+	}
+	if refundID != "" {
+		if err := h.queries.MarkSubscriptionRefunded(c.Request.Context(), sub.ID, refundID, refundCents); err != nil {
+			log.Printf("orders CancelSubscription mark refunded: %v", err)
+		}
+	}
+
+	auditReason := fmt.Sprintf("admin cancel: %s", reason)
+	if refundID != "" {
+		auditReason = fmt.Sprintf("admin cancel: %s (refunded $%d.%02d %s)", reason, refundCents/100, refundCents%100, sub.Currency)
+	}
+	if err := h.paymentSvc.RevokeSubscription(c.Request.Context(), sub.PayPalSubscriptionID, "cancelled", auditReason); err != nil {
+		log.Printf("orders CancelSubscription revoke: %v", err)
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "revoke subscription"})
+		return
+	}
+
+	var refundIDResp *string
+	if refundID != "" {
+		refundIDResp = &refundID
+	}
+	c.JSON(http.StatusOK, gin.H{"refund_id": refundIDResp, "refund_amount_cents": refundCents})
+}
+
+// RevertSubscriptionAllocation undoes the local premium grant of a sandbox
+// subscription without contacting PayPal — mirrors RevertAllocation for
+// one-time sandbox orders (sandbox charges move fake money, so there's
+// nothing to refund, only the local grant to undo). Only available for
+// sandbox subscriptions; live subscriptions must go through
+// CancelSubscription, which issues a real prorated refund.
+// POST /api/v1/admin/subscriptions/:id/revert-allocation
+func (h *Handler) RevertSubscriptionAllocation(c *gin.Context) {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+
+	sub, err := h.queries.GetSubscriptionByID(c.Request.Context(), id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "subscription not found"})
+			return
+		}
+		log.Printf("orders RevertSubscriptionAllocation load: %v", err)
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "load subscription"})
+		return
+	}
+	if sub.Environment != "sandbox" {
+		c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": "only sandbox subscriptions can have their allocation reverted"})
+		return
+	}
+	if sub.Status != "active" && sub.Status != "suspended" {
+		c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": "subscription is not active"})
+		return
+	}
+
+	actor := c.GetString("username")
+	if err := h.paymentSvc.RevertSubscriptionAllocation(c.Request.Context(), sub.PayPalSubscriptionID, actor); err != nil {
+		log.Printf("orders RevertSubscriptionAllocation: %v", err)
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "revert allocation"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// subscriptionPeriodStart estimates when the subscription's current billing
+// period began, given its plan and PayPal-reported period end. Subscriptions
+// only track current_period_end (PayPal's next_billing_time) — the period
+// start isn't stored separately, so it's derived from the plan's fixed
+// cadence (monthly/annual), which holds as long as the price/interval hasn't
+// changed mid-subscription (true for this app's fixed plan pricing).
+func subscriptionPeriodStart(plan string, periodEnd time.Time) time.Time {
+	if plan == "annual" {
+		return periodEnd.AddDate(-1, 0, 0)
+	}
+	return periodEnd.AddDate(0, -1, 0)
+}
+
+// prorateRefundCents computes an admin cancellation's refund: the fraction of
+// the current billing period still remaining (now → current_period_end)
+// times the subscription's per-cycle price, rounded to the nearest cent and
+// clamped to [0, amountCents].
+func prorateRefundCents(plan string, amountCents int, periodEnd, now time.Time) int {
+	if !periodEnd.After(now) {
+		return 0
+	}
+	periodStart := subscriptionPeriodStart(plan, periodEnd)
+	total := periodEnd.Sub(periodStart)
+	if total <= 0 {
+		return 0
+	}
+	remaining := periodEnd.Sub(now)
+	if remaining > total {
+		remaining = total
+	}
+	cents := int(math.Round(float64(remaining) / float64(total) * float64(amountCents)))
+	if cents > amountCents {
+		cents = amountCents
+	}
+	if cents < 0 {
+		cents = 0
+	}
+	return cents
+}
+
+// latestCompletedSaleID picks the most recent COMPLETED transaction from a
+// ListSubscriptionTransactions result — the sale an admin cancellation's
+// prorated refund is issued against. Returns "" if none completed (e.g. all
+// declined/pending).
+func latestCompletedSaleID(txs []services.SubscriptionTransaction) string {
+	var latest services.SubscriptionTransaction
+	found := false
+	for _, t := range txs {
+		if t.Status != "COMPLETED" {
+			continue
+		}
+		if !found || t.Time.After(latest.Time) {
+			latest = t
+			found = true
+		}
+	}
+	if !found {
+		return ""
+	}
+	return latest.ID
 }
 
 // Refund refunds a captured order in full via PayPal. Premium refunds revoke

@@ -1,21 +1,23 @@
 import { createFileRoute, useNavigate, useSearch } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
-import { MdCheck, MdRocketLaunch, MdCreditCard, MdPhoneIphone } from 'react-icons/md'
-import { capturePaymentOrder, createPaymentOrder, type PaymentMethod } from '../api/payments'
+import { MdCheck, MdRocketLaunch } from 'react-icons/md'
+import { createPremiumSubscription, confirmPremiumSubscription, type PremiumPlan } from '../api/payments'
 import { meQueryOptions } from '../api/me'
+import { useBillingConfig } from '../hooks/useBillingConfig'
+import { ApiError } from '../api/client'
+import { PayPalSubscribeButton } from '../components/PayPalSubscribeButton'
+import { PremiumPlanSelector } from '../components/PremiumPlanSelector'
 
 interface Search {
   status?: 'approved' | 'cancelled'
-  token?: string  // PayPal redirect: order_id is in the `token` query param
-  PayerID?: string
+  subscription_id?: string // PayPal subscription-approval redirect param
 }
 
 export const Route = createFileRoute('/_auth/premium')({
   validateSearch: (search: Record<string, unknown>): Search => ({
     status: search.status === 'approved' || search.status === 'cancelled' ? search.status : undefined,
-    token: typeof search.token === 'string' ? search.token : undefined,
-    PayerID: typeof search.PayerID === 'string' ? search.PayerID : undefined,
+    subscription_id: typeof search.subscription_id === 'string' ? search.subscription_id : undefined,
   }),
   component: RouteComponent,
 })
@@ -25,7 +27,7 @@ const FEATURES = [
   'Per-directory API keys with read / write / delete / list scopes',
   'Share folder URLs from the file browser',
   'Same encryption + storage allocation as the web UI',
-  'Lifetime access — one-time payment',
+  'Cancel anytime from your profile',
 ]
 
 function RouteComponent() {
@@ -33,31 +35,37 @@ function RouteComponent() {
   const queryClient = useQueryClient()
   const search = useSearch({ from: '/_auth/premium' })
   const { data: user } = useQuery(meQueryOptions)
+  const { data: config, isLoading: configLoading } = useBillingConfig()
   const [error, setError] = useState<string | null>(null)
-  const [method, setMethod] = useState<PaymentMethod | null>(null)
+  const [plan, setPlan] = useState<PremiumPlan>('monthly')
 
-  const createOrder = useMutation({
-    mutationFn: (m: PaymentMethod) => createPaymentOrder(m),
-    onSuccess: (res) => {
-      // Redirect the browser to PayPal's approval URL; PayPal redirects back
-      // here with ?status=approved&token=<order_id> when complete.
-      window.location.href = res.approve_url
-    },
-    onError: (err) => setError(err instanceof Error ? err.message : 'Failed to create order'),
-  })
-
-  const capture = useMutation({
-    mutationFn: (orderID: string) => capturePaymentOrder(orderID),
+  const confirm = useMutation({
+    mutationFn: (subscriptionId: string) => confirmPremiumSubscription(subscriptionId),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ['me'] })
       navigate({ to: '/settings/api-keys' as never })
     },
-    onError: (err) => setError(err instanceof Error ? err.message : 'Capture failed'),
+    onError: (err) => setError(err instanceof Error ? err.message : 'Confirmation failed'),
   })
 
-  // PayPal redirected back with approval → run capture.
-  if (search.status === 'approved' && search.token && !capture.isSuccess && !capture.isPending) {
-    capture.mutate(search.token)
+  // PayPal redirected back with approval → confirm the grant immediately.
+  if (search.status === 'approved' && search.subscription_id && !confirm.isSuccess && !confirm.isPending) {
+    confirm.mutate(search.subscription_id)
+  }
+
+  async function handleCreateSubscription(): Promise<string> {
+    setError(null)
+    try {
+      const { subscription_id } = await createPremiumSubscription(plan)
+      return subscription_id
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not start checkout')
+      throw err
+    }
+  }
+
+  function handleApprove(subscriptionId: string) {
+    confirm.mutate(subscriptionId)
   }
 
   if (!user) return <p className="text-sm text-gray-500">Loading…</p>
@@ -82,16 +90,20 @@ function RouteComponent() {
     )
   }
 
+  const plans = config?.premium_plans ?? []
+
   return (
     <div className="max-w-2xl mx-auto">
       <div className="text-center mb-8">
         <MdRocketLaunch className="text-5xl text-amber-500 mx-auto mb-2" />
         <h1 className="text-2xl font-semibold text-gray-900 m-0">Premium</h1>
-        <p className="text-sm text-gray-500 mt-1">One-time payment unlocks the SFS API for the life of this account.</p>
+        <p className="text-sm text-gray-500 mt-1">
+          A recurring subscription unlocks the SFS API for as long as it&rsquo;s active.
+        </p>
       </div>
 
       <div className="border border-gray-200 rounded-2xl p-6 bg-white shadow-sm">
-        <ul className="list-none p-0 m-0 mb-6 flex flex-col gap-2">
+        <ul className="list-none p-0 m-0 mb-6 mt-4 flex flex-col gap-2">
           {FEATURES.map((f) => (
             <li key={f} className="flex items-start gap-2 text-sm text-gray-700">
               <MdCheck className="text-green-500 shrink-0 mt-0.5" /> {f}
@@ -100,45 +112,29 @@ function RouteComponent() {
         </ul>
 
         {search.status === 'cancelled' && (
-          <p className="text-sm text-amber-600 mb-4">Payment was cancelled. You can try again below.</p>
+          <p className="text-sm text-amber-600 mb-4">Checkout was cancelled. You can try again below.</p>
         )}
         {error && <p className="text-sm text-red-500 mb-4">{error}</p>}
-        {capture.isPending && <p className="text-sm text-gray-500 mb-4">Confirming payment…</p>}
+        {confirm.isPending && <p className="text-sm text-gray-500 mb-4">Confirming subscription…</p>}
 
-        <div className="flex flex-col sm:flex-row gap-3">
-          <PayButton
-            method="card"
-            label="Pay with card"
-            icon={<MdCreditCard className="text-xl" />}
-            loading={createOrder.isPending && method === 'card'}
-            onClick={() => { setMethod('card'); setError(null); createOrder.mutate('card') }}
-          />
-          <PayButton
-            method="apple_pay"
-            label="Pay with Apple Pay"
-            icon={<MdPhoneIphone className="text-xl" />}
-            loading={createOrder.isPending && method === 'apple_pay'}
-            onClick={() => { setMethod('apple_pay'); setError(null); createOrder.mutate('apple_pay') }}
-          />
-        </div>
-        <p className="text-xs text-gray-400 mt-3 text-center">
-          Payments are processed by PayPal. You&rsquo;ll be redirected to complete checkout.
-        </p>
+        {configLoading ? (
+          <p className="text-sm text-gray-400 m-0">Loading payment options…</p>
+        ) : !config?.paypal_client_id ? (
+          <p className="text-sm text-red-500 m-0">Payments are not configured.</p>
+        ) : (
+          <div className="flex flex-col gap-4">
+            <PremiumPlanSelector plans={plans} selected={plan} onSelect={setPlan} disabled={confirm.isPending} />
+            <PayPalSubscribeButton
+              clientId={config.paypal_client_id}
+              createSubscription={handleCreateSubscription}
+              onApprove={handleApprove}
+              onError={(msg) => setError(msg)}
+              onCancel={() => setError(null)}
+              disabled={confirm.isPending}
+            />
+          </div>
+        )}
       </div>
     </div>
-  )
-}
-
-function PayButton({
-  label, icon, loading, onClick,
-}: { method: PaymentMethod; label: string; icon: React.ReactNode; loading: boolean; onClick: () => void }) {
-  return (
-    <button
-      onClick={onClick}
-      disabled={loading}
-      className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-3 text-sm bg-gray-900 hover:bg-black text-white rounded-lg font-medium disabled:opacity-50 cursor-pointer transition-colors"
-    >
-      {icon} {loading ? 'Working…' : label}
-    </button>
   )
 }

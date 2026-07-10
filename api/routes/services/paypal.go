@@ -646,6 +646,234 @@ func (p *PayPalClient) RefundCapture(ctx context.Context, captureID string, amou
 	return &RefundResult{RefundID: parsed.ID, Status: parsed.Status}, nil
 }
 
+// ── Subscriptions ─────────────────────────────────────────────────────────────
+
+// CreateSubscriptionInput is the parameter set for CreateSubscription.
+type CreateSubscriptionInput struct {
+	PlanID    string
+	ReturnURL string
+	CancelURL string
+}
+
+// CreateSubscriptionResult is the relevant subset of PayPal's create
+// subscription response. ApproveURL is what the frontend redirects the
+// shopper to in order to approve the subscription on PayPal's hosted page.
+type CreateSubscriptionResult struct {
+	SubscriptionID string
+	ApproveURL     string
+}
+
+// CreateSubscription issues a v1 Billing Subscriptions create call. Approving
+// the subscription does not by itself grant premium — that happens when the
+// BILLING.SUBSCRIPTION.ACTIVATED webhook (or the post-redirect confirm
+// endpoint, as a latency shortcut) reports status ACTIVE.
+func (p *PayPalClient) CreateSubscription(ctx context.Context, in CreateSubscriptionInput) (*CreateSubscriptionResult, error) {
+	if in.PlanID == "" {
+		return nil, errors.New("paypal: plan_id required")
+	}
+	payload := map[string]any{
+		"plan_id": in.PlanID,
+		"application_context": map[string]any{
+			"return_url":  in.ReturnURL,
+			"cancel_url":  in.CancelURL,
+			"user_action": "SUBSCRIBE_NOW",
+		},
+	}
+	body, _ := json.Marshal(payload)
+	resp, err := p.doAuthed(ctx, http.MethodPost, "/v1/billing/subscriptions", bytes.NewReader(body), nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusCreated {
+		return nil, fmt.Errorf("paypal create subscription: %s: %s", resp.Status, string(raw))
+	}
+	var out struct {
+		ID    string `json:"id"`
+		Links []struct {
+			Href string `json:"href"`
+			Rel  string `json:"rel"`
+		} `json:"links"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, err
+	}
+	approve := ""
+	for _, l := range out.Links {
+		if l.Rel == "approve" {
+			approve = l.Href
+			break
+		}
+	}
+	return &CreateSubscriptionResult{SubscriptionID: out.ID, ApproveURL: approve}, nil
+}
+
+// SubscriptionDetails is the relevant subset of PayPal's get-subscription
+// response, used both by the post-redirect confirm endpoint and the
+// reconciliation loop's missed-webhook safety net.
+type SubscriptionDetails struct {
+	ID              string
+	Status          string // APPROVAL_PENDING|APPROVED|ACTIVE|SUSPENDED|CANCELLED|EXPIRED
+	PlanID          string
+	NextBillingTime *time.Time
+}
+
+// GetSubscription fetches a subscription's current status and billing info.
+func (p *PayPalClient) GetSubscription(ctx context.Context, subscriptionID string) (*SubscriptionDetails, error) {
+	resp, err := p.doAuthed(ctx, http.MethodGet, "/v1/billing/subscriptions/"+subscriptionID, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("paypal get subscription: %s: %s", resp.Status, string(raw))
+	}
+	var out struct {
+		ID          string `json:"id"`
+		Status      string `json:"status"`
+		PlanID      string `json:"plan_id"`
+		BillingInfo struct {
+			NextBillingTime *time.Time `json:"next_billing_time"`
+		} `json:"billing_info"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("paypal get subscription decode: %w", err)
+	}
+	return &SubscriptionDetails{
+		ID:              out.ID,
+		Status:          out.Status,
+		PlanID:          out.PlanID,
+		NextBillingTime: out.BillingInfo.NextBillingTime,
+	}, nil
+}
+
+// CancelSubscription cancels an active or suspended subscription on PayPal's
+// side. Idempotent from the caller's perspective: PayPal returns 422 for an
+// already-cancelled subscription, which is treated as success here since the
+// desired end state (not billing again) already holds.
+func (p *PayPalClient) CancelSubscription(ctx context.Context, subscriptionID, reason string) error {
+	payload := map[string]any{"reason": reason}
+	body, _ := json.Marshal(payload)
+	resp, err := p.doAuthed(ctx, http.MethodPost, "/v1/billing/subscriptions/"+subscriptionID+"/cancel", bytes.NewReader(body), nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusUnprocessableEntity {
+		return nil
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	return fmt.Errorf("paypal cancel subscription: %s: %s", resp.Status, string(raw))
+}
+
+// SubscriptionTransaction is one billing-cycle payment record for a
+// subscription, as returned by ListSubscriptionTransactions.
+type SubscriptionTransaction struct {
+	ID          string // sale/transaction id — refundable via RefundSale
+	Status      string // e.g. "COMPLETED", "PENDING", "DECLINED"
+	AmountCents int
+	Currency    string
+	Time        time.Time
+}
+
+// ListSubscriptionTransactions lists a subscription's billing transactions in
+// [start, end] (PayPal requires both bounds). Used to locate the sale behind
+// the subscription's current billing period when an admin cancellation needs
+// to issue a prorated refund — PayPal Subscriptions v1 has no "give me the
+// last charge" endpoint, only this range query.
+func (p *PayPalClient) ListSubscriptionTransactions(ctx context.Context, subscriptionID string, start, end time.Time) ([]SubscriptionTransaction, error) {
+	path := fmt.Sprintf("/v1/billing/subscriptions/%s/transactions?start_time=%s&end_time=%s",
+		subscriptionID,
+		strings.ReplaceAll(start.UTC().Format(time.RFC3339), "+", "%2B"),
+		strings.ReplaceAll(end.UTC().Format(time.RFC3339), "+", "%2B"))
+	resp, err := p.doAuthed(ctx, http.MethodGet, path, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("paypal list subscription transactions: %s: %s", resp.Status, string(raw))
+	}
+	var out struct {
+		Transactions []struct {
+			ID                  string `json:"id"`
+			Status              string `json:"status"`
+			AmountWithBreakdown struct {
+				GrossAmount struct {
+					CurrencyCode string `json:"currency_code"`
+					Value        string `json:"value"`
+				} `json:"gross_amount"`
+			} `json:"amount_with_breakdown"`
+			Time time.Time `json:"time"`
+		} `json:"transactions"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("paypal list subscription transactions decode: %w", err)
+	}
+	txs := make([]SubscriptionTransaction, 0, len(out.Transactions))
+	for _, t := range out.Transactions {
+		cents, err := parseAmountCents(t.AmountWithBreakdown.GrossAmount.Value)
+		if err != nil {
+			continue
+		}
+		txs = append(txs, SubscriptionTransaction{
+			ID:          t.ID,
+			Status:      t.Status,
+			AmountCents: cents,
+			Currency:    t.AmountWithBreakdown.GrossAmount.CurrencyCode,
+			Time:        t.Time,
+		})
+	}
+	return txs, nil
+}
+
+// RefundSale issues a partial or full refund against a subscription billing
+// charge. Subscription payments are "sale" transactions, not Orders v2
+// captures, so they're refunded through the legacy Payments v1 API
+// (/v1/payments/sale/{id}/refund) rather than RefundCapture's v2 endpoint.
+// amountCents <= 0 refunds the sale in full.
+func (p *PayPalClient) RefundSale(ctx context.Context, saleID string, amountCents int, currency string) (*RefundResult, error) {
+	if currency == "" {
+		currency = "USD"
+	}
+	payload := map[string]any{}
+	if amountCents > 0 {
+		payload["amount"] = map[string]any{
+			"total":    fmt.Sprintf("%d.%02d", amountCents/100, amountCents%100),
+			"currency": currency,
+		}
+	}
+	body, _ := json.Marshal(payload)
+	resp, err := p.doAuthed(ctx, http.MethodPost,
+		fmt.Sprintf("/v1/payments/sale/%s/refund", saleID),
+		bytes.NewReader(body), nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		var ppErr struct {
+			Message string `json:"message"`
+		}
+		if jerr := json.Unmarshal(raw, &ppErr); jerr == nil && ppErr.Message != "" {
+			return nil, fmt.Errorf("paypal refund sale: %s", ppErr.Message)
+		}
+		return nil, fmt.Errorf("paypal refund sale: %s: %s", resp.Status, string(raw))
+	}
+	var parsed struct {
+		ID    string `json:"id"`
+		State string `json:"state"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return nil, fmt.Errorf("paypal refund sale decode: %w", err)
+	}
+	return &RefundResult{RefundID: parsed.ID, Status: parsed.State}, nil
+}
+
 // parseAmountCents parses a PayPal "12.34"-style decimal amount to cents.
 // Rejects negative values or more than 2 decimal places.
 func parseAmountCents(v string) (int, error) {

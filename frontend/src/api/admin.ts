@@ -758,8 +758,64 @@ export function listAdminOrders(opts: { search?: string; sort?: string; page?: n
   return get<OffsetPage<AdminOrder>>(`/admin/orders${qs ? '?' + qs : ''}`)
 }
 
+// ── Premium subscriptions (admin, all users) ────────────────────────────────────
+
+export interface AdminSubscription {
+  id: string
+  username: string
+  plan: 'monthly' | 'annual'
+  status: 'approval_pending' | 'active' | 'suspended' | 'cancelled' | 'expired'
+  amount_cents: number
+  currency: string
+  payment_method: string
+  reference: string
+  invoice_number: string
+  created_at: string
+  current_period_end: string | null
+  cancelled_at: string | null
+  // Which PayPal instance this subscription was created against — 'sandbox'
+  // subscriptions came from an admin's sandbox-payments toggle.
+  environment: 'sandbox' | 'live'
+  // Set only by the admin "Cancel" action's prorated refund — null for
+  // subscriptions ended via the user's own self-service cancel (no refund)
+  // or a sandbox "Revert" (no PayPal call at all).
+  refund_id: string | null
+  refund_amount_cents: number | null
+  refunded_at: string | null
+  // Set only by the admin "Cancel" action — the required reason it was
+  // given, also surfaced to the user in their notification bar.
+  cancellation_reason: string | null
+}
+
+export function listAdminSubscriptions(opts: { search?: string; sort?: string; page?: number; page_size?: number } = {}) {
+  const params = new URLSearchParams()
+  if (opts.search)    params.set('search',    opts.search)
+  if (opts.sort)      params.set('sort',      opts.sort)
+  if (opts.page)      params.set('page',      String(opts.page))
+  if (opts.page_size) params.set('page_size', String(opts.page_size))
+  const qs = params.toString()
+  return get<OffsetPage<AdminSubscription>>(`/admin/subscriptions${qs ? '?' + qs : ''}`)
+}
+
 export function refundAdminOrder(type: 'premium' | 'storage', id: string) {
   return post<{ refund_id: string }>(`/admin/orders/${type}/${id}/refund`, {})
+}
+
+// Cancels an active/suspended subscription on PayPal's side and refunds the
+// prorated remainder of its current billing period — stronger than the
+// subscriber's own self-service cancel (which stops billing but refunds
+// nothing). Works for both live and sandbox subscriptions. reason is
+// required — it's shown to the cancelled user in their notification bar
+// alongside the refund amount.
+export function cancelAdminSubscription(id: string, reason: string) {
+  return post<{ refund_id: string | null; refund_amount_cents: number }>(`/admin/subscriptions/${id}/cancel`, { reason })
+}
+
+// Reverts a sandbox subscription's local premium grant without a PayPal call
+// — the recurring counterpart to revertAdminOrderAllocation. Only available
+// for sandbox subscriptions; live subscriptions must use cancelAdminSubscription.
+export function revertAdminSubscriptionAllocation(id: string) {
+  return post<{ ok: boolean }>(`/admin/subscriptions/${id}/revert-allocation`, {})
 }
 
 // Reverts the local quota/premium grant of a captured sandbox order without

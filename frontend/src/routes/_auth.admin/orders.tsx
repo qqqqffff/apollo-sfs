@@ -11,27 +11,31 @@ import {
 } from 'react-icons/md'
 import {
   approveExpansionRequest,
+  cancelAdminSubscription,
   cancelExpansionRequest,
   createExpansionInvoice,
   fulfillExpansionRequest,
   listAdminOrders,
+  listAdminSubscriptions,
   listExpansionRequests,
   refundAdminOrder,
   revertAdminOrderAllocation,
+  revertAdminSubscriptionAllocation,
   type AdminInvoicePayload,
   type AdminOrder,
+  type AdminSubscription,
 } from '../../api/admin'
 import { ApiError } from '../../api/client'
 import { useNotification } from '../../context/NotificationContext'
 import { InvoiceDocument } from '../../components/InvoiceDocument'
 import type { ServerExpansionRequest } from '../../types/api'
 
-type Tab = 'orders' | 'expansion' | 'custom'
+type Tab = 'orders' | 'subscriptions' | 'expansion' | 'custom'
+const TAB_VALUES: Tab[] = ['orders', 'subscriptions', 'expansion', 'custom']
 
 export const Route = createFileRoute('/_auth/admin/orders')({
   validateSearch: (search: Record<string, unknown>): { tab?: Tab } => {
-    const tab = search.tab === 'orders' || search.tab === 'expansion' || search.tab === 'custom'
-      ? search.tab : undefined
+    const tab = TAB_VALUES.includes(search.tab as Tab) ? (search.tab as Tab) : undefined
     return { tab }
   },
   component: RouteComponent,
@@ -79,6 +83,25 @@ function fmtCountdown(dueAt: Date): string {
   return `${minutes}m`
 }
 
+// estimateProratedRefundCents previews the admin Cancel action's refund
+// before confirming — mirrors prorateRefundCents/subscriptionPeriodStart in
+// api/routes/orders/handler.go (the server recomputes this authoritatively;
+// this is display-only). monthly/annual period lengths are approximated as
+// one calendar month/year ending at current_period_end.
+function estimateProratedRefundCents(s: AdminSubscription): number {
+  if (!s.current_period_end) return 0
+  const periodEnd = new Date(s.current_period_end).getTime()
+  const now = Date.now()
+  if (periodEnd <= now) return 0
+  const periodStart = new Date(s.current_period_end)
+  if (s.plan === 'annual') periodStart.setFullYear(periodStart.getFullYear() - 1)
+  else periodStart.setMonth(periodStart.getMonth() - 1)
+  const total = periodEnd - periodStart.getTime()
+  if (total <= 0) return 0
+  const remaining = Math.min(periodEnd - now, total)
+  return Math.round((remaining / total) * s.amount_cents)
+}
+
 function fmtCapacity(bytes: number): string {
   if (bytes >= 1024 * TIB) return `${(bytes / (1024 * TIB)).toFixed(1).replace(/\.0$/, '')} PB`
   if (bytes >= TIB) return `${(bytes / TIB).toFixed(1).replace(/\.0$/, '')} TB`
@@ -109,9 +132,10 @@ function RouteComponent() {
 
       <div className="flex gap-1 mb-6 border-b border-gray-200">
         {([
-          { key: 'orders',    label: 'Orders' },
-          { key: 'expansion', label: 'Expansion Requests' },
-          { key: 'custom',    label: 'Custom Requests' },
+          { key: 'orders',        label: 'Orders' },
+          { key: 'subscriptions', label: 'Subscriptions' },
+          { key: 'expansion',     label: 'Expansion Requests' },
+          { key: 'custom',        label: 'Custom Requests' },
         ] as { key: Tab; label: string }[]).map(({ key, label }) => (
           <button
             key={key}
@@ -129,6 +153,7 @@ function RouteComponent() {
       </div>
 
       {activeTab === 'orders' && <OrdersTab />}
+      {activeTab === 'subscriptions' && <SubscriptionsTab />}
       {activeTab === 'expansion' && <RequestsTab custom={false} />}
       {activeTab === 'custom' && <RequestsTab custom={true} />}
     </div>
@@ -421,6 +446,254 @@ function OrderInfoModal({ order, onClose }: { order: AdminOrder; onClose: () => 
         )}
         {order.type === 'premium' && (
           <InfoRow label="Grants" value="Lifetime premium — SFS API + per-directory API keys" />
+        )}
+      </div>
+    </ModalShell>
+  )
+}
+
+// ── Subscriptions tab ─────────────────────────────────────────────────────────
+
+const SUBSCRIPTION_STATUS_COLORS: Record<string, string> = {
+  active:            'bg-green-100 text-green-700',
+  approval_pending:  'bg-amber-100 text-amber-700',
+  suspended:         'bg-amber-100 text-amber-700',
+  cancelled:         'bg-gray-100 text-gray-500',
+  expired:           'bg-gray-100 text-gray-500',
+}
+
+const PLAN_LABELS: Record<string, string> = {
+  monthly: 'Monthly',
+  annual: 'Annual',
+}
+
+// SubscriptionsTab mirrors OrdersTab's table (same search/sort/pagination
+// controls, same User/Status/Amount/Payment date/Method/Reference/Invoice #
+// columns) plus two subscription-specific columns: Status shows the
+// subscription's own lifecycle state (active/suspended/cancelled/expired/
+// awaiting approval) rather than a one-time order's captured/refunded, and
+// Next payment surfaces current_period_end while the subscription is active.
+function SubscriptionsTab() {
+  const queryClient = useQueryClient()
+  const { notify } = useNotification()
+  const [search, setSearch] = useState('')
+  const [sort, setSort] = useState('date')
+  const [page, setPage] = useState(1)
+  const [infoSub, setInfoSub] = useState<AdminSubscription | null>(null)
+  const [cancelTarget, setCancelTarget] = useState<AdminSubscription | null>(null)
+  const [cancelReason, setCancelReason] = useState('')
+  const [revertTarget, setRevertTarget] = useState<AdminSubscription | null>(null)
+
+  const { data, isLoading, error } = useQuery({
+    queryKey: ['admin', 'subscriptions', { search, sort, page }],
+    queryFn: () => listAdminSubscriptions({ search, sort, page, page_size: PAGE_SIZE }),
+  })
+
+  const closeCancelModal = () => { setCancelTarget(null); setCancelReason('') }
+
+  const cancelMutation = useMutation({
+    mutationFn: ({ s, reason }: { s: AdminSubscription; reason: string }) => cancelAdminSubscription(s.id, reason),
+    onSuccess: (res) => {
+      closeCancelModal()
+      queryClient.invalidateQueries({ queryKey: ['admin', 'subscriptions'] })
+      notify('success', res.refund_id ? `Subscription cancelled — refunded ${fmtCents(res.refund_amount_cents)}` : 'Subscription cancelled')
+    },
+    onError: (err) => notify('error', err instanceof ApiError ? err.message : 'Cancel failed'),
+  })
+
+  const revertMutation = useMutation({
+    mutationFn: (s: AdminSubscription) => revertAdminSubscriptionAllocation(s.id),
+    onSuccess: () => {
+      setRevertTarget(null)
+      queryClient.invalidateQueries({ queryKey: ['admin', 'subscriptions'] })
+      notify('success', 'Allocation reverted')
+    },
+    onError: (err) => notify('error', err instanceof ApiError ? err.message : 'Revert failed'),
+  })
+
+  const pageCount = data ? Math.ceil(data.total / PAGE_SIZE) : 1
+
+  return (
+    <div>
+      <ListControls
+        search={search} onSearch={(v) => { setSearch(v); setPage(1) }}
+        sort={sort} onSort={(v) => { setSort(v); setPage(1) }}
+        sortOptions={[
+          { value: 'date', label: 'Newest first' },
+          { value: 'amount', label: 'Largest payment first' },
+        ]}
+        page={page} pageCount={pageCount} onPage={setPage}
+      />
+
+      {isLoading && <p className="text-sm text-gray-400">Loading…</p>}
+      {error != null && <p className="text-sm text-red-500">Failed to load subscriptions.</p>}
+
+      {data && (
+        <div className="border border-gray-200 rounded-xl overflow-x-auto bg-white">
+          <table className="w-full text-sm border-collapse min-w-225">
+            <thead>
+              <tr className="bg-gray-50 text-left text-xs text-gray-500">
+                <th className="px-3 py-2 font-medium">User</th>
+                <th className="px-3 py-2 font-medium">Status</th>
+                <th className="px-3 py-2 font-medium">Amount</th>
+                <th className="px-3 py-2 font-medium">Payment date</th>
+                <th className="px-3 py-2 font-medium">Method</th>
+                <th className="px-3 py-2 font-medium">Reference</th>
+                <th className="px-3 py-2 font-medium">Invoice #</th>
+                <th className="px-3 py-2 font-medium">Next payment</th>
+                <th className="px-3 py-2 font-medium text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.items.length === 0 && (
+                <tr><td colSpan={9} className="px-3 py-6 text-center text-gray-400">No subscriptions found.</td></tr>
+              )}
+              {data.items.map((s) => {
+                const cancelOpen = s.status === 'active' || s.status === 'suspended'
+                const revertOpen = s.environment === 'sandbox' && cancelOpen
+                const revertTitle = s.environment !== 'sandbox'
+                  ? 'Only sandbox subscriptions can have their allocation reverted'
+                  : !cancelOpen
+                  ? 'Subscription is not active'
+                  : 'Revert the granted premium access — no PayPal refund'
+                const cancelTitle = cancelOpen
+                  ? 'Cancel on PayPal and refund the prorated remainder of the current billing period'
+                  : 'Subscription is not active'
+                return (
+                  <tr
+                    key={s.id}
+                    onClick={() => setInfoSub(s)}
+                    className="border-t border-gray-100 cursor-pointer hover:bg-gray-50"
+                  >
+                    <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}><UserLink username={s.username} /></td>
+                    <td className="px-3 py-2">
+                      <span className={`px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider rounded whitespace-nowrap ${SUBSCRIPTION_STATUS_COLORS[s.status] ?? 'bg-gray-100 text-gray-500'}`}>
+                        {s.status.replace('_', ' ')}
+                      </span>
+                    </td>
+                    <td className="px-3 py-2 font-medium text-gray-800">
+                      {fmtCents(s.amount_cents)} <span className="text-gray-400 font-normal">/ {PLAN_LABELS[s.plan] ?? s.plan}</span>
+                      {s.environment === 'sandbox' && (
+                        <span
+                          title="Created via an admin's sandbox-payments toggle — not real revenue"
+                          className="ml-1.5 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider rounded bg-purple-100 text-purple-700"
+                        >
+                          Sandbox
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2 text-gray-500">{fmtDate(s.created_at)}</td>
+                    <td className="px-3 py-2 text-gray-600">{METHOD_LABELS[s.payment_method] ?? s.payment_method}</td>
+                    <td className="px-3 py-2 text-gray-400 font-mono text-xs">{s.reference}</td>
+                    <td className="px-3 py-2 text-gray-500 font-mono text-xs">{s.invoice_number}</td>
+                    <td className="px-3 py-2 text-gray-700 whitespace-nowrap">
+                      {s.status === 'active' ? fmtDate(s.current_period_end) : '—'}
+                    </td>
+                    <td className="px-3 py-2 text-right whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+                      {s.environment === 'sandbox' && (
+                        <button
+                          onClick={() => setRevertTarget(s)}
+                          disabled={!revertOpen}
+                          title={revertTitle}
+                          className="inline-flex items-center gap-1 px-2 py-1 text-xs border border-purple-200 rounded-lg text-purple-600 hover:bg-purple-50 disabled:opacity-40 disabled:hover:bg-transparent cursor-pointer disabled:cursor-not-allowed transition-colors mr-1.5"
+                        >
+                          Revert allocation
+                        </button>
+                      )}
+                      <button
+                        onClick={() => setCancelTarget(s)}
+                        disabled={!cancelOpen}
+                        title={cancelTitle}
+                        className="inline-flex items-center gap-1 px-2 py-1 text-xs border border-red-200 rounded-lg text-red-600 hover:bg-red-50 disabled:opacity-40 disabled:hover:bg-transparent cursor-pointer disabled:cursor-not-allowed transition-colors"
+                      >
+                        Cancel
+                      </button>
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {infoSub && <SubscriptionInfoModal subscription={infoSub} onClose={() => setInfoSub(null)} />}
+
+      {cancelTarget && (
+        <ModalShell onClose={closeCancelModal} title="Cancel subscription">
+          <p className="text-sm text-gray-600 m-0 mb-3">
+            This cancels {cancelTarget.username}&rsquo;s {PLAN_LABELS[cancelTarget.plan] ?? cancelTarget.plan} subscription on PayPal and immediately revokes their premium access (API keys and file-server links).{' '}
+            {estimateProratedRefundCents(cancelTarget) > 0
+              ? `A prorated refund of approximately ${fmtCents(estimateProratedRefundCents(cancelTarget))} for the remaining time in the current billing period will be issued.`
+              : 'No refund is due — the current billing period has no time remaining.'}
+            {' '}The reason below and the refund amount will be shown to the user in their notification bar.
+          </p>
+          <textarea
+            value={cancelReason}
+            onChange={(e) => setCancelReason(e.target.value)}
+            placeholder="Reason (shown to the user)"
+            rows={3}
+            className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+          />
+          <div className="flex justify-end gap-2 mt-3">
+            <button
+              onClick={closeCancelModal}
+              className="px-3 py-1.5 text-sm border border-gray-200 rounded-lg text-gray-600 hover:bg-gray-50 cursor-pointer"
+            >
+              Keep subscription
+            </button>
+            <button
+              onClick={() => cancelMutation.mutate({ s: cancelTarget, reason: cancelReason.trim() })}
+              disabled={!cancelReason.trim() || cancelMutation.isPending}
+              className="px-3 py-1.5 text-sm bg-red-600 hover:bg-red-700 text-white rounded-lg font-medium disabled:opacity-50 cursor-pointer"
+            >
+              {cancelMutation.isPending ? 'Cancelling…' : 'Cancel subscription'}
+            </button>
+          </div>
+        </ModalShell>
+      )}
+
+      {revertTarget && (
+        <ConfirmModal
+          title="Revert allocation?"
+          body={`This revokes the premium access ${revertTarget.username} got from this sandbox subscription. No PayPal refund is issued and the sandbox subscription is left as-is on PayPal — this is a sandbox test subscription, so nothing needs to be sent back.`}
+          confirmLabel={revertMutation.isPending ? 'Reverting…' : 'Revert allocation'}
+          disabled={revertMutation.isPending}
+          onConfirm={() => revertMutation.mutate(revertTarget)}
+          onCancel={() => setRevertTarget(null)}
+        />
+      )}
+    </div>
+  )
+}
+
+function SubscriptionInfoModal({ subscription, onClose }: { subscription: AdminSubscription; onClose: () => void }) {
+  return (
+    <ModalShell onClose={onClose} title="Subscription details">
+      <div className="flex flex-col divide-y divide-gray-100 text-sm">
+        <InfoRow label="User" value={subscription.username} />
+        <InfoRow label="Plan" value={PLAN_LABELS[subscription.plan] ?? subscription.plan} />
+        <InfoRow label="Status" value={subscription.status.replace('_', ' ')} />
+        <InfoRow label="Environment" value={subscription.environment === 'sandbox' ? 'Sandbox (test)' : 'Live'} />
+        <InfoRow label="Amount" value={`${fmtCents(subscription.amount_cents)} ${subscription.currency}`} />
+        <InfoRow label="Method" value={METHOD_LABELS[subscription.payment_method] ?? subscription.payment_method} />
+        <InfoRow label="Reference" value={subscription.reference} mono />
+        <InfoRow label="Invoice #" value={subscription.invoice_number} mono />
+        <InfoRow label="Created" value={new Date(subscription.created_at).toLocaleString()} />
+        <InfoRow
+          label="Next payment"
+          value={subscription.status === 'active' && subscription.current_period_end
+            ? new Date(subscription.current_period_end).toLocaleString()
+            : '—'}
+        />
+        {subscription.cancelled_at && (
+          <InfoRow label="Cancelled" value={new Date(subscription.cancelled_at).toLocaleString()} />
+        )}
+        {subscription.cancellation_reason && (
+          <InfoRow label="Cancellation reason" value={subscription.cancellation_reason} />
+        )}
+        {subscription.refund_id && (
+          <InfoRow label="Refund" value={`${fmtCents(subscription.refund_amount_cents ?? 0)} · ${subscription.refund_id} (${fmtDate(subscription.refunded_at)})`} mono />
         )}
       </div>
     </ModalShell>

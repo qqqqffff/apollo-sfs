@@ -6,6 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"time"
+
+	"github.com/google/uuid"
 
 	"apollo-sfs.com/api/db"
 	"apollo-sfs.com/api/models"
@@ -177,4 +180,131 @@ func (s *PaymentService) CreatePending(ctx context.Context, p *models.Payment) e
 // up the username and amount before calling ApplyCapture.
 func (s *PaymentService) GetByOrderID(ctx context.Context, orderID string) (*models.Payment, error) {
 	return s.queries.GetPaymentByOrderID(ctx, orderID)
+}
+
+// ApplySubscriptionActivated is the subscription equivalent of ApplyCapture:
+// called both by the post-approval-redirect confirm endpoint and the
+// asynchronous BILLING.SUBSCRIPTION.ACTIVATED webhook. MarkSubscriptionActive
+// is the idempotency anchor (status transition guard), so both callers can
+// fire without double-granting premium.
+func (s *PaymentService) ApplySubscriptionActivated(ctx context.Context, subscriptionID string, nextBillingTime *time.Time, rawWebhook []byte) error {
+	id, username, applied, err := s.queries.MarkSubscriptionActive(ctx, subscriptionID, nextBillingTime, rawWebhook)
+	if err != nil {
+		return fmt.Errorf("apply subscription activated: mark: %w", err)
+	}
+	if id == uuid.Nil {
+		// Unknown subscription id — nothing to grant.
+		return nil
+	}
+	if !applied {
+		// Already active by a previous webhook or confirm call. Idempotent.
+		return nil
+	}
+	if err := s.queries.SetUserPremium(ctx, username, true); err != nil {
+		return fmt.Errorf("apply subscription activated: set premium: %w", err)
+	}
+	if s.kc != nil {
+		if err := s.kc.AddUserToGroupByName(ctx, username, "premium"); err != nil {
+			log.Printf("apply subscription activated: KC group add for %q: %v", username, err)
+		}
+	}
+	action := "premium.granted"
+	resourceType := "premium_subscription"
+	resourceName := subscriptionID
+	if err := s.queries.InsertAuditLog(ctx, db.AuditInput{
+		TargetUsername: username,
+		ActorUsername:  username,
+		Action:         action,
+		ResourceType:   &resourceType,
+		ResourceID:     &id,
+		ResourceName:   &resourceName,
+	}); err != nil {
+		log.Printf("apply subscription activated: audit log: %v", err)
+	}
+	return nil
+}
+
+// ExtendSubscriptionPeriod bumps a subscription's current_period_end on a
+// recurring renewal charge (PAYMENT.SALE.COMPLETED). No grant/revoke side
+// effects — the user is already premium and stays that way.
+func (s *PaymentService) ExtendSubscriptionPeriod(ctx context.Context, subscriptionID string, nextBillingTime *time.Time) error {
+	if err := s.queries.UpdateSubscriptionPeriod(ctx, subscriptionID, nextBillingTime); err != nil {
+		return fmt.Errorf("extend subscription period: %w", err)
+	}
+	return nil
+}
+
+// RevokeSubscription marks a subscription cancelled/suspended/expired and
+// applies the same revocation effects as a one-time-purchase refund
+// (revokePremiumEffects) — used by the user-initiated cancel endpoint and by
+// BILLING.SUBSCRIPTION.CANCELLED/.SUSPENDED/.EXPIRED webhooks. status must be
+// one of premium_subscriptions' CHECK-constrained values.
+func (s *PaymentService) RevokeSubscription(ctx context.Context, subscriptionID, status, reason string) error {
+	id, username, err := s.queries.MarkSubscriptionStatus(ctx, subscriptionID, status)
+	if err != nil {
+		return fmt.Errorf("revoke subscription: mark status: %w", err)
+	}
+	if id == uuid.Nil {
+		// Unknown subscription id — likely a duplicate/test webhook event.
+		return nil
+	}
+	if err := s.revokePremiumEffects(ctx, username); err != nil {
+		return fmt.Errorf("revoke subscription: %w", err)
+	}
+	action := "premium.revoked"
+	resourceType := "premium_subscription"
+	resourceName := reason
+	if err := s.queries.InsertAuditLog(ctx, db.AuditInput{
+		TargetUsername: username,
+		ActorUsername:  username,
+		Action:         action,
+		ResourceType:   &resourceType,
+		ResourceID:     &id,
+		ResourceName:   &resourceName,
+	}); err != nil {
+		log.Printf("revoke subscription: audit log: %v", err)
+	}
+	return nil
+}
+
+// RevertSubscriptionAllocation undoes a sandbox subscription's local premium
+// grant (revokePremiumEffects) without any PayPal call — the recurring
+// counterpart to RevokePremiumAllocation for one-time sandbox orders: sandbox
+// charges move fake money, so there's nothing to refund, only the local grant
+// to undo. The subscription row is marked 'expired' locally; the PayPal-side
+// sandbox subscription is left running (harmless — it isn't real money, and
+// once the row is no longer active/suspended, ExtendSubscriptionPeriod's
+// status guard makes future renewal webhooks for it silent no-ops instead of
+// re-granting access).
+//
+// Logged as "premium_subscription.allocation_reverted", distinct from
+// RevokeSubscription's "premium.revoked", so admin reverts stay
+// distinguishable from real cancellations in the audit trail — mirrors
+// applyAllocationRevert's own distinct action for one-time orders.
+func (s *PaymentService) RevertSubscriptionAllocation(ctx context.Context, subscriptionID, actorUsername string) error {
+	id, username, err := s.queries.MarkSubscriptionStatus(ctx, subscriptionID, "expired")
+	if err != nil {
+		return fmt.Errorf("revert subscription allocation: mark status: %w", err)
+	}
+	if id == uuid.Nil {
+		// Unknown subscription id.
+		return nil
+	}
+	if err := s.revokePremiumEffects(ctx, username); err != nil {
+		return fmt.Errorf("revert subscription allocation: %w", err)
+	}
+	action := "premium_subscription.allocation_reverted"
+	resourceType := "premium_subscription"
+	resourceName := "manual"
+	if err := s.queries.InsertAuditLog(ctx, db.AuditInput{
+		TargetUsername: username,
+		ActorUsername:  actorUsername,
+		Action:         action,
+		ResourceType:   &resourceType,
+		ResourceID:     &id,
+		ResourceName:   &resourceName,
+	}); err != nil {
+		log.Printf("revert subscription allocation: audit log: %v", err)
+	}
+	return nil
 }

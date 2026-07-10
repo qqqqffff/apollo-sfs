@@ -423,3 +423,134 @@ func (q *Queries) ListSandboxOrdersDueForAutoRevert(ctx context.Context, cutoff 
 	}
 	return out, rows.Err()
 }
+
+// AdminSubscription is one row on the admin Orders page's Subscriptions tab —
+// shaped like AdminOrder (same amount/currency/payment_method/reference/
+// invoice_number/environment fields, mirroring the storage/premium orders
+// tab) plus the subscription-specific CurrentPeriodEnd, which the frontend
+// reads as "next payment date" while active.
+type AdminSubscription struct {
+	ID               uuid.UUID  `json:"id"`
+	Username         string     `json:"username"`
+	Plan             string     `json:"plan"`
+	Status           string     `json:"status"`
+	AmountCents      int64      `json:"amount_cents"`
+	Currency         string     `json:"currency"`
+	PaymentMethod    string     `json:"payment_method"`
+	Reference        string     `json:"reference"`      // PayPal subscription id
+	InvoiceNumber    string     `json:"invoice_number"` // SUB-<yymmdd>-<id prefix>
+	CreatedAt        time.Time  `json:"created_at"`
+	CurrentPeriodEnd *time.Time `json:"current_period_end"`
+	CancelledAt      *time.Time `json:"cancelled_at"`
+	Environment      string     `json:"environment"`
+	// RefundID/RefundAmountCents/RefundedAt are set only by an admin's
+	// prorated Cancel action (see orders.Handler.CancelSubscription) — nil
+	// otherwise, including for subscriptions ended via the ordinary
+	// user-initiated cancel (no refund) or a sandbox Revert (no PayPal call
+	// at all).
+	RefundID          *string    `json:"refund_id"`
+	RefundAmountCents *int64     `json:"refund_amount_cents"`
+	RefundedAt        *time.Time `json:"refunded_at"`
+	// CancellationReason is set only by the admin Cancel action below.
+	CancellationReason *string `json:"cancellation_reason"`
+}
+
+// adminSubscriptionsBase mirrors adminOrdersBase's shape/invoice-number
+// derivation for premium_subscriptions rows (SUB- prefix instead of ORD-, so
+// the two are visually distinguishable in search results).
+const adminSubscriptionsBase = `
+	SELECT ps.id, ps.username, ps.plan, ps.status,
+	       ps.amount_cents::bigint AS amount_cents, ps.currency, ps.payment_method,
+	       ps.paypal_subscription_id AS reference,
+	       'SUB-' || to_char(ps.created_at, 'YYMMDD') || '-' || upper(left(replace(ps.id::text,'-',''), 6)) AS invoice_number,
+	       ps.created_at, ps.current_period_end, ps.cancelled_at, ps.environment,
+	       ps.refund_id, ps.refund_amount_cents::bigint AS refund_amount_cents, ps.refunded_at,
+	       ps.cancellation_reason
+	FROM premium_subscriptions ps`
+
+// ListAdminSubscriptions returns a searched, sorted, offset-paginated page of
+// premium subscriptions (all users) plus the total row count — backs the
+// admin Orders page's Subscriptions tab. sort: "date" (newest first,
+// default) or "amount" (largest first).
+func (q *Queries) ListAdminSubscriptions(ctx context.Context, search, sort string, limit, offset int) ([]AdminSubscription, int, error) {
+	limit = clampLimit(limit)
+	if offset < 0 {
+		offset = 0
+	}
+
+	where := ""
+	args := []any{}
+	if search != "" {
+		args = append(args, "%"+search+"%")
+		where = `WHERE sub.username ILIKE $1 OR sub.reference ILIKE $1
+		         OR sub.invoice_number ILIKE $1 OR sub.status ILIKE $1
+		         OR sub.payment_method ILIKE $1`
+	}
+
+	var total int
+	countQuery := fmt.Sprintf(`SELECT COUNT(*) FROM (%s) sub %s`, adminSubscriptionsBase, where)
+	if err := q.db.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("ListAdminSubscriptions count: %w", err)
+	}
+
+	orderBy := "sub.created_at DESC"
+	if sort == "amount" {
+		orderBy = "sub.amount_cents DESC, sub.created_at DESC"
+	}
+
+	args = append(args, limit, offset)
+	query := fmt.Sprintf(`
+		SELECT * FROM (%s) sub
+		%s
+		ORDER BY %s
+		LIMIT $%d OFFSET $%d
+	`, adminSubscriptionsBase, where, orderBy, len(args)-1, len(args))
+
+	rows, err := q.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("ListAdminSubscriptions: %w", err)
+	}
+	defer rows.Close()
+
+	var out []AdminSubscription
+	for rows.Next() {
+		var s AdminSubscription
+		var periodEnd, cancelledAt, refundedAt sql.NullTime
+		var refundID, cancellationReason sql.NullString
+		var refundAmountCents sql.NullInt64
+		if err := rows.Scan(
+			&s.ID, &s.Username, &s.Plan, &s.Status,
+			&s.AmountCents, &s.Currency, &s.PaymentMethod,
+			&s.Reference, &s.InvoiceNumber,
+			&s.CreatedAt, &periodEnd, &cancelledAt, &s.Environment,
+			&refundID, &refundAmountCents, &refundedAt,
+			&cancellationReason,
+		); err != nil {
+			return nil, 0, fmt.Errorf("ListAdminSubscriptions scan: %w", err)
+		}
+		if periodEnd.Valid {
+			t := periodEnd.Time
+			s.CurrentPeriodEnd = &t
+		}
+		if cancelledAt.Valid {
+			t := cancelledAt.Time
+			s.CancelledAt = &t
+		}
+		if refundID.Valid {
+			s.RefundID = &refundID.String
+		}
+		if refundAmountCents.Valid {
+			v := refundAmountCents.Int64
+			s.RefundAmountCents = &v
+		}
+		if refundedAt.Valid {
+			t := refundedAt.Time
+			s.RefundedAt = &t
+		}
+		if cancellationReason.Valid {
+			s.CancellationReason = &cancellationReason.String
+		}
+		out = append(out, s)
+	}
+	return out, total, rows.Err()
+}

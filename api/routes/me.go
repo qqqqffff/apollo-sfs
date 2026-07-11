@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -17,6 +18,7 @@ import (
 	"github.com/gin-contrib/sessions"
 	"github.com/gin-gonic/gin"
 
+	"apollo-sfs.com/api/models"
 	"apollo-sfs.com/api/routes/middleware"
 	"apollo-sfs.com/api/routes/services"
 )
@@ -431,6 +433,10 @@ type notificationItem struct {
 	Body      string    `json:"body"`
 	Link      string    `json:"link"`
 	CreatedAt time.Time `json:"created_at"`
+	// Details carries the structured before/after breakdown for kinds that
+	// need more than a one-line body (currently only quota_changed) — the
+	// frontend renders it behind a "Breakdown" expand button.
+	Details json.RawMessage `json:"details,omitempty"`
 }
 
 // shareNotificationWindow bounds how long a received share keeps showing in
@@ -456,7 +462,7 @@ const adminNotificationLimit = 15
 // resolve the `category` query param on DismissNotifications.
 func notificationCategory(kind string) string {
 	switch kind {
-	case "capacity_provisioned":
+	case "capacity_provisioned", "quota_changed":
 		return "Storage"
 	case "payment_required", "action_pending", "subscription_cancelled":
 		return "Billing"
@@ -622,6 +628,24 @@ func (h *Handler) gatherNotificationItems(ctx context.Context, username string, 
 			Body:      body,
 			Link:      "/client/orders?tab=premium",
 			CreatedAt: cancelledAt,
+		})
+	}
+
+	// Storage allocation changes an admin made via the Users page editor,
+	// within the same window as the admin-cancelled-subscription notice above.
+	quotaChanges, err := h.queries.ListRecentQuotaChangeNotificationsForUser(ctx, username, time.Now().Add(-subscriptionCancelNotificationWindow))
+	if err != nil {
+		return nil, err
+	}
+	for _, qc := range quotaChanges {
+		items = append(items, notificationItem{
+			ID:        qc.ID.String() + ":quota-changed",
+			Kind:      "quota_changed",
+			Title:     "Storage allocation updated",
+			Body:      summarizeQuotaChange(qc.Details),
+			Link:      "/client/profile",
+			CreatedAt: qc.CreatedAt,
+			Details:   qc.Details,
 		})
 	}
 
@@ -794,6 +818,36 @@ func (h *Handler) adminNotifications(ctx context.Context) []notificationItem {
 	}
 
 	return items
+}
+
+// summarizeQuotaChange builds the bell body's concise one-line summary from a
+// quota_change_notifications row's structured details — the full per-drive
+// breakdown is available via the item's Details field (rendered behind the
+// frontend's "Breakdown" expand button).
+func summarizeQuotaChange(raw json.RawMessage) string {
+	var d models.StorageAllocationChangeDetails
+	if err := json.Unmarshal(raw, &d); err != nil {
+		return "An admin updated your storage allocation."
+	}
+	var before, after int64
+	for _, a := range d.Before {
+		before += a.QuotaBytes
+	}
+	for _, a := range d.After {
+		after += a.QuotaBytes
+	}
+	n := len(d.After)
+	if n == 0 {
+		n = len(d.Before)
+	}
+	drives := "drive"
+	if n != 1 {
+		drives = "drives"
+	}
+	return fmt.Sprintf(
+		"An admin updated your storage across %d %s: %s → %s total.",
+		n, drives, formatCapacityShort(before), formatCapacityShort(after),
+	)
 }
 
 func formatCapacityShort(bytes int64) string {

@@ -1365,7 +1365,7 @@ func (h *Handler) MarkExpanded(c *gin.Context) {
 	}
 
 	// Provision the quota now; the remaining balance is collected afterwards.
-	newQuota, err := h.queries.AddUserQuota(c.Request.Context(), req.Username, req.BytesRequested)
+	newQuota, err := h.queries.AddUserQuotaAndAllocation(c.Request.Context(), req.Username, &drive.DriveID, req.BytesRequested)
 	if err != nil {
 		log.Printf("expansion MarkExpanded add quota: %v", err)
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "provision quota"})
@@ -1375,7 +1375,7 @@ func (h *Handler) MarkExpanded(c *gin.Context) {
 	updated, err := h.queries.ProvisionExpansionRequest(c.Request.Context(), id, newQuota)
 	if err != nil || !updated {
 		// Roll the quota back if the status flip lost a race.
-		if _, rbErr := h.queries.AddUserQuota(c.Request.Context(), req.Username, -req.BytesRequested); rbErr != nil {
+		if _, rbErr := h.queries.AddUserQuotaAndAllocation(c.Request.Context(), req.Username, &drive.DriveID, -req.BytesRequested); rbErr != nil {
 			log.Printf("expansion MarkExpanded rollback quota: %v", rbErr)
 		}
 		log.Printf("expansion MarkExpanded: err=%v updated=%v", err, updated)
@@ -1620,7 +1620,11 @@ func (h *Handler) processUnpaidBalances(ctx context.Context) {
 
 		// 30 calendar days overdue → revert the allocation, keep the deposit.
 		if now.After(r.PaymentDueAt.AddDate(0, 0, balanceRevertDays)) {
-			if _, err := h.queries.AddUserQuota(ctx, r.Username, -r.BytesRequested); err != nil {
+			var driveID *uuid.UUID
+			if alloc, _ := h.queries.GetUserDrive(ctx, r.Username); alloc != nil {
+				driveID = &alloc.DriveID
+			}
+			if _, err := h.queries.AddUserQuotaAndAllocation(ctx, r.Username, driveID, -r.BytesRequested); err != nil {
 				log.Printf("expansion revert %s: subtract quota: %v", r.ID, err)
 				continue
 			}

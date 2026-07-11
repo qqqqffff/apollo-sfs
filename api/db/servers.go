@@ -155,9 +155,8 @@ func (q *Queries) ListServerCapacities(ctx context.Context) ([]ServerCapacity, e
 		FROM servers s
 		JOIN drives d ON d.server_id = s.id AND d.is_active = true
 		LEFT JOIN (
-			SELECT uda.drive_id, SUM(u.storage_quota_bytes) AS allocated
+			SELECT uda.drive_id, SUM(uda.quota_bytes) AS allocated
 			FROM user_drive_allocations uda
-			JOIN users u ON u.username = uda.user_id
 			GROUP BY uda.drive_id
 		) sub ON sub.drive_id = d.id
 		WHERE s.is_active = true
@@ -196,9 +195,8 @@ func (q *Queries) GetServerCapacity(ctx context.Context, serverID uuid.UUID, dri
 		FROM servers s
 		JOIN drives d ON d.server_id = s.id AND d.is_active = true AND d.drive_type = $2
 		LEFT JOIN (
-			SELECT uda.drive_id, SUM(u.storage_quota_bytes) AS allocated
+			SELECT uda.drive_id, SUM(uda.quota_bytes) AS allocated
 			FROM user_drive_allocations uda
-			JOIN users u ON u.username = uda.user_id
 			GROUP BY uda.drive_id
 		) sub ON sub.drive_id = d.id
 		WHERE s.is_active = true AND s.id = $1

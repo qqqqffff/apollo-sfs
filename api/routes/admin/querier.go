@@ -16,6 +16,7 @@ import (
 type AdminQuerier interface {
 	// Users
 	ListUsers(ctx context.Context, in db.PageInput) (*db.PageResult[models.User], error)
+	ListAdminUsers(ctx context.Context, f db.ListUsersFilter, limit, offset int) ([]models.User, int, error)
 	GetUserByUsername(ctx context.Context, username string) (*models.User, error)
 	UpdateUserQuota(ctx context.Context, username string, quotaBytes int64) error
 	GetUserDrive(ctx context.Context, username string) (*models.UserDriveAllocation, error)

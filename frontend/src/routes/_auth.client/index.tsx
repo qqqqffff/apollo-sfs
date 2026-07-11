@@ -50,7 +50,7 @@ import { useInfiniteFolderContents } from '../../hooks/useInfiniteFolderContents
 import { useFavorites } from '../../hooks/useFavorites'
 import { useDriveMigrationProgress } from '../../hooks/useDriveMigrationProgress'
 import { useImpersonation } from '../../context/ImpersonationContext'
-import { FilesLayout, parseFilesAction, type FilesAction } from '../../components/FilesSidebar'
+import { FilesLayout, FilesSidebarToggle, parseFilesAction, type FilesAction } from '../../components/FilesSidebar'
 import { GoogleServiceSelectModal } from '../../components/GoogleServiceSelectModal'
 import { GoogleBackupModal } from '../../components/GoogleBackupModal'
 import { GooglePhotosLoadingModal } from '../../components/GooglePhotosLoadingModal'
@@ -486,17 +486,29 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
     <div>
       {folderId !== 'root' ? (
         <div className="mb-2">
-          <FolderBreadcrumb
-            folderId={folderId}
-            onNavigate={(id) => navigate({ to: '/client', search: { file: undefined, folder: id } })}
-          />
-          {folder && <h2 className="text-lg font-semibold text-gray-900 m-0">{folder.name}</h2>}
+          <div className="flex items-center gap-3">
+            <FilesSidebarToggle />
+            <FolderBreadcrumb
+              folderId={folderId}
+              onNavigate={(id) => navigate({ to: '/client', search: { file: undefined, folder: id } })}
+            />
+          </div>
+          {folder && (
+            <div className="flex items-center gap-1">
+              <h2 className="text-lg font-semibold text-gray-900 m-0">{folder.name}</h2>
+              {!readOnly && (
+                <DriveInfoButton folder={folder} servers={myServers} isAdmin={!!user?.is_admin} align="left" />
+              )}
+            </div>
+          )}
         </div>
       ) : (
         <div className="flex items-center gap-3 mb-5">
+          <FilesSidebarToggle />
           <h2 className="text-lg font-semibold text-gray-900 mt-0 mb-0">
             {readOnly ? `${impersonatedUser!.username}'s Files` : 'My Files'}
           </h2>
+          <DriveInfoButton folder={null} servers={myServers} isAdmin={!!user?.is_admin} align="left" />
           {(user?.is_premium || user?.is_admin) && (
             <AccountBadges user={user} className="text-[10px]" />
           )}
@@ -1047,11 +1059,17 @@ function ServerPicker({
 }
 
 // DriveInfoButton shows a folder's current tier/server (resolved against the
-// user's drives) and, on click, opens DriveChangePopover to change it.
-function DriveInfoButton({ folder, servers, isAdmin }: { folder: Folder; servers: MyServer[] | undefined; isAdmin: boolean }) {
+// user's drives) and, on click, opens a popover with the details. For a real
+// folder that's DriveChangePopover (also lets the user request a move); for
+// the virtual root (folder === null, e.g. the "My Files" header) there's
+// nothing to migrate, so it opens the read-only RootLocationPopover instead —
+// root uploads always use the dynamic-routing default (resolveDrive(null, …)).
+function DriveInfoButton({
+  folder, servers, isAdmin, align = 'right',
+}: { folder: Folder | null; servers: MyServer[] | undefined; isAdmin: boolean; align?: 'left' | 'right' }) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
-  const { drive, isPinned } = resolveDrive(folder.drive_id, servers)
+  const { drive, isPinned } = resolveDrive(folder?.drive_id ?? null, servers)
   const label = drive
     ? `${isPinned ? '' : 'Default — '}${tierLabel(drive.drive_type)} tier · ${drive.name}`
     : 'Default storage location'
@@ -1075,12 +1093,47 @@ function DriveInfoButton({ folder, servers, isAdmin }: { folder: Folder; servers
         <MdInfoOutline className="text-lg" />
       </button>
       {open && (
-        <DriveChangePopover
-          folder={folder}
-          servers={servers}
-          isAdmin={isAdmin}
-          onClose={() => setOpen(false)}
-        />
+        folder ? (
+          <DriveChangePopover
+            folder={folder}
+            servers={servers}
+            isAdmin={isAdmin}
+            align={align}
+            onClose={() => setOpen(false)}
+          />
+        ) : (
+          <RootLocationPopover drive={drive} isPinned={isPinned} align={align} onClose={() => setOpen(false)} />
+        )
+      )}
+    </div>
+  )
+}
+
+// RootLocationPopover is the read-only counterpart to DriveChangePopover for
+// the virtual root: there's no folder row to pin/migrate, so it just explains
+// where new root-level uploads land today.
+function RootLocationPopover({
+  drive, isPinned, align, onClose,
+}: { drive: MyServer | undefined; isPinned: boolean; align: 'left' | 'right'; onClose: () => void }) {
+  return (
+    <div className={`absolute ${align === 'left' ? 'left-0' : 'right-0'} top-full mt-1 w-64 bg-white rounded-lg border border-gray-200 shadow-lg z-50 p-3`}>
+      <div className="flex items-center justify-between gap-2 mb-2">
+        <span className="text-xs font-semibold text-gray-700">Storage location</span>
+        <button onClick={onClose} className="text-gray-400 hover:text-gray-600 cursor-pointer bg-transparent border-0 p-0.5">
+          <MdClose className="text-sm" />
+        </button>
+      </div>
+      {drive ? (
+        <>
+          <p className="text-xs text-gray-500 m-0 mb-1.5">
+            Files uploaded here use your {isPinned ? 'assigned' : 'primary'} drive by default:
+          </p>
+          <p className="text-xs font-semibold text-gray-800 m-0 flex items-center gap-1">
+            {drive.name} <TierIcon type={drive.drive_type} /> {tierLabel(drive.drive_type)} tier
+          </p>
+        </>
+      ) : (
+        <p className="text-xs text-gray-500 m-0">No storage server assigned yet.</p>
       )}
     </div>
   )
@@ -1094,8 +1147,8 @@ function DriveInfoButton({ folder, servers, isAdmin }: { folder: Folder; servers
 // (all servers/tiers, owned or not) to see the full control surface without
 // being able to actually fire a move.
 function DriveChangePopover({
-  folder, servers, isAdmin, onClose,
-}: { folder: Folder; servers: MyServer[] | undefined; isAdmin: boolean; onClose: () => void }) {
+  folder, servers, isAdmin, align = 'right', onClose,
+}: { folder: Folder; servers: MyServer[] | undefined; isAdmin: boolean; align?: 'left' | 'right'; onClose: () => void }) {
   const queryClient = useQueryClient()
   const { notify } = useNotification()
   const { eligibility, migration, progress, isActive } = useDriveMigrationProgress(folder.id, folder.name)
@@ -1155,7 +1208,7 @@ function DriveChangePopover({
   const canConfirm = hasChange && !atLimit && !migrateMutation.isPending && !previewMode
 
   return (
-    <div className="absolute right-0 top-full mt-1 w-72 bg-white rounded-lg border border-gray-200 shadow-lg z-50 p-3">
+    <div className={`absolute ${align === 'left' ? 'left-0' : 'right-0'} top-full mt-1 w-72 bg-white rounded-lg border border-gray-200 shadow-lg z-50 p-3`}>
       <div className="flex items-center justify-between gap-2 mb-3">
         <span className="text-xs text-gray-500 min-w-0 truncate">
           {current ? (

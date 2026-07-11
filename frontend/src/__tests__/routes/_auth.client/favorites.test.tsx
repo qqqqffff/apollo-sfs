@@ -47,6 +47,7 @@ jest.mock('../../../components/FilePreviewModal', () => ({
 // passthrough so these tests stay focused on the favorites content.
 jest.mock('../../../components/FilesSidebar', () => ({
   FilesLayout: ({ children }: any) => children,
+  FilesSidebarToggle: () => null,
 }))
 
 import { Route } from '../../../routes/_auth.client/favorites'

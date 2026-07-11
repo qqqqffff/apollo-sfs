@@ -47,7 +47,8 @@ type Querier interface {
 	GetAdminOrder(ctx context.Context, orderType string, id uuid.UUID) (*db.AdminOrder, error)
 	MarkPaymentRefundedByID(ctx context.Context, id uuid.UUID, refundID string) (bool, error)
 	MarkStorageOrderRefunded(ctx context.Context, id uuid.UUID, refundID string) (bool, error)
-	AddUserQuota(ctx context.Context, username string, bytesAdded int64) (int64, error)
+	AddUserQuotaAndAllocation(ctx context.Context, username string, driveID *uuid.UUID, bytesAdded int64) (int64, error)
+	GetUserDrive(ctx context.Context, username string) (*models.UserDriveAllocation, error)
 	MarkPaymentAllocationReverted(ctx context.Context, id uuid.UUID) (bool, error)
 	MarkStorageOrderAllocationReverted(ctx context.Context, id uuid.UUID) (bool, error)
 	ListSandboxOrdersDueForAutoRevert(ctx context.Context, cutoff time.Time) ([]db.AdminOrder, error)
@@ -420,7 +421,11 @@ func (h *Handler) Refund(c *gin.Context) {
 				log.Printf("orders Refund revoke premium: %v", err)
 			}
 		} else if order.BytesAdded > 0 {
-			if _, err := h.queries.AddUserQuota(c.Request.Context(), order.Username, -order.BytesAdded); err != nil {
+			var driveID *uuid.UUID
+			if alloc, _ := h.queries.GetUserDrive(c.Request.Context(), order.Username); alloc != nil {
+				driveID = &alloc.DriveID
+			}
+			if _, err := h.queries.AddUserQuotaAndAllocation(c.Request.Context(), order.Username, driveID, -order.BytesAdded); err != nil {
 				log.Printf("orders Refund revert quota: %v", err)
 			}
 		}
@@ -509,7 +514,11 @@ func (h *Handler) applyAllocationRevert(ctx context.Context, order *db.AdminOrde
 			log.Printf("orders applyAllocationRevert revoke premium: %v", err)
 		}
 	} else if order.BytesAdded > 0 {
-		if _, err := h.queries.AddUserQuota(ctx, order.Username, -order.BytesAdded); err != nil {
+		var driveID *uuid.UUID
+		if alloc, _ := h.queries.GetUserDrive(ctx, order.Username); alloc != nil {
+			driveID = &alloc.DriveID
+		}
+		if _, err := h.queries.AddUserQuotaAndAllocation(ctx, order.Username, driveID, -order.BytesAdded); err != nil {
 			log.Printf("orders applyAllocationRevert subtract quota: %v", err)
 		}
 	}

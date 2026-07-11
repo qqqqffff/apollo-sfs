@@ -11,7 +11,7 @@ import {
 } from 'react-icons/md'
 import { mySharesQueryOptions, revokeShare, sharedWithMeQueryOptions } from '../../api/shares'
 import { useNotification } from '../../context/NotificationContext'
-import { FilesLayout } from '../../components/FilesSidebar'
+import { FilesLayout, FilesSidebarToggle } from '../../components/FilesSidebar'
 import type { Share } from '../../types/api'
 
 export const Route = createFileRoute('/_auth/client/shared/')({
@@ -46,7 +46,10 @@ function SharedView() {
 
   return (
     <div>
-      <h2 className="text-lg font-semibold text-gray-900 mb-6 mt-0">Shared</h2>
+      <div className="flex items-center gap-3 mb-6">
+        <FilesSidebarToggle />
+        <h2 className="text-lg font-semibold text-gray-900 m-0">Shared</h2>
+      </div>
 
       <section className="mb-8">
         <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">

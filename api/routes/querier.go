@@ -27,11 +27,19 @@ type Querier interface {
 	GetUserStorageAllocations(ctx context.Context, username, userID string) ([]db.UserStorageAllocation, error)
 	CountActiveExpansionRequests(ctx context.Context, username string) (int, error)
 
+	// Admin storage allocation editor
+	GetDrive(ctx context.Context, id uuid.UUID) (*models.Drive, error)
+	GetServer(ctx context.Context, id uuid.UUID) (*models.Server, error)
+	GetDriveAvailableBytes(ctx context.Context, driveID uuid.UUID) (int64, error)
+	SaveUserDriveAllocations(ctx context.Context, username string, want []db.SaveAllocationsParams) (int64, error)
+	InsertQuotaChangeNotification(ctx context.Context, p db.InsertQuotaChangeNotificationParams) error
+
 	// Notification bell
 	ListUserExpansionRequests(ctx context.Context, username string) ([]models.ServerExpansionRequest, error)
 	GetLatestExpansionInvoice(ctx context.Context, requestID uuid.UUID) (*models.ExpansionInvoice, error)
 	ListSharesForRecipient(ctx context.Context, email string) ([]models.Share, error)
 	ListRecentAdminCancelledSubscriptionsForUser(ctx context.Context, username string, since time.Time) ([]models.PremiumSubscription, error)
+	ListRecentQuotaChangeNotificationsForUser(ctx context.Context, username string, since time.Time) ([]db.QuotaChangeNotification, error)
 
 	// Notification bell — admin-only categories
 	ListRecentlyAcceptedInvitations(ctx context.Context, since time.Time) ([]models.Invitation, error)

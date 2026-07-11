@@ -1,5 +1,7 @@
 import {
   listUsers,
+  searchAdminUsers,
+  updateUserStorageAllocations,
   getUser,
   updateUserQuota,
   updateUsername,
@@ -78,6 +80,20 @@ describe('listUsers', () => {
   })
 })
 
+describe('searchAdminUsers', () => {
+  it('GETs /admin/users/search with no params', async () => {
+    mockFetch(200, { items: [], total: 0, page: 1, page_size: 25 })
+    await searchAdminUsers()
+    expect(lastUrl()).toBe('/api/v1/admin/users/search')
+  })
+
+  it('appends search, role, sort, dir, page, page_size', async () => {
+    mockFetch(200, { items: [], total: 0, page: 2, page_size: 25 })
+    await searchAdminUsers({ search: 'ali', role: 'admin', sort: 'username', dir: 'asc', page: 2, page_size: 25 })
+    expect(lastUrl()).toBe('/api/v1/admin/users/search?search=ali&role=admin&sort=username&dir=asc&page=2&page_size=25')
+  })
+})
+
 describe('getUser', () => {
   it('GETs /admin/users/:username', async () => {
     mockFetch(200, { id: 'u1', username: 'alice' })
@@ -93,6 +109,22 @@ describe('updateUserQuota', () => {
     expect(lastUrl()).toBe('/api/v1/admin/users/alice/quota')
     expect(lastInit().method).toBe('PATCH')
     expect(lastBody()).toEqual({ quota_bytes: 10 * 1024 ** 3 })
+  })
+})
+
+describe('updateUserStorageAllocations', () => {
+  it('PUTs /admin/users/:username/storage/allocations', async () => {
+    mockFetch(200, { quota_bytes: 0, used_bytes: 0, nvme_bytes: 0, hdd_bytes: 0, allocations: [], active_request_count: 0 })
+    await updateUserStorageAllocations('alice', {
+      allocations: [{ drive_id: 'd1', quota_bytes: 10 * 1024 ** 3 }],
+      reason: 'growing them a bit',
+    })
+    expect(lastUrl()).toBe('/api/v1/admin/users/alice/storage/allocations')
+    expect(lastInit().method).toBe('PUT')
+    expect(lastBody()).toEqual({
+      allocations: [{ drive_id: 'd1', quota_bytes: 10 * 1024 ** 3 }],
+      reason: 'growing them a bit',
+    })
   })
 })
 

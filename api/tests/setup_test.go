@@ -95,6 +95,20 @@ type stubQuerier struct {
 	expansionRequests   []models.ServerExpansionRequest
 	activeSub           *models.PremiumSubscription
 	activeSubErr        error
+	// Admin storage allocation editor
+	drive                 *models.Drive
+	driveErr              error
+	server                *models.Server
+	serverErr             error
+	driveAvailBytes       int64
+	driveAvailErr         error
+	storageAllocations    []db.UserStorageAllocation
+	storageAllocationsErr error
+	saveAllocationsTotal  int64
+	saveAllocationsErr    error
+	quotaChangeNotifErr   error
+	recentQuotaChanges    []db.QuotaChangeNotification
+	recentQuotaChangesErr error
 }
 
 func (s *stubQuerier) GetUserByUsername(_ context.Context, _ string) (*models.User, error) {
@@ -175,7 +189,25 @@ func (s *stubQuerier) GetUserStorageBreakdown(_ context.Context, _ string) (db.U
 	return db.UserStorageBreakdown{}, nil
 }
 func (s *stubQuerier) GetUserStorageAllocations(_ context.Context, _, _ string) ([]db.UserStorageAllocation, error) {
-	return nil, nil
+	return s.storageAllocations, s.storageAllocationsErr
+}
+func (s *stubQuerier) GetDrive(_ context.Context, _ uuid.UUID) (*models.Drive, error) {
+	return s.drive, s.driveErr
+}
+func (s *stubQuerier) GetServer(_ context.Context, _ uuid.UUID) (*models.Server, error) {
+	return s.server, s.serverErr
+}
+func (s *stubQuerier) GetDriveAvailableBytes(_ context.Context, _ uuid.UUID) (int64, error) {
+	return s.driveAvailBytes, s.driveAvailErr
+}
+func (s *stubQuerier) SaveUserDriveAllocations(_ context.Context, _ string, _ []db.SaveAllocationsParams) (int64, error) {
+	return s.saveAllocationsTotal, s.saveAllocationsErr
+}
+func (s *stubQuerier) InsertQuotaChangeNotification(_ context.Context, _ db.InsertQuotaChangeNotificationParams) error {
+	return s.quotaChangeNotifErr
+}
+func (s *stubQuerier) ListRecentQuotaChangeNotificationsForUser(_ context.Context, _ string, _ time.Time) ([]db.QuotaChangeNotification, error) {
+	return s.recentQuotaChanges, s.recentQuotaChangesErr
 }
 func (s *stubQuerier) AutoPardonExpiredSuspension(_ context.Context, _ string) error { return nil }
 func (s *stubQuerier) AddBannedIP(_ context.Context, _, _ string) error              { return nil }
@@ -310,6 +342,16 @@ func (s *stubAdminQuerier) ListUsers(_ context.Context, _ db.PageInput) (*db.Pag
 		items = []models.User{}
 	}
 	return &db.PageResult[models.User]{Items: items}, nil
+}
+func (s *stubAdminQuerier) ListAdminUsers(_ context.Context, _ db.ListUsersFilter, _, _ int) ([]models.User, int, error) {
+	if s.userErr != nil {
+		return nil, 0, s.userErr
+	}
+	items := s.users
+	if items == nil {
+		items = []models.User{}
+	}
+	return items, len(items), nil
 }
 func (s *stubAdminQuerier) GetUserByUsername(_ context.Context, _ string) (*models.User, error) {
 	return s.user, s.userErr
@@ -734,7 +776,7 @@ func (s *stubMetricsService) GetNodeDiskTempHistoryByHours(_ context.Context, _ 
 func (s *stubMetricsService) NodeStates(_ context.Context) ([]models.NodeFrame, error) {
 	return s.nodeStates, nil
 }
-func (s *stubMetricsService) Hub() *services.Hub             { return nil }
+func (s *stubMetricsService) Hub() *services.Hub { return nil }
 
 // ── Stub FavServicer ──────────────────────────────────────────────────────────
 

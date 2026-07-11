@@ -13,15 +13,25 @@ func TestPickUploadDrive(t *testing.T) {
 	emptier := uuid.New()
 	fuller := uuid.New()
 
-	drive := func(id uuid.UUID, primaryFlag bool, capacity, used int64, active bool) db.UserDriveInfo {
+	// driveQ sets this user's own per-drive quota and usage explicitly.
+	driveQ := func(id uuid.UUID, primaryFlag bool, capacity, driveUsed, quota, userUsed int64, active bool) db.UserDriveInfo {
 		return db.UserDriveInfo{
 			DriveID:        id,
 			CapacityBytes:  capacity,
-			DriveUsedBytes: used,
+			DriveUsedBytes: driveUsed,
+			QuotaBytes:     quota,
+			UserUsedBytes:  userUsed,
 			IsPrimary:      primaryFlag,
 			DriveIsActive:  active,
 			ServerIsActive: active,
 		}
+	}
+
+	// drive gives the allocation an "unlimited" per-user quota (quota == capacity,
+	// no usage) so pre-existing cases exercise only the physical-capacity check;
+	// quota-specific behavior is covered by driveQ above.
+	drive := func(id uuid.UUID, primaryFlag bool, capacity, used int64, active bool) db.UserDriveInfo {
+		return driveQ(id, primaryFlag, capacity, used, capacity, 0, active)
 	}
 
 	t.Run("primary wins when it has room", func(t *testing.T) {
@@ -49,9 +59,9 @@ func TestPickUploadDrive(t *testing.T) {
 
 	t.Run("skips inactive drives", func(t *testing.T) {
 		drives := []db.UserDriveInfo{
-			drive(primary, true, 100, 100, true),    // full
-			drive(emptier, false, 100, 0, false),    // inactive, must be skipped
-			drive(fuller, false, 100, 50, true),     // only active candidate
+			drive(primary, true, 100, 100, true), // full
+			drive(emptier, false, 100, 0, false), // inactive, must be skipped
+			drive(fuller, false, 100, 50, true),  // only active candidate
 		}
 		got, ok := pickUploadDrive(drives, 5)
 		if !ok || got != fuller {
@@ -68,20 +78,63 @@ func TestPickUploadDrive(t *testing.T) {
 			t.Fatal("expected ok=false when nothing has room")
 		}
 	})
+
+	t.Run("skips a drive with physical room but no per-user quota headroom", func(t *testing.T) {
+		drives := []db.UserDriveInfo{
+			// Plenty of physical room, but this user's own quota on the drive is
+			// exhausted — must not be picked despite being primary.
+			driveQ(primary, true, 1000, 10, 50, 50, true),
+			driveQ(emptier, false, 1000, 10, 100, 0, true),
+		}
+		got, ok := pickUploadDrive(drives, 5)
+		if !ok || got != emptier {
+			t.Fatalf("want emptier %s (only one with quota headroom), got %s ok=%v", emptier, got, ok)
+		}
+	})
+
+	t.Run("primary with quota room wins even when a non-primary has more physical room", func(t *testing.T) {
+		drives := []db.UserDriveInfo{
+			driveQ(primary, true, 100, 90, 100, 90, true),   // 10 bytes of both physical and quota room
+			driveQ(fuller, false, 1000, 10, 1000, 10, true), // huge physical+quota headroom, but not primary
+		}
+		got, ok := pickUploadDrive(drives, 5)
+		if !ok || got != primary {
+			t.Fatalf("want primary %s, got %s ok=%v", primary, got, ok)
+		}
+	})
+
+	t.Run("no room anywhere due to quota exhaustion despite physical space", func(t *testing.T) {
+		drives := []db.UserDriveInfo{
+			driveQ(primary, true, 1000, 10, 50, 50, true),
+			driveQ(emptier, false, 1000, 10, 50, 50, true),
+		}
+		if _, ok := pickUploadDrive(drives, 5); ok {
+			t.Fatal("expected ok=false when every drive's per-user quota is exhausted")
+		}
+	})
 }
 
 func TestPinnedDriveIfValid(t *testing.T) {
 	pinned := uuid.New()
 	other := uuid.New()
 
-	drive := func(id uuid.UUID, capacity, used int64, active bool) db.UserDriveInfo {
+	driveQ := func(id uuid.UUID, capacity, driveUsed, quota, userUsed int64, active bool) db.UserDriveInfo {
 		return db.UserDriveInfo{
 			DriveID:        id,
 			CapacityBytes:  capacity,
-			DriveUsedBytes: used,
+			DriveUsedBytes: driveUsed,
+			QuotaBytes:     quota,
+			UserUsedBytes:  userUsed,
 			DriveIsActive:  active,
 			ServerIsActive: active,
 		}
+	}
+
+	// drive gives the allocation an "unlimited" per-user quota (quota ==
+	// capacity, no usage) so pre-existing cases exercise only the
+	// physical-capacity check.
+	drive := func(id uuid.UUID, capacity, used int64, active bool) db.UserDriveInfo {
+		return driveQ(id, capacity, used, capacity, 0, active)
 	}
 
 	t.Run("nil folderDriveID falls through", func(t *testing.T) {
@@ -128,6 +181,54 @@ func TestPinnedDriveIfValid(t *testing.T) {
 		drives := []db.UserDriveInfo{drive(other, 100, 0, true)}
 		if _, ok := pinnedDriveIfValid(drives, &pinned, 5); ok {
 			t.Fatal("expected ok=false when pinned drive is not in the user's drives")
+		}
+	})
+
+	t.Run("falls through when the pinned drive is per-user quota-exhausted despite physical room", func(t *testing.T) {
+		drives := []db.UserDriveInfo{
+			driveQ(pinned, 1000, 10, 50, 50, true), // huge physical room, but quota exhausted
+			driveQ(other, 100, 0, 100, 0, true),
+		}
+		if _, ok := pinnedDriveIfValid(drives, &pinned, 5); ok {
+			t.Fatal("expected ok=false when the pinned drive's per-user quota is exhausted")
+		}
+	})
+}
+
+func TestHasRoomForUpload(t *testing.T) {
+	base := db.UserDriveInfo{CapacityBytes: 100, DriveUsedBytes: 90, QuotaBytes: 100, UserUsedBytes: 90}
+
+	t.Run("both physical and quota room", func(t *testing.T) {
+		if !hasRoomForUpload(base, 5) {
+			t.Fatal("expected room: 10 bytes free both physically and on quota")
+		}
+	})
+
+	t.Run("physically full", func(t *testing.T) {
+		d := base
+		d.DriveUsedBytes = 100
+		if hasRoomForUpload(d, 5) {
+			t.Fatal("expected no room: drive physically full")
+		}
+	})
+
+	t.Run("quota exhausted despite physical room", func(t *testing.T) {
+		d := base
+		d.DriveUsedBytes = 10
+		d.QuotaBytes = 50
+		d.UserUsedBytes = 50
+		if hasRoomForUpload(d, 5) {
+			t.Fatal("expected no room: this user's quota on the drive is exhausted")
+		}
+	})
+
+	t.Run("both exhausted", func(t *testing.T) {
+		d := base
+		d.DriveUsedBytes = 100
+		d.QuotaBytes = 50
+		d.UserUsedBytes = 50
+		if hasRoomForUpload(d, 5) {
+			t.Fatal("expected no room")
 		}
 	})
 }

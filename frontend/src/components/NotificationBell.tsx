@@ -12,6 +12,7 @@ import {
   MdPersonAddAlt1,
   MdReceiptLong,
   MdMoneyOff,
+  MdStorage,
   MdExpandMore,
   MdChevronRight,
   MdClose,
@@ -23,6 +24,7 @@ import {
   type AppNotification,
   type NotificationKind,
 } from '../api/billing'
+import { AllocationChangeBreakdown } from './AllocationChangeBreakdown'
 
 interface KindMeta {
   icon: React.ComponentType<{ className?: string }>
@@ -40,6 +42,7 @@ const KIND_META: Record<NotificationKind, KindMeta> = {
   action_pending:       { icon: MdPendingActions,        className: 'bg-amber-50 text-amber-600',   category: 'Billing' },
   share_received:       { icon: MdFolderShared,          className: 'bg-blue-50 text-blue-600',     category: 'Shares' },
   subscription_cancelled: { icon: MdMoneyOff,             className: 'bg-orange-50 text-orange-600', category: 'Billing' },
+  quota_changed:        { icon: MdStorage,               className: 'bg-sky-50 text-sky-600',       category: 'Storage' },
   invitation_accepted:  { icon: MdPersonAddAlt1,         className: 'bg-green-50 text-green-600',   category: 'Invitations' },
   order_received:       { icon: MdReceiptLong,           className: 'bg-blue-50 text-blue-600',     category: 'Orders' },
   email_received:       { icon: MdMarkEmailUnread,       className: 'bg-sky-50 text-sky-600',       category: 'Emails' },
@@ -69,7 +72,17 @@ export function NotificationBell() {
   const queryClient = useQueryClient()
   const [open, setOpen] = useState(false)
   const [collapsed, setCollapsed] = useState<Set<string>>(DEFAULT_COLLAPSED)
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set())
   const ref = useRef<HTMLDivElement>(null)
+
+  function toggleBreakdown(id: string) {
+    setExpandedIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
 
   const { data: notifications = [] } = useQuery({
     queryKey: ['me', 'notifications'],
@@ -201,29 +214,42 @@ export function NotificationBell() {
                         const meta = KIND_META[n.kind] ?? FALLBACK_META
                         const Icon = meta.icon
                         return (
-                          <div key={n.id} className="group flex items-stretch hover:bg-gray-50 transition-colors">
-                            <button
-                              onClick={() => openItem(n)}
-                              className="flex items-start gap-3 flex-1 min-w-0 pl-4 pr-1 py-2.5 text-left bg-transparent border-0 cursor-pointer"
-                            >
-                              <span className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 mt-0.5 ${meta.className}`}>
-                                <Icon className="text-sm" />
-                              </span>
-                              <span className="min-w-0">
-                                <span className="block text-sm font-medium text-gray-800">{n.title}</span>
-                                <span className="block text-xs text-gray-500 mt-0.5">{n.body}</span>
-                                <span className="block text-[10px] text-gray-300 mt-0.5">
-                                  {new Date(n.created_at).toLocaleDateString()}
+                          <div key={n.id} className="group hover:bg-gray-50 transition-colors">
+                            <div className="flex items-stretch">
+                              <button
+                                onClick={() => openItem(n)}
+                                className="flex items-start gap-3 flex-1 min-w-0 pl-4 pr-1 py-2.5 text-left bg-transparent border-0 cursor-pointer"
+                              >
+                                <span className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 mt-0.5 ${meta.className}`}>
+                                  <Icon className="text-sm" />
                                 </span>
-                              </span>
-                            </button>
-                            <button
-                              onClick={() => dismissMutation.mutate([n.id])}
-                              title="Dismiss"
-                              className="shrink-0 flex items-center justify-center w-8 mr-1 text-gray-300 opacity-0 group-hover:opacity-100 hover:text-gray-600 bg-transparent border-0 cursor-pointer transition-opacity"
-                            >
-                              <MdClose className="text-base" />
-                            </button>
+                                <span className="min-w-0">
+                                  <span className="block text-sm font-medium text-gray-800">{n.title}</span>
+                                  <span className="block text-xs text-gray-500 mt-0.5">{n.body}</span>
+                                  <span className="block text-[10px] text-gray-300 mt-0.5">
+                                    {new Date(n.created_at).toLocaleDateString()}
+                                  </span>
+                                </span>
+                              </button>
+                              <button
+                                onClick={() => dismissMutation.mutate([n.id])}
+                                title="Dismiss"
+                                className="shrink-0 flex items-center justify-center w-8 mr-1 text-gray-300 opacity-0 group-hover:opacity-100 hover:text-gray-600 bg-transparent border-0 cursor-pointer transition-opacity"
+                              >
+                                <MdClose className="text-base" />
+                              </button>
+                            </div>
+                            {n.details && (
+                              <div className="pl-14 pr-4 pb-2 -mt-1">
+                                <button
+                                  onClick={() => toggleBreakdown(n.id)}
+                                  className="text-[10px] font-medium text-blue-500 hover:text-blue-700 bg-transparent border-0 p-0 cursor-pointer"
+                                >
+                                  {expandedIds.has(n.id) ? 'Hide breakdown' : 'Show breakdown'}
+                                </button>
+                                {expandedIds.has(n.id) && <AllocationChangeBreakdown details={n.details} />}
+                              </div>
+                            )}
                           </div>
                         )
                       })}

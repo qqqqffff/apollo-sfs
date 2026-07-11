@@ -1,4 +1,5 @@
 import { get, post } from './client'
+import type { StorageAllocationChangeDetails } from '../types/api'
 
 export type StorageType = 'nvme' | 'hdd'
 
@@ -277,7 +278,7 @@ export async function listMyOrders(): Promise<UserOrder[]> {
 
 export type NotificationKind =
   | 'capacity_provisioned' | 'payment_required' | 'action_pending' | 'share_received'
-  | 'subscription_cancelled'
+  | 'subscription_cancelled' | 'quota_changed'
   // Admin-only categories (empty for non-admin users).
   | 'invitation_accepted' | 'order_received' | 'email_received' | 'alarm_triggered'
 
@@ -288,6 +289,9 @@ export interface AppNotification {
   body: string
   link: string
   created_at: string
+  // Structured before/after breakdown — only set for quota_changed, rendered
+  // behind a "Breakdown" expand button.
+  details?: StorageAllocationChangeDetails
 }
 
 export async function listNotifications(): Promise<AppNotification[]> {

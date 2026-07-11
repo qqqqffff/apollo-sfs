@@ -258,7 +258,11 @@ func (h *Handler) CaptureWalletOrder(c *gin.Context) {
 		return
 	}
 
-	newQuota, err := h.queries.AddUserQuota(c.Request.Context(), username, existing.BytesAdded)
+	var driveID *uuid.UUID
+	if alloc, _ := h.queries.GetUserDrive(c.Request.Context(), username); alloc != nil {
+		driveID = &alloc.DriveID
+	}
+	newQuota, err := h.queries.AddUserQuotaAndAllocation(c.Request.Context(), username, driveID, existing.BytesAdded)
 	if err != nil {
 		log.Printf("billing CaptureWalletOrder add quota: %v", err)
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "apply quota"})
@@ -646,7 +650,11 @@ func (h *Handler) persistDirectCapture(
 		return 0, err
 	}
 
-	newQuota, err := h.queries.AddUserQuota(c.Request.Context(), username, pl.BytesAdded)
+	var driveID *uuid.UUID
+	if alloc, _ := h.queries.GetUserDrive(c.Request.Context(), username); alloc != nil {
+		driveID = &alloc.DriveID
+	}
+	newQuota, err := h.queries.AddUserQuotaAndAllocation(c.Request.Context(), username, driveID, pl.BytesAdded)
 	if err != nil {
 		log.Printf("billing %s add quota: %v", paymentMethod, err)
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "apply quota"})

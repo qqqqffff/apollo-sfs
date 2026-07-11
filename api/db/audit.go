@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 
 	"github.com/google/uuid"
@@ -18,18 +19,32 @@ type AuditInput struct {
 	ResourceType   *string
 	ResourceID     *uuid.UUID
 	ResourceName   *string
+	// Details is a generic, action-specific structured payload (e.g. the
+	// storage allocation editor's before/after breakdown + reason). Nil for
+	// every action that doesn't need more than the flat fields above.
+	Details json.RawMessage
 }
 
 // InsertAuditLog writes one audit record. Errors are logged by the caller.
 func (q *Queries) InsertAuditLog(ctx context.Context, in AuditInput) error {
 	_, err := q.db.ExecContext(ctx, `
-		INSERT INTO audit_logs (target_username, actor_username, action, resource_type, resource_id, resource_name)
-		VALUES ($1, $2, $3, $4, $5, $6)
-	`, in.TargetUsername, in.ActorUsername, in.Action, in.ResourceType, in.ResourceID, in.ResourceName)
+		INSERT INTO audit_logs (target_username, actor_username, action, resource_type, resource_id, resource_name, details)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+	`, in.TargetUsername, in.ActorUsername, in.Action, in.ResourceType, in.ResourceID, in.ResourceName, nullableJSON(in.Details))
 	if err != nil {
 		return fmt.Errorf("InsertAuditLog: %w", err)
 	}
 	return nil
+}
+
+// nullableJSON turns an empty/nil json.RawMessage into a real SQL NULL rather
+// than the literal 4-byte JSON string "null", so audit_logs.details stays
+// unset (not a JSON null) for actions that don't populate it.
+func nullableJSON(b json.RawMessage) any {
+	if len(b) == 0 {
+		return nil
+	}
+	return []byte(b)
 }
 
 // ListAuditLogsForUser returns a paginated list of audit events for a user,
@@ -42,7 +57,7 @@ func (q *Queries) ListAuditLogsForUser(ctx context.Context, username string, in 
 	}
 
 	rows, err := q.db.QueryContext(ctx, `
-		SELECT id, target_username, actor_username, action, resource_type, resource_id, resource_name, created_at
+		SELECT id, target_username, actor_username, action, resource_type, resource_id, resource_name, details, created_at
 		FROM audit_logs
 		WHERE target_username = $1
 		ORDER BY created_at DESC
@@ -59,9 +74,10 @@ func (q *Queries) ListAuditLogsForUser(ctx context.Context, username string, in 
 		var resourceType sql.NullString
 		var resourceID uuid.NullUUID
 		var resourceName sql.NullString
+		var details []byte
 		if err := rows.Scan(
 			&l.ID, &l.TargetUsername, &l.ActorUsername, &l.Action,
-			&resourceType, &resourceID, &resourceName, &l.CreatedAt,
+			&resourceType, &resourceID, &resourceName, &details, &l.CreatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("ListAuditLogsForUser scan: %w", err)
 		}
@@ -73,6 +89,9 @@ func (q *Queries) ListAuditLogsForUser(ctx context.Context, username string, in 
 		}
 		if resourceName.Valid {
 			l.ResourceName = &resourceName.String
+		}
+		if len(details) > 0 {
+			l.Details = details
 		}
 		logs = append(logs, l)
 	}

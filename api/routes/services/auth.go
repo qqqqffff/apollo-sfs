@@ -486,7 +486,7 @@ func (s *AuthService) provisionInvitedAppUser(
 	}); err != nil {
 		return fmt.Errorf("create db user: %w", err)
 	}
-	if err := s.queries.AllocateUserToDrive(ctx, username, drive.ID); err != nil {
+	if err := s.queries.AllocateUserToDrive(ctx, username, drive.ID, quotaBytes); err != nil {
 		return fmt.Errorf("allocate drive: %w", err)
 	}
 

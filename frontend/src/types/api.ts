@@ -243,6 +243,22 @@ export interface BannedIP {
   city: string
 }
 
+export interface QuotaAllocationSnapshot {
+  drive_id: string
+  server_name: string
+  drive_type: 'nvme' | 'hdd'
+  quota_bytes: number
+}
+
+// StorageAllocationChangeDetails is the structured before/after breakdown for
+// a "storage_allocations_updated" audit entry / quota_changed notification —
+// rendered behind a "Breakdown" expand button by AllocationChangeBreakdown.
+export interface StorageAllocationChangeDetails {
+  reason?: string
+  before: QuotaAllocationSnapshot[]
+  after: QuotaAllocationSnapshot[]
+}
+
 export interface AuditLog {
   id: string
   target_username: string
@@ -251,6 +267,7 @@ export interface AuditLog {
   resource_type: string | null
   resource_id: string | null
   resource_name: string | null
+  details?: StorageAllocationChangeDetails
   created_at: string
 }
 

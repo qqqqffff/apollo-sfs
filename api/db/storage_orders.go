@@ -83,6 +83,11 @@ func (q *Queries) MarkStorageOrderCaptured(ctx context.Context, orderID, capture
 
 // AddUserQuota atomically adds bytesAdded to the user's storage_quota_bytes
 // and returns the new total. Used after a successful storage order capture.
+//
+// Deprecated: this only touches the aggregate. Since the storage allocation
+// editor introduced per-drive quota_bytes (which the upload path now
+// enforces), any caller that knows which drive the change applies to should
+// use AddUserQuotaAndAllocation instead, so the two numbers never drift.
 func (q *Queries) AddUserQuota(ctx context.Context, username string, bytesAdded int64) (int64, error) {
 	var newQuota int64
 	err := q.db.QueryRowContext(ctx, `
@@ -95,6 +100,37 @@ func (q *Queries) AddUserQuota(ctx context.Context, username string, bytesAdded 
 		return 0, fmt.Errorf("AddUserQuota: %w", err)
 	}
 	return newQuota, nil
+}
+
+// AddUserQuotaAndAllocation atomically adds bytesAdded to both
+// users.storage_quota_bytes and — when driveID is non-nil — the matching
+// user_drive_allocations.quota_bytes row, so the two numbers never drift
+// once per-drive quotas are enforced at upload time. driveID nil is
+// tolerated (e.g. a user with no drive allocation yet) and only updates the
+// aggregate. Returns the new aggregate quota.
+func (q *Queries) AddUserQuotaAndAllocation(ctx context.Context, username string, driveID *uuid.UUID, bytesAdded int64) (int64, error) {
+	tx, err := q.pool.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("AddUserQuotaAndAllocation: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var newQuota int64
+	if err := tx.QueryRowContext(ctx, `
+		UPDATE users SET storage_quota_bytes = storage_quota_bytes + $2
+		WHERE username = $1 RETURNING storage_quota_bytes
+	`, username, bytesAdded).Scan(&newQuota); err != nil {
+		return 0, fmt.Errorf("AddUserQuotaAndAllocation: user: %w", err)
+	}
+	if driveID != nil {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE user_drive_allocations SET quota_bytes = quota_bytes + $3
+			WHERE user_id = $1 AND drive_id = $2
+		`, username, *driveID, bytesAdded); err != nil {
+			return 0, fmt.Errorf("AddUserQuotaAndAllocation: allocation: %w", err)
+		}
+	}
+	return newQuota, tx.Commit()
 }
 
 // UserStorageBreakdown holds the user's actual used bytes split by drive type.

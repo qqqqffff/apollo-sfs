@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"fmt"
 
+	"github.com/lib/pq"
+
 	"apollo-sfs.com/api/models"
 )
 
@@ -152,6 +154,146 @@ func (q *Queries) ListUsers(ctx context.Context, in PageInput) (*PageResult[mode
 		Items:     users,
 		NextToken: offsetNextToken(len(users), limit, offset),
 	}, nil
+}
+
+// ListUsersFilter narrows and orders the admin Users table (search box, role
+// filter, column sort). Kept separate from the plain cursor-paginated
+// ListUsers above, which other callers (e.g. the alarm-subscription user
+// picker) use to page through every user with no search/sort/filter needs.
+type ListUsersFilter struct {
+	Search   string // matches username/email, case-insensitive substring
+	Role     string // "" (all) | "admin" | "premium" | "user" (neither)
+	Sort     string // "username" | "email" | "role" | "created_at" (default) | "last_seen_at"
+	Dir      string // "asc" | "desc" — default depends on Sort, see sortColumn
+	ServerID string   // "" (all) | a servers.id — restricts to users with a drive_allocations row on that server
+	Tiers    []string // subset of "nvme"/"hdd"; empty = all tiers — restricts to users with an allocation of that tier (on ServerID, if also set)
+}
+
+// sortColumn maps a whitelisted Sort key to its ORDER BY expression and the
+// direction to default to when Dir isn't given. Whitelisting (rather than
+// interpolating the query param directly) keeps the sort key out of the SQL
+// string as anything but one of these fixed expressions.
+func sortColumn(sort string) (expr, defaultDir string) {
+	switch sort {
+	case "username":
+		return "u.username", "asc"
+	case "email":
+		return "u.email", "asc"
+	case "role":
+		return "(CASE WHEN u.is_admin THEN 2 WHEN u.is_premium THEN 1 ELSE 0 END)", "desc"
+	case "last_seen_at":
+		return "u.last_seen_at", "desc"
+	default:
+		return "u.created_at", "desc"
+	}
+}
+
+// ListAdminUsers returns a searched, filtered, sorted, offset-paginated page
+// of users for the admin Users table, plus the total matching row count.
+func (q *Queries) ListAdminUsers(ctx context.Context, f ListUsersFilter, limit, offset int) ([]models.User, int, error) {
+	limit = clampLimit(limit)
+	if offset < 0 {
+		offset = 0
+	}
+
+	args := []any{}
+	where := "WHERE 1=1"
+	add := func(cond string, v any) {
+		args = append(args, v)
+		where += fmt.Sprintf(" AND %s $%d", cond, len(args))
+	}
+
+	if f.Search != "" {
+		args = append(args, "%"+f.Search+"%")
+		n := len(args)
+		where += fmt.Sprintf(" AND (u.username ILIKE $%d OR u.email ILIKE $%d)", n, n)
+	}
+	switch f.Role {
+	case "admin":
+		add("u.is_admin =", true)
+	case "premium":
+		add("u.is_premium =", true)
+	case "user":
+		add("u.is_admin =", false)
+		add("u.is_premium =", false)
+	}
+
+	// Server/tier filter: restricts to users who have a user_drive_allocations
+	// row on the given server and/or of the given tier(s). The two combine
+	// (server dropdown + tier checkboxes both set) to mean "that tier on that
+	// server"; either alone means "any allocation on that server" / "that tier
+	// on any server". Existence-only — a 0-quota_bytes allocation still counts,
+	// since the admin is filtering by "has an allocation", not "has capacity".
+	if f.ServerID != "" || len(f.Tiers) > 0 {
+		exists := "EXISTS (SELECT 1 FROM user_drive_allocations uda" +
+			" JOIN drives d ON d.id = uda.drive_id" +
+			" WHERE uda.user_id = u.username"
+		if f.ServerID != "" {
+			args = append(args, f.ServerID)
+			exists += fmt.Sprintf(" AND d.server_id = $%d", len(args))
+		}
+		if len(f.Tiers) > 0 {
+			args = append(args, pq.Array(f.Tiers))
+			exists += fmt.Sprintf(" AND d.drive_type = ANY($%d)", len(args))
+		}
+		exists += ")"
+		where += " AND " + exists
+	}
+
+	var total int
+	countQuery := fmt.Sprintf(`SELECT COUNT(*) FROM users u %s`, where)
+	if err := q.db.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("ListAdminUsers count: %w", err)
+	}
+
+	expr, defaultDir := sortColumn(f.Sort)
+	dir := f.Dir
+	if dir != "asc" && dir != "desc" {
+		dir = defaultDir
+	}
+
+	args = append(args, limit, offset)
+	query := fmt.Sprintf(`
+		SELECT u.username, u.email, u.encrypted_key, u.key_nonce, u.master_key_version,
+		       u.storage_used_bytes, u.storage_quota_bytes, u.last_seen_at, u.created_at, u.is_admin,
+		       u.is_premium, u.premium_granted_at,
+		       b.id, b.ban_type, b.violation_code, b.comments, b.banned_by,
+		       b.banned_at, b.expires_at, b.pardoned_at, b.pardoned_by,
+		       EXISTS (
+		         SELECT 1 FROM premium_subscriptions ps
+		         WHERE ps.username = u.username AND ps.status IN ('active', 'suspended')
+		       ) AS premium_subscribed
+		FROM   users u
+		LEFT JOIN LATERAL (
+		  SELECT * FROM user_bans
+		  WHERE  username   = u.username
+		    AND  pardoned_at IS NULL
+		  ORDER  BY banned_at DESC
+		  LIMIT  1
+		) b ON TRUE
+		%s
+		ORDER BY %s %s
+		LIMIT $%d OFFSET $%d
+	`, where, expr, dir, len(args)-1, len(args))
+
+	rows, err := q.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("ListAdminUsers: %w", err)
+	}
+	defer rows.Close()
+
+	var out []models.User
+	for rows.Next() {
+		u, err := scanUserWithBanRow(rows)
+		if err != nil {
+			return nil, 0, fmt.Errorf("ListAdminUsers scan: %w", err)
+		}
+		out = append(out, *u)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("ListAdminUsers: %w", err)
+	}
+	return out, total, nil
 }
 
 func scanUserWithBanRow(rows *sql.Rows) (*models.User, error) {

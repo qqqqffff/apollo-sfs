@@ -74,6 +74,70 @@ func TestAdminGetUsers_InvalidLimit(t *testing.T) {
 	}
 }
 
+func TestAdminSearchUsers_ReturnsUsersWithTotal(t *testing.T) {
+	q := &stubAdminQuerier{
+		users: []models.User{
+			{Username: "alice", Email: "alice@example.com", CreatedAt: time.Now()},
+			{Username: "bob", Email: "bob@example.com", CreatedAt: time.Now()},
+		},
+	}
+	h := newAdminHandler(q, &stubAdminInviteService{})
+
+	r := newEngine()
+	r.GET("/admin/users/search", h.SearchUsers)
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/users/search?search=al&role=user&sort=username&dir=asc&page=1&page_size=25", nil)
+	w := doRequest(r, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body: %s)", w.Code, w.Body.String())
+	}
+
+	var body map[string]any
+	decodeBody(w, &body) //nolint
+	items, _ := body["items"].([]any)
+	if len(items) != 2 {
+		t.Errorf("expected 2 users, got %d", len(items))
+	}
+	if total, _ := body["total"].(float64); total != 2 {
+		t.Errorf("expected total=2, got %v", body["total"])
+	}
+	if page, _ := body["page"].(float64); page != 1 {
+		t.Errorf("expected page=1, got %v", body["page"])
+	}
+	if pageSize, _ := body["page_size"].(float64); pageSize != 25 {
+		t.Errorf("expected page_size=25, got %v", body["page_size"])
+	}
+}
+
+func TestAdminSearchUsers_InvalidPage(t *testing.T) {
+	h := newAdminHandler(&stubAdminQuerier{}, &stubAdminInviteService{})
+
+	r := newEngine()
+	r.GET("/admin/users/search", h.SearchUsers)
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/users/search?page=notanumber", nil)
+	w := doRequest(r, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestAdminSearchUsers_InvalidPageSize(t *testing.T) {
+	h := newAdminHandler(&stubAdminQuerier{}, &stubAdminInviteService{})
+
+	r := newEngine()
+	r.GET("/admin/users/search", h.SearchUsers)
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/users/search?page_size=notanumber", nil)
+	w := doRequest(r, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
 func TestAdminGetUser_Found(t *testing.T) {
 	q := &stubAdminQuerier{user: sampleUser()}
 	h := newAdminHandler(q, &stubAdminInviteService{})

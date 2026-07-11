@@ -8,7 +8,7 @@ import { useState } from 'react'
 import type { File as ApiFile } from '../../types/api'
 import { useNotification } from '../../context/NotificationContext'
 import { useImpersonation } from '../../context/ImpersonationContext'
-import { FilesLayout } from '../../components/FilesSidebar'
+import { FilesLayout, FilesSidebarToggle } from '../../components/FilesSidebar'
 
 export const Route = createFileRoute('/_auth/client/favorites')({
   component: RouteComponent,
@@ -58,9 +58,12 @@ function FavoritesView() {
 
   return (
     <div>
-      <h2 className="text-lg font-semibold text-gray-900 mb-6 mt-0">
-        {readOnly ? `${impersonatedUser!.username}'s Favorites` : 'Favorites'}
-      </h2>
+      <div className="flex items-center gap-3 mb-6">
+        <FilesSidebarToggle />
+        <h2 className="text-lg font-semibold text-gray-900 m-0">
+          {readOnly ? `${impersonatedUser!.username}'s Favorites` : 'Favorites'}
+        </h2>
+      </div>
 
       {isEmpty && (
         <p className="text-sm text-gray-400">

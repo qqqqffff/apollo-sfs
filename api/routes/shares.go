@@ -388,6 +388,10 @@ func (h *Handler) UploadToShare(c *gin.Context) {
 			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "the owner's storage quota is full"})
 			return
 		}
+		if errors.Is(err, services.ErrDriveUnavailable) {
+			c.JSON(http.StatusInsufficientStorage, gin.H{"error": "the owner's storage has no room on their assigned drive"})
+			return
+		}
 		if errors.Is(err, services.ErrDuplicateName) {
 			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 			return

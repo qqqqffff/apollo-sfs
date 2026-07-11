@@ -54,6 +54,7 @@ export interface AdminUserStorageAllocation {
   drive_label: string
   drive_type: 'nvme' | 'hdd'
   capacity_bytes: number
+  quota_bytes: number // this user's own slice of the drive, admin-editable
   used_bytes: number
   is_primary: boolean
 }
@@ -71,6 +72,28 @@ export function getAdminUserStorage(username: string) {
   return get<AdminUserStorage>(`/admin/users/${encodeURIComponent(username)}/storage`)
 }
 
+export interface StorageAllocationInput {
+  drive_id: string
+  quota_bytes: number
+}
+
+export interface StorageAllocationsViolation {
+  drive_id: string
+  code: 'used_exceeds_quota' | 'insufficient_capacity' | 'removal_blocked'
+  used_bytes?: number
+  requested_quota_bytes?: number
+  max_bytes?: number
+  drive_label?: string
+}
+
+// updateUserStorageAllocations saves the full desired set of a user's drive
+// allocations in one atomic request — see AdminUpdateUserStorageAllocations in
+// api/routes/admin_browse.go. A 409 response body's `violations` array uses
+// StorageAllocationsViolation's shape.
+export function updateUserStorageAllocations(username: string, body: { allocations: StorageAllocationInput[]; reason?: string }) {
+  return put<AdminUserStorage>(`/admin/users/${encodeURIComponent(username)}/storage/allocations`, body)
+}
+
 // ── Users ──────────────────────────────────────────────────────────────────────
 
 export function listUsers(cursor?: string, limit?: number) {
@@ -79,6 +102,42 @@ export function listUsers(cursor?: string, limit?: number) {
   if (limit) params.set('limit', String(limit))
   const qs = params.size ? `?${params}` : ''
   return get<PageResult<User>>(`/admin/users${qs}`)
+}
+
+export type UserRoleFilter = 'admin' | 'premium' | 'user'
+export type UserSortKey = 'username' | 'email' | 'role' | 'created_at' | 'last_seen_at'
+export type SortDir = 'asc' | 'desc'
+
+export type StorageTier = 'nvme' | 'hdd'
+
+export interface SearchUsersFilter {
+  search?: string
+  role?: UserRoleFilter
+  sort?: UserSortKey
+  dir?: SortDir
+  server_id?: string
+  tiers?: StorageTier[]
+  page?: number
+  page_size?: number
+}
+
+// searchAdminUsers backs the admin Users table: server-side search, role
+// filter, server/tier filter, column sort, and offset pagination — see
+// api/routes/admin/users.go SearchUsers. Distinct from
+// listUsers/adminUsersInfiniteQueryOptions above, which cursor-page through
+// every user unfiltered (used by the alarm subscription user picker).
+export function searchAdminUsers(filter: SearchUsersFilter = {}) {
+  const params = new URLSearchParams()
+  if (filter.search)    params.set('search',    filter.search)
+  if (filter.role)      params.set('role',      filter.role)
+  if (filter.sort)      params.set('sort',      filter.sort)
+  if (filter.dir)       params.set('dir',       filter.dir)
+  if (filter.server_id) params.set('server_id', filter.server_id)
+  if (filter.tiers)     for (const t of filter.tiers) params.append('tier', t)
+  if (filter.page)      params.set('page',      String(filter.page))
+  if (filter.page_size) params.set('page_size', String(filter.page_size))
+  const qs = params.toString()
+  return get<OffsetPage<User>>(`/admin/users/search${qs ? '?' + qs : ''}`)
 }
 
 export function getUser(username: string) {

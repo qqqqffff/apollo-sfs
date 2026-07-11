@@ -22,8 +22,9 @@ type Server struct {
 	CreatedAt           time.Time `json:"created_at"`
 }
 
-// Drive represents a physical drive on a Server. All files for a user are
-// stored in a single drive's MinIO bucket; users are never split across drives.
+// Drive represents a physical drive on a Server. A user may be allocated to
+// more than one drive (see UserDriveAllocation) — uploads route to whichever
+// allocated drive has room, preferring the primary.
 // NodeID, when set, records which node in the server's swarm the drive is
 // mounted on. It is nullable so drives added before a node is registered remain
 // valid (they appear under an "Unassigned" node in the metrics view).
@@ -42,11 +43,15 @@ type Drive struct {
 }
 
 // UserDriveAllocation records a drive a user is allocated to. A user may have
-// several; exactly one is the primary upload target.
+// several; exactly one is the primary upload target. QuotaBytes is this
+// user's own quota slice on this specific drive — admin-edited via the
+// storage allocation editor and the number the upload path enforces per
+// drive; it is not derived from the drive's own capacity_bytes.
 type UserDriveAllocation struct {
 	UserID      string    `json:"user_id"`
 	DriveID     uuid.UUID `json:"drive_id"`
 	IsPrimary   bool      `json:"is_primary"`
+	QuotaBytes  int64     `json:"quota_bytes"`
 	AllocatedAt time.Time `json:"allocated_at"`
 
 	// Populated by GetUserDrive — not stored directly in the table.

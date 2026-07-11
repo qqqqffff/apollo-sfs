@@ -135,6 +135,7 @@ jest.mock('../../../api/me', () => ({
 // passthrough so these tests stay focused on the folder/file content.
 jest.mock('../../../components/FilesSidebar', () => ({
   FilesLayout: ({ children }: any) => children,
+  FilesSidebarToggle: () => null,
   parseFilesAction: () => undefined,
 }))
 

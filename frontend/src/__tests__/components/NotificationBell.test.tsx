@@ -110,6 +110,34 @@ describe('NotificationBell', () => {
     expect(mockNavigate).not.toHaveBeenCalled()
   })
 
+  it('shows a Breakdown toggle for quota_changed items and expands the before/after table', async () => {
+    renderBell([
+      makeNotification({
+        id: 'q1',
+        kind: 'quota_changed',
+        title: 'Storage allocation updated',
+        body: 'An admin updated your storage across 1 drive: 50 GB → 80 GB total.',
+        details: {
+          reason: 'Needed more room',
+          before: [{ drive_id: 'd1', server_name: 'Manager', drive_type: 'hdd', quota_bytes: 50 * 1024 ** 3 }],
+          after: [{ drive_id: 'd1', server_name: 'Manager', drive_type: 'hdd', quota_bytes: 80 * 1024 ** 3 }],
+        },
+      }),
+    ])
+    fireEvent.click(screen.getByTitle('Notifications'))
+    await screen.findByText('Storage allocation updated')
+
+    expect(screen.queryByText('Needed more room', { exact: false })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByText('Show breakdown'))
+
+    expect(await screen.findByText(/Needed more room/)).toBeInTheDocument()
+    expect(screen.getByText('50.00 GB')).toBeInTheDocument()
+    expect(screen.getByText('80.00 GB')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByText('Hide breakdown'))
+    expect(screen.queryByText(/Needed more room/)).not.toBeInTheDocument()
+  })
+
   it('dismisses an entire category with "Dismiss all"', async () => {
     renderBell([
       makeNotification({ id: 's1', kind: 'share_received', title: 'Share one' }),

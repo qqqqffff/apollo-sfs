@@ -1,41 +1,42 @@
 import { PayPalScriptProvider, PayPalButtons } from '@paypal/react-paypal-js'
 import { MdArrowBack } from 'react-icons/md'
 import { PayPalGooglePayButton } from './PayPalGooglePayButton'
+import { PayPalApplePayButton } from './PayPalApplePayButton'
 
 interface Props {
   clientId: string
   currency: string
   environment: 'sandbox' | 'live'
   // Creates the order server-side and resolves to its PayPal order id — shared
-  // by the Google Pay button, the PayPal wallet button, and (once "Pay with
-  // card" is chosen) HostedCardFields.
+  // by the Apple Pay button, the Google Pay button, the PayPal wallet button,
+  // and (once "Pay with card" is chosen) HostedCardFields.
   createOrder: () => Promise<string>
   onApprove: (orderId: string) => Promise<void> | void
   onError: (message: string) => void
   onCancel?: () => void
   // Current amount in major units (e.g. "30.00"), read at click time for the
-  // Google Pay sheet.
+  // Apple Pay / Google Pay sheets.
   amount: () => string
   canPay: boolean
   onChooseCard: () => void
 }
 
 // The wallet-checkout step shared by every payment surface (storage/premium
-// upgrade modals, registration, and the account-request form): Google Pay +
-// the inline PayPal wallet button, plus a "Pay with card" button that hands
-// off to HostedCardFields. Kept as one component so all four stay pixel- and
-// behavior-identical instead of drifting copy to copy.
+// upgrade modals, registration, and the account-request form): Apple Pay +
+// Google Pay + the inline PayPal wallet button, plus a "Pay with card" button
+// that hands off to HostedCardFields. Kept as one component so all four stay
+// pixel- and behavior-identical instead of drifting copy to copy.
 export function PayPalCheckoutOptions({
   clientId, currency, environment, createOrder, onApprove, onError, onCancel, amount, canPay, onChooseCard,
 }: Props) {
   return (
-    <div className={canPay ? '' : 'opacity-50 pointer-events-none'}>
+    <div className={`flex flex-col gap-2 ${canPay ? '' : 'opacity-50 pointer-events-none'}`}>
       <PayPalScriptProvider
         options={{
           clientId,
           currency,
           intent: 'capture',
-          components: 'buttons,googlepay',
+          components: 'buttons,googlepay,applepay',
           // 'card' is disabled here because that funding source sends the
           // shopper to PayPal's hosted guest-checkout page (extra "ship to
           // billing address" / age-confirm copy we don't want) — "Pay with
@@ -43,6 +44,14 @@ export function PayPalCheckoutOptions({
           disableFunding: 'paylater,card',
         }}
       >
+        <PayPalApplePayButton
+          currencyCode={currency}
+          amount={amount}
+          createOrder={createOrder}
+          onApprove={onApprove}
+          onError={onError}
+          enabled={canPay}
+        />
         <PayPalGooglePayButton
           environment={environment}
           currencyCode={currency}
@@ -65,11 +74,11 @@ export function PayPalCheckoutOptions({
         type="button"
         onClick={onChooseCard}
         disabled={!canPay}
-        className="w-full mt-2 px-4 py-2.5 text-sm border border-gray-300 text-gray-700 rounded-lg font-medium hover:bg-gray-50 disabled:opacity-50 cursor-pointer transition-colors"
+        className="w-full px-4 py-2.5 text-sm border border-gray-300 text-gray-700 rounded-lg font-medium hover:bg-gray-50 disabled:opacity-50 cursor-pointer transition-colors"
       >
         Pay with card
       </button>
-      <p className="text-[11px] text-gray-400 text-center m-0 mt-2">
+      <p className="text-[11px] text-gray-400 text-center m-0">
         Payments are processed securely by PayPal.
       </p>
     </div>

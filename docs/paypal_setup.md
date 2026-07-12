@@ -13,24 +13,28 @@ There are four concerns:
 
 ## 1. Create a PayPal application
 
+You need **two** PayPal applications from the start — there is no staged "sandbox first, flip a switch later" mode for the primary client; it is hardcoded to PayPal's live API. Testing happens exclusively through the second, sandbox-only app plus the admin-only "sandbox payments" toggle (Profile page).
+
 1. Sign in to the [PayPal Developer Dashboard](https://developer.paypal.com/dashboard/applications/sandbox).
-2. **Sandbox first**: under *Apps & Credentials → Sandbox*, click **Create App**.
+2. **Live/primary app**: under *Apps & Credentials → Live*, click **Create App** (requires a verified PayPal business account).
+   - **App name** — e.g. `Apollo SFS`.
+   - **App type** — Merchant.
+3. **Sandbox app**: under *Apps & Credentials → Sandbox*, click **Create App**.
    - **App name** — e.g. `Apollo SFS (sandbox)`.
    - **Sandbox business account** — use the default test business account.
    - **App type** — Merchant.
-3. Open the app. Copy the **Client ID** and **Secret**.
-4. Under *Features*, ensure the following are enabled:
+4. Open each app. Copy its **Client ID** and **Secret**.
+5. Under *Features* on both apps, ensure the following are enabled:
    - **Accept payments**
    - **Subscriptions**
    - **Apple Pay** (storage add-ons only — see §5)
-5. Repeat the same steps under *Live* once you have a verified PayPal business account.
 
 The API always constructs **two** PayPal clients side by side, not one selected by a global switch:
 
-- **Live/primary** — `PAYPAL_CLIENT_ID` / `PAYPAL_CLIENT_SECRET` / `PAYPAL_WEBHOOK_ID`, at the base URL selected by `PAYPAL_ENV` (`sandbox` or `live`). This is the client every non-admin user's payments go through, and the one admins use with the toggle below off.
-- **Sandbox-only** — `PAYPAL_SANDBOX_CLIENT_ID` / `PAYPAL_SANDBOX_CLIENT_SECRET` / `PAYPAL_SANDBOX_WEBHOOK_ID`, always at `https://api-m.sandbox.paypal.com`. This client only gets used for an admin whose own "sandbox payments" toggle (Profile page) is turned on for their current session — see `api/routes/services/paypal.go`'s `PayPalClients`. Leaving these three empty simply disables the toggle (admins get a 503 "payments not configured" if they turn it on anyway); it does not affect the live/primary client at all.
+- **Live/primary** — `PAYPAL_CLIENT_ID` / `PAYPAL_CLIENT_SECRET` / `PAYPAL_WEBHOOK_ID`, always at `https://api-m.paypal.com`. This is the client every non-admin user's payments go through, and the one admins use with the toggle below off. There is no environment variable that can route it to sandbox — that determination is never resolved from server config.
+- **Sandbox-only** — `PAYPAL_SANDBOX_CLIENT_ID` / `PAYPAL_SANDBOX_CLIENT_SECRET` / `PAYPAL_SANDBOX_WEBHOOK_ID`, always at `https://api-m.sandbox.paypal.com`. This client only gets used for an admin whose own "sandbox payments" toggle (Profile page) is turned on for their current session — see `api/routes/services/paypal.go`'s `PayPalClients`. The toggle itself is validated server-side on every request against the caller's JWT `realm_access` roles (`middleware.SandboxEnabled`); it can't be spoofed by a client-supplied value. Leaving these three empty simply disables the toggle (admins get a 503 "payments not configured" if they turn it on anyway); it does not affect the live/primary client at all. This toggle is the *only* way any request is ever routed to sandbox, and the "Sandbox" badge shown across the app is purely a side effect of it.
 
-Don't confuse this with the *old* `SANDBOX_PAYPAL_*` naming from before this dual-client toggle existed — that scheme (documented in older revisions of this file) had `PAYPAL_ENV` pick between two mutually-exclusive credential sets for the *whole app*. It's gone; the variable names below are current.
+Don't confuse this with the *old* `SANDBOX_PAYPAL_*` naming or the later `PAYPAL_ENV` variable from before the live/primary client was hardcoded — both are gone; the variable names below are current.
 
 ---
 
@@ -178,8 +182,7 @@ Add the following to `.env` at the project root, and to `docker-stack.yml`'s `ap
 | Variable                         | Required | Example              | Notes                                                                 |
 | -------------------------------- | -------- | -------------------- | --------------------------------------------------------------------- |
 | `SFS_API_KEY_PEPPER`             | yes      | `<openssl rand -base64 48>` | ≥ 32 bytes. Mixed into argon2id over every API key secret.   |
-| `PAYPAL_ENV`                     | yes      | `sandbox`            | `sandbox` or `live`. Base URL for the live/primary client only.        |
-| `PAYPAL_CLIENT_ID`               | yes      | `AYNJ...`            | Client ID — live/primary app.                                          |
+| `PAYPAL_CLIENT_ID`               | yes      | `AYNJ...`            | Client ID — live/primary app. Always used at PayPal's live API.        |
 | `PAYPAL_CLIENT_SECRET`           | yes      | `ELk...`             | Secret — live/primary app.                                             |
 | `PAYPAL_WEBHOOK_ID`              | yes      | `2N9...`             | Webhook ID — live/primary app's Webhooks panel.                        |
 | `PAYPAL_SANDBOX_CLIENT_ID`       | no       | `AYNJ...`            | Client ID — dedicated sandbox app, backs the admin profile toggle.     |
@@ -205,14 +208,17 @@ The `SFS_API_KEY_PEPPER` is **mandatory** even if you have no immediate plans to
 
 ## 7. Sandbox testing
 
+There is no whole-app sandbox mode — the live/primary client is hardcoded to PayPal's live API from the moment `PAYPAL_CLIENT_ID`/`_SECRET` are populated. The only way to exercise the checkout flows against sandbox, at any point (before or after this deployment has real customers), is the per-admin "sandbox payments" toggle:
+
 1. In the [PayPal Sandbox accounts page](https://developer.paypal.com/dashboard/accounts), find a personal test buyer. Note its email and password.
-2. Open the app, sign in as a non-premium user, visit `/premium`, pick Monthly or Annual, and click the PayPal subscribe button.
-3. PayPal redirects to the sandbox login. Sign in as the test buyer, approve the subscription.
-4. You're redirected back to `/premium?status=approved&subscription_id=<id>`; the frontend calls `POST /payments/subscriptions/:id/confirm`, which flips the DB flag and routes you to `/settings/api-keys`.
-5. Confirm in the Keycloak admin console that the user has been added to the `premium` group, and that a `premium_subscriptions` row exists with `status = 'active'`.
-6. From the Profile page, confirm the premium card shows the Sandbox badge, a renewal date, and the next-payment line.
-7. Test cancellation: click **Cancel Premium Membership** on the profile card, confirm, and verify the user's API keys and file-server links are revoked immediately and the `premium_subscriptions` row is `status = 'cancelled'`.
-8. Optionally replay `BILLING.SUBSCRIPTION.ACTIVATED` manually via curl to confirm idempotency — no second grant, no duplicate audit log entry.
+2. Sign in to Apollo SFS as an **admin** account, open the Profile page, and turn on **"Sandbox payments"**. Non-admin accounts have no way to reach sandbox — the badge and the sandbox client only ever appear as a side effect of this toggle, which is validated server-side against the caller's JWT admin role on every request.
+3. Still on the Profile page, the premium card now shows the upgrade flow (admins with the toggle on and no active sandbox subscription see it same as a real user would); pick Monthly or Annual and click the PayPal subscribe button.
+4. PayPal redirects to the sandbox login. Sign in as the test buyer, approve the subscription.
+5. You're redirected back with `?status=approved&subscription_id=<id>`; the frontend calls `POST /payments/subscriptions/:id/confirm`, which flips the DB flag and routes you to `/settings/api-keys`.
+6. Confirm in the Keycloak admin console that the user has been added to the `premium` group, and that a `premium_subscriptions` row exists with `status = 'active'`.
+7. From the Profile page, confirm the premium card shows the Sandbox badge, a renewal date, and the next-payment line.
+8. Test cancellation: click **Cancel Premium Membership** on the profile card, confirm, and verify the user's API keys and file-server links are revoked immediately and the `premium_subscriptions` row is `status = 'cancelled'`.
+9. Optionally replay `BILLING.SUBSCRIPTION.ACTIVATED` manually via curl to confirm idempotency — no second grant, no duplicate audit log entry.
 
 If something is broken on the webhook path, the PayPal *Webhook simulator* (under the app's Webhooks panel) is the fastest way to surface the failure mode — useful for `BILLING.SUBSCRIPTION.CANCELLED`/`.SUSPENDED`/`.EXPIRED` in particular, since those are otherwise slow to trigger organically in sandbox.
 
@@ -220,15 +226,14 @@ If something is broken on the webhook path, the PayPal *Webhook simulator* (unde
 
 ## 8. Going live
 
-When you're satisfied with sandbox behaviour:
+Since the live/primary client is always live, "going live" is just populating real credentials — there's no environment variable to flip:
 
-1. Update `PAYPAL_ENV` to `live`.
-2. Populate `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, and `PAYPAL_WEBHOOK_ID` with the values from the *Live* tab of the same app.
-3. Populate `PAYPAL_PLAN_ID_MONTHLY` / `PAYPAL_PLAN_ID_ANNUAL` with the Live Product/Plan ids from §2.
-4. Re-verify the Apple Pay domain if you changed hosts (storage add-ons only — see §5).
-5. Redeploy: `./deploy.sh --deploy-only`.
-6. Subscribe yourself on the Monthly plan — easier to cancel/refund — to confirm the full flow, then cancel it from the Profile page.
+1. Populate `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, and `PAYPAL_WEBHOOK_ID` with the values from the *Live* tab of the app (§1).
+2. Populate `PAYPAL_PLAN_ID_MONTHLY` / `PAYPAL_PLAN_ID_ANNUAL` with the Live Product/Plan ids from §2.
+3. Re-verify the Apple Pay domain if you changed hosts (storage add-ons only — see §5).
+4. Redeploy: `./deploy.sh --deploy-only`.
+5. Subscribe yourself on the Monthly plan — easier to cancel/refund — to confirm the full flow, then cancel it from the Profile page. Non-admin real users will see the premium upgrade card automatically at this point (it's gated only on not already having an active membership, not on any environment flag).
 
-Once live, you can still exercise the checkout flows against sandbox at any time — as an admin, flip "sandbox payments" on in your Profile page for the current session instead of touching `PAYPAL_ENV` (see §1). That requires `PAYPAL_SANDBOX_CLIENT_ID`/`_CLIENT_SECRET`/`_WEBHOOK_ID` **and** `PAYPAL_SANDBOX_PLAN_ID_MONTHLY`/`_ANNUAL` to be populated, independent of whatever `PAYPAL_ENV` is set to.
+You can keep exercising the checkout flows against sandbox at any time — as an admin, flip "sandbox payments" on in your Profile page for the current session (see §7). That requires `PAYPAL_SANDBOX_CLIENT_ID`/`_CLIENT_SECRET`/`_WEBHOOK_ID` **and** `PAYPAL_SANDBOX_PLAN_ID_MONTHLY`/`_ANNUAL` to be populated; it has no effect on, and needs nothing from, the live/primary client.
 
 Subscription cancellations/suspensions/expirations processed on PayPal's side (dashboard or automatic dunning after failed renewal charges) arrive via `BILLING.SUBSCRIPTION.CANCELLED`/`.SUSPENDED`/`.EXPIRED`, which flip the user's `is_premium` flag back to false, remove them from the Keycloak group, and bulk-revoke their API keys and file-server links — the same effects as a user-initiated cancel from the Profile page.

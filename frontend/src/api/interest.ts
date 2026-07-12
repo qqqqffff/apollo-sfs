@@ -51,14 +51,6 @@ export function captureInterestDepositOrder(orderId: string) {
   return post<{ capture_id: string; status: string }>(`/interest/deposit/orders/${orderId}/capture`)
 }
 
-export function validateApplePayMerchantForDeposit(validationURL: string) {
-  return post<object>('/interest/deposit/apple-pay/validate', { validation_url: validationURL })
-}
-
-export function createApplePayInterestDeposit(planId: string, storageType: StorageType, paymentToken: string) {
-  return post<{ order_id: string }>('/interest/deposit/orders/apple-pay', { plan_id: planId, storage_type: storageType, payment_token: paymentToken })
-}
-
 export function createGooglePayInterestDeposit(planId: string, storageType: StorageType, paymentToken: string) {
   return post<{ order_id: string }>('/interest/deposit/orders/google-pay', { plan_id: planId, storage_type: storageType, payment_token: paymentToken })
 }

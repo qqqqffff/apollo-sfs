@@ -1,5 +1,5 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { Turnstile } from '@marsidev/react-turnstile'
 import type { TurnstileInstance } from '@marsidev/react-turnstile'
@@ -7,8 +7,6 @@ import {
   submitInterestForm,
   createInterestDepositOrder,
   captureInterestDepositOrder,
-  validateApplePayMerchantForDeposit,
-  createApplePayInterestDeposit,
   publicConfigQueryOptions,
   type StorageType,
 } from '../api/interest'
@@ -19,8 +17,6 @@ import { PayPalCheckoutOptions, CheckoutBackButton } from '../components/PayPalC
 export const Route = createFileRoute('/interest')({
   component: RouteComponent,
 })
-
-const APPLE_PAY_MERCHANT_ID = 'merchant.com.apollosfs'
 
 interface Plan {
   id: string
@@ -64,19 +60,9 @@ function RouteComponent() {
   const [step, setStep] = useState<FormStep>('form')
   const [error, setError] = useState<string | null>(null)
   const [showCardForm, setShowCardForm] = useState(false)
-  const [canApplePay, setCanApplePay] = useState(false)
   const turnstileRef = useRef<TurnstileInstance>(null)
 
   const selectedPlan = PLANS.find((p) => p.id === selectedPlanId) ?? null
-
-  // Detect Apple Pay (Safari / WebKit only)
-  useEffect(() => {
-    const ApplePaySession = (window as any).ApplePaySession
-    if (ApplePaySession?.canMakePayments) {
-      try { setCanApplePay(ApplePaySession.canMakePayments(APPLE_PAY_MERCHANT_ID)) }
-      catch { /* not available */ }
-    }
-  }, [])
 
   const submitMutation = useMutation({
     mutationFn: (depositOrderId: string) => {
@@ -137,47 +123,6 @@ function RouteComponent() {
     if (!validateForm()) return
     setError(null)
     setShowCardForm(true)
-  }
-
-  // ── Apple Pay ────────────────────────────────────────────────────────────────
-
-  function handleApplePay(e: React.MouseEvent) {
-    e.preventDefault()
-    if (!validateForm() || !selectedPlan) return
-    setError(null)
-    const ApplePaySession = (window as any).ApplePaySession
-    const amount = depositAmt(selectedPlan, storageType)
-    const session = new ApplePaySession(3, {
-      countryCode: 'US',
-      currencyCode: 'USD',
-      supportedNetworks: ['visa', 'masterCard', 'amex', 'discover'],
-      merchantCapabilities: ['supports3DS'],
-      total: { label: 'Apollo SFS Storage Deposit', amount },
-    })
-    session.onvalidatemerchant = async (event: any) => {
-      try {
-        const merchantSession = await validateApplePayMerchantForDeposit(event.validationURL)
-        session.completeMerchantValidation(merchantSession)
-      } catch {
-        session.abort()
-        setError('Apple Pay merchant validation failed.')
-      }
-    }
-    session.onpaymentauthorized = async (event: any) => {
-      try {
-        setStep('pending')
-        const token = JSON.stringify(event.payment.token)
-        const { order_id } = await createApplePayInterestDeposit(selectedPlanId!, storageType, token)
-        session.completePayment(ApplePaySession.STATUS_SUCCESS)
-        submitMutation.mutate(order_id)
-      } catch {
-        session.completePayment(ApplePaySession.STATUS_FAILURE)
-        setError('Apple Pay payment failed — please try another method.')
-        setStep('form')
-      }
-    }
-    session.oncancel = () => setStep('form')
-    session.begin()
   }
 
   // ── Hosted card fields (PCI-compliant inline entry) ───────────────────────────
@@ -364,6 +309,9 @@ function RouteComponent() {
                     </button>
                   )
                 })}
+                <p className="text-xs text-gray-400 m-0 mt-1">
+                  Not sure how much you'll need? Additional capacity can be purchased once your account is provisioned.
+                </p>
               </div>
 
               {/* Deposit notice */}
@@ -410,19 +358,6 @@ function RouteComponent() {
 
               {/* Payment buttons */}
               <div className="flex flex-col gap-2">
-                {canApplePay && (
-                  <button
-                    type="button"
-                    onClick={handleApplePay}
-                    disabled={!formReady || isPending}
-                    className="w-full flex items-center justify-center gap-2 px-4 py-3 text-sm font-semibold bg-black hover:bg-gray-900 text-white rounded-xl disabled:opacity-50 transition-colors cursor-pointer"
-                  >
-                    {isPending ? 'Processing…' : (
-                      <> Pay{selectedPlan ? ` ${depositDisplay(selectedPlan, storageType)}` : ''}</>
-                    )}
-                  </button>
-                )}
-
                 {config?.paypal_client_id && (
                   <PayPalCheckoutOptions
                     clientId={config.paypal_client_id}

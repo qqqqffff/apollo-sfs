@@ -279,7 +279,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	inboundEmailHandler := admin.NewInboundEmailHandler(inboundEmailSvc, cfg.SendgridWebhookSecret)
 
 	paypalClient := services.NewPayPalClient(services.PayPalConfig{
-		Environment:  cfg.PayPalEnvironment,
+		Environment:  services.PayPalEnvLive,
 		ClientID:     cfg.PayPalClientID,
 		ClientSecret: cfg.PayPalClientSecret,
 		WebhookID:    cfg.PayPalWebhookID,
@@ -323,7 +323,6 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		ReturnURL:                "apollosfs://billing/storage/complete",
 		CancelURL:                "apollosfs://billing/storage/cancel",
 		ClientID:                 cfg.PayPalClientID,
-		Environment:              cfg.PayPalEnvironment,
 		SandboxClientID:          cfg.PayPalSandboxClientID,
 		PremiumMonthlyPriceCents: cfg.PremiumMonthlyPriceCents,
 		PremiumAnnualPriceCents:  cfg.PremiumAnnualPriceCents,
@@ -353,13 +352,13 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		// paypal_client_id is public by design — the PayPal JS SDK needs it in
 		// the browser. Exposing it here (unauthenticated) lets the public
 		// interest/register pages load hosted card fields without a session.
-		// This is always the live client; the admin sandbox toggle only applies
-		// to the authenticated /billing/config surface.
+		// This is always the live client at the hardcoded live environment;
+		// there is no admin toggle on this unauthenticated surface.
 		c.JSON(200, gin.H{
 			"turnstile_site_key": cfg.TurnstileSiteKey,
 			"paypal_client_id":   cfg.PayPalClientID,
 			"paypal_currency":    cfg.PremiumTierCurrency,
-			"paypal_environment": cfg.PayPalEnvironment,
+			"paypal_environment": services.PayPalEnvLive,
 			"premium_plans": []gin.H{
 				{"plan": "monthly", "price_cents": cfg.PremiumMonthlyPriceCents},
 				{"plan": "annual", "price_cents": cfg.PremiumAnnualPriceCents},
@@ -372,9 +371,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	// direct storage purchase or expansion request — no custom amounts.
 	v1.POST("/interest/deposit/orders", h.CreateInterestDepositOrder)
 	v1.POST("/interest/deposit/orders/:order_id/capture", h.CaptureInterestDepositOrder)
-	v1.POST("/interest/deposit/orders/apple-pay", h.CreateApplePayInterestDeposit)
 	v1.POST("/interest/deposit/orders/google-pay", h.CreateGooglePayInterestDeposit)
-	v1.POST("/interest/deposit/apple-pay/validate", h.ValidateApplePayMerchantForDeposit)
 
 	// ── PayPal webhook (no auth — verified via signature) ────────────────────
 	v1.POST("/payments/webhook", paymentsHandler.Webhook)
@@ -464,6 +461,8 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		protected.PUT("/me/preferences/storage-ui", h.UpdateStorageUIPreferences)
 		// Admin-only, session-scoped sandbox-payments toggle (not persisted).
 		protected.PUT("/me/sandbox-payments", h.UpdateSandboxPayments)
+		// Admin-only, session-scoped storage-expansion-override toggle (not persisted).
+		protected.PUT("/me/expansion-override", h.UpdateExpansionOverride)
 		protected.POST("/me/social/link", h.LinkSocial)
 		protected.DELETE("/me/social/unlink", h.UnlinkSocial)
 
@@ -657,6 +656,8 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 			adminGroup.GET("/system/nodes/:node_id/disks", adminHandler.GetNodeDisks)
 			adminGroup.GET("/system/drives/:drive_id/temps/history", adminHandler.GetDriveTempsHistory)
 			adminGroup.GET("/system/disks/:disk_id/temps/history", adminHandler.GetNodeDiskTempsHistory)
+			adminGroup.GET("/system/drives/:drive_id/io/history", adminHandler.GetDriveIOHistory)
+			adminGroup.GET("/system/disks/:disk_id/io/history", adminHandler.GetNodeDiskIOHistory)
 			adminGroup.POST("/system/servers", adminHandler.CreateServer)
 			adminGroup.PATCH("/system/servers/:server_id", adminHandler.UpdateServer)
 			adminGroup.POST("/system/servers/:server_id/nodes", adminHandler.CreateNode)

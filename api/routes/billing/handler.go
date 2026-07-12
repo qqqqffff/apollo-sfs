@@ -27,11 +27,11 @@ type Config struct {
 	Currency  string
 	ReturnURL string // e.g. "apollosfs://billing/storage/complete"
 	CancelURL string // e.g. "apollosfs://billing/storage/cancel"
-	// ClientID / Environment are exposed to the web frontend via GET
-	// /billing/config so the PayPal JS SDK can be initialised without
-	// baking credentials into the frontend build.
-	ClientID    string
-	Environment string // "sandbox" | "live"
+	// ClientID is exposed to the web frontend via GET /billing/config so the
+	// PayPal JS SDK can be initialised without baking credentials into the
+	// frontend build. The environment for non-toggle requests is always
+	// "live" (see GetConfig) — it is never read from server config.
+	ClientID string
 	// SandboxClientID is returned instead of ClientID when the calling
 	// admin's sandbox-payments toggle is on (see GetConfig).
 	SandboxClientID string
@@ -68,10 +68,14 @@ func NewHandler(paypal services.PayPalClients, q Querier, cfg Config) *Handler {
 
 // GetConfig returns the public PayPal configuration the web frontend needs to
 // load the PayPal JS SDK (react-paypal-js). The client ID is public by design.
-// Returns the sandbox client ID/environment when the caller is an admin with
-// the sandbox-payments toggle on, so every PayPalScriptProvider surface
-// (storage add-ons, expansion deposits, premium, invoices) initialises
-// against the matching PayPal environment automatically.
+// The environment is always "live" here unless the caller is an admin with
+// the sandbox-payments toggle on (validated server-side from the JWT's
+// realm_access roles by middleware.SandboxEnabled — never client-supplied),
+// in which case the sandbox client ID/environment is returned instead so
+// every PayPalScriptProvider surface (storage add-ons, expansion deposits,
+// premium, invoices) initialises against the matching PayPal environment
+// automatically. The "sandbox" badge shown across the app is purely a
+// side effect of this toggle — there is no other path to it.
 func (h *Handler) GetConfig(c *gin.Context) {
 	if middleware.SandboxEnabled(c) {
 		c.JSON(http.StatusOK, gin.H{
@@ -85,7 +89,7 @@ func (h *Handler) GetConfig(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"paypal_client_id": h.cfg.ClientID,
 		"currency":         h.currencyOrDefault(),
-		"environment":      h.cfg.Environment,
+		"environment":      services.PayPalEnvLive,
 		"premium_plans":    h.premiumPlans(),
 	})
 }

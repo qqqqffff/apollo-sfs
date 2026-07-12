@@ -200,6 +200,10 @@ type meResponse struct {
 	// middleware.SandboxEnabled) — always false for non-admins, and resets on
 	// logout/session expiry since it isn't persisted.
 	SandboxPaymentsEnabled bool `json:"sandbox_payments_enabled"`
+	// ExpansionOverrideEnabled reflects the admin's session-scoped toggle (see
+	// middleware.ExpansionOverrideEnabled) — always false for non-admins, and
+	// resets on logout/session expiry since it isn't persisted.
+	ExpansionOverrideEnabled bool `json:"expansion_override_enabled"`
 }
 
 // Me handles GET /api/v1/me.
@@ -299,22 +303,23 @@ func (h *Handler) Me(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, meResponse{
-		Username:                user.Username,
-		Email:                   user.Email,
-		StorageUsedBytes:        user.StorageUsedBytes,
-		StorageQuotaBytes:       user.StorageQuotaBytes,
-		StorageUsedPct:          usedPct,
-		LastSeenAt:              user.LastSeenAt,
-		CreatedAt:               user.CreatedAt,
-		IsAdmin:                 isAdmin,
-		IsPremium:               user.IsPremium,
-		PremiumGrantedAt:        user.PremiumGrantedAt,
-		PremiumSubscribed:       premiumSubscribed,
-		PremiumEnvironment:      premiumEnvironment,
-		PremiumPlan:             premiumPlan,
-		PremiumCurrentPeriodEnd: premiumCurrentPeriodEnd,
-		LinkedProviders:         linkedProviders,
-		SandboxPaymentsEnabled:  middleware.SandboxEnabled(c),
+		Username:                 user.Username,
+		Email:                    user.Email,
+		StorageUsedBytes:         user.StorageUsedBytes,
+		StorageQuotaBytes:        user.StorageQuotaBytes,
+		StorageUsedPct:           usedPct,
+		LastSeenAt:               user.LastSeenAt,
+		CreatedAt:                user.CreatedAt,
+		IsAdmin:                  isAdmin,
+		IsPremium:                user.IsPremium,
+		PremiumGrantedAt:         user.PremiumGrantedAt,
+		PremiumSubscribed:        premiumSubscribed,
+		PremiumEnvironment:       premiumEnvironment,
+		PremiumPlan:              premiumPlan,
+		PremiumCurrentPeriodEnd:  premiumCurrentPeriodEnd,
+		LinkedProviders:          linkedProviders,
+		SandboxPaymentsEnabled:   middleware.SandboxEnabled(c),
+		ExpansionOverrideEnabled: middleware.ExpansionOverrideEnabled(c),
 	})
 }
 
@@ -342,6 +347,34 @@ func (h *Handler) UpdateSandboxPayments(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"sandbox_payments_enabled": req.Enabled})
+}
+
+// UpdateExpansionOverride handles PUT /api/v1/me/expansion-override.
+// Admin-only: toggles whether the calling admin's Add Storage modal always
+// routes plan purchases through the capacity expansion request flow (deposit
+// + manual review) instead of a direct buy, regardless of actual server
+// capacity — useful for testing that flow. Stored in the session cookie
+// only — it resets to disabled on logout or session expiry, never persisted
+// to the DB.
+func (h *Handler) UpdateExpansionOverride(c *gin.Context) {
+	if !c.GetBool("isAdmin") {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "admin only"})
+		return
+	}
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	session := sessions.DefaultMany(c, middleware.SessionName)
+	session.Set("expansion_override_enabled", req.Enabled)
+	if err := session.Save(); err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "could not save session"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"expansion_override_enabled": req.Enabled})
 }
 
 type socialLinkRequest struct {

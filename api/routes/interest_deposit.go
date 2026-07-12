@@ -200,20 +200,3 @@ func (h *Handler) CreateGooglePayInterestDeposit(c *gin.Context) {
 
 	c.JSON(http.StatusCreated, gin.H{"order_id": cap.OrderID})
 }
-
-// CreateApplePayInterestDeposit is not yet available in this deployment:
-// Apple Pay merchant validation requires an Apple merchant identity
-// certificate that is not configured anywhere in this codebase (see
-// ValidateApplePayMerchantForDeposit). The endpoint exists so the frontend's
-// Apple Pay button degrades gracefully instead of 404ing.
-// POST /api/v1/interest/deposit/orders/apple-pay
-func (h *Handler) CreateApplePayInterestDeposit(c *gin.Context) {
-	c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "Apple Pay is not configured for this deployment"})
-}
-
-// ValidateApplePayMerchantForDeposit is not yet available — see
-// CreateApplePayInterestDeposit.
-// POST /api/v1/interest/deposit/apple-pay/validate
-func (h *Handler) ValidateApplePayMerchantForDeposit(c *gin.Context) {
-	c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "Apple Pay is not configured for this deployment"})
-}

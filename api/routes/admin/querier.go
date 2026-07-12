@@ -104,6 +104,8 @@ type MetricsServicer interface {
 	GetDriveTempHistoryByHours(ctx context.Context, driveID uuid.UUID, hours int) ([]models.DriveTempSnapshot, error)
 	GetNodeDisks(ctx context.Context, nodeID uuid.UUID) ([]models.NodeDisk, error)
 	GetNodeDiskTempHistoryByHours(ctx context.Context, diskID uuid.UUID, hours int) ([]models.NodeDiskTempSnapshot, error)
+	GetDriveIOHistoryByHours(ctx context.Context, driveID uuid.UUID, hours int) ([]models.DriveIOSnapshot, error)
+	GetNodeDiskIOHistoryByHours(ctx context.Context, diskID uuid.UUID, hours int) ([]models.NodeDiskIOSnapshot, error)
 	NodeStates(ctx context.Context) ([]models.NodeFrame, error)
 	Hub() *services.Hub
 }

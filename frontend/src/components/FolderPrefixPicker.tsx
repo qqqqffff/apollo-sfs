@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { MdCheckCircle, MdChevronRight, MdEdit, MdFolder, MdKeyboardArrowRight } from 'react-icons/md'
 import { rootQueryOptions, folderQueryOptions } from '../api/folders'
@@ -24,14 +24,27 @@ export function FolderPrefixPicker({ value, onSelect, disabled }: Props) {
   const current = trail[trail.length - 1]
   const query = useQuery(current ? folderQueryOptions(current.id) : rootQueryOptions)
   const subfolders = query.data?.subfolders.items ?? []
+  const rootRef = useRef<HTMLDivElement>(null)
 
   function choose(folder: Folder | null, atTrail: Folder[]) {
     onSelect(atTrail.map((f) => f.name).join('/'), folder)
     setExpanded(false)
   }
 
+  // The browse panel floats above the rest of the scope row (see below)
+  // instead of pushing it down, so closing on an outside click matches how
+  // every other floating panel in this codebase behaves.
+  useEffect(() => {
+    if (!expanded) return
+    function handleOutsideClick(e: MouseEvent) {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setExpanded(false)
+    }
+    document.addEventListener('mousedown', handleOutsideClick)
+    return () => document.removeEventListener('mousedown', handleOutsideClick)
+  }, [expanded])
+
   return (
-    <div className="flex-1 min-w-0">
+    <div ref={rootRef} className="relative flex-1 min-w-0">
       <div className="flex items-center gap-2">
         <button
           type="button"
@@ -65,7 +78,7 @@ export function FolderPrefixPicker({ value, onSelect, disabled }: Props) {
       )}
 
       {expanded && (
-        <div className="mt-2 border border-gray-200 rounded-lg bg-white overflow-hidden">
+        <div className="absolute z-20 top-full left-0 mt-2 w-full min-w-[16rem] border border-gray-200 rounded-lg bg-white shadow-lg overflow-hidden">
           <div className="flex items-center gap-1 px-3 py-2 border-b border-gray-100 text-xs overflow-x-auto">
             <button
               type="button"

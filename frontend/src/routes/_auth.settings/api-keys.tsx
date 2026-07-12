@@ -1,10 +1,12 @@
 import { createFileRoute, useNavigate, useSearch } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
+import type { IconType } from 'react-icons'
 import {
   MdAdd, MdClose, MdContentCopy, MdCheck, MdDelete, MdEdit,
-  MdInfoOutline, MdKey, MdWarning,
+  MdFormatListBulleted, MdInfoOutline, MdKey, MdKeyboardArrowDown, MdStars, MdUpload, MdVisibility,
+  MdWarning,
 } from 'react-icons/md'
 import { createAPIKey, listAPIKeys, revokeAPIKey, updateAPIKey } from '../../api/apiKeys'
 import { resolvePathToFolder } from '../../api/folders'
@@ -17,6 +19,65 @@ import {
 import type { APIKey, APIKeyOperation, APIKeyScope, Folder, IssuedAPIKey } from '../../types/api'
 
 const OPS: APIKeyOperation[] = ['read', 'list', 'write', 'delete']
+
+// 'all' is a form-only convenience value — there's no wildcard operation
+// server-side (see api/routes/services/api_key.go's validOperations). A
+// scope row set to 'all' is expanded into the four real operations before
+// the request is sent (see scopesToPayload) and collapsed back into a
+// single row when an existing key with all four is opened for editing (see
+// collapseScopesForEdit).
+type LocalOperation = APIKeyOperation | 'all'
+
+const OPERATION_META: Record<LocalOperation, { label: string; icon: IconType; badgeClass: string }> = {
+  read: { label: 'Read', icon: MdVisibility, badgeClass: 'bg-blue-100 text-blue-700' },
+  list: { label: 'List', icon: MdFormatListBulleted, badgeClass: 'bg-purple-100 text-purple-700' },
+  write: { label: 'Write', icon: MdUpload, badgeClass: 'bg-green-100 text-green-700' },
+  delete: { label: 'Delete', icon: MdDelete, badgeClass: 'bg-red-100 text-red-700' },
+  all: { label: 'All actions', icon: MdStars, badgeClass: 'bg-amber-100 text-amber-700' },
+}
+
+const OPERATION_PICKER_OPTIONS: LocalOperation[] = [...OPS, 'all']
+
+// scopesToPayload expands any 'all actions' rows into the four discrete
+// operations the API understands and dedupes so the same operation+prefix
+// pair (e.g. from two overlapping rows) isn't sent twice.
+function scopesToPayload(scopes: { operation: LocalOperation; path_prefix: string }[]): APIKeyScope[] {
+  const seen = new Set<string>()
+  const out: APIKeyScope[] = []
+  for (const s of scopes) {
+    const ops = s.operation === 'all' ? OPS : [s.operation]
+    for (const op of ops) {
+      const key = `${op}:${s.path_prefix}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      out.push({ operation: op, path_prefix: s.path_prefix })
+    }
+  }
+  return out
+}
+
+// collapseScopesForEdit is scopesToPayload's inverse: groups a persisted
+// key's scopes by path_prefix and folds any group covering all four base
+// operations back into a single 'all actions' row, so a key created via the
+// star option round-trips cleanly when reopened for editing.
+function collapseScopesForEdit(scopes: APIKeyScope[]): { operation: LocalOperation; path_prefix: string }[] {
+  const byPrefix = new Map<string, APIKeyScope[]>()
+  for (const s of scopes) {
+    const list = byPrefix.get(s.path_prefix) ?? []
+    list.push(s)
+    byPrefix.set(s.path_prefix, list)
+  }
+  const rows: { operation: LocalOperation; path_prefix: string }[] = []
+  for (const [prefix, group] of byPrefix) {
+    const ops = new Set(group.map((s) => s.operation))
+    if (group.length === OPS.length && OPS.every((op) => ops.has(op))) {
+      rows.push({ operation: 'all', path_prefix: prefix })
+    } else {
+      for (const s of group) rows.push({ operation: s.operation, path_prefix: prefix })
+    }
+  }
+  return rows
+}
 
 // The API's public domain — used in code samples so they can be copy-pasted
 // verbatim instead of requiring a find-and-replace on a <your-domain>
@@ -172,50 +233,122 @@ function RouteComponent() {
       ) : (
         <ul className="list-none p-0 m-0 flex flex-col gap-3">
           {keys.map((k) => (
-            <li key={k.id} className="border border-gray-200 rounded-xl p-4 bg-white">
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2 mb-1">
-                    <MdKey className="text-gray-400" />
-                    <span className="font-semibold text-gray-900 truncate">{k.name}</span>
-                    <span className="text-xs font-mono text-gray-400 truncate">{k.key_prefix}</span>
-                    {k.revoked_at && (
-                      <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider bg-red-100 text-red-700 rounded">Revoked</span>
-                    )}
-                  </div>
-                  <div className="text-xs text-gray-500 mb-2">
-                    Created {new Date(k.created_at).toLocaleDateString()}
-                    {k.last_used_at && ` • last used ${new Date(k.last_used_at).toLocaleDateString()}`}
-                    {k.expires_at && ` • expires ${new Date(k.expires_at).toLocaleDateString()}`}
-                    {` • ${k.rate_limit_per_min}/min`}
-                  </div>
-                  <ScopeList scopes={k.scopes ?? []} />
-                </div>
-                {!k.revoked_at && (
-                  <div className="flex items-center gap-1 shrink-0">
-                    <button
-                      onClick={() => setEditingKey(k)}
-                      title="Edit key"
-                      className="text-gray-400 hover:text-gray-700 cursor-pointer bg-transparent border-0 p-1 transition-colors"
-                    >
-                      <MdEdit className="text-lg" />
-                    </button>
-                    <button
-                      onClick={() => { if (confirm(`Revoke ${k.name}? This cannot be undone.`)) revoke.mutate(k.id) }}
-                      title="Revoke key"
-                      className="text-red-500 hover:text-red-700 cursor-pointer bg-transparent border-0 p-1 transition-colors"
-                    >
-                      <MdDelete className="text-lg" />
-                    </button>
-                  </div>
-                )}
-              </div>
-            </li>
+            <KeyCard
+              key={k.id}
+              apiKey={k}
+              onEdit={() => setEditingKey(k)}
+              onRevoke={() => { if (confirm(`Revoke ${k.name}? This cannot be undone.`)) revoke.mutate(k.id) }}
+            />
           ))}
         </ul>
       )}
     </div>
   )
+}
+
+function KeyCard({
+  apiKey: k, onEdit, onRevoke,
+}: { apiKey: APIKey; onEdit: () => void; onRevoke: () => void }) {
+  const [infoOpen, setInfoOpen] = useState(false)
+  const [copied, setCopied] = useState(false)
+  const sample = sampleQueryText(k)
+
+  async function copySample() {
+    try {
+      await navigator.clipboard.writeText(sample)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch { /* noop */ }
+  }
+
+  return (
+    <li className="border border-gray-200 rounded-xl p-4 bg-white">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2 mb-1">
+            <MdKey className="text-gray-400" />
+            <span className="font-semibold text-gray-900 truncate">{k.name}</span>
+            <span className="text-xs font-mono text-gray-400 truncate">{k.key_prefix}</span>
+            {k.revoked_at && (
+              <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider bg-red-100 text-red-700 rounded">Revoked</span>
+            )}
+          </div>
+          <div className="text-xs text-gray-500 mb-2">
+            Created {new Date(k.created_at).toLocaleDateString()}
+            {k.last_used_at && ` • last used ${new Date(k.last_used_at).toLocaleString()}`}
+            {k.expires_at && ` • expires ${new Date(k.expires_at).toLocaleDateString()}`}
+            {` • ${k.rate_limit_per_min}/min`}
+          </div>
+          <ScopeList scopes={k.scopes ?? []} />
+        </div>
+        <div className="flex items-center gap-1 shrink-0">
+          <button
+            onClick={() => setInfoOpen((o) => !o)}
+            title="Sample query"
+            aria-expanded={infoOpen}
+            className={`cursor-pointer bg-transparent border-0 p-1 transition-colors ${infoOpen ? 'text-blue-600' : 'text-gray-400 hover:text-gray-700'}`}
+          >
+            <MdInfoOutline className="text-lg" />
+          </button>
+          {!k.revoked_at && (
+            <>
+              <button
+                onClick={onEdit}
+                title="Edit key"
+                className="text-gray-400 hover:text-gray-700 cursor-pointer bg-transparent border-0 p-1 transition-colors"
+              >
+                <MdEdit className="text-lg" />
+              </button>
+              <button
+                onClick={onRevoke}
+                title="Revoke key"
+                className="text-red-500 hover:text-red-700 cursor-pointer bg-transparent border-0 p-1 transition-colors"
+              >
+                <MdDelete className="text-lg" />
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+
+      {infoOpen && (
+        <div className="mt-3 pt-3 border-t border-gray-100">
+          <div className="flex items-center justify-between mb-1.5">
+            <span className="text-xs font-semibold text-gray-700">Sample query</span>
+            <button
+              onClick={copySample}
+              className="inline-flex items-center gap-1 text-xs px-2 py-1 border border-gray-200 rounded-md hover:bg-gray-50 cursor-pointer transition-colors"
+            >
+              {copied ? <MdCheck className="text-green-500" /> : <MdContentCopy />} Copy
+            </button>
+          </div>
+          <textarea
+            readOnly
+            value={sample}
+            rows={sample.split('\n').length}
+            onFocus={(e) => e.target.select()}
+            className="w-full bg-gray-900 text-gray-100 text-[11px] font-mono rounded-lg p-3 resize-none focus:outline-none"
+          />
+          <p className="text-[11px] text-gray-400 m-0 mt-1">
+            Replace <code className="font-mono">&lt;YOUR_SECRET&gt;</code> with the secret you saved when this key was created — it can&rsquo;t be shown again.
+          </p>
+        </div>
+      )}
+    </li>
+  )
+}
+
+// sampleQueryText builds copy-pasteable curl examples for every scope on an
+// already-issued key. The raw secret is only ever shown once at creation
+// (see NewKeyBanner), so this substitutes a placeholder into the real
+// `sfs_<prefix>_<secret>` token shape instead of the actual key.
+function sampleQueryText(k: APIKey): string {
+  const placeholderKey = `sfs_${k.key_prefix}_<YOUR_SECRET>`
+  const scopes = k.scopes ?? []
+  if (scopes.length === 0) return 'This key has no scopes, so it cannot be used for requests.'
+  return scopes
+    .map((s) => sampleRequest(s.operation, s.path_prefix, placeholderKey))
+    .join('\n\n')
 }
 
 function NewKeyBanner({
@@ -298,15 +431,25 @@ function ScopeList({ scopes }: { scopes: APIKeyScope[] }) {
   if (scopes.length === 0) {
     return <p className="text-xs text-gray-400 m-0">No scopes (key cannot be used).</p>
   }
+  // Collapse groups covering all four base operations into one "all
+  // actions" row — same grouping the form uses — so a key granted full
+  // access to a prefix doesn't show as four near-identical lines.
+  const grouped = collapseScopesForEdit(scopes)
   return (
     <ul className="list-none p-0 m-0 flex flex-col gap-1.5">
-      {scopes.map((s) => (
-        <li key={s.id ?? `${s.operation}:${s.path_prefix}`} className="flex flex-wrap items-center gap-1.5 text-xs">
-          <span className="px-1.5 py-0.5 font-mono uppercase rounded bg-blue-100 text-blue-700">{s.operation}</span>
-          <span className="font-mono text-gray-500">{s.path_prefix || '/'}</span>
-          <ScopeInfraBadges pathPrefix={s.path_prefix} />
-        </li>
-      ))}
+      {grouped.map((s) => {
+        const meta = OPERATION_META[s.operation]
+        const Icon = meta.icon
+        return (
+          <li key={`${s.operation}:${s.path_prefix}`} className="flex flex-wrap items-center gap-1.5 text-xs">
+            <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 font-medium rounded ${meta.badgeClass}`}>
+              <Icon className="text-[13px]" /> {meta.label}
+            </span>
+            <span className="font-mono text-gray-500">{s.path_prefix || '/'}</span>
+            <ScopeInfraBadges pathPrefix={s.path_prefix} />
+          </li>
+        )
+      })}
     </ul>
   )
 }
@@ -322,11 +465,73 @@ function ScopeInfraBadges({ pathPrefix }: { pathPrefix: string }) {
   return <ApiKeyInfraBadges driveId={folder?.drive_id ?? null} />
 }
 
-// ScopeDraft carries an optional resolved Folder alongside the plain
-// operation/path_prefix pair the API expects, purely so the form can show
-// infra badges without a second round-trip lookup right after picking.
-interface ScopeDraft extends APIKeyScope {
+// ScopeDraft carries an optional resolved Folder alongside the
+// operation/path_prefix pair, purely so the form can show infra badges
+// without a second round-trip lookup right after picking. operation is
+// LocalOperation (not APIKeyScope's APIKeyOperation) so a row can hold the
+// form-only 'all actions' value — see scopesToPayload/collapseScopesForEdit.
+interface ScopeDraft {
+  operation: LocalOperation
+  path_prefix: string
   _folder?: Folder | null
+}
+
+// OperationPicker replaces a native <select> for choosing a scope's
+// operation with a styled dropdown that matches the rest of the app's
+// popovers (see DriveInfoButton in _auth.client/index.tsx for the same
+// button+floating-panel+outside-click pattern) instead of the browser's
+// unstyleable native option list. Includes the 'all actions' star option.
+function OperationPicker({ value, onChange }: { value: LocalOperation; onChange: (op: LocalOperation) => void }) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+  const meta = OPERATION_META[value]
+  const Icon = meta.icon
+
+  useEffect(() => {
+    if (!open) return
+    function handleOutsideClick(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', handleOutsideClick)
+    return () => document.removeEventListener('mousedown', handleOutsideClick)
+  }, [open])
+
+  return (
+    <div ref={ref} className="relative shrink-0">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="inline-flex items-center gap-1.5 border border-gray-200 rounded-lg pl-2 pr-1.5 py-1.5 text-sm bg-white hover:border-gray-300 cursor-pointer"
+      >
+        <Icon className={value === 'all' ? 'text-amber-500' : 'text-gray-400'} />
+        {meta.label}
+        <MdKeyboardArrowDown className="text-gray-400" />
+      </button>
+      {open && (
+        <div className="absolute z-20 top-full left-0 mt-1 w-40 border border-gray-200 rounded-lg bg-white shadow-lg overflow-hidden py-1">
+          {OPERATION_PICKER_OPTIONS.map((op) => {
+            const optMeta = OPERATION_META[op]
+            const OptIcon = optMeta.icon
+            const selected = op === value
+            return (
+              <button
+                key={op}
+                type="button"
+                onClick={() => { onChange(op); setOpen(false) }}
+                className={`w-full flex items-center gap-2 px-2.5 py-1.5 text-xs text-left cursor-pointer bg-transparent border-0 ${
+                  selected ? 'bg-blue-50 text-blue-700 font-medium' : 'text-gray-700 hover:bg-gray-50'
+                } ${op === 'all' ? 'border-t border-gray-100 mt-1 pt-2' : ''}`}
+              >
+                <OptIcon className={op === 'all' ? 'text-amber-500' : 'text-gray-400'} />
+                {optMeta.label}
+                {selected && <MdCheck className="ml-auto text-blue-600" />}
+              </button>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
 }
 
 function daysUntil(iso: string | null): number {
@@ -350,7 +555,7 @@ function KeyForm({
   const [rateLimit, setRateLimit] = useState<number>(initial?.rate_limit_per_min ?? API_KEY_DEFAULT_RATE_LIMIT_PER_MIN)
   const [scopes, setScopes] = useState<ScopeDraft[]>(
     initial?.scopes && initial.scopes.length > 0
-      ? initial.scopes.map((s) => ({ operation: s.operation, path_prefix: s.path_prefix }))
+      ? collapseScopesForEdit(initial.scopes)
       : [{ operation: 'read', path_prefix: initialPrefix }],
   )
   const [error, setError] = useState<string | null>(null)
@@ -375,7 +580,7 @@ function KeyForm({
   const createMutation = useMutation({
     mutationFn: () => createAPIKey({
       name: name.trim(),
-      scopes: scopes.map(({ operation, path_prefix }) => ({ operation, path_prefix })),
+      scopes: scopesToPayload(scopes),
       ttl_days: ttlDays > 0 ? ttlDays : undefined,
       rate_limit_per_min: rateLimit,
     }),
@@ -386,7 +591,7 @@ function KeyForm({
   const updateMutation = useMutation({
     mutationFn: () => updateAPIKey(initial!.id, {
       name: name.trim(),
-      scopes: scopes.map(({ operation, path_prefix }) => ({ operation, path_prefix })),
+      scopes: scopesToPayload(scopes),
       ttl_days: ttlDays > 0 ? ttlDays : undefined,
       rate_limit_per_min: rateLimit,
     }),
@@ -424,13 +629,10 @@ function KeyForm({
             return (
               <div key={i} className="flex flex-col gap-1.5">
                 <div className="flex items-center gap-2">
-                  <select
+                  <OperationPicker
                     value={s.operation}
-                    onChange={(e) => updateScope(i, { operation: e.target.value as APIKeyOperation })}
-                    className="border border-gray-200 rounded-lg px-2 py-1.5 text-sm bg-white shrink-0"
-                  >
-                    {OPS.map((op) => <option key={op} value={op}>{op}</option>)}
-                  </select>
+                    onChange={(operation) => updateScope(i, { operation })}
+                  />
                   <FolderPrefixPicker
                     value={s.path_prefix}
                     onSelect={(prefix, folder) => updateScope(i, { path_prefix: prefix, _folder: folder })}

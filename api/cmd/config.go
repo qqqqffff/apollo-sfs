@@ -80,11 +80,12 @@ type Config struct {
 
 	// PayPalClientID / Secret / WebhookID are the credentials of the PayPal
 	// application that processes one-time premium purchases. Configured via
-	// docs/paypal_setup.md.
+	// docs/paypal_setup.md. Always used at PayPal's live base URL — the
+	// primary/live client has no sandbox mode; use PayPalSandbox* below
+	// (via the admin-only session toggle) for testing.
 	PayPalClientID     string
 	PayPalClientSecret string
 	PayPalWebhookID    string
-	PayPalEnvironment  string // "sandbox" | "live"
 
 	// PayPalSandboxClientID / Secret / WebhookID configure a second, always-
 	// sandbox PayPal client used only when an admin's session-scoped "sandbox
@@ -135,7 +136,6 @@ func loadConfig() Config {
 	premiumMonthlyPrice, _ := strconv.Atoi(getEnv("PREMIUM_MONTHLY_PRICE_CENTS", "100"))
 	premiumAnnualPrice, _ := strconv.Atoi(getEnv("PREMIUM_ANNUAL_PRICE_CENTS", "1000"))
 
-	paypalEnv := getEnv("PAYPAL_ENV", "sandbox")
 	paypalClientID := getEnv("PAYPAL_CLIENT_ID", "")
 	paypalClientSecret := getEnv("PAYPAL_CLIENT_SECRET", "")
 	paypalWebhookID := getEnv("PAYPAL_WEBHOOK_ID", "")
@@ -193,7 +193,6 @@ func loadConfig() Config {
 		PayPalClientID:            paypalClientID,
 		PayPalClientSecret:        paypalClientSecret,
 		PayPalWebhookID:           paypalWebhookID,
-		PayPalEnvironment:         paypalEnv,
 		PayPalSandboxClientID:     getEnv("PAYPAL_SANDBOX_CLIENT_ID", ""),
 		PayPalSandboxClientSecret: getEnv("PAYPAL_SANDBOX_CLIENT_SECRET", ""),
 		PayPalSandboxWebhookID:    getEnv("PAYPAL_SANDBOX_WEBHOOK_ID", ""),

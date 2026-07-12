@@ -172,12 +172,19 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
   const serverTypeMismatch = !!selectedServer && selectedServer.drive_type !== storageType
   const serverLacksCapacity = !!selectedServer && planBytes > selectedServer.available_bytes
 
+  // Admin-only, session-scoped override (see SandboxPaymentsToggle on the
+  // profile page) that forces every plan purchase through the expansion
+  // request flow below, regardless of actual server capacity — lets an
+  // admin test that flow without needing a server actually near capacity.
+  const expansionOverride = !!user?.expansion_override_enabled
+
   // Deposit-based expansion request instead of a direct purchase when the
-  // server can't take the purchase (>=90% allocated, wrong tier, or not
-  // enough free capacity). Custom amounts never pay here: they are submitted
-  // without payment (estimated price) and invoiced after manual review.
+  // override above is on, or the server can't take the purchase (>=90%
+  // allocated, wrong tier, or not enough free capacity). Custom amounts
+  // never pay here: they are submitted without payment (estimated price)
+  // and invoiced after manual review.
   const isExpansion = !!selectedPlanId && !isCustom && !!selectedServer &&
-    (serverAtCapacity || serverTypeMismatch || serverLacksCapacity)
+    (expansionOverride || serverAtCapacity || serverTypeMismatch || serverLacksCapacity)
 
   // An already-open custom request for this exact server + storage type —
   // submitting another would just duplicate manual review work, so the
@@ -304,6 +311,11 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
             {config?.environment === 'sandbox' && (
               <span className="px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider bg-purple-100 text-purple-700 rounded">
                 Sandbox payment
+              </span>
+            )}
+            {expansionOverride && (
+              <span className="px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider bg-amber-100 text-amber-700 rounded">
+                Server expansion only
               </span>
             )}
           </div>
@@ -609,7 +621,7 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
                   {STORAGE_PLANS.map((plan) => {
                     const sel = selectedPlanId === plan.id
                     const unavailable = !!selectedServer &&
-                      (serverAtCapacity || selectedServer.drive_type !== storageType || plan.addBytes > selectedServer.available_bytes)
+                      (expansionOverride || serverAtCapacity || selectedServer.drive_type !== storageType || plan.addBytes > selectedServer.available_bytes)
                     return (
                       <button
                         key={plan.id}

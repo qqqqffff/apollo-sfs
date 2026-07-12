@@ -3,7 +3,7 @@ import { useEffect, useRef, useCallback, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { MdAddCircleOutline, MdCheck, MdClose, MdEdit, MdPhotoLibrary, MdRocketLaunch, MdShield, MdStorage, MdBolt, MdRefresh, MdScience } from 'react-icons/md'
 import { FaApple } from 'react-icons/fa'
-import { meQueryOptions, updateUsername, preferencesQueryOptions, updatePreferences, updateStorageUIPreferences, updateSandboxPayments, unlinkProvider } from '../../api/me'
+import { meQueryOptions, updateUsername, preferencesQueryOptions, updatePreferences, updateStorageUIPreferences, updateSandboxPayments, updateExpansionOverride, unlinkProvider } from '../../api/me'
 import { logout } from '../../api/auth'
 import { listRoot } from '../../api/folders'
 import { ApiError } from '../../api/client'
@@ -137,7 +137,12 @@ function RouteComponent() {
 
       <MediaAutoUpload />
 
-      {user.is_admin && <SandboxPaymentsToggle enabled={user.sandbox_payments_enabled} />}
+      {user.is_admin && (
+        <SandboxPaymentsToggle
+          enabled={user.sandbox_payments_enabled}
+          expansionOverrideEnabled={user.expansion_override_enabled}
+        />
+      )}
 
       <div className="bg-white border border-gray-200 rounded-xl px-5 py-4">
         <div className="flex items-center justify-between gap-3">
@@ -596,9 +601,15 @@ function StorageUIPreferences() {
   )
 }
 
-function SandboxPaymentsToggle({ enabled }: { enabled: boolean }) {
+function SandboxPaymentsToggle({
+  enabled, expansionOverrideEnabled,
+}: {
+  enabled: boolean
+  expansionOverrideEnabled: boolean
+}) {
   const queryClient = useQueryClient()
   const [error, setError] = useState<string | null>(null)
+  const [expansionError, setExpansionError] = useState<string | null>(null)
 
   const mutation = useMutation({
     mutationFn: updateSandboxPayments,
@@ -612,6 +623,15 @@ function SandboxPaymentsToggle({ enabled }: { enabled: boolean }) {
       setError(null)
     },
     onError: (err) => setError(err instanceof ApiError ? err.message : 'Failed to save preference'),
+  })
+
+  const expansionMutation = useMutation({
+    mutationFn: updateExpansionOverride,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['me'] })
+      setExpansionError(null)
+    },
+    onError: (err) => setExpansionError(err instanceof ApiError ? err.message : 'Failed to save preference'),
   })
 
   return (
@@ -634,6 +654,27 @@ function SandboxPaymentsToggle({ enabled }: { enabled: boolean }) {
         Use PayPal sandbox for my purchases this session
       </label>
       {error && <p className="text-xs text-red-500 m-0 mt-2">{error}</p>}
+
+      <div className="mt-4 pt-4 border-t border-gray-100">
+        <h4 className="text-sm font-semibold text-gray-800 mb-1 flex items-center gap-1.5">
+          <MdStorage className="text-gray-500" /> Storage expansion override
+        </h4>
+        <p className="text-xs text-gray-400 mb-3">
+          Force the Add storage modal to always show a capacity expansion request instead of a
+          direct purchase, so you can test the request/deposit flow without needing a server
+          near capacity. Resets to off when you log out or your session expires.
+        </p>
+        <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={expansionOverrideEnabled}
+            onChange={(e) => expansionMutation.mutate(e.target.checked)}
+            className="cursor-pointer"
+          />
+          Always show server expansion requests in Add storage
+        </label>
+        {expansionError && <p className="text-xs text-red-500 m-0 mt-2">{expansionError}</p>}
+      </div>
     </div>
   )
 }
@@ -991,15 +1032,10 @@ function PremiumCard({
     )
   }
 
-  // Premium checkout is still being verified end-to-end — only surface the
-  // upgrade card while payments are routed through the PayPal sandbox
-  // (globally, via PAYPAL_ENV, or per-admin via the sandbox-payments toggle
-  // above). Hidden entirely otherwise so real users aren't steered into an
-  // unverified live payment flow.
-  if (billingConfig?.environment !== 'sandbox') {
-    return null
-  }
-
+  // Reachable here only when genuinelyPremium is false and the admin-implicit
+  // case above didn't apply — i.e. a base user without an active membership,
+  // or an admin who has sandbox payments on and no active sandbox
+  // subscription. Both should see the upgrade flow.
   return (
     <div className="bg-amber-50 border-2 border-amber-200 rounded-xl px-5 py-4">
       <div className="flex items-start gap-3">

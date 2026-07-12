@@ -57,6 +57,14 @@ export function updateSandboxPayments(enabled: boolean) {
   return put<{ sandbox_payments_enabled: boolean }>('/me/sandbox-payments', { enabled })
 }
 
+// updateExpansionOverride toggles the admin-only, session-scoped override
+// that forces the Add Storage modal to always show a capacity expansion
+// request instead of a direct purchase (resets on logout/session expiry —
+// not a persisted preference, hence not part of UserPreferences).
+export function updateExpansionOverride(enabled: boolean) {
+  return put<{ expansion_override_enabled: boolean }>('/me/expansion-override', { enabled })
+}
+
 export const preferencesQueryOptions = {
   queryKey: ['preferences'] as const,
   queryFn: getPreferences,

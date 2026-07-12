@@ -21,8 +21,6 @@ jest.mock('../../api/interest', () => ({
   submitInterestForm: jest.fn(),
   createInterestDepositOrder: jest.fn(),
   captureInterestDepositOrder: jest.fn(),
-  validateApplePayMerchantForDeposit: jest.fn(),
-  createApplePayInterestDeposit: jest.fn(),
   createGooglePayInterestDeposit: jest.fn(),
 }))
 

@@ -738,6 +738,10 @@ type stubMetricsService struct {
 	nodeDisksErr     error
 	nodeDiskTemps    []models.NodeDiskTempSnapshot
 	nodeDiskTempsErr error
+	driveIO          []models.DriveIOSnapshot
+	driveIOErr       error
+	nodeDiskIO       []models.NodeDiskIOSnapshot
+	nodeDiskIOErr    error
 	nodeStates       []models.NodeFrame
 }
 
@@ -772,6 +776,12 @@ func (s *stubMetricsService) GetNodeDisks(_ context.Context, _ uuid.UUID) ([]mod
 }
 func (s *stubMetricsService) GetNodeDiskTempHistoryByHours(_ context.Context, _ uuid.UUID, _ int) ([]models.NodeDiskTempSnapshot, error) {
 	return s.nodeDiskTemps, s.nodeDiskTempsErr
+}
+func (s *stubMetricsService) GetDriveIOHistoryByHours(_ context.Context, _ uuid.UUID, _ int) ([]models.DriveIOSnapshot, error) {
+	return s.driveIO, s.driveIOErr
+}
+func (s *stubMetricsService) GetNodeDiskIOHistoryByHours(_ context.Context, _ uuid.UUID, _ int) ([]models.NodeDiskIOSnapshot, error) {
+	return s.nodeDiskIO, s.nodeDiskIOErr
 }
 func (s *stubMetricsService) NodeStates(_ context.Context) ([]models.NodeFrame, error) {
 	return s.nodeStates, nil

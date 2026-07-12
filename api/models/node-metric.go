@@ -35,6 +35,9 @@ type DriveTempSnapshot struct {
 // its filesystem label and refreshed on every agent push. Telemetry here is
 // per-physical-disk and independent of logical drives: a pooled MinIO drive can
 // span several of these, each reporting its own capacity and temperature.
+// ReadBytes/WriteBytes are cumulative I/O counters since the disk was last
+// reset (mirrors NetworkBytesSent/Recv) — diff adjacent live frames for
+// bytes/second, the same way network throughput is derived.
 type NodeDisk struct {
 	ID            uuid.UUID `json:"id" db:"id"`
 	NodeID        uuid.UUID `json:"node_id" db:"node_id"`
@@ -43,6 +46,8 @@ type NodeDisk struct {
 	CapacityBytes int64     `json:"capacity_bytes" db:"capacity_bytes"`
 	UsedBytes     int64     `json:"used_bytes" db:"used_bytes"`
 	FreeBytes     int64     `json:"free_bytes" db:"free_bytes"`
+	ReadBytes     int64     `json:"read_bytes" db:"read_bytes"`
+	WriteBytes    int64     `json:"write_bytes" db:"write_bytes"`
 	TempCelsius   *float64  `json:"temp_celsius" db:"temp_celsius"`
 	LastSeenAt    time.Time `json:"last_seen_at" db:"last_seen_at"`
 	CreatedAt     time.Time `json:"created_at" db:"created_at"`
@@ -56,6 +61,30 @@ type NodeDiskTempSnapshot struct {
 	DiskID      uuid.UUID `json:"disk_id" db:"disk_id"`
 	TempCelsius float64   `json:"temp_celsius" db:"temp_celsius"`
 	SampledAt   time.Time `json:"sampled_at" db:"sampled_at"`
+}
+
+// NodeDiskIOSnapshot mirrors the `node_disk_io_snapshots` table — one
+// cumulative read/write byte-counter reading per physical disk per sample.
+// Diff adjacent rows over their sampled_at delta to compute bytes/second, the
+// same way network_bytes_sent/recv history is derived.
+type NodeDiskIOSnapshot struct {
+	ID         uuid.UUID `json:"id" db:"id"`
+	DiskID     uuid.UUID `json:"disk_id" db:"disk_id"`
+	ReadBytes  int64     `json:"read_bytes" db:"read_bytes"`
+	WriteBytes int64     `json:"write_bytes" db:"write_bytes"`
+	SampledAt  time.Time `json:"sampled_at" db:"sampled_at"`
+}
+
+// DriveIOSnapshot mirrors the `drive_io_snapshots` table — one cumulative
+// read/write byte-counter reading per registered logical drive per sample.
+// Only written when the reporting disk's label backs a registered drive (see
+// DriveTempSnapshot).
+type DriveIOSnapshot struct {
+	ID         uuid.UUID `json:"id" db:"id"`
+	DriveID    uuid.UUID `json:"drive_id" db:"drive_id"`
+	ReadBytes  int64     `json:"read_bytes" db:"read_bytes"`
+	WriteBytes int64     `json:"write_bytes" db:"write_bytes"`
+	SampledAt  time.Time `json:"sampled_at" db:"sampled_at"`
 }
 
 // NodeMetricsPayload is the JSON body the per-node agent POSTs to
@@ -74,6 +103,8 @@ type NodeMetricsPayload struct {
 
 // DrivePayload is one drive's live figures as reported by the node agent. Label
 // is the filesystem label, matched to a registered drive on the reporting node.
+// ReadBytes/WriteBytes are cumulative I/O counters since boot, read from the
+// kernel's block-device stats (like NetworkBytesSent/Recv from /proc/net/dev).
 type DrivePayload struct {
 	Label       string   `json:"label"`
 	Device      string   `json:"device"`
@@ -81,6 +112,8 @@ type DrivePayload struct {
 	TotalBytes  int64    `json:"total_bytes"`
 	UsedBytes   int64    `json:"used_bytes"`
 	FreeBytes   int64    `json:"free_bytes"`
+	ReadBytes   int64    `json:"read_bytes"`
+	WriteBytes  int64    `json:"write_bytes"`
 }
 
 // MetricsFrame is the per-tick WebSocket payload broadcast to admin clients:
@@ -112,6 +145,8 @@ type NodeFrame struct {
 
 // DiskFrame is one physical disk's live figures within a NodeFrame, resolved to
 // its node_disks row so the frontend can correlate with the per-disk history.
+// ReadBytes/WriteBytes are cumulative counters — the frontend diffs consecutive
+// live frames to derive a read/write bytes-per-second rate.
 type DiskFrame struct {
 	DiskID      uuid.UUID `json:"disk_id"`
 	Label       string    `json:"label"`
@@ -120,10 +155,13 @@ type DiskFrame struct {
 	TotalBytes  int64     `json:"total_bytes"`
 	UsedBytes   int64     `json:"used_bytes"`
 	FreeBytes   int64     `json:"free_bytes"`
+	ReadBytes   int64     `json:"read_bytes"`
+	WriteBytes  int64     `json:"write_bytes"`
 }
 
 // DriveFrame is one drive's live figures within a NodeFrame, resolved to its
 // registered drive_id so the frontend can correlate with the infrastructure view.
+// ReadBytes/WriteBytes mirror the backing physical disk (see DiskFrame).
 type DriveFrame struct {
 	DriveID     uuid.UUID `json:"drive_id"`
 	Label       string    `json:"label"`
@@ -132,4 +170,6 @@ type DriveFrame struct {
 	TotalBytes  int64     `json:"total_bytes"`
 	UsedBytes   int64     `json:"used_bytes"`
 	FreeBytes   int64     `json:"free_bytes"`
+	ReadBytes   int64     `json:"read_bytes"`
+	WriteBytes  int64     `json:"write_bytes"`
 }

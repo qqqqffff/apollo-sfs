@@ -23,6 +23,11 @@ export interface User {
   // Admin's session-scoped sandbox-payments toggle (resets on logout/session
   // expiry — never persisted). Always false for non-admins.
   sandbox_payments_enabled: boolean
+  // Admin's session-scoped storage-expansion-override toggle (resets on
+  // logout/session expiry — never persisted). Always false for non-admins.
+  // When true, the Add Storage modal always routes purchases through the
+  // capacity expansion request flow instead of a direct buy.
+  expansion_override_enabled: boolean
 }
 
 export type APIKeyOperation = 'read' | 'write' | 'delete' | 'list'

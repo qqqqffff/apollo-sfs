@@ -210,7 +210,9 @@ export interface MetricsSnapshot {
 }
 
 // DriveFrame is one drive's live figures within a node, as reported by that
-// node's agent and resolved to its registered drive_id.
+// node's agent and resolved to its registered drive_id. read_bytes/write_bytes
+// are cumulative I/O counters (like network_bytes_sent/recv) — diff consecutive
+// frames for a bytes/second rate.
 export interface DriveFrame {
   drive_id: string
   label: string
@@ -219,6 +221,8 @@ export interface DriveFrame {
   total_bytes: number
   used_bytes: number
   free_bytes: number
+  read_bytes: number
+  write_bytes: number
 }
 
 // NodeFrame is one node's latest hardware state within a MetricsFrame. online is
@@ -243,7 +247,9 @@ export interface NodeFrame {
 }
 
 // DiskFrame is one physical disk's live figures within a node, resolved to its
-// node_disks row (disk_id) so per-disk history can be fetched.
+// node_disks row (disk_id) so per-disk history can be fetched. read_bytes/
+// write_bytes are cumulative I/O counters — diff consecutive frames for a
+// bytes/second rate.
 export interface DiskFrame {
   disk_id: string
   label: string
@@ -252,6 +258,8 @@ export interface DiskFrame {
   total_bytes: number
   used_bytes: number
   free_bytes: number
+  read_bytes: number
+  write_bytes: number
 }
 
 // MetricsFrame is the per-tick WebSocket payload: a cluster snapshot plus a
@@ -279,6 +287,26 @@ export interface DriveTempSnapshot {
   id: string
   drive_id: string
   temp_celsius: number
+  sampled_at: string
+}
+
+// Per-drive read/write I/O history (downsampled), backing the drive-speed
+// carousel graph. read_bytes/write_bytes are cumulative counters — diff
+// adjacent points for bytes/second, same as network_bytes_sent/recv.
+export interface DriveIOSnapshot {
+  id: string
+  drive_id: string
+  read_bytes: number
+  write_bytes: number
+  sampled_at: string
+}
+
+// Per-physical-disk read/write I/O history (downsampled).
+export interface NodeDiskIOSnapshot {
+  id: string
+  disk_id: string
+  read_bytes: number
+  write_bytes: number
   sampled_at: string
 }
 
@@ -326,6 +354,14 @@ export function getNodeDisks(nodeId: string) {
 
 export function getNodeDiskTempsHistory(diskId: string, hours: number) {
   return get<NodeDiskTempSnapshot[]>(`/admin/system/disks/${diskId}/temps/history?hours=${hours}`)
+}
+
+export function getDriveIOHistory(driveId: string, hours: number) {
+  return get<DriveIOSnapshot[]>(`/admin/system/drives/${driveId}/io/history?hours=${hours}`)
+}
+
+export function getNodeDiskIOHistory(diskId: string, hours: number) {
+  return get<NodeDiskIOSnapshot[]>(`/admin/system/disks/${diskId}/io/history?hours=${hours}`)
 }
 
 export async function pingServer(): Promise<number> {

@@ -196,6 +196,18 @@ func (h *Handler) SyncInfrastructure(c *gin.Context) {
 			c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("could not read MinIO %s: %v", inst.endpoint, err)})
 			return
 		}
+
+		// The drive row below points every tier at the shared bucket name, but
+		// unlike the manual "add drive" flow (infrastructure.go) nothing has
+		// actually created it on this instance yet — a freshly provisioned
+		// MinIO (e.g. a new standard-tier node) starts with no buckets at all.
+		// Ensure it here so uploads/speed-tests against this drive don't fail
+		// with "the specified bucket does not exist".
+		if err := h.storage.EnsureBucket(ctx, inst.endpoint, h.minioAccessKey, h.minioSecretKey, h.minioUseSSL, h.minioBucketName); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("could not ensure bucket on %s: %v", inst.endpoint, err)})
+			return
+		}
+
 		driveType := "hdd"
 		if inst.tier == "fast" {
 			driveType = "nvme"

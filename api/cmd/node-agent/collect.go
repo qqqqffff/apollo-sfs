@@ -135,11 +135,11 @@ func labelMounts(partitions []psdisk.PartitionStat) []diskMount {
 	return out
 }
 
-// collectDrives reports live capacity/used/free plus temperature for each physical
-// disk. Disks come from NODE_DISK_MOUNTS when set (deterministic, label-free),
-// otherwise from /dev/disk/by-label. Mounts that can't be read are skipped (the
-// API falls back to stored DB capacity). The label is matched to a registered
-// drive on the API side.
+// collectDrives reports live capacity/used/free/read/write plus temperature for
+// each physical disk. Disks come from NODE_DISK_MOUNTS when set (deterministic,
+// label-free), otherwise from /dev/disk/by-label. Mounts that can't be read are
+// skipped (the API falls back to stored DB capacity). The label is matched to a
+// registered drive on the API side.
 func collectDrives() []models.DrivePayload {
 	partitions, _ := psdisk.Partitions(true)
 
@@ -148,7 +148,7 @@ func collectDrives() []models.DrivePayload {
 		mounts = labelMounts(partitions)
 	}
 
-	// Resolve a mount's backing device so temperatures can be matched to it.
+	// Resolve a mount's backing device so temperature/I-O can be matched to it.
 	deviceFor := func(mount string) string {
 		for _, prt := range partitions {
 			if prt.Mountpoint == mount {
@@ -157,6 +157,13 @@ func collectDrives() []models.DrivePayload {
 		}
 		return ""
 	}
+
+	// Cumulative read/write bytes since boot, keyed by device basename (e.g.
+	// "nvme0n1p1", "sda1") — /proc/diskstats reports partitions as their own
+	// entries, so no controller/whole-disk resolution is needed here (unlike
+	// driveTempPath's hwmon matching). Diffed by the API across consecutive
+	// live frames to derive a bytes/second rate, mirroring network throughput.
+	ioCounters, _ := psdisk.IOCounters()
 
 	var out []models.DrivePayload
 	for _, m := range mounts {
@@ -175,6 +182,10 @@ func collectDrives() []models.DrivePayload {
 			FreeBytes:  int64(usage.Free),
 		}
 		d.TempCelsius = readTempFile(driveTempPath(dev))
+		if stat, ok := ioCounters[filepath.Base(dev)]; ok {
+			d.ReadBytes = int64(stat.ReadBytes)
+			d.WriteBytes = int64(stat.WriteBytes)
+		}
 		out = append(out, d)
 	}
 	return out

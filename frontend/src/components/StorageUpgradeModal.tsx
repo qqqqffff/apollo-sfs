@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { useNavigate } from '@tanstack/react-router'
+import { Link, useNavigate } from '@tanstack/react-router'
 import {
   MdBolt,
   MdCheckCircle,
@@ -737,21 +737,26 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
                 </div>
               </div>
 
-              {/* Expansion notice (fixed plans, deposit-based) */}
+              {/* Expansion notice (fixed plans, deposit-based) — full explanation of
+                  how the request/deposit/provisioning flow works now lives on the
+                  orders page instead of duplicated here. */}
               {isExpansion && (
                 <div className="px-4 py-3 bg-amber-50 border border-amber-200 rounded-xl">
                   <p className="text-xs font-semibold text-amber-800 m-0 mb-1">
                     Capacity expansion request
                   </p>
                   <p className="text-xs text-amber-800 m-0 leading-relaxed">
-                    {serverAtCapacity
-                      ? `This server is at ${selectedServer?.allocated_pct.toFixed(0)}% allocated capacity, so direct purchases are unavailable. Your request will be reviewed within 7 business days. `
-                      : `This server can't fit ${formatSize(planBytes)} of ${storageType === 'nvme' ? 'fast' : 'standard'} storage right now. Your request will be reviewed within 7 business days. `}
-                    Once approved, capacity is expanded within <span className="font-semibold">14 business days</span>.
-                    You pay a <span className="font-semibold">50% deposit ({formatCents(depositCents)})</span> now;
-                    if either deadline is missed, it is refunded automatically. The remaining balance is
-                    charged when your capacity is provisioned.
+                    This purchase requires a <span className="font-semibold">50% deposit ({formatCents(depositCents)})</span> and manual review.
                   </p>
+                  <Link
+                    to="/client/orders"
+                    search={{ tab: 'requests' } as never}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-xs text-amber-900 font-medium underline hover:no-underline mt-1 inline-block"
+                  >
+                    How expansion requests work →
+                  </Link>
                 </div>
               )}
 

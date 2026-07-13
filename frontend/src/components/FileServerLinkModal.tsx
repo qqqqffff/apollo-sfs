@@ -72,7 +72,7 @@ const GUIDES: Record<DeviceOS, string[]> = {
 
 // MountGuide renders the toggleable per-device instructions accordion shown
 // inside the modal (auto-expanded on first-time link creation).
-function MountGuide({ mountUrl, defaultOpen }: { mountUrl: string | null; defaultOpen: boolean }) {
+export function MountGuide({ mountUrl, defaultOpen }: { mountUrl: string | null; defaultOpen: boolean }) {
   const [open, setOpen] = useState(defaultOpen)
   const [os, setOS] = useState<DeviceOS>(() => detectDeviceOS())
 
@@ -161,7 +161,18 @@ export function copyToClipboard(text: string): Promise<void> {
   return navigator.clipboard.writeText(text)
 }
 
-export function FileServerLinkModal({ onClose, existingLinks }: Props) {
+interface CreateFormProps {
+  existingLinks: FileServerLink[]
+  // First-time creation (no links existed before) auto-expands the guide.
+  isFirstLink: boolean
+}
+
+// FileServerLinkCreateForm is the picker + creation flow, with no backdrop or
+// header of its own — reusable both inside the standalone FileServerLinkModal
+// (own backdrop, used from the profile page) and embedded directly inside a
+// host modal's own single-backdrop shell (used from the files sidebar), so
+// the two entry points never stack two dimmed backdrops on top of each other.
+export function FileServerLinkCreateForm({ existingLinks, isFirstLink }: CreateFormProps) {
   const queryClient = useQueryClient()
   const { data: servers = [], isLoading } = useQuery({
     queryKey: ['storage', 'my-servers'],
@@ -173,9 +184,6 @@ export function FileServerLinkModal({ onClose, existingLinks }: Props) {
   const [result, setResult] = useState<{ link: FileServerLink; created: boolean } | null>(null)
   const [copied, setCopied] = useState(false)
   const [error, setError] = useState<string | null>(null)
-
-  // First-time creation (no links existed before) auto-expands the guide.
-  const isFirstLink = existingLinks.length === 0
 
   const linkByDrive = useMemo(() => {
     const m = new Map<string, FileServerLink>()
@@ -204,6 +212,125 @@ export function FileServerLinkModal({ onClose, existingLinks }: Props) {
   })
 
   return (
+    <div className="space-y-4">
+      {result?.created ? (
+        <div className="space-y-3">
+          <div className="flex items-center gap-2 text-green-600 text-sm font-medium">
+            <MdCheckCircle className="text-lg shrink-0" />
+            Link created{copied ? ' and copied to your clipboard' : ''}
+          </div>
+          <LinkDisplay link={result.link} />
+          <MountGuide mountUrl={result.link.mount_url} defaultOpen={isFirstLink} />
+        </div>
+      ) : (
+        <>
+          <p className="text-xs text-gray-500 m-0">
+            Pick one of your storage servers and its tier. The link mounts that specific
+            drive as a network drive on your device — you'll sign in with your Apollo SFS
+            credentials when connecting. A server exposing both Fast and Standard tiers to
+            you can have a separate link for each; only one link can exist per drive.
+          </p>
+
+          {isLoading && <p className="text-xs text-gray-400">Loading your servers…</p>}
+          {!isLoading && servers.length === 0 && (
+            <p className="text-xs text-gray-400">You have no storage servers yet.</p>
+          )}
+
+          <div className="space-y-2">
+            {servers.map((srv: MyServer) => {
+              const has = linkByDrive.has(srv.drive_id)
+              const isSel = selected === srv.drive_id
+              return (
+                <button
+                  key={srv.drive_id}
+                  type="button"
+                  onClick={() => { setSelected(srv.drive_id); setError(null) }}
+                  className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg border text-left transition-colors cursor-pointer ${
+                    isSel ? 'border-blue-500 bg-blue-50/50' : 'border-gray-200 bg-white hover:border-gray-300'
+                  }`}
+                >
+                  <span className="flex items-center gap-2 min-w-0">
+                    <MdDns className={`shrink-0 ${isSel ? 'text-blue-600' : 'text-gray-400'}`} />
+                    <span className="text-sm text-gray-800 truncate">{srv.name}</span>
+                    <span
+                      className={`text-[10px] font-medium rounded px-1.5 py-0.5 shrink-0 ${
+                        srv.drive_type === 'nvme'
+                          ? 'text-emerald-700 bg-emerald-100'
+                          : 'text-sky-700 bg-sky-100'
+                      }`}
+                    >
+                      {tierLabel(srv.drive_type)}
+                    </span>
+                    {srv.is_primary && (
+                      <span className="text-[10px] font-medium text-blue-600 bg-blue-50 rounded px-1.5 py-0.5">primary</span>
+                    )}
+                  </span>
+                  {has && (
+                    <span className="text-[10px] font-medium text-amber-600 bg-amber-50 rounded px-1.5 py-0.5 shrink-0">
+                      link exists
+                    </span>
+                  )}
+                </button>
+              )
+            })}
+          </div>
+
+          {existingForSelected ? (
+            <div className="space-y-3">
+              <p className="text-xs text-amber-600 m-0">
+                A link already exists for this drive. You can copy it below, or delete it
+                from your profile page to create a new one.
+              </p>
+              <LinkDisplay link={existingForSelected} />
+              <MountGuide mountUrl={existingForSelected.mount_url} defaultOpen={false} />
+            </div>
+          ) : (
+            <>
+              <label className="flex items-start gap-2.5 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={enhanced}
+                  onChange={(e) => setEnhanced(e.target.checked)}
+                  className="mt-0.5 accent-blue-600"
+                />
+                <span>
+                  <span className="flex items-center gap-1 text-xs font-medium text-gray-700">
+                    <MdShield className="text-blue-600" /> Enhanced security mode
+                  </span>
+                  <span className="block text-[11px] text-gray-400 mt-0.5">
+                    Uploads and downloads from a new location (or every 30 days from a known
+                    one) require clicking a verification link sent to your email while signed in.
+                  </span>
+                </span>
+              </label>
+
+              {error && <p className="text-xs text-red-500 m-0">{error}</p>}
+
+              <button
+                type="button"
+                disabled={!selected || createMutation.isPending}
+                onClick={() => createMutation.mutate()}
+                className="w-full px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-lg disabled:opacity-50 transition-colors cursor-pointer"
+              >
+                {createMutation.isPending ? 'Creating…' : 'Generate link & copy to clipboard'}
+              </button>
+
+              <MountGuide mountUrl={null} defaultOpen={false} />
+            </>
+          )}
+        </>
+      )}
+    </div>
+  )
+}
+
+// FileServerLinkModal is the standalone entry point (own backdrop + header)
+// used from the profile page, where there is no host modal already dimming
+// the background.
+export function FileServerLinkModal({ onClose, existingLinks }: Props) {
+  const isFirstLink = existingLinks.length === 0
+
+  return (
     <div
       onClick={onClose}
       className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4"
@@ -225,114 +352,8 @@ export function FileServerLinkModal({ onClose, existingLinks }: Props) {
           </button>
         </div>
 
-        <div className="px-5 py-4 space-y-4">
-          {result?.created ? (
-            <div className="space-y-3">
-              <div className="flex items-center gap-2 text-green-600 text-sm font-medium">
-                <MdCheckCircle className="text-lg shrink-0" />
-                Link created{copied ? ' and copied to your clipboard' : ''}
-              </div>
-              <LinkDisplay link={result.link} />
-              <MountGuide mountUrl={result.link.mount_url} defaultOpen={isFirstLink} />
-            </div>
-          ) : (
-            <>
-              <p className="text-xs text-gray-500 m-0">
-                Pick one of your storage servers and its tier. The link mounts that specific
-                drive as a network drive on your device — you'll sign in with your Apollo SFS
-                credentials when connecting. A server exposing both Fast and Standard tiers to
-                you can have a separate link for each; only one link can exist per drive.
-              </p>
-
-              {isLoading && <p className="text-xs text-gray-400">Loading your servers…</p>}
-              {!isLoading && servers.length === 0 && (
-                <p className="text-xs text-gray-400">You have no storage servers yet.</p>
-              )}
-
-              <div className="space-y-2">
-                {servers.map((srv: MyServer) => {
-                  const has = linkByDrive.has(srv.drive_id)
-                  const isSel = selected === srv.drive_id
-                  return (
-                    <button
-                      key={srv.drive_id}
-                      type="button"
-                      onClick={() => { setSelected(srv.drive_id); setError(null) }}
-                      className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg border text-left transition-colors cursor-pointer ${
-                        isSel ? 'border-blue-500 bg-blue-50/50' : 'border-gray-200 bg-white hover:border-gray-300'
-                      }`}
-                    >
-                      <span className="flex items-center gap-2 min-w-0">
-                        <MdDns className={`shrink-0 ${isSel ? 'text-blue-600' : 'text-gray-400'}`} />
-                        <span className="text-sm text-gray-800 truncate">{srv.name}</span>
-                        <span
-                          className={`text-[10px] font-medium rounded px-1.5 py-0.5 shrink-0 ${
-                            srv.drive_type === 'nvme'
-                              ? 'text-emerald-700 bg-emerald-100'
-                              : 'text-sky-700 bg-sky-100'
-                          }`}
-                        >
-                          {tierLabel(srv.drive_type)}
-                        </span>
-                        {srv.is_primary && (
-                          <span className="text-[10px] font-medium text-blue-600 bg-blue-50 rounded px-1.5 py-0.5">primary</span>
-                        )}
-                      </span>
-                      {has && (
-                        <span className="text-[10px] font-medium text-amber-600 bg-amber-50 rounded px-1.5 py-0.5 shrink-0">
-                          link exists
-                        </span>
-                      )}
-                    </button>
-                  )
-                })}
-              </div>
-
-              {existingForSelected ? (
-                <div className="space-y-3">
-                  <p className="text-xs text-amber-600 m-0">
-                    A link already exists for this drive. You can copy it below, or delete it
-                    from your profile page to create a new one.
-                  </p>
-                  <LinkDisplay link={existingForSelected} />
-                  <MountGuide mountUrl={existingForSelected.mount_url} defaultOpen={false} />
-                </div>
-              ) : (
-                <>
-                  <label className="flex items-start gap-2.5 cursor-pointer select-none">
-                    <input
-                      type="checkbox"
-                      checked={enhanced}
-                      onChange={(e) => setEnhanced(e.target.checked)}
-                      className="mt-0.5 accent-blue-600"
-                    />
-                    <span>
-                      <span className="flex items-center gap-1 text-xs font-medium text-gray-700">
-                        <MdShield className="text-blue-600" /> Enhanced security mode
-                      </span>
-                      <span className="block text-[11px] text-gray-400 mt-0.5">
-                        Uploads and downloads from a new location (or every 30 days from a known
-                        one) require clicking a verification link sent to your email while signed in.
-                      </span>
-                    </span>
-                  </label>
-
-                  {error && <p className="text-xs text-red-500 m-0">{error}</p>}
-
-                  <button
-                    type="button"
-                    disabled={!selected || createMutation.isPending}
-                    onClick={() => createMutation.mutate()}
-                    className="w-full px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-lg disabled:opacity-50 transition-colors cursor-pointer"
-                  >
-                    {createMutation.isPending ? 'Creating…' : 'Generate link & copy to clipboard'}
-                  </button>
-
-                  <MountGuide mountUrl={null} defaultOpen={false} />
-                </>
-              )}
-            </>
-          )}
+        <div className="px-5 py-4">
+          <FileServerLinkCreateForm existingLinks={existingLinks} isFirstLink={isFirstLink} />
         </div>
       </div>
     </div>

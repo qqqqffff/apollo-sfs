@@ -81,39 +81,57 @@ export function HostedCardFields({
   )
 }
 
-// Shared with the plain <input> billing fields below so the hosted PayPal
-// iframes (card number/expiry/CVV/name) read as the same form as everything
-// else: same height, border, radius and focus ring. `focus-within` lights the
-// ring up when the iframe inside gets focus, since the div itself never does.
-// NOTE: className here only reaches the *container* div the iframe is mounted
-// into (react-paypal-js renders <div ref={containerRef} className={className} />
-// and hands that node to PayPal's render()) — it can never reach the actual
-// <input> inside the iframe, which is cross-origin. So this class only carries
-// border/radius/height/focus-ring; text inset and vertical centering must be
-// set on the input itself via CARD_FIELD_STYLE below, not here.
+// Shared with the plain <input> billing fields below so both read as the same
+// form: same height, border, radius, font and focus ring.
 const inputClass = 'border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent'
-const hostedFieldBaseClass = 'h-[38px] border rounded-lg focus-within:ring-2 focus-within:ring-blue-500 focus-within:border-transparent transition-colors'
 
-// Injected into the hosted iframes so the actual <input> elements match the
-// surrounding text-sm / text-gray-900 inputs (PayPal only accepts styling this
-// way — the iframe content is cross-origin, so className on the field
-// components above can't reach it). padding/line-height give the input its own
-// text inset and vertical centering — line-height 36px matches the 38px
-// container's content-box height (38px - 1px border on each side).
+// className on the hosted field components below (PayPalNameField etc.) only
+// reaches the *container* div the iframe is mounted into (react-paypal-js
+// renders <div ref={containerRef} className={className} /> and hands that
+// node to PayPal's render()) — it can never reach the actual <input> inside
+// the cross-origin iframe. So the visible box (border/radius/padding/font)
+// must be drawn by the input itself, via the `style` prop below (the
+// PayPalCardFieldsStyleOptions interface — border/borderRadius are valid
+// properties of the `input` selector, same as any other CSS-ish key).
+// The container is then just a same-height, borderless wrapper that adds a
+// ring for focus/invalid state — both live, ordinary CSS (:focus-within, and
+// a className computed per render), unlike `style`: react-paypal-js sends it
+// to PayPal's SDK only once, at mount, so it can't be used for anything that
+// needs to change later (e.g. turning the border red once the shopper types
+// an invalid number).
+const hostedFieldBaseClass = 'h-[38px] rounded-lg focus-within:ring-2 focus-within:ring-blue-500 transition-shadow'
+
+const CARD_FIELD_BASE_STYLE = {
+  'font-size': '14px',
+  'font-family': 'inherit',
+  'line-height': '20px',
+  color: '#111827',
+  border: '1px solid #d1d5db',
+  borderRadius: '0.5rem',
+  'padding-top': '8px',
+  'padding-bottom': '8px',
+  'padding-left': '12px',
+  'padding-right': '12px',
+}
+
 const CARD_FIELD_STYLE = {
-  input: {
-    'font-size': '14px',
-    'font-family': 'inherit',
-    color: '#111827',
-    padding: '0 12px',
-    'line-height': '36px',
-  },
+  input: CARD_FIELD_BASE_STYLE,
+  '::placeholder': { color: '#9ca3af' },
+}
+
+// The card number field reserves its own space on the right for PayPal's
+// card-brand icon (Visa/Mastercard/Amex...) — overriding padding-right there
+// crowds the placeholder text into it (renders as "iumber" instead of
+// "Number"), so this variant omits padding-right and leaves PayPal's default.
+const { 'padding-right': _numberFieldPaddingRight, ...CARD_FIELD_BASE_STYLE_NO_RIGHT_PAD } = CARD_FIELD_BASE_STYLE
+const NUMBER_FIELD_STYLE = {
+  input: CARD_FIELD_BASE_STYLE_NO_RIGHT_PAD,
   '::placeholder': { color: '#9ca3af' },
 }
 
 function hostedFieldClass(field?: { isEmpty: boolean; isValid: boolean }) {
   const invalid = !!field && !field.isEmpty && !field.isValid
-  return `${hostedFieldBaseClass} ${invalid ? 'border-red-300' : 'border-gray-300'}`
+  return `${hostedFieldBaseClass} ${invalid ? 'ring-2 ring-red-300' : ''}`
 }
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
@@ -192,7 +210,7 @@ function CardDetailsAndAddress({
         />
         <PayPalNumberField
           placeholder="Card number"
-          style={CARD_FIELD_STYLE}
+          style={NUMBER_FIELD_STYLE}
           inputEvents={{ onChange: handleFieldChange }}
           className={hostedFieldClass(fieldStates?.cardNumberField)}
         />

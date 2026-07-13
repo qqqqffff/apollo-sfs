@@ -293,6 +293,23 @@ function RouteComponent() {
 
       {activeTab === 'requests' && (
         <>
+          <div className="px-4 py-3 bg-amber-50 border border-amber-200 rounded-xl">
+            <p className="text-xs font-semibold text-amber-800 m-0 mb-1">
+              How capacity expansion requests work
+            </p>
+            <p className="text-xs text-amber-800 m-0 leading-relaxed">
+              When a server can't fit your selected capacity — it's over 90% allocated, the wrong
+              storage tier, or doesn't have enough free space — your purchase becomes an expansion
+              request instead of a direct purchase. A <span className="font-semibold">50% deposit</span>{' '}
+              reserves your increased quota. Requests are reviewed within{' '}
+              <span className="font-semibold">7 business days</span> (3 for custom capacity), and
+              once approved, the additional capacity is provisioned within{' '}
+              <span className="font-semibold">14 business days</span>. Once provisioned, you'll owe
+              the remaining balance — pay it from the request below with any payment method. If
+              either deadline is missed, your deposit is refunded automatically.
+            </p>
+          </div>
+
           {reqList.length === 0 && (
             <p className="text-sm text-gray-400">
               No expansion or custom capacity requests yet. Requests you submit from the Add storage

@@ -362,8 +362,6 @@ function ExpansionRequestsCard({ onViewAll }: { onViewAll: () => void }) {
     listMyExpansionRequests().then(setRequests).catch(() => {});
   }, []);
 
-  if (requests.length === 0) return null;
-
   return (
     <View style={[card, styles.cardPad, { marginBottom: spacing.md }]}>
       <View style={styles.rowBetween}>
@@ -373,9 +371,16 @@ function ExpansionRequestsCard({ onViewAll }: { onViewAll: () => void }) {
         </TouchableOpacity>
       </View>
       <Text style={[styles.mutedSmall, { marginBottom: spacing.sm }]}>
-        Requests are reviewed within 7 business days (3 for custom capacity) and expanded within
-        14 business days of approval. Your deposit is refunded automatically if either deadline is missed.
+        When a server can't fit your selected capacity, your purchase becomes an expansion request
+        instead of a direct purchase. A 50% deposit reserves your increased quota. Requests are
+        reviewed within 7 business days (3 for custom capacity), and once approved, the additional
+        capacity is provisioned within 14 business days. Once provisioned, you'll owe the remaining
+        balance — pay it from the request with any payment method. If either deadline is missed,
+        your deposit is refunded automatically.
       </Text>
+      {requests.length === 0 && (
+        <Text style={styles.mutedSmall}>No expansion or custom capacity requests yet.</Text>
+      )}
       {requests.map((r, i) => {
         const meta = EXPANSION_STATUS_META[r.status] ?? { label: r.status, color: colors.textMuted, bg: colors.divider };
         const deadline =

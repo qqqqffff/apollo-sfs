@@ -2,6 +2,8 @@ import { createContext, useContext, useEffect, useState } from 'react'
 import { Link, useNavigate, useSearch } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
 import {
+  MdAddCircleOutline,
+  MdArrowBack,
   MdClose,
   MdCreateNewFolder,
   MdFolder,
@@ -14,7 +16,9 @@ import {
 } from 'react-icons/md'
 import { meQueryOptions } from '../api/me'
 import { useImpersonation } from '../context/ImpersonationContext'
-import { FileServerLinksCard } from './FileServerLinksCard'
+import { FileServerLinksCard, useCanCreateFileServerLink } from './FileServerLinksCard'
+import { FileServerLinkCreateForm } from './FileServerLinkModal'
+import { listFileServerLinks } from '../api/fileServerLinks'
 
 // Actions the sidebar can fire on the files page. They travel as the ?action=
 // search param so they work from any sub-page (favorites, shared): the files
@@ -218,7 +222,21 @@ function SidebarButton({
 
 // FileServerLinksDialog hosts the same management card used on the profile
 // page inside a modal, so links can be managed from the files control panel.
+// It owns a single backdrop and header shared by both the list and create
+// views (switched internally) — the header holds a back button in the
+// create view and always-visible "New link"/close controls placed in normal
+// flex flow, so nothing overlaps and the backdrop dim never stacks when
+// moving between views.
 function FileServerLinksDialog({ onClose }: { onClose: () => void }) {
+  const [view, setView] = useState<'list' | 'create'>('list')
+
+  const { data } = useQuery({
+    queryKey: ['file-server-links'],
+    queryFn: listFileServerLinks,
+  })
+  const links = data?.items ?? []
+  const { canCreate } = useCanCreateFileServerLink(links)
+
   useEffect(() => {
     const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
     document.addEventListener('keydown', handler)
@@ -232,16 +250,50 @@ function FileServerLinksDialog({ onClose }: { onClose: () => void }) {
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="w-130 max-w-[94vw] max-h-[90vh] overflow-y-auto relative"
+        className="bg-white rounded-xl shadow-xl w-130 max-w-[94vw] max-h-[90vh] flex flex-col overflow-hidden"
       >
-        <button
-          onClick={onClose}
-          aria-label="Close file server links"
-          className="absolute top-3 right-4 z-10 text-gray-400 hover:text-gray-600 cursor-pointer bg-transparent border-0 p-0"
-        >
-          <MdClose className="text-xl" />
-        </button>
-        <FileServerLinksCard />
+        <div className="flex items-center justify-between gap-2 px-5 py-4 border-b border-gray-100 shrink-0">
+          <span className="flex items-center gap-2 min-w-0">
+            {view === 'create' && (
+              <button
+                onClick={() => setView('list')}
+                aria-label="Back to file server links"
+                className="shrink-0 text-gray-400 hover:text-gray-600 cursor-pointer bg-transparent border-0 p-0"
+              >
+                <MdArrowBack className="text-lg" />
+              </button>
+            )}
+            <h3 className="text-sm font-semibold text-gray-800 m-0 flex items-center gap-2 truncate">
+              <MdLink className="text-blue-600 text-base shrink-0" />
+              {view === 'create' ? 'New file server link' : 'File server links'}
+            </h3>
+          </span>
+          <span className="flex items-center gap-3 shrink-0">
+            {view === 'list' && canCreate && (
+              <button
+                onClick={() => setView('create')}
+                className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 bg-transparent border-0 p-0 cursor-pointer font-medium transition-colors"
+              >
+                <MdAddCircleOutline className="text-sm" /> New link
+              </button>
+            )}
+            <button
+              onClick={onClose}
+              aria-label="Close file server links"
+              className="text-gray-400 hover:text-gray-600 cursor-pointer bg-transparent border-0 p-0"
+            >
+              <MdClose className="text-xl" />
+            </button>
+          </span>
+        </div>
+
+        <div className="px-5 py-4 overflow-y-auto">
+          {view === 'list' ? (
+            <FileServerLinksCard hideHeader onNewLink={() => setView('create')} />
+          ) : (
+            <FileServerLinkCreateForm existingLinks={links} isFirstLink={links.length === 0} />
+          )}
+        </div>
       </div>
     </div>
   )

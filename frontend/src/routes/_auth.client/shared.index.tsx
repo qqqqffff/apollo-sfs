@@ -14,7 +14,14 @@ import { useNotification } from '../../context/NotificationContext'
 import { FilesLayout, FilesSidebarToggle } from '../../components/FilesSidebar'
 import type { Share } from '../../types/api'
 
+type Tab = 'with-me' | 'by-me'
+const TAB_VALUES: Tab[] = ['with-me', 'by-me']
+
 export const Route = createFileRoute('/_auth/client/shared/')({
+  validateSearch: (search: Record<string, unknown>): { tab?: Tab } => {
+    const tab = TAB_VALUES.includes(search.tab as Tab) ? (search.tab as Tab) : undefined
+    return { tab }
+  },
   component: RouteComponent,
 })
 
@@ -27,6 +34,8 @@ function RouteComponent() {
 }
 
 function SharedView() {
+  const { tab } = Route.useSearch()
+  const [activeTab, setActiveTab] = useState<Tab>(tab ?? 'with-me')
   const queryClient = useQueryClient()
   const { notify } = useNotification()
 
@@ -51,11 +60,28 @@ function SharedView() {
         <h2 className="text-lg font-semibold text-gray-900 m-0">Shared</h2>
       </div>
 
-      <section className="mb-8">
-        <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">
-          Shared with me
-        </h3>
-        {sharedWithMe.length === 0 ? (
+      <div className="flex gap-1 mb-6 border-b border-gray-200">
+        {([
+          { key: 'with-me', label: 'Shared with me' },
+          { key: 'by-me',   label: 'Shared by me' },
+        ] as { key: Tab; label: string }[]).map(({ key, label }) => (
+          <button
+            key={key}
+            type="button"
+            onClick={() => setActiveTab(key)}
+            className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors cursor-pointer ${
+              activeTab === key
+                ? 'border-blue-600 text-blue-600'
+                : 'border-transparent text-gray-500 hover:text-gray-800'
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {activeTab === 'with-me' && (
+        sharedWithMe.length === 0 ? (
           <p className="text-sm text-gray-400">
             Nothing has been shared with you yet.
           </p>
@@ -79,14 +105,11 @@ function SharedView() {
               </li>
             ))}
           </ul>
-        )}
-      </section>
+        )
+      )}
 
-      <section>
-        <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">
-          Shared by me
-        </h3>
-        {myShares.length === 0 ? (
+      {activeTab === 'by-me' && (
+        myShares.length === 0 ? (
           <p className="text-sm text-gray-400">
             You haven&apos;t shared anything. Use the share icon next to a file or folder.
           </p>
@@ -112,8 +135,8 @@ function SharedView() {
               </li>
             ))}
           </ul>
-        )}
-      </section>
+        )
+      )}
     </div>
   )
 }

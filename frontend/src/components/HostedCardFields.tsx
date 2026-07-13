@@ -85,14 +85,29 @@ export function HostedCardFields({
 // iframes (card number/expiry/CVV/name) read as the same form as everything
 // else: same height, border, radius and focus ring. `focus-within` lights the
 // ring up when the iframe inside gets focus, since the div itself never does.
+// NOTE: className here only reaches the *container* div the iframe is mounted
+// into (react-paypal-js renders <div ref={containerRef} className={className} />
+// and hands that node to PayPal's render()) — it can never reach the actual
+// <input> inside the iframe, which is cross-origin. So this class only carries
+// border/radius/height/focus-ring; text inset and vertical centering must be
+// set on the input itself via CARD_FIELD_STYLE below, not here.
 const inputClass = 'border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent'
-const hostedFieldBaseClass = 'h-[38px] px-3 border rounded-lg focus-within:ring-2 focus-within:ring-blue-500 focus-within:border-transparent transition-colors'
+const hostedFieldBaseClass = 'h-[38px] border rounded-lg focus-within:ring-2 focus-within:ring-blue-500 focus-within:border-transparent transition-colors'
 
-// Injected into the hosted iframes so their text matches the surrounding
-// text-sm / text-gray-900 inputs (PayPal only accepts styling this way — the
-// iframe content is cross-origin).
+// Injected into the hosted iframes so the actual <input> elements match the
+// surrounding text-sm / text-gray-900 inputs (PayPal only accepts styling this
+// way — the iframe content is cross-origin, so className on the field
+// components above can't reach it). padding/line-height give the input its own
+// text inset and vertical centering — line-height 36px matches the 38px
+// container's content-box height (38px - 1px border on each side).
 const CARD_FIELD_STYLE = {
-  input: { 'font-size': '14px', 'font-family': 'inherit', color: '#111827' },
+  input: {
+    'font-size': '14px',
+    'font-family': 'inherit',
+    color: '#111827',
+    padding: '0 12px',
+    'line-height': '36px',
+  },
   '::placeholder': { color: '#9ca3af' },
 }
 

@@ -53,19 +53,15 @@ function RouteComponent() {
     confirm.mutate(search.subscription_id)
   }
 
-  async function handleCreateSubscription(): Promise<string> {
+  async function handleGetApprovalUrl(): Promise<string> {
     setError(null)
     try {
-      const { subscription_id } = await createPremiumSubscription(plan)
-      return subscription_id
+      const { approve_url } = await createPremiumSubscription(plan)
+      return approve_url
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not start checkout')
       throw err
     }
-  }
-
-  function handleApprove(subscriptionId: string) {
-    confirm.mutate(subscriptionId)
   }
 
   if (!user) return <p className="text-sm text-gray-500">Loading…</p>
@@ -125,11 +121,8 @@ function RouteComponent() {
           <div className="flex flex-col gap-4">
             <PremiumPlanSelector plans={plans} selected={plan} onSelect={setPlan} disabled={confirm.isPending} />
             <PayPalSubscribeButton
-              clientId={config.paypal_client_id}
-              createSubscription={handleCreateSubscription}
-              onApprove={handleApprove}
+              getApprovalUrl={handleGetApprovalUrl}
               onError={(msg) => setError(msg)}
-              onCancel={() => setError(null)}
               disabled={confirm.isPending}
             />
           </div>

@@ -105,6 +105,10 @@ func (h *Handler) CreateWalletOrder(c *gin.Context) {
 		StorageType string `json:"storage_type" binding:"required,oneof=nvme hdd"`
 		ServerID    string `json:"server_id"    binding:"required"`
 		CustomBytes int64  `json:"custom_bytes"`
+		// Platform is "web" for the browser frontend, which needs a real
+		// http(s) return/cancel URL (unlike the mobile app's apollosfs://
+		// deep link, which is the default when this is omitted).
+		Platform string `json:"platform"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -127,8 +131,13 @@ func (h *Handler) CreateWalletOrder(c *gin.Context) {
 	}
 
 	currency := h.currencyOrDefault()
+	returnURL, cancelURL := h.cfg.ReturnURL, h.cfg.CancelURL
+	if req.Platform == "web" && h.cfg.AppURL != "" {
+		returnURL = h.cfg.AppURL + "/checkout/return?flow=expansion"
+		cancelURL = h.cfg.AppURL + "/checkout/return?flow=expansion&cancelled=1"
+	}
 	result, err := client.CreateWalletOrder(
-		c.Request.Context(), depositCents, currency, h.cfg.ReturnURL, h.cfg.CancelURL,
+		c.Request.Context(), depositCents, currency, returnURL, cancelURL,
 	)
 	if err != nil {
 		log.Printf("expansion CreateWalletOrder paypal: %v", err)
@@ -996,8 +1005,18 @@ func (h *Handler) PayRemainingWalletOrder(c *gin.Context) {
 	}
 	remainingCents := req.FullPriceCents - req.DepositAmountCents
 
+	// Platform is "web" for the browser frontend (?platform=web query param,
+	// since this endpoint takes no JSON body), which needs a real http(s)
+	// return/cancel URL carrying the expansion request id — capture needs it
+	// (unlike the mobile app's apollosfs:// deep link, the default otherwise).
+	returnURL, cancelURL := h.cfg.ReturnURL, h.cfg.CancelURL
+	if c.Query("platform") == "web" && h.cfg.AppURL != "" {
+		returnURL = h.cfg.AppURL + "/checkout/return?flow=pay_remaining&request_id=" + req.ID.String()
+		cancelURL = h.cfg.AppURL + "/checkout/return?flow=pay_remaining&request_id=" + req.ID.String() + "&cancelled=1"
+	}
+
 	result, err := client.CreateWalletOrder(
-		c.Request.Context(), remainingCents, req.Currency, h.cfg.ReturnURL, h.cfg.CancelURL,
+		c.Request.Context(), remainingCents, req.Currency, returnURL, cancelURL,
 	)
 	if err != nil {
 		log.Printf("expansion PayRemainingWallet paypal: %v", err)

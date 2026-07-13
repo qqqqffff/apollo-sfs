@@ -258,3 +258,105 @@ export async function payRemainingByGooglePay(
   );
   return res.data;
 }
+
+// ── Shared helpers / config ─────────────────────────────────────────────────
+
+export function formatCents(cents: number): string {
+  return `$${(cents / 100).toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+}
+
+export interface PremiumPlanOption {
+  plan: 'monthly' | 'annual';
+  price_cents: number;
+}
+
+export interface BillingConfig {
+  paypal_client_id: string;
+  currency: string;
+  // 'sandbox' when the admin's session sandbox-payments toggle is on.
+  environment: 'sandbox' | 'live';
+  premium_plans: PremiumPlanOption[];
+}
+
+// Backend: GET /api/v1/billing/config — per-session PayPal config (reflects
+// the admin sandbox-payments toggle).
+export async function getBillingConfig(): Promise<BillingConfig> {
+  const res = await api.get<BillingConfig>('/api/v1/billing/config');
+  return res.data;
+}
+
+// ── User's expansion request history ────────────────────────────────────────
+
+export type ExpansionStatus =
+  | 'opened' | 'invoice_sent' | 'accepted' | 'approved' | 'expanded'
+  | 'completed' | 'expired' | 'refunded' | 'rejected';
+
+export interface ExpansionRequest {
+  id: string;
+  username: string;
+  server_id: string;
+  server_name: string;
+  plan_id: string;
+  storage_type: StorageType;
+  bytes_requested: number;
+  deposit_amount_cents: number;
+  full_price_cents: number;
+  currency: string;
+  payment_method: string;
+  status: ExpansionStatus;
+  is_custom: boolean;
+  expires_at: string;
+  approval_due_at: string | null;
+  approved_at: string | null;
+  expansion_due_at: string | null;
+  payment_due_at: string | null;
+  reminder_sent_at: string | null;
+  created_at: string;
+  completed_at: string | null;
+  cancellation_reason: string | null;
+  paypal_capture_id: string | null;
+  // Latest invoice summary (custom requests only).
+  invoice_number?: string;
+  invoice_status?: string;
+  invoice_sent_at?: string;
+  invoice_accept_due_at?: string;
+  invoice_review_token?: string;
+}
+
+export async function listMyExpansionRequests(): Promise<ExpansionRequest[]> {
+  const res = await api.get<{ items: ExpansionRequest[] }>('/api/v1/billing/storage/expansion/requests');
+  return res.data.items ?? [];
+}
+
+// ── User's combined order history (premium + storage purchases) ─────────────
+
+export interface UserOrder {
+  id: string;
+  type: 'premium' | 'storage';
+  status: string;
+  amount_cents: number;
+  currency: string;
+  payment_method: string;
+  reference: string;
+  invoice_number: string;
+  created_at: string;
+  captured_at: string | null;
+  refunded_at: string | null;
+  // Set once the order's local quota/premium grant has been undone via the
+  // admin "Revert allocation" action or the 7-day sandbox auto-revert loop.
+  allocation_reverted_at: string | null;
+  plan_id?: string;
+  storage_type?: string;
+  bytes_added?: number;
+  server_name?: string;
+  // 'sandbox' means it came from an admin's sandbox-payments toggle.
+  environment: 'sandbox' | 'live';
+}
+
+export async function listMyOrders(): Promise<UserOrder[]> {
+  const res = await api.get<{ items: UserOrder[] }>('/api/v1/billing/orders');
+  return res.data.items ?? [];
+}

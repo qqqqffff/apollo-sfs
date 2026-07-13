@@ -1,19 +1,23 @@
-import { PayPalScriptProvider, PayPalButtons } from '@paypal/react-paypal-js'
+import { PayPalScriptProvider } from '@paypal/react-paypal-js'
 import { MdArrowBack } from 'react-icons/md'
 import { PayPalGooglePayButton } from './PayPalGooglePayButton'
 import { PayPalApplePayButton } from './PayPalApplePayButton'
+import { PayPalWalletRedirectButton } from './PayPalWalletRedirectButton'
 
 interface Props {
   clientId: string
   currency: string
   environment: 'sandbox' | 'live'
   // Creates the order server-side and resolves to its PayPal order id — shared
-  // by the Apple Pay button, the Google Pay button, the PayPal wallet button,
-  // and (once "Pay with card" is chosen) HostedCardFields.
+  // by the Apple Pay button, the Google Pay button, and (once "Pay with card"
+  // is chosen) HostedCardFields.
   createOrder: () => Promise<string>
+  // Creates an order the same way and resolves to its PayPal-hosted approval
+  // URL, for the "PayPal" wallet button below — see PayPalWalletRedirectButton
+  // for why that one redirects instead of using createOrder+onApprove.
+  getApprovalUrl: () => Promise<string>
   onApprove: (orderId: string) => Promise<void> | void
   onError: (message: string) => void
-  onCancel?: () => void
   // Current amount in major units (e.g. "30.00"), read at click time for the
   // Apple Pay / Google Pay sheets.
   amount: () => string
@@ -27,7 +31,7 @@ interface Props {
 // that hands off to HostedCardFields. Kept as one component so all four stay
 // pixel- and behavior-identical instead of drifting copy to copy.
 export function PayPalCheckoutOptions({
-  clientId, currency, environment, createOrder, onApprove, onError, onCancel, amount, canPay, onChooseCard,
+  clientId, currency, environment, createOrder, getApprovalUrl, onApprove, onError, amount, canPay, onChooseCard,
 }: Props) {
   return (
     <div className={`flex flex-col gap-2 ${canPay ? '' : 'opacity-50 pointer-events-none'}`}>
@@ -36,7 +40,7 @@ export function PayPalCheckoutOptions({
           clientId,
           currency,
           intent: 'capture',
-          components: 'buttons,googlepay,applepay',
+          components: 'googlepay,applepay',
           // 'card' is disabled here because that funding source sends the
           // shopper to PayPal's hosted guest-checkout page (extra "ship to
           // billing address" / age-confirm copy we don't want) — "Pay with
@@ -61,15 +65,12 @@ export function PayPalCheckoutOptions({
           onError={onError}
           enabled={canPay}
         />
-        <PayPalButtons
-          disabled={!canPay}
-          style={{ layout: 'vertical', shape: 'rect', label: 'pay' }}
-          createOrder={createOrder}
-          onApprove={async (data) => { await onApprove(data.orderID) }}
-          onError={(err) => onError(err instanceof Error ? err.message : 'Payment failed')}
-          onCancel={onCancel}
-        />
       </PayPalScriptProvider>
+      <PayPalWalletRedirectButton
+        disabled={!canPay}
+        getApprovalUrl={getApprovalUrl}
+        onError={onError}
+      />
       <button
         type="button"
         onClick={onChooseCard}

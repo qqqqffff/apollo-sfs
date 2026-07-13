@@ -80,6 +80,10 @@ interface Props {
   visible: boolean;
   quotaBytes: number;
   usedBytes: number;
+  // Admin session override (me.expansion_override_enabled): force every
+  // purchase through the capacity-expansion request flow, so the
+  // request/deposit path can be tested without a server near capacity.
+  expansionOverride?: boolean;
   onPurchased: (newQuotaBytes: number) => void;
   onExpansionRequested?: (requestId: string, expiresAt: string) => void;
   onClose: () => void;
@@ -88,7 +92,7 @@ interface Props {
 // ── Component ──────────────────────────────────────────────────────────────────
 
 export default function StorageUpgradeModal({
-  visible, quotaBytes, usedBytes, onPurchased, onExpansionRequested, onClose,
+  visible, quotaBytes, usedBytes, expansionOverride, onPurchased, onExpansionRequested, onClose,
 }: Props) {
   const [storageType, setStorageType] = useState<StorageType>('nvme');
   const [selectedPlanId, setSelectedPlanId] = useState<string | null>(null);
@@ -159,13 +163,14 @@ export default function StorageUpgradeModal({
   const selectedPlan = PLANS.find((p) => p.id === selectedPlanId);
   const selectedServer = servers.find((s) => s.id === selectedServerId);
   // Expansion if: the server's drive type doesn't match the selected storage type,
-  // OR the plan exceeds the server's available capacity.
+  // OR the plan exceeds the server's available capacity, OR the admin's
+  // session-scoped expansion override is on (always test the request flow).
   const serverTypeMismatch = !!(selectedServer && (
     (storageType === 'nvme' && selectedServer.drive_type !== 'nvme') ||
     (storageType === 'hdd'  && selectedServer.drive_type !== 'hdd')
   ));
   const isExpansion = !!(selectedPlan && selectedServer && (
-    serverTypeMismatch || selectedPlan.addBytes > selectedServer.available_bytes
+    expansionOverride || serverTypeMismatch || selectedPlan.addBytes > selectedServer.available_bytes
   ));
 
   // Aggregate fast (NVMe) and standard (HDD) available bytes across all servers.

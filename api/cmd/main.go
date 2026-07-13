@@ -297,7 +297,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	routes.SetPayPalClient(h, paypalClient, routes.InterestDepositConfig{
 		Currency:  cfg.PremiumTierCurrency,
 		ReturnURL: cfg.AppBaseURL + "/interest",
-		CancelURL: cfg.AppBaseURL + "/interest",
+		CancelURL: cfg.AppBaseURL + "/interest?cancelled=1",
 	})
 	adminHandler.SetPayPalClient(paypalClient)
 	paymentSvc := services.NewPaymentService(queries, authSvc)
@@ -322,6 +322,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		Currency:                 cfg.PremiumTierCurrency,
 		ReturnURL:                "apollosfs://billing/storage/complete",
 		CancelURL:                "apollosfs://billing/storage/cancel",
+		AppBaseURL:               cfg.AppBaseURL,
 		ClientID:                 cfg.PayPalClientID,
 		SandboxClientID:          cfg.PayPalSandboxClientID,
 		PremiumMonthlyPriceCents: cfg.PremiumMonthlyPriceCents,
@@ -367,6 +368,9 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	})
 	v1.GET("/invitations/:token", h.ValidateInvitationToken)
 	v1.POST("/interest", h.SubmitInterestForm)
+	// Native-app account request form: no Turnstile (the app cannot render
+	// it) — the captured deposit plus the daily/per-IP caps remain.
+	v1.POST("/mobile/interest", h.SubmitMobileInterestForm)
 	// Interest-form deposit: fixed-tier pricing + 50% deposit, same as a
 	// direct storage purchase or expansion request — no custom amounts.
 	v1.POST("/interest/deposit/orders", h.CreateInterestDepositOrder)

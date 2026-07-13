@@ -85,6 +85,10 @@ export function createStorageOrder(planId: string, storageType: StorageType, ser
     plan_id: planId,
     storage_type: storageType,
     server_id: serverId,
+    // Tells the backend to build a browser-navigable return/cancel URL
+    // (rather than the mobile app's apollosfs:// deep link) for the
+    // redirect-based PayPal wallet checkout — see PayPalWalletRedirectButton.
+    platform: 'web',
   })
 }
 
@@ -128,6 +132,8 @@ export function createExpansionOrder(
     plan_id: planId,
     storage_type: storageType,
     server_id: serverId,
+    // See createStorageOrder's platform comment above.
+    platform: 'web',
     ...(customBytes ? { custom_bytes: customBytes } : {}),
   })
 }
@@ -314,8 +320,10 @@ export async function dismissNotificationCategory(category: string): Promise<voi
 // ── Pay-remaining (after admin marks the capacity expanded) ───────────────────
 
 export function createPayRemainingOrder(requestId: string) {
+  // platform=web query param (this endpoint takes no JSON body) — see
+  // createStorageOrder's platform comment above.
   return post<{ order_id: string; approval_url: string; remaining_cents: number }>(
-    `/billing/storage/expansion/${requestId}/pay-remaining/order`,
+    `/billing/storage/expansion/${requestId}/pay-remaining/order?platform=web`,
   )
 }
 

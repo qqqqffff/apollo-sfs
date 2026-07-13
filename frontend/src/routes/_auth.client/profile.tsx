@@ -1,7 +1,7 @@
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
 import { useEffect, useRef, useCallback, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { MdAddCircleOutline, MdCheck, MdClose, MdEdit, MdPhotoLibrary, MdRocketLaunch, MdShield, MdStorage, MdBolt, MdRefresh, MdScience } from 'react-icons/md'
+import { MdAddCircleOutline, MdAssignment, MdCheck, MdClose, MdEdit, MdOpenInNew, MdPhotoLibrary, MdRocketLaunch, MdShield, MdStorage, MdBolt, MdRefresh, MdScience } from 'react-icons/md'
 import { FaApple } from 'react-icons/fa'
 import { meQueryOptions, updateUsername, preferencesQueryOptions, updatePreferences, updateStorageUIPreferences, updateSandboxPayments, updateExpansionOverride, unlinkProvider } from '../../api/me'
 import { logout } from '../../api/auth'
@@ -143,6 +143,8 @@ function RouteComponent() {
           expansionOverrideEnabled={user.expansion_override_enabled}
         />
       )}
+
+      {user.is_admin && user.sandbox_payments_enabled && <SandboxAccountRequestCard />}
 
       <div className="bg-white border border-gray-200 rounded-xl px-5 py-4">
         <div className="flex items-center justify-between gap-3">
@@ -675,6 +677,28 @@ function SandboxPaymentsToggle({
         </label>
         {expansionError && <p className="text-xs text-red-500 m-0 mt-2">{expansionError}</p>}
       </div>
+    </div>
+  )
+}
+
+function SandboxAccountRequestCard() {
+  return (
+    <div className="bg-white border border-gray-200 rounded-xl px-5 py-4">
+      <h3 className="text-sm font-semibold text-gray-800 mb-1 flex items-center gap-1.5">
+        <MdAssignment className="text-gray-500" /> Account request form
+      </h3>
+      <p className="text-xs text-gray-400 mb-3">
+        With sandbox payments on, use the public account request form to exercise the deposit
+        checkout flow end to end — sign in as a PayPal sandbox test buyer when prompted.
+      </p>
+      <a
+        href="/interest"
+        target="_blank"
+        rel="noopener noreferrer"
+        className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 font-medium transition-colors"
+      >
+        Open account request form <MdOpenInNew className="text-sm" />
+      </a>
     </div>
   )
 }

@@ -1,5 +1,5 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { Turnstile } from '@marsidev/react-turnstile'
 import type { TurnstileInstance } from '@marsidev/react-turnstile'
@@ -44,6 +44,20 @@ function depositDisplay(plan: Plan, storageType: StorageType) {
 
 type FormStep = 'form' | 'pending' | 'submitted'
 
+// Persisted across the full-page redirect to PayPal and back — the deposit
+// order row (api/routes/interest_deposit.go) only has plan_id/storage_type,
+// not name/email/use_case, so those need to survive client-side.
+// captcha_token is deliberately excluded: Turnstile tokens are short-lived
+// and are re-collected once the shopper is back.
+interface SavedInterestState {
+  name: string
+  email: string
+  storageType: StorageType
+  selectedPlanId: string
+  useCase: string
+}
+const INTEREST_RESUME_KEY = 'apollo-sfs:interest-resume'
+
 function RequiredStar() {
   return <span className="text-red-500 ml-0.5" aria-hidden="true">*</span>
 }
@@ -60,9 +74,57 @@ function RouteComponent() {
   const [step, setStep] = useState<FormStep>('form')
   const [error, setError] = useState<string | null>(null)
   const [showCardForm, setShowCardForm] = useState(false)
+  const [resumeOrderId, setResumeOrderId] = useState<string | null>(null)
   const turnstileRef = useRef<TurnstileInstance>(null)
+  const resumeTriggered = useRef(false)
 
   const selectedPlan = PLANS.find((p) => p.id === selectedPlanId) ?? null
+
+  const captchaRequired = !!config?.turnstile_site_key
+
+  // Landed back here after a full-page redirect to PayPal (see
+  // handleGetApprovalUrl / PayPalWalletRedirectButton) — restore the fields
+  // that only ever lived client-side and, once the shopper solves a fresh
+  // Turnstile challenge, finish the request automatically.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const token = params.get('token')
+    const cancelled = params.get('cancelled')
+    if (!token && !cancelled) return
+    window.history.replaceState(null, '', window.location.pathname)
+    if (cancelled) {
+      sessionStorage.removeItem(INTEREST_RESUME_KEY)
+      return
+    }
+    const raw = sessionStorage.getItem(INTEREST_RESUME_KEY)
+    sessionStorage.removeItem(INTEREST_RESUME_KEY)
+    if (!raw) {
+      // An order id came back but we have nothing to resume with (e.g.
+      // sessionStorage was cleared) — the deposit may have gone through, but
+      // submitting the request needs name/email/use_case, which only ever
+      // lived client-side, so there's nothing safe to auto-complete.
+      setError(`Your payment may have gone through, but we couldn't recover your request. Please contact support with this reference: ${token}`)
+      return
+    }
+    const saved = JSON.parse(raw) as SavedInterestState
+    setName(saved.name)
+    setEmail(saved.email)
+    setStorageType(saved.storageType)
+    setSelectedPlanId(saved.selectedPlanId)
+    setUseCase(saved.useCase)
+    setResumeOrderId(token)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  useEffect(() => {
+    if (!config || !resumeOrderId || resumeTriggered.current) return
+    if (captchaRequired && !captchaToken) return
+    resumeTriggered.current = true
+    const orderId = resumeOrderId
+    setResumeOrderId(null)
+    handleDepositApprove(orderId)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [config, resumeOrderId, captchaRequired, captchaToken])
 
   const submitMutation = useMutation({
     mutationFn: (depositOrderId: string) => {
@@ -102,6 +164,24 @@ function RouteComponent() {
     try {
       const { order_id } = await createInterestDepositOrder(selectedPlanId!, storageType, 'paypal')
       return order_id
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not start checkout')
+      throw err
+    }
+  }
+
+  // For the "PayPal" wallet button, which redirects the browser to PayPal's
+  // approval page rather than using createOrder+onApprove's popup (see
+  // PayPalWalletRedirectButton) — persists the fields the deposit order can't
+  // hold server-side so they survive the round trip (see SavedInterestState).
+  async function handleGetApprovalUrl(): Promise<string> {
+    setError(null)
+    if (!validateForm()) throw new Error('Please complete the required fields.')
+    try {
+      const { approve_url } = await createInterestDepositOrder(selectedPlanId!, storageType, 'paypal')
+      const saved: SavedInterestState = { name, email, storageType, selectedPlanId: selectedPlanId!, useCase }
+      sessionStorage.setItem(INTEREST_RESUME_KEY, JSON.stringify(saved))
+      return approve_url
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not start checkout')
       throw err
@@ -161,9 +241,36 @@ function RouteComponent() {
     )
   }
 
+  // ── Resuming after a PayPal redirect (see the useEffects above) ─────────────
+
+  if (resumeOrderId) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center px-4">
+        <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-10 max-w-md w-full text-center">
+          <h2 className="text-lg font-semibold text-gray-900 mb-2">Finishing up…</h2>
+          <p className="text-sm text-gray-500 mb-4">
+            Your payment was received.{' '}
+            {captchaRequired ? 'Complete the security check below to finish submitting your request.' : 'Submitting your request…'}
+          </p>
+          {error && <p className="text-sm text-red-500 mb-4">{error}</p>}
+          {captchaRequired && config?.turnstile_site_key && (
+            <div className="flex justify-center">
+              <Turnstile
+                ref={turnstileRef}
+                siteKey={config.turnstile_site_key}
+                onSuccess={(token) => setCaptchaToken(token)}
+                onExpire={() => setCaptchaToken(null)}
+                onError={() => setCaptchaToken(null)}
+              />
+            </div>
+          )}
+        </div>
+      </div>
+    )
+  }
+
   // ── Main form ─────────────────────────────────────────────────────────────────
 
-  const captchaRequired = !!config?.turnstile_site_key
   // Buttons are disabled only until a plan is selected; captcha errors surface inline
   const formReady = !!selectedPlanId
   const isPending = step === 'pending'
@@ -365,6 +472,7 @@ function RouteComponent() {
                     environment={config.paypal_environment === 'sandbox' ? 'sandbox' : 'live'}
                     amount={() => (selectedPlan ? depositAmt(selectedPlan, storageType) : '0.00')}
                     createOrder={handleCreateOrder}
+                    getApprovalUrl={handleGetApprovalUrl}
                     onApprove={handleDepositApprove}
                     onError={(msg) => setError(msg)}
                     canPay={formReady && !isPending}

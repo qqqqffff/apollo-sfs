@@ -1,14 +1,52 @@
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { PayPalScriptProvider, PayPalButtons } from '@paypal/react-paypal-js'
 import { MdCloud, MdRocketLaunch, MdCheckCircle } from 'react-icons/md'
 import { register, validateInviteToken } from '../api/auth'
 import { ApiError } from '../api/client'
 import { publicConfigQueryOptions } from '../api/interest'
 import { createPremiumSubscription, confirmPremiumSubscription, type PremiumPlan } from '../api/payments'
 import { TermsOfServiceModal } from '../components/TermsOfServiceModal'
-import { PayPalSubscribeButton } from '../components/PayPalSubscribeButton'
 import { PremiumPlanSelector } from '../components/PremiumPlanSelector'
+
+// This inline checkout deliberately keeps the popup-based <PayPalButtons>
+// (rather than PayPalWalletRedirectButton/PayPalSubscribeButton's redirect
+// flow) because it runs on the registration wizard's "plan" step, before the
+// SPA has done its Keycloak login — only the backend session cookie exists
+// at this point (see the comment below). A redirect would land back on
+// /premium, which sits behind the _auth layout's Keycloak gate and would
+// bounce the user to a login wall instead of showing the confirmation.
+// Known trade-off: this one instance keeps the Chrome-iOS popup bug (see
+// PayPalWalletRedirectButton) until it gets its own return route.
+function InlinePayPalSubscribeButton({
+  clientId, createSubscription, onApprove, onError, onCancel, disabled,
+}: {
+  clientId: string
+  createSubscription: () => Promise<string>
+  onApprove: (subscriptionId: string) => Promise<void> | void
+  onError: (message: string) => void
+  onCancel?: () => void
+  disabled?: boolean
+}) {
+  return (
+    <div className={disabled ? 'opacity-50 pointer-events-none' : ''}>
+      <PayPalScriptProvider options={{ clientId, intent: 'subscription', vault: true, components: 'buttons' }}>
+        <PayPalButtons
+          disabled={disabled}
+          style={{ layout: 'vertical', shape: 'rect', label: 'subscribe' }}
+          createSubscription={() => createSubscription()}
+          onApprove={async (data) => { if (data.subscriptionID) await onApprove(data.subscriptionID) }}
+          onError={(err) => onError(err instanceof Error ? err.message : 'Subscription failed')}
+          onCancel={onCancel}
+        />
+      </PayPalScriptProvider>
+      <p className="text-[11px] text-gray-400 text-center m-0 mt-2">
+        Payments are processed securely by PayPal.
+      </p>
+    </div>
+  )
+}
 
 interface RegisterParams {
   token: string
@@ -176,7 +214,7 @@ function RouteComponent() {
                 </h3>
                 {payError && <p className="text-sm text-red-500 m-0">{payError}</p>}
                 <PremiumPlanSelector plans={premiumPlans} selected={premiumPlan} onSelect={setPremiumPlan} disabled={paying} />
-                <PayPalSubscribeButton
+                <InlinePayPalSubscribeButton
                   clientId={config.paypal_client_id}
                   createSubscription={handleCreatePremiumSubscription}
                   onApprove={handlePremiumApprove}

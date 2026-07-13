@@ -251,6 +251,28 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
     }
   }
 
+  // Same order-creation call as handleCreateOrder, for the "PayPal" wallet
+  // button — which redirects the browser to the approval URL rather than
+  // using the popup-based createOrder/onApprove pair (see
+  // PayPalWalletRedirectButton). A fresh order per click, same as every other
+  // payment method here.
+  async function handleGetApprovalUrl(): Promise<string> {
+    setPayError(null)
+    if (!selectedPlanId || !selectedServer) throw new Error('No plan selected')
+    try {
+      if (isExpansion) {
+        const res = await createExpansionOrder(selectedPlanId, storageType, selectedServer.id)
+        return res.approval_url
+      }
+      const res = await createStorageOrder(selectedPlanId, storageType, selectedServer.id)
+      return res.approval_url
+    } catch (err) {
+      const msg = err instanceof ApiError ? err.message : 'Could not start checkout'
+      setPayError(msg)
+      throw err
+    }
+  }
+
   async function handleSubmitCustom() {
     if (!selectedServer || !isCustom) return
     setBusy(true)
@@ -785,9 +807,9 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
                     environment={config.environment}
                     amount={() => (amountCents / 100).toFixed(2)}
                     createOrder={handleCreateOrder}
+                    getApprovalUrl={handleGetApprovalUrl}
                     onApprove={(orderId) => handleApprove({ orderID: orderId })}
                     onError={(msg) => { if (!payError) setPayError(msg) }}
-                    onCancel={() => setPayError(null)}
                     canPay={canPay}
                     onChooseCard={() => { setPayError(null); setShowCardForm(true) }}
                   />

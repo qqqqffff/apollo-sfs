@@ -27,6 +27,11 @@ type Config struct {
 	Currency  string
 	ReturnURL string // e.g. "apollosfs://billing/storage/complete"
 	CancelURL string // e.g. "apollosfs://billing/storage/cancel"
+	// AppBaseURL is the web frontend's origin (e.g. "https://apollo-sfs.com").
+	// Used instead of ReturnURL/CancelURL when the caller signals platform
+	// "web" in CreateWalletOrder — those are mobile-only deep links that a
+	// browser can't navigate back to.
+	AppBaseURL string
 	// ClientID is exposed to the web frontend via GET /billing/config so the
 	// PayPal JS SDK can be initialised without baking credentials into the
 	// frontend build. The environment for non-toggle requests is always
@@ -142,6 +147,11 @@ func (h *Handler) CreateWalletOrder(c *gin.Context) {
 		PlanID      string `json:"plan_id"      binding:"required"`
 		StorageType string `json:"storage_type" binding:"required,oneof=nvme hdd"`
 		ServerID    string `json:"server_id"`
+		// Platform is "web" for the browser frontend, which needs a real
+		// http(s) return/cancel URL it can be redirected back to (unlike the
+		// mobile app, which detects return via its apollosfs:// deep link and
+		// is the default when this is omitted).
+		Platform string `json:"platform"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -163,8 +173,14 @@ func (h *Handler) CreateWalletOrder(c *gin.Context) {
 		currency = "USD"
 	}
 
+	returnURL, cancelURL := h.cfg.ReturnURL, h.cfg.CancelURL
+	if req.Platform == "web" && h.cfg.AppBaseURL != "" {
+		returnURL = h.cfg.AppBaseURL + "/checkout/return?flow=storage"
+		cancelURL = h.cfg.AppBaseURL + "/checkout/return?flow=storage&cancelled=1"
+	}
+
 	result, err := client.CreateWalletOrder(
-		c.Request.Context(), amountCents, currency, h.cfg.ReturnURL, h.cfg.CancelURL,
+		c.Request.Context(), amountCents, currency, returnURL, cancelURL,
 	)
 	if err != nil {
 		log.Printf("billing CreateWalletOrder paypal: %v", err)

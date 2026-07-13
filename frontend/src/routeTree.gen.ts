@@ -29,6 +29,7 @@ import { Route as AuthClientProfileRouteImport } from './routes/_auth.client/pro
 import { Route as AuthClientOrdersRouteImport } from './routes/_auth.client/orders'
 import { Route as AuthClientFavoritesRouteImport } from './routes/_auth.client/favorites'
 import { Route as AuthClientChangePasswordRouteImport } from './routes/_auth.client/change-password'
+import { Route as AuthCheckoutReturnRouteImport } from './routes/_auth.checkout.return'
 import { Route as AuthAdminUsersRouteImport } from './routes/_auth.admin/users'
 import { Route as AuthAdminRequestsRouteImport } from './routes/_auth.admin/requests'
 import { Route as AuthAdminOrdersRouteImport } from './routes/_auth.admin/orders'
@@ -140,6 +141,11 @@ const AuthClientChangePasswordRoute =
     path: '/client/change-password',
     getParentRoute: () => AuthRoute,
   } as any)
+const AuthCheckoutReturnRoute = AuthCheckoutReturnRouteImport.update({
+  id: '/checkout/return',
+  path: '/checkout/return',
+  getParentRoute: () => AuthRoute,
+} as any)
 const AuthAdminUsersRoute = AuthAdminUsersRouteImport.update({
   id: '/admin/users',
   path: '/admin/users',
@@ -211,6 +217,7 @@ export interface FileRoutesByFullPath {
   '/admin/orders': typeof AuthAdminOrdersRoute
   '/admin/requests': typeof AuthAdminRequestsRoute
   '/admin/users': typeof AuthAdminUsersRoute
+  '/checkout/return': typeof AuthCheckoutReturnRoute
   '/client/change-password': typeof AuthClientChangePasswordRoute
   '/client/favorites': typeof AuthClientFavoritesRoute
   '/client/orders': typeof AuthClientOrdersRoute
@@ -242,6 +249,7 @@ export interface FileRoutesByTo {
   '/admin/orders': typeof AuthAdminOrdersRoute
   '/admin/requests': typeof AuthAdminRequestsRoute
   '/admin/users': typeof AuthAdminUsersRoute
+  '/checkout/return': typeof AuthCheckoutReturnRoute
   '/client/change-password': typeof AuthClientChangePasswordRoute
   '/client/favorites': typeof AuthClientFavoritesRoute
   '/client/orders': typeof AuthClientOrdersRoute
@@ -275,6 +283,7 @@ export interface FileRoutesById {
   '/_auth/admin/orders': typeof AuthAdminOrdersRoute
   '/_auth/admin/requests': typeof AuthAdminRequestsRoute
   '/_auth/admin/users': typeof AuthAdminUsersRoute
+  '/_auth/checkout/return': typeof AuthCheckoutReturnRoute
   '/_auth/client/change-password': typeof AuthClientChangePasswordRoute
   '/_auth/client/favorites': typeof AuthClientFavoritesRoute
   '/_auth/client/orders': typeof AuthClientOrdersRoute
@@ -308,6 +317,7 @@ export interface FileRouteTypes {
     | '/admin/orders'
     | '/admin/requests'
     | '/admin/users'
+    | '/checkout/return'
     | '/client/change-password'
     | '/client/favorites'
     | '/client/orders'
@@ -339,6 +349,7 @@ export interface FileRouteTypes {
     | '/admin/orders'
     | '/admin/requests'
     | '/admin/users'
+    | '/checkout/return'
     | '/client/change-password'
     | '/client/favorites'
     | '/client/orders'
@@ -371,6 +382,7 @@ export interface FileRouteTypes {
     | '/_auth/admin/orders'
     | '/_auth/admin/requests'
     | '/_auth/admin/users'
+    | '/_auth/checkout/return'
     | '/_auth/client/change-password'
     | '/_auth/client/favorites'
     | '/_auth/client/orders'
@@ -539,6 +551,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthClientChangePasswordRouteImport
       parentRoute: typeof AuthRoute
     }
+    '/_auth/checkout/return': {
+      id: '/_auth/checkout/return'
+      path: '/checkout/return'
+      fullPath: '/checkout/return'
+      preLoaderRoute: typeof AuthCheckoutReturnRouteImport
+      parentRoute: typeof AuthRoute
+    }
     '/_auth/admin/users': {
       id: '/_auth/admin/users'
       path: '/admin/users'
@@ -622,6 +641,7 @@ interface AuthRouteChildren {
   AuthAdminOrdersRoute: typeof AuthAdminOrdersRoute
   AuthAdminRequestsRoute: typeof AuthAdminRequestsRoute
   AuthAdminUsersRoute: typeof AuthAdminUsersRoute
+  AuthCheckoutReturnRoute: typeof AuthCheckoutReturnRoute
   AuthClientChangePasswordRoute: typeof AuthClientChangePasswordRoute
   AuthClientFavoritesRoute: typeof AuthClientFavoritesRoute
   AuthClientOrdersRoute: typeof AuthClientOrdersRoute
@@ -644,6 +664,7 @@ const AuthRouteChildren: AuthRouteChildren = {
   AuthAdminOrdersRoute: AuthAdminOrdersRoute,
   AuthAdminRequestsRoute: AuthAdminRequestsRoute,
   AuthAdminUsersRoute: AuthAdminUsersRoute,
+  AuthCheckoutReturnRoute: AuthCheckoutReturnRoute,
   AuthClientChangePasswordRoute: AuthClientChangePasswordRoute,
   AuthClientFavoritesRoute: AuthClientFavoritesRoute,
   AuthClientOrdersRoute: AuthClientOrdersRoute,

@@ -93,6 +93,31 @@ func (q *Queries) SetStorageUIPreferences(ctx context.Context, userID string, sh
 	return &p, nil
 }
 
+// SetBackupStaleNotify upserts the backup-reminder toggle: when enabled the
+// notification bell warns the user once their most recent Google or email
+// backup is more than 30 days old.
+func (q *Queries) SetBackupStaleNotify(ctx context.Context, userID string, enabled bool) (*models.UserPreferences, error) {
+	var p models.UserPreferences
+	var folderID uuid.NullUUID
+	err := q.db.QueryRowContext(ctx, `
+		INSERT INTO user_preferences (user_id, backup_stale_notify, created_at, updated_at)
+		VALUES ($1, $2, NOW(), NOW())
+		ON CONFLICT (user_id) DO UPDATE
+			SET backup_stale_notify = EXCLUDED.backup_stale_notify,
+			    updated_at = NOW()
+		RETURNING user_id, media_autoupload_folder_id, show_storage_buttons,
+		          storage_prompt_enabled, backup_stale_notify, created_at, updated_at
+	`, userID, enabled).Scan(&p.UserID, &folderID, &p.ShowStorageButtons,
+		&p.StoragePromptEnabled, &p.BackupStaleNotify, &p.CreatedAt, &p.UpdatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("SetBackupStaleNotify: %w", err)
+	}
+	if folderID.Valid {
+		p.MediaAutouploadFolderID = &folderID.UUID
+	}
+	return &p, nil
+}
+
 func nullBool(b *bool) any {
 	if b == nil {
 		return nil

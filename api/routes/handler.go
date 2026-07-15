@@ -93,6 +93,7 @@ type Handler struct {
 	apiKeys         *services.APIKeyService
 	shares          *services.ShareService
 	fileServerLinks *services.FileServerLinkService
+	emailBackup     *services.EmailBackupService
 	turnstileSecret string
 	// paypal is used for the interest-form deposit (nil is tolerated and
 	// causes the deposit endpoints to return 503).

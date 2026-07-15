@@ -1,6 +1,6 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { MdFolder, MdInsertDriveFile, MdStar } from 'react-icons/md'
+import { MdAlternateEmail, MdFolder, MdInsertDriveFile, MdStar } from 'react-icons/md'
 import { favoritesQueryOptions, unfavoriteFile, unfavoriteFolder } from '../../api/favorites'
 import { adminGetUserFavorites } from '../../api/admin'
 import { canPreview, FilePreviewModal } from '../../components/FilePreviewModal'
@@ -79,7 +79,9 @@ function FavoritesView() {
           <ul className="list-none m-0 p-0 divide-y divide-gray-100">
             {folders.map((folder) => (
               <li key={folder.id} className="flex items-center gap-2 py-2">
-                <MdFolder className="text-blue-400 text-lg shrink-0" />
+                {folder.kind === 'email'
+                  ? <MdAlternateEmail className="text-teal-500 text-lg shrink-0" title="Email backup" />
+                  : <MdFolder className="text-blue-400 text-lg shrink-0" />}
                 <Link
                   to="/client"
                   search={{ file: undefined, folder: folder.id }}

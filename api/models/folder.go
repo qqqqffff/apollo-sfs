@@ -18,8 +18,10 @@ type Folder struct {
 	// today's behavior exactly.
 	DriveID *uuid.UUID `json:"drive_id" db:"drive_id"`
 	Name    string     `json:"name" db:"name"`
-	// Kind is "regular" or "media". A media folder is a top-level picture/video
-	// collection; folders nested beneath it act as subcollections.
+	// Kind is "regular", "media", or "email". A media folder is a top-level
+	// picture/video collection; folders nested beneath it act as
+	// subcollections. An email folder holds a provider mailbox backup (its
+	// name is the backed-up email address) and renders as a mail viewer.
 	Kind string `json:"kind" db:"kind"`
 	// SizeBytes is the recursive sum of all file sizes under the folder
 	// (including descendants). Computed by the listing queries; 0 on bare
@@ -33,4 +35,5 @@ type Folder struct {
 const (
 	FolderKindRegular = "regular"
 	FolderKindMedia   = "media"
+	FolderKindEmail   = "email"
 )

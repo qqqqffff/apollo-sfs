@@ -13,9 +13,10 @@ import (
 )
 
 // SocialCallback handles GET /api/v1/auth/social/callback.
-// Keycloak redirects here after completing a social IDP login (Google, Apple).
-// The authorization code is exchanged for tokens. If the social email matches
-// an existing account, the user is redirected to the linking UI instead.
+// Keycloak redirects here after completing a social IDP login (Google, Apple,
+// Microsoft). The authorization code is exchanged for tokens. If the social
+// email matches an existing account, the user is redirected to the linking UI
+// instead.
 func (h *Handler) SocialCallback(c *gin.Context) {
 	if errParam := c.Query("error"); errParam != "" {
 		c.Redirect(http.StatusFound, "/login?social_error="+errParam)
@@ -30,7 +31,7 @@ func (h *Handler) SocialCallback(c *gin.Context) {
 
 	// The provider is carried in state so we know which IDP we're coming back from.
 	provider := c.Query("state")
-	if provider != "google" && provider != "apple" {
+	if provider != "google" && provider != "apple" && provider != "microsoft" {
 		provider = "google" // safe fallback; state param is optional
 	}
 

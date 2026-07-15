@@ -40,6 +40,12 @@ type Querier interface {
 	ListSharesForRecipient(ctx context.Context, email string) ([]models.Share, error)
 	ListRecentAdminCancelledSubscriptionsForUser(ctx context.Context, username string, since time.Time) ([]models.PremiumSubscription, error)
 	ListRecentQuotaChangeNotificationsForUser(ctx context.Context, username string, since time.Time) ([]db.QuotaChangeNotification, error)
+	ListRecentEmailBackupRunsForUser(ctx context.Context, username string, since time.Time) ([]models.EmailBackupRun, error)
+
+	// Backup last-sync times (backup pages + opt-in stale-backup reminder)
+	GetLastGoogleBackupSync(ctx context.Context, userID uuid.UUID) (*time.Time, error)
+	GetLastEmailBackupSync(ctx context.Context, username string) (*time.Time, error)
+	SetBackupStaleNotify(ctx context.Context, userID string, enabled bool) (*models.UserPreferences, error)
 
 	// Notification bell — admin-only categories
 	ListRecentlyAcceptedInvitations(ctx context.Context, since time.Time) ([]models.Invitation, error)

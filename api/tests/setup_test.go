@@ -209,6 +209,18 @@ func (s *stubQuerier) InsertQuotaChangeNotification(_ context.Context, _ db.Inse
 func (s *stubQuerier) ListRecentQuotaChangeNotificationsForUser(_ context.Context, _ string, _ time.Time) ([]db.QuotaChangeNotification, error) {
 	return s.recentQuotaChanges, s.recentQuotaChangesErr
 }
+func (s *stubQuerier) ListRecentEmailBackupRunsForUser(_ context.Context, _ string, _ time.Time) ([]models.EmailBackupRun, error) {
+	return nil, nil
+}
+func (s *stubQuerier) GetLastGoogleBackupSync(_ context.Context, _ uuid.UUID) (*time.Time, error) {
+	return nil, nil
+}
+func (s *stubQuerier) GetLastEmailBackupSync(_ context.Context, _ string) (*time.Time, error) {
+	return nil, nil
+}
+func (s *stubQuerier) SetBackupStaleNotify(_ context.Context, _ string, enabled bool) (*models.UserPreferences, error) {
+	return &models.UserPreferences{BackupStaleNotify: enabled, ShowStorageButtons: true, StoragePromptEnabled: true}, nil
+}
 func (s *stubQuerier) AutoPardonExpiredSuspension(_ context.Context, _ string) error { return nil }
 func (s *stubQuerier) AddBannedIP(_ context.Context, _, _ string) error              { return nil }
 func (s *stubQuerier) GetInterestFormSettings(_ context.Context) (*models.InterestFormSettings, error) {

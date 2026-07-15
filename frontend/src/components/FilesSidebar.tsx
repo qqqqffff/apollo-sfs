@@ -3,6 +3,7 @@ import { Link, useNavigate, useSearch } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
 import {
   MdAddCircleOutline,
+  MdAlternateEmail,
   MdArrowBack,
   MdClose,
   MdCreateNewFolder,
@@ -23,10 +24,10 @@ import { listFileServerLinks } from '../api/fileServerLinks'
 // Actions the sidebar can fire on the files page. They travel as the ?action=
 // search param so they work from any sub-page (favorites, shared): the files
 // page picks the action up on mount, triggers it, and clears the param.
-export type FilesAction = 'new-folder' | 'new-collection' | 'google-backup'
+export type FilesAction = 'new-folder' | 'new-collection' | 'google-backup' | 'email-backup'
 
 export function parseFilesAction(v: unknown): FilesAction | undefined {
-  return v === 'new-folder' || v === 'new-collection' || v === 'google-backup'
+  return v === 'new-folder' || v === 'new-collection' || v === 'google-backup' || v === 'email-backup'
     ? v
     : undefined
 }
@@ -175,6 +176,14 @@ function FilesSidebar({ open, onClose }: { open: boolean; onClose: () => void })
               {isPremium && hasGoogleLinked && (
                 <SidebarButton icon={<GoogleIcon />} onClick={() => fireAction('google-backup')}>
                   Google Backup
+                </SidebarButton>
+              )}
+              {isPremium && (
+                <SidebarButton
+                  icon={<MdAlternateEmail className="text-teal-500" />}
+                  onClick={() => fireAction('email-backup')}
+                >
+                  Email Backup
                 </SidebarButton>
               )}
             </div>

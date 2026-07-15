@@ -96,8 +96,13 @@ Served directly by nginx (not proxied to Docker) for mobile deep linking:
 
 - `GET /.well-known/apple-app-site-association` → iOS Universal Links
 - `GET /.well-known/assetlinks.json` → Android App Links
+- `GET /.well-known/microsoft-identity-association.json` → Microsoft domain association (Azure AD app verification for the email backup Microsoft sign-in)
 
-Source files: `/etc/nginx/well-known/` (copy from `nginx/well-known/` in this repo).
+Source files: `/etc/nginx/well-known/` (copy from `nginx/well-known/` in this repo). Note this directory is *not* covered by the `nginx/conf.d/*` deploy step below — copy it separately:
+
+```bash
+sudo cp -r nginx/well-known/.well-known /etc/nginx/well-known/
+```
 
 ---
 

@@ -4,13 +4,18 @@ import { MdClose } from 'react-icons/md'
 interface Props {
   message: string
   onCancel: () => void
+  // Secondary explanation line. Defaults to the Google Photos picker copy;
+  // the email backup flow passes its own.
+  hint?: string
 }
 
 // Blocking modal shown while a Google backup is being prepared — most importantly
 // while the Google Photos picker tab is open and we poll for the user's selection.
 // The trailing "..." animates by cycling 0–3 dots; a fixed-width slot keeps the
 // text from shifting as dots are added and removed.
-export function GooglePhotosLoadingModal({ message, onCancel }: Props) {
+// Also reused (with a custom hint) by the email backup flow while provider
+// sign-in and message listing are in flight.
+export function GooglePhotosLoadingModal({ message, onCancel, hint }: Props) {
   const [dots, setDots] = useState('')
 
   useEffect(() => {
@@ -32,7 +37,7 @@ export function GooglePhotosLoadingModal({ message, onCancel }: Props) {
         </div>
 
         <p className="text-xs text-gray-500 leading-relaxed">
-          Finish choosing in the Google tab, then come back here — your selection loads automatically.
+          {hint ?? 'Finish choosing in the Google tab, then come back here — your selection loads automatically.'}
         </p>
 
         <button

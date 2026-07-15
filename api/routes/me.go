@@ -17,6 +17,7 @@ import (
 
 	"github.com/gin-contrib/sessions"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 
 	"apollo-sfs.com/api/models"
 	"apollo-sfs.com/api/routes/middleware"
@@ -388,7 +389,8 @@ type socialUnlinkRequest struct {
 }
 
 // LinkSocial handles POST /api/v1/me/social/link.
-// Links an Apple or Google identity to the authenticated user's account.
+// Links an Apple, Google, or Microsoft identity to the authenticated user's
+// account.
 func (h *Handler) LinkSocial(c *gin.Context) {
 	userID := c.GetString("userID")
 	if userID == "" {
@@ -401,8 +403,8 @@ func (h *Handler) LinkSocial(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "provider is required"})
 		return
 	}
-	if req.Provider != "apple" && req.Provider != "google" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "provider must be apple or google"})
+	if req.Provider != "apple" && req.Provider != "google" && req.Provider != "microsoft" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "provider must be apple, google, or microsoft"})
 		return
 	}
 
@@ -428,7 +430,8 @@ func (h *Handler) LinkSocial(c *gin.Context) {
 }
 
 // UnlinkSocial handles DELETE /api/v1/me/social/unlink.
-// Removes an Apple or Google identity link from the authenticated user's account.
+// Removes an Apple, Google, or Microsoft identity link from the authenticated
+// user's account.
 func (h *Handler) UnlinkSocial(c *gin.Context) {
 	userID := c.GetString("userID")
 	if userID == "" {
@@ -441,8 +444,8 @@ func (h *Handler) UnlinkSocial(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "provider is required"})
 		return
 	}
-	if req.Provider != "apple" && req.Provider != "google" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "provider must be apple or google"})
+	if req.Provider != "apple" && req.Provider != "google" && req.Provider != "microsoft" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "provider must be apple, google, or microsoft"})
 		return
 	}
 
@@ -485,6 +488,15 @@ const subscriptionCancelNotificationWindow = 30 * 24 * time.Hour
 // in the bell dropdown.
 const adminNotificationWindow = 7 * 24 * time.Hour
 
+// emailBackupNotificationWindow bounds how long a completed email backup run
+// (with notifications enabled) keeps showing in the bell dropdown.
+const emailBackupNotificationWindow = 7 * 24 * time.Hour
+
+// backupStaleAfter is how old the most recent Google/email backup may get
+// before the opt-in backup reminder (user_preferences.backup_stale_notify)
+// surfaces a bell warning.
+const backupStaleAfter = 30 * 24 * time.Hour
+
 // adminNotificationLimit caps each admin category so one busy day of orders
 // or inbound mail can't flood the dropdown.
 const adminNotificationLimit = 15
@@ -501,6 +513,8 @@ func notificationCategory(kind string) string {
 		return "Billing"
 	case "share_received":
 		return "Shares"
+	case "email_backup_completed", "backup_stale":
+		return "Backups"
 	case "invitation_accepted":
 		return "Invitations"
 	case "order_received":
@@ -525,7 +539,7 @@ func (h *Handler) Notifications(c *gin.Context) {
 	}
 	ctx := c.Request.Context()
 
-	items, err := h.gatherNotificationItems(ctx, username, c.GetBool("isAdmin"))
+	items, err := h.gatherNotificationItems(ctx, username, c.GetString("userID"), c.GetBool("isAdmin"))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "load notifications"})
 		return
@@ -555,7 +569,7 @@ func (h *Handler) Notifications(c *gin.Context) {
 // account/infrastructure activity. Shared by Notifications and
 // DismissNotifications (category dismissal needs the same live-derived set to
 // resolve which IDs a category currently contains).
-func (h *Handler) gatherNotificationItems(ctx context.Context, username string, isAdmin bool) ([]notificationItem, error) {
+func (h *Handler) gatherNotificationItems(ctx context.Context, username, userID string, isAdmin bool) ([]notificationItem, error) {
 	items := []notificationItem{}
 
 	requests, err := h.queries.ListUserExpansionRequests(ctx, username)
@@ -664,6 +678,74 @@ func (h *Handler) gatherNotificationItems(ctx context.Context, username string, 
 		})
 	}
 
+	// Completed email backup runs where the user asked to be notified.
+	backupRuns, err := h.queries.ListRecentEmailBackupRunsForUser(ctx, username, time.Now().Add(-emailBackupNotificationWindow))
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range backupRuns {
+		body := fmt.Sprintf("%d email%s from %s backed up.", r.Uploaded, plural(r.Uploaded), r.EmailAddress)
+		if r.Duplicates > 0 {
+			body += fmt.Sprintf(" %d duplicate%s skipped.", r.Duplicates, plural(r.Duplicates))
+		}
+		if r.Errors > 0 {
+			body += fmt.Sprintf(" %d failed.", r.Errors)
+		}
+		link := "/client"
+		if r.FolderID != nil {
+			link = "/client?folder=" + r.FolderID.String()
+		}
+		items = append(items, notificationItem{
+			ID:        r.ID.String() + ":email-backup",
+			Kind:      "email_backup_completed",
+			Title:     "Email backup complete",
+			Body:      body,
+			Link:      link,
+			CreatedAt: r.CompletedAt,
+		})
+	}
+
+	// Opt-in backup reminder: warn when the most recent Google/email backup is
+	// more than 30 days old. Only fires for backup types the user has actually
+	// used at least once — "never backed up" is not "out of date". The item ID
+	// embeds the last-sync time, so dismissing one hides it until a newer
+	// backup starts a fresh staleness period.
+	if prefs, err := h.queries.GetUserPreferences(ctx, username); err == nil && prefs != nil && prefs.BackupStaleNotify {
+		staleChecks := []struct {
+			label  string
+			action string
+			last   func() (*time.Time, error)
+		}{
+			{"Google", "google-backup", func() (*time.Time, error) {
+				uid, err := uuid.Parse(userID)
+				if err != nil {
+					return nil, nil
+				}
+				return h.queries.GetLastGoogleBackupSync(ctx, uid)
+			}},
+			{"Email", "email-backup", func() (*time.Time, error) {
+				return h.queries.GetLastEmailBackupSync(ctx, username)
+			}},
+		}
+		for _, chk := range staleChecks {
+			last, err := chk.last()
+			if err != nil || last == nil {
+				continue
+			}
+			if age := time.Since(*last); age > backupStaleAfter {
+				items = append(items, notificationItem{
+					ID:   fmt.Sprintf("backup-stale:%s:%d", strings.ToLower(chk.label), last.Unix()),
+					Kind: "backup_stale",
+					Title: fmt.Sprintf("%s backup is out of date", chk.label),
+					Body: fmt.Sprintf("Your last %s backup completed %d days ago — over the 30-day reminder threshold.",
+						strings.ToLower(chk.label), int(age.Hours()/24)),
+					Link:      "/client?action=" + chk.action,
+					CreatedAt: last.Add(backupStaleAfter),
+				})
+			}
+		}
+	}
+
 	// Storage allocation changes an admin made via the Users page editor,
 	// within the same window as the admin-cancelled-subscription notice above.
 	quotaChanges, err := h.queries.ListRecentQuotaChangeNotificationsForUser(ctx, username, time.Now().Add(-subscriptionCancelNotificationWindow))
@@ -690,6 +772,66 @@ func (h *Handler) gatherNotificationItems(ctx context.Context, username string, 
 	}
 
 	return items, nil
+}
+
+// ── Backup last-sync + reminder preference ────────────────────────────────────
+
+// LastBackupSync handles GET /api/v1/me/backups/last-sync.
+// Returns when the user's most recent Google backup (last Drive/Photos file
+// uploaded) and email backup (last completed run) happened, so the backup
+// dialogs can show "last backup completed N days ago". Null means that backup
+// type has never been used.
+func (h *Handler) LastBackupSync(c *gin.Context) {
+	username := c.GetString("username")
+	ctx := c.Request.Context()
+
+	var googleLast *time.Time
+	if uid, err := uuid.Parse(c.GetString("userID")); err == nil {
+		t, err := h.queries.GetLastGoogleBackupSync(ctx, uid)
+		if err != nil {
+			log.Printf("LastBackupSync: google user=%s err=%v", username, err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "could not load backup status"})
+			return
+		}
+		googleLast = t
+	}
+
+	emailLast, err := h.queries.GetLastEmailBackupSync(ctx, username)
+	if err != nil {
+		log.Printf("LastBackupSync: email user=%s err=%v", username, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not load backup status"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"google_last_sync": googleLast,
+		"email_last_sync":  emailLast,
+	})
+}
+
+type updateBackupReminderRequest struct {
+	BackupStaleNotify *bool `json:"backup_stale_notify" binding:"required"`
+}
+
+// UpdateBackupReminderPreference handles PUT /api/v1/me/preferences/backup-reminder.
+// Toggles the opt-in bell warning shown when the most recent Google or email
+// backup is more than 30 days old. Premium-only (registered in the premium
+// route group); disabled by default.
+// Body: {"backup_stale_notify": bool}.
+func (h *Handler) UpdateBackupReminderPreference(c *gin.Context) {
+	var req updateBackupReminderRequest
+	if err := c.ShouldBindJSON(&req); err != nil || req.BackupStaleNotify == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "backup_stale_notify is required"})
+		return
+	}
+
+	username := c.GetString("username")
+	prefs, err := h.queries.SetBackupStaleNotify(c.Request.Context(), username, *req.BackupStaleNotify)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not save preferences"})
+		return
+	}
+	c.JSON(http.StatusOK, prefs)
 }
 
 type dismissNotificationsRequest struct {
@@ -719,7 +861,7 @@ func (h *Handler) DismissNotifications(c *gin.Context) {
 	ctx := c.Request.Context()
 
 	if category := c.Query("category"); category != "" {
-		items, err := h.gatherNotificationItems(ctx, username, c.GetBool("isAdmin"))
+		items, err := h.gatherNotificationItems(ctx, username, c.GetString("userID"), c.GetBool("isAdmin"))
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "dismiss notifications"})
 			return
@@ -893,6 +1035,14 @@ func formatCapacityShort(bytes int64) string {
 	default:
 		return fmt.Sprintf("%d GB", bytes/(1<<30))
 	}
+}
+
+// plural returns "s" when n != 1, for simple count phrases.
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 func formatCentsShort(cents int) string {

@@ -1,9 +1,10 @@
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
 import { useEffect, useRef, useCallback, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { MdAddCircleOutline, MdAssignment, MdCheck, MdClose, MdEdit, MdOpenInNew, MdPhotoLibrary, MdRocketLaunch, MdShield, MdStorage, MdBolt, MdRefresh, MdScience } from 'react-icons/md'
+import { MdAddCircleOutline, MdAssignment, MdCheck, MdClose, MdEdit, MdHistory, MdOpenInNew, MdPhotoLibrary, MdRocketLaunch, MdShield, MdStorage, MdBolt, MdRefresh, MdScience } from 'react-icons/md'
 import { FaApple } from 'react-icons/fa'
-import { meQueryOptions, updateUsername, preferencesQueryOptions, updatePreferences, updateStorageUIPreferences, updateSandboxPayments, updateExpansionOverride, unlinkProvider } from '../../api/me'
+import { meQueryOptions, updateUsername, preferencesQueryOptions, updatePreferences, updateStorageUIPreferences, updateSandboxPayments, updateExpansionOverride, unlinkProvider, lastBackupSyncQueryOptions, updateBackupReminderPreference } from '../../api/me'
+import { formatTimeSince } from '../../components/LastSyncNote'
 import { logout } from '../../api/auth'
 import { listRoot } from '../../api/folders'
 import { ApiError } from '../../api/client'
@@ -136,6 +137,8 @@ function RouteComponent() {
       <StorageUIPreferences />
 
       <MediaAutoUpload />
+
+      {(user.is_premium || user.is_admin) && <BackupReminderCard />}
 
       {user.is_admin && (
         <SandboxPaymentsToggle
@@ -772,6 +775,64 @@ function MediaAutoUpload() {
   )
 }
 
+// BackupReminderCard toggles the premium-only bell warning shown when the
+// most recent Google or email backup is more than 30 days old. Shows the
+// current last-sync times for context.
+function BackupReminderCard() {
+  const queryClient = useQueryClient()
+  const { data: prefs } = useQuery(preferencesQueryOptions)
+  const { data: lastSync } = useQuery(lastBackupSyncQueryOptions)
+  const [error, setError] = useState<string | null>(null)
+  const [saved, setSaved] = useState(false)
+
+  const mutation = useMutation({
+    mutationFn: (enabled: boolean) => updateBackupReminderPreference(enabled),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['preferences'] })
+      queryClient.invalidateQueries({ queryKey: ['me', 'notifications'] })
+      setError(null)
+      setSaved(true)
+      setTimeout(() => setSaved(false), 3000)
+    },
+    onError: (err) => setError(err instanceof ApiError ? err.message : 'Failed to save preference'),
+  })
+
+  const lastLine = (label: string, iso: string | null | undefined) =>
+    `${label}: ${iso ? formatTimeSince(iso) : 'never backed up'}`
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-xl px-5 py-4">
+      <h3 className="text-sm font-semibold text-gray-800 mb-1 flex items-center gap-1.5">
+        <MdHistory className="text-gray-500" /> Backup reminder
+      </h3>
+      <p className="text-xs text-gray-400 mb-4">
+        Get a notification when your last Google or email backup is more than 30 days old.
+      </p>
+
+      <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+        <input
+          type="checkbox"
+          checked={prefs?.backup_stale_notify ?? false}
+          onChange={(e) => mutation.mutate(e.target.checked)}
+          disabled={mutation.isPending}
+          className="cursor-pointer"
+        />
+        Notify me when a backup is over 30 days old
+      </label>
+
+      {lastSync && (
+        <p className="text-xs text-gray-400 mt-3 mb-0">
+          {lastLine('Google backup', lastSync.google_last_sync)} ·{' '}
+          {lastLine('Email backup', lastSync.email_last_sync)}
+        </p>
+      )}
+
+      {error && <p className="text-xs text-red-500 mt-2 mb-0">{error}</p>}
+      {saved && <p className="text-xs text-green-600 mt-2 mb-0">Preference saved.</p>}
+    </div>
+  )
+}
+
 function GoogleIcon() {
   return (
     <svg viewBox="0 0 24 24" className="w-[18px] h-[18px]" aria-hidden="true">
@@ -783,14 +844,26 @@ function GoogleIcon() {
   )
 }
 
+function MicrosoftIcon() {
+  return (
+    <svg viewBox="0 0 24 24" className="w-[18px] h-[18px]" aria-hidden="true">
+      <rect x="3" y="3" width="8.5" height="8.5" fill="#F25022" />
+      <rect x="12.5" y="3" width="8.5" height="8.5" fill="#7FBA00" />
+      <rect x="3" y="12.5" width="8.5" height="8.5" fill="#00A4EF" />
+      <rect x="12.5" y="12.5" width="8.5" height="8.5" fill="#FFB900" />
+    </svg>
+  )
+}
+
 function LinkedAccountsCard({ linkedProviders }: { linkedProviders: string[] }) {
   const queryClient = useQueryClient()
   const [unlinking, setUnlinking] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   const providers = [
-    { key: 'google', label: 'Google', icon: <GoogleIcon /> },
-    { key: 'apple',  label: 'Apple',  icon: <FaApple className="text-gray-900 text-lg" /> },
+    { key: 'google',    label: 'Google',    icon: <GoogleIcon /> },
+    { key: 'apple',     label: 'Apple',     icon: <FaApple className="text-gray-900 text-lg" /> },
+    { key: 'microsoft', label: 'Microsoft', icon: <MicrosoftIcon /> },
   ]
 
   const handleUnlink = async (provider: string) => {

@@ -140,6 +140,7 @@ Vite exposes only variables prefixed with `VITE_` to the browser bundle. Everyth
 | `VITE_KEYCLOAK_CLIENT_ID` | Public client ID (`apollo-sfs-web`) |
 | `VITE_TURNSTILE_SITE_KEY` | Cloudflare Turnstile public site key |
 | `VITE_API_BASE_URL` | Base path for API requests (usually `/api/v1`) |
+| `VITE_MS_CLIENT_ID` | Azure AD app (client) ID for the email backup Microsoft sign-in (see `docs/email_backup_setup.md`); Microsoft option is disabled with a clear error when unset. In production it lives in the **root `.env`** — `deploy.sh` passes it into the frontend image build as a `--build-arg` (see `frontend/Dockerfile`); for local dev, export it or put it in a local Vite env file |
 
 ## Production Container
 

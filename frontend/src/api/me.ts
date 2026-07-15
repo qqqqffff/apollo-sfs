@@ -50,6 +50,30 @@ export function updateStorageUIPreferences(prefs: {
   return put<UserPreferences>('/me/preferences/storage-ui', prefs)
 }
 
+// updateBackupReminderPreference toggles the premium-only bell warning shown
+// when the most recent Google or email backup is more than 30 days old.
+export function updateBackupReminderPreference(enabled: boolean) {
+  return put<UserPreferences>('/me/preferences/backup-reminder', {
+    backup_stale_notify: enabled,
+  })
+}
+
+// LastBackupSync reports when each backup type last completed; null means the
+// user has never used that backup.
+export interface LastBackupSync {
+  google_last_sync: string | null
+  email_last_sync: string | null
+}
+
+export function getLastBackupSync() {
+  return get<LastBackupSync>('/me/backups/last-sync')
+}
+
+export const lastBackupSyncQueryOptions = {
+  queryKey: ['me', 'backups', 'last-sync'] as const,
+  queryFn: getLastBackupSync,
+}
+
 // updateSandboxPayments toggles the admin-only, session-scoped sandbox
 // payments mode (resets on logout/session expiry — not a persisted
 // preference, hence not part of UserPreferences).

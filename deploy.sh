@@ -356,6 +356,10 @@ if [[ ${#SELECTED_SERVICES[@]} -gt 0 ]]; then
     echo "── Building $svc -> $image_ref ($platforms) ──"
     build_args=(buildx build --platform "$platforms" -t "$image_ref")
     [[ -n "$dockerfile" ]] && build_args+=(-f "$dockerfile")
+    # Vite inlines VITE_* vars at build time, so the frontend image bakes them
+    # in from the root .env (sourced above). Empty is fine — it just disables
+    # the Microsoft option in the email backup dialog.
+    [[ "$svc" == "frontend" ]] && build_args+=(--build-arg "VITE_MS_CLIENT_ID=${VITE_MS_CLIENT_ID:-}")
     build_args+=("$context" --push)
     run docker "${build_args[@]}"
   done

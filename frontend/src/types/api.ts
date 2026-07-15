@@ -96,7 +96,7 @@ export interface MathGameScore {
   created_at: string
 }
 
-export type FolderKind = 'regular' | 'media'
+export type FolderKind = 'regular' | 'media' | 'email'
 
 export interface Folder {
   id: string
@@ -149,6 +149,9 @@ export interface UserPreferences {
   // Auto-open the storage upgrade modal when an upload would push usage past
   // 75% of quota or exceed it.
   storage_prompt_enabled: boolean
+  // Warn in the notification bell when the most recent Google or email backup
+  // is more than 30 days old. Premium-only; default false.
+  backup_stale_notify: boolean
   created_at: string
   updated_at: string
 }

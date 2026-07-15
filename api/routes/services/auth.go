@@ -1183,7 +1183,8 @@ func (s *AuthService) ExchangeGoogleServerAuthCode(ctx context.Context, serverAu
 }
 
 // LinkSocialIdentity links a provider identity to the Keycloak account identified
-// by kcUserID. provider must be the Keycloak IdP alias ("apple" or "google").
+// by kcUserID. provider must be the Keycloak IdP alias ("apple", "google", or
+// "microsoft").
 // providerToken is the raw JWT from the provider.
 func (s *AuthService) LinkSocialIdentity(ctx context.Context, kcUserID, provider, providerToken string) error {
 	adminToken, err := s.adminToken(ctx)

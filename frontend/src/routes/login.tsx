@@ -34,7 +34,7 @@ const KC_CLIENT_ID = 'apollo-sfs-api'
 // to this app's own origin (redirect_uri below).
 const KC_BASE_URL = 'https://auth.apollo-sfs.com'
 
-function socialLoginUrl(provider: 'google' | 'apple') {
+function socialLoginUrl(provider: 'google' | 'apple' | 'microsoft') {
   const params = new URLSearchParams({
     client_id: KC_CLIENT_ID,
     redirect_uri: `${window.location.origin}/api/v1/auth/social/callback`,
@@ -115,6 +115,13 @@ function RouteComponent() {
                 >
                   <AppleIcon className="w-4 h-4 shrink-0" />
                   Sign in with Apple
+                </a>
+                <a
+                  href={socialLoginUrl('microsoft')}
+                  className="flex items-center justify-center gap-2.5 px-4 py-2 rounded-lg border border-gray-200 bg-white hover:bg-gray-50 text-sm font-medium text-gray-700 transition-colors no-underline"
+                >
+                  <MicrosoftIcon className="w-4 h-4 shrink-0" />
+                  Sign in with Microsoft
                 </a>
               </div>
             </>
@@ -202,7 +209,7 @@ function SignInForm({ onSuccess, login, onForgot }: SignInFormProps) {
 
 // ── Link account form ─────────────────────────────────────────────────────────
 
-const PROVIDER_LABEL: Record<string, string> = { google: 'Google', apple: 'Apple' }
+const PROVIDER_LABEL: Record<string, string> = { google: 'Google', apple: 'Apple', microsoft: 'Microsoft' }
 
 interface LinkAccountFormProps {
   provider: string
@@ -303,6 +310,17 @@ function AppleIcon({ className }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
       <path d="M17.05 20.28c-.98.95-2.05.8-3.08.35-1.09-.46-2.09-.48-3.24 0-1.44.62-2.2.44-3.06-.35C2.79 15.25 3.51 7.7 9.05 7.38c1.27.07 2.14.74 2.87.78 1.09-.21 2.13-.91 3.29-.84 1.39.1 2.44.63 3.13 1.57-2.87 1.72-2.19 5.45.37 6.59-.57 1.52-1.33 3.02-1.66 4.8zM12.03 7.25c-.15-2.23 1.66-4.07 3.74-4.25.29 2.58-2.34 4.5-3.74 4.25z" />
+    </svg>
+  )
+}
+
+function MicrosoftIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="3" y="3" width="8.5" height="8.5" fill="#F25022" />
+      <rect x="12.5" y="3" width="8.5" height="8.5" fill="#7FBA00" />
+      <rect x="3" y="12.5" width="8.5" height="8.5" fill="#00A4EF" />
+      <rect x="12.5" y="12.5" width="8.5" height="8.5" fill="#FFB900" />
     </svg>
   )
 }

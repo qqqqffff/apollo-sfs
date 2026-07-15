@@ -276,6 +276,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	sfsHandler := sfs.NewHandler(queries, fileSvc, presignSvc, apiKeySvc)
 	fileServerLinkSvc := services.NewFileServerLinkService(queries, authSvc, emailSvc, cfg.AppBaseURL)
 	routes.SetFileServerLinkService(h, fileServerLinkSvc)
+	routes.SetEmailBackupService(h, services.NewEmailBackupService(queries, fileSvc, folderSvc))
 	davHandler := dav.NewHandler(fileServerLinkSvc, fileSvc, queries)
 	inboundEmailHandler := admin.NewInboundEmailHandler(inboundEmailSvc, cfg.SendgridWebhookSecret)
 
@@ -465,6 +466,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		protected.GET("/me/preferences", h.GetPreferences)
 		protected.GET("/me/notifications", h.Notifications)
 		protected.POST("/me/notifications/dismiss", h.DismissNotifications)
+		protected.GET("/me/backups/last-sync", h.LastBackupSync)
 		// PUT /me/preferences is premium-only (media auto-upload); registered below.
 		// Storage UI toggles are available to every user.
 		protected.PUT("/me/preferences/storage-ui", h.UpdateStorageUIPreferences)
@@ -632,9 +634,22 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		{
 			premiumGroup.GET("/folders/:folder_id/media", h.GetMediaFolder)
 			premiumGroup.PUT("/me/preferences", h.UpdatePreferences)
+			premiumGroup.PUT("/me/preferences/backup-reminder", h.UpdateBackupReminderPreference)
 			premiumGroup.POST("/collections/:collection_id/items/:file_id", h.CopyFileToCollection)
 			premiumGroup.PATCH("/collections/:collection_id/items/:file_id/move", h.MoveCollectionItem)
 			premiumGroup.DELETE("/collections/:collection_id/items/:file_id", h.RemoveFileFromCollection)
+
+			// Email backup — provider mailbox backups into 'email' folders.
+			// Provider OAuth is entirely client-side (mirrors Google backup);
+			// these endpoints store/serve the encrypted messages.
+			premiumGroup.POST("/email-backup/folders", h.EnsureEmailBackupFolder)
+			premiumGroup.POST("/email-backup/messages", h.BackupEmailMessage)
+			premiumGroup.GET("/email-backup/folders/:folder_id/senders", h.ListEmailBackupSenders)
+			premiumGroup.GET("/email-backup/folders/:folder_id/messages", h.ListEmailBackupMessages)
+			premiumGroup.GET("/email-backup/messages/:id", h.GetEmailBackupMessage)
+			premiumGroup.PATCH("/email-backup/messages/:id/read", h.MarkEmailBackupMessageRead)
+			premiumGroup.DELETE("/email-backup/messages/:id", h.DeleteEmailBackupMessage)
+			premiumGroup.POST("/email-backup/runs", h.CompleteEmailBackupRun)
 		}
 
 		// ── Admin — JWT + admin realm role ───────────────────────────────────

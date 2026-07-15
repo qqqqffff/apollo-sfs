@@ -115,6 +115,7 @@ All secrets live in `.env` (never commit this file). Key groups:
 | `CLOUDFLARE_*` | API token (DDNS), Turnstile site/secret keys |
 | `SENDGRID_*` | SMTP password (via Postfix relay) and inbound webhook secret |
 | `SFS_API_KEY_PEPPER` | Pepper mixed into argon2id API key hashes |
+| `VITE_MS_CLIENT_ID` | Azure AD app (client) ID for the email backup's Microsoft sign-in. Build-time only: deploy.sh passes it to the frontend image build (`--build-arg`), where Vite inlines it into the bundle |
 
 ## Networking and Public Access
 
@@ -136,5 +137,6 @@ Docker logging uses the JSON file driver with rotation (10 MB max, 3 files). Ngi
 - `docs/nvme_capacity_expansion.md` — expanding the mergerfs pool
 - `docs/mobile_app_setup.md` — React Native build and release
 - `docs/paypal_setup.md` — PayPal payment integration
+- `docs/email_backup_setup.md` — Gmail/Microsoft email backup feature (OAuth setup, architecture)
 - `docs/sfs_api.md` — SFS public API reference
 - `docs/file_server_links.md` — premium WebDAV mount links (file server feature)

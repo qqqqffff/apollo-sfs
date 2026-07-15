@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useRef, useState } from 'react'
 import {
   MdAddCircleOutline,
+  MdAlternateEmail,
   MdArrowBack,
   MdBolt,
   MdCheck,
@@ -64,6 +65,18 @@ import {
   type BackupEntry,
   type GoogleBackupItem,
 } from '../../api/googleBackup'
+import { EmailProviderSelectModal } from '../../components/EmailProviderSelectModal'
+import { EmailBackupModal } from '../../components/EmailBackupModal'
+import { EmailBackupView } from '../../components/EmailBackupView'
+import {
+  getGmailUserEmail,
+  getMicrosoftUserEmail,
+  listProviderMessages,
+  requestGmailAccessToken,
+  requestMicrosoftAccessToken,
+  type EmailProvider,
+  type ProviderEmailItem,
+} from '../../api/emailProviders'
 
 export const Route = createFileRoute('/_auth/client/')({
   // All keys optional so navigations to /client elsewhere need not pass every
@@ -198,6 +211,18 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
     driveIds: string[]
   } | null>(null)
 
+  // ── Email Backup state ─────────────────────────────────────────────────────
+  const [emailSelectOpen, setEmailSelectOpen] = useState(false)
+  const [emailLoading, setEmailLoading] = useState(false)
+  const [emailError, setEmailError] = useState<string | null>(null)
+  const [emailBackup, setEmailBackup] = useState<{
+    provider: EmailProvider
+    accessToken: string
+    accountEmail: string
+    items: ProviderEmailItem[]
+  } | null>(null)
+  const emailCancelRef = useRef<(() => void) | null>(null)
+
   // Trigger the action requested from the side control panel (?action=…), then
   // strip the param so refreshes/back-navigation don't re-trigger it. Waits for
   // the user profile so premium gating is decided on real data.
@@ -214,6 +239,10 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
     else if (sidebarAction === 'google-backup' && isPremium && (user.linked_providers?.includes('google') ?? false)) {
       setGoogleError(null)
       setServiceSelectOpen(true)
+    }
+    else if (sidebarAction === 'email-backup' && isPremium) {
+      setEmailError(null)
+      setEmailSelectOpen(true)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sidebarAction, user])
@@ -414,6 +443,71 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
     googleCancelRef.current?.()
   }
 
+  // ── Email Backup handlers ──────────────────────────────────────────────────
+
+  async function handleEmailProviderContinue(provider: EmailProvider) {
+    setEmailSelectOpen(false)
+    setEmailLoading(true)
+    setEmailError(null)
+
+    let cancelled = false
+    // Microsoft needs a popup pre-opened synchronously before any awaits —
+    // same constraint as the Google Photos picker tab.
+    let msPopup: Window | null = null
+    if (provider === 'microsoft') {
+      msPopup = window.open('about:blank', '_blank', 'width=480,height=640')
+    }
+    emailCancelRef.current = () => {
+      cancelled = true
+      msPopup?.close()
+    }
+
+    try {
+      const token = provider === 'gmail'
+        ? await requestGmailAccessToken()
+        : await requestMicrosoftAccessToken(msPopup)
+      if (cancelled) return
+
+      const accountEmail = provider === 'gmail'
+        ? await getGmailUserEmail(token)
+        : await getMicrosoftUserEmail(token)
+      if (cancelled) return
+      if (!accountEmail) {
+        setEmailError('Could not determine the signed-in email address.')
+        return
+      }
+
+      const items = await listProviderMessages(provider, token)
+      if (cancelled) return
+      if (items.length === 0) {
+        setEmailError('No emails were found in this account.')
+        return
+      }
+
+      setEmailBackup({ provider, accessToken: token, accountEmail, items })
+    } catch (e: any) {
+      if (cancelled) return
+      const msg: string = e?.message ?? ''
+      // Swallow silent dismissals (popup closed, user cancelled)
+      if (msg && !msg.toLowerCase().includes('popup_closed') && !msg.toLowerCase().includes('cancel')) {
+        setEmailError(msg)
+      }
+    } finally {
+      emailCancelRef.current = null
+      setEmailLoading(false)
+    }
+  }
+
+  function handleEmailBackupDone(backupFolderId: string | null) {
+    setEmailBackup(null)
+    queryClient.invalidateQueries({ queryKey: ['folders'] })
+    queryClient.invalidateQueries({ queryKey: ['me'] })
+    queryClient.invalidateQueries({ queryKey: ['email-backup'] })
+    if (backupFolderId) {
+      navigate({ to: '/client', search: { file: undefined, folder: backupFolderId } })
+    }
+  }
+
   function handleStartBackground(entries: BackupEntry[], token: string) {
     setGoogleBackupItems(null)
     const driveIds = entries.filter((e) => e.googleItem.source === 'drive').map((e) => e.googleItem.id)
@@ -460,6 +554,32 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
         onOpenFile={openFile}
       />
     )
+  }
+
+  // Email backup folders render as a mail viewer (sender sidebar, message
+  // list, reading pane) instead of the standard file/folder listing.
+  if (folder && folder.kind === 'email') {
+    if (!isPremium) {
+      return (
+        <div className="flex flex-col items-center justify-center py-16 gap-4 text-center">
+          <MdAlternateEmail className="text-6xl text-teal-300" />
+          <h2 className="text-lg font-semibold text-gray-900 m-0">Email Backups</h2>
+          <p className="text-sm text-gray-500 max-w-xs">
+            Email backups are a premium feature. Upgrade to browse your backed-up mail.
+          </p>
+          <a
+            href="/premium"
+            className="px-4 py-2 text-sm bg-amber-500 hover:bg-amber-600 text-white rounded-lg font-medium transition-colors"
+          >
+            Upgrade to Premium
+          </a>
+          <button onClick={goBack} className="text-sm text-gray-500 hover:text-gray-700 bg-transparent border-0 cursor-pointer">
+            Go back
+          </button>
+        </div>
+      )
+    }
+    return <EmailBackupView folder={folder} readOnly={readOnly} onBack={goBack} />
   }
 
   const subfolders = sortedFolders(rawSubfolders, sort)
@@ -559,6 +679,14 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
         <div className="flex items-center gap-2 mb-3 px-3 py-2 bg-red-50 border border-red-200 rounded-lg text-xs text-red-600">
           <span className="flex-1">{googleError}</span>
           <button onClick={() => setGoogleError(null)} className="text-red-400 hover:text-red-600 cursor-pointer"><MdClose /></button>
+        </div>
+      )}
+
+      {/* Email Backup error */}
+      {emailError && (
+        <div className="flex items-center gap-2 mb-3 px-3 py-2 bg-red-50 border border-red-200 rounded-lg text-xs text-red-600">
+          <span className="flex-1">{emailError}</span>
+          <button onClick={() => setEmailError(null)} className="text-red-400 hover:text-red-600 cursor-pointer"><MdClose /></button>
         </div>
       )}
 
@@ -691,7 +819,9 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
                 >
                   {f.kind === 'media'
                     ? <MdPhotoLibrary className="text-purple-400 text-lg shrink-0" />
-                    : <MdFolder className="text-blue-400 text-lg shrink-0" />}
+                    : f.kind === 'email'
+                      ? <MdAlternateEmail className="text-teal-500 text-lg shrink-0" title="Email backup" />
+                      : <MdFolder className="text-blue-400 text-lg shrink-0" />}
                   <span className="truncate">{f.name}</span>
                 </button>
                 <span className="text-xs text-gray-400 shrink-0 hidden sm:inline">
@@ -826,6 +956,38 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
             queryClient.invalidateQueries({ queryKey: ['me'] })
           }}
           onStartBackground={handleStartBackground}
+        />
+      )}
+
+      {/* Email Backup — provider selection */}
+      {emailSelectOpen && (
+        <EmailProviderSelectModal
+          onCancel={() => setEmailSelectOpen(false)}
+          onContinue={handleEmailProviderContinue}
+        />
+      )}
+
+      {/* Email Backup — signing in / loading messages */}
+      {emailLoading && !emailBackup && (
+        <GooglePhotosLoadingModal
+          message="Loading your emails"
+          hint="Finish signing in to your email account in the popup, then come back here — your inbox loads automatically."
+          onCancel={() => emailCancelRef.current?.()}
+        />
+      )}
+
+      {/* Email Backup — picker + upload modal */}
+      {emailBackup && user && (
+        <EmailBackupModal
+          provider={emailBackup.provider}
+          accessToken={emailBackup.accessToken}
+          accountEmail={emailBackup.accountEmail}
+          items={emailBackup.items}
+          quotaBytes={user.storage_quota_bytes}
+          usedBytes={user.storage_used_bytes}
+          myServers={myServers}
+          onClose={() => setEmailBackup(null)}
+          onDone={handleEmailBackupDone}
         />
       )}
 

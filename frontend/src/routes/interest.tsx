@@ -7,6 +7,7 @@ import {
   submitInterestForm,
   createInterestDepositOrder,
   captureInterestDepositOrder,
+  getPublicPayPalClientToken,
   publicConfigQueryOptions,
   type StorageType,
 } from '../api/interest'
@@ -470,6 +471,7 @@ function RouteComponent() {
                     clientId={config.paypal_client_id}
                     currency={config.paypal_currency || 'USD'}
                     environment={config.paypal_environment === 'sandbox' ? 'sandbox' : 'live'}
+                    getClientToken={async () => (await getPublicPayPalClientToken()).client_token}
                     amount={() => (selectedPlan ? depositAmt(selectedPlan, storageType) : '0.00')}
                     createOrder={handleCreateOrder}
                     getApprovalUrl={handleGetApprovalUrl}

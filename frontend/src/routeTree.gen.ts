@@ -32,6 +32,7 @@ import { Route as AuthClientChangePasswordRouteImport } from './routes/_auth.cli
 import { Route as AuthCheckoutReturnRouteImport } from './routes/_auth.checkout.return'
 import { Route as AuthAdminUsersRouteImport } from './routes/_auth.admin/users'
 import { Route as AuthAdminRequestsRouteImport } from './routes/_auth.admin/requests'
+import { Route as AuthAdminPricingRouteImport } from './routes/_auth.admin/pricing'
 import { Route as AuthAdminOrdersRouteImport } from './routes/_auth.admin/orders'
 import { Route as AuthAdminMetricsRouteImport } from './routes/_auth.admin/metrics'
 import { Route as AuthAdminEmailsRouteImport } from './routes/_auth.admin/emails'
@@ -156,6 +157,11 @@ const AuthAdminRequestsRoute = AuthAdminRequestsRouteImport.update({
   path: '/admin/requests',
   getParentRoute: () => AuthRoute,
 } as any)
+const AuthAdminPricingRoute = AuthAdminPricingRouteImport.update({
+  id: '/admin/pricing',
+  path: '/admin/pricing',
+  getParentRoute: () => AuthRoute,
+} as any)
 const AuthAdminOrdersRoute = AuthAdminOrdersRouteImport.update({
   id: '/admin/orders',
   path: '/admin/orders',
@@ -215,6 +221,7 @@ export interface FileRoutesByFullPath {
   '/admin/emails': typeof AuthAdminEmailsRoute
   '/admin/metrics': typeof AuthAdminMetricsRoute
   '/admin/orders': typeof AuthAdminOrdersRoute
+  '/admin/pricing': typeof AuthAdminPricingRoute
   '/admin/requests': typeof AuthAdminRequestsRoute
   '/admin/users': typeof AuthAdminUsersRoute
   '/checkout/return': typeof AuthCheckoutReturnRoute
@@ -247,6 +254,7 @@ export interface FileRoutesByTo {
   '/admin/emails': typeof AuthAdminEmailsRoute
   '/admin/metrics': typeof AuthAdminMetricsRoute
   '/admin/orders': typeof AuthAdminOrdersRoute
+  '/admin/pricing': typeof AuthAdminPricingRoute
   '/admin/requests': typeof AuthAdminRequestsRoute
   '/admin/users': typeof AuthAdminUsersRoute
   '/checkout/return': typeof AuthCheckoutReturnRoute
@@ -281,6 +289,7 @@ export interface FileRoutesById {
   '/_auth/admin/emails': typeof AuthAdminEmailsRoute
   '/_auth/admin/metrics': typeof AuthAdminMetricsRoute
   '/_auth/admin/orders': typeof AuthAdminOrdersRoute
+  '/_auth/admin/pricing': typeof AuthAdminPricingRoute
   '/_auth/admin/requests': typeof AuthAdminRequestsRoute
   '/_auth/admin/users': typeof AuthAdminUsersRoute
   '/_auth/checkout/return': typeof AuthCheckoutReturnRoute
@@ -315,6 +324,7 @@ export interface FileRouteTypes {
     | '/admin/emails'
     | '/admin/metrics'
     | '/admin/orders'
+    | '/admin/pricing'
     | '/admin/requests'
     | '/admin/users'
     | '/checkout/return'
@@ -347,6 +357,7 @@ export interface FileRouteTypes {
     | '/admin/emails'
     | '/admin/metrics'
     | '/admin/orders'
+    | '/admin/pricing'
     | '/admin/requests'
     | '/admin/users'
     | '/checkout/return'
@@ -380,6 +391,7 @@ export interface FileRouteTypes {
     | '/_auth/admin/emails'
     | '/_auth/admin/metrics'
     | '/_auth/admin/orders'
+    | '/_auth/admin/pricing'
     | '/_auth/admin/requests'
     | '/_auth/admin/users'
     | '/_auth/checkout/return'
@@ -572,6 +584,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthAdminRequestsRouteImport
       parentRoute: typeof AuthRoute
     }
+    '/_auth/admin/pricing': {
+      id: '/_auth/admin/pricing'
+      path: '/admin/pricing'
+      fullPath: '/admin/pricing'
+      preLoaderRoute: typeof AuthAdminPricingRouteImport
+      parentRoute: typeof AuthRoute
+    }
     '/_auth/admin/orders': {
       id: '/_auth/admin/orders'
       path: '/admin/orders'
@@ -639,6 +658,7 @@ interface AuthRouteChildren {
   AuthAdminEmailsRoute: typeof AuthAdminEmailsRoute
   AuthAdminMetricsRoute: typeof AuthAdminMetricsRoute
   AuthAdminOrdersRoute: typeof AuthAdminOrdersRoute
+  AuthAdminPricingRoute: typeof AuthAdminPricingRoute
   AuthAdminRequestsRoute: typeof AuthAdminRequestsRoute
   AuthAdminUsersRoute: typeof AuthAdminUsersRoute
   AuthCheckoutReturnRoute: typeof AuthCheckoutReturnRoute
@@ -662,6 +682,7 @@ const AuthRouteChildren: AuthRouteChildren = {
   AuthAdminEmailsRoute: AuthAdminEmailsRoute,
   AuthAdminMetricsRoute: AuthAdminMetricsRoute,
   AuthAdminOrdersRoute: AuthAdminOrdersRoute,
+  AuthAdminPricingRoute: AuthAdminPricingRoute,
   AuthAdminRequestsRoute: AuthAdminRequestsRoute,
   AuthAdminUsersRoute: AuthAdminUsersRoute,
   AuthCheckoutReturnRoute: AuthCheckoutReturnRoute,

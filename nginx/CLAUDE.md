@@ -14,7 +14,7 @@ Neither nginx nor fail2ban runs inside Docker — they run directly on the manag
 | `/etc/nginx/conf.d/apollo-sfs.conf` | HTTPS vhosts for `apollo-sfs.com`, `www.apollo-sfs.com`, and `auth.apollo-sfs.com` |
 | `/etc/nginx/conf.d/cloudflare-real-ip.conf` | Extracts real client IP from `CF-Connecting-IP` header |
 | `/etc/nginx/blocklist.d/auto-blocked.conf` | Auto-generated `deny <ip>;` rules written by fail2ban |
-| `/etc/nginx/well-known/` | Static files for Apple Universal Links and Android App Links |
+| `/etc/nginx/well-known/` | Static files for Apple Universal Links, Android App Links, and the (live) PayPal Apple Pay domain-association file |
 
 The repository's `nginx/` directory holds the source versions of these files. Deploy them to the host with:
 

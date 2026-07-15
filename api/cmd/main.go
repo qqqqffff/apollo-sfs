@@ -260,6 +260,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	routes.SetShareService(h, services.NewShareService(queries, emailSvc, cfg.AppBaseURL))
 	authHandler := auth.NewHandler(authSvc, cfg.CookieDomain, cfg.CookieSecure)
 	adminHandler := admin.NewHandler(queries, inviteSvc, metricsSvc, authSvc, fileSvc, registry, geoReader, cfg.DiskStatsPath, cfg.DiskStatsDriveLabel, cfg.BackendTestURL, cfg.AppDir, cfg.FrontendTestURL, cfg.FrontendE2EURL, shutdownCh)
+	adminHandler.SetDiscountMailer(emailSvc)
 	// Configure the on-demand infrastructure sync (POST /system/sync): discover
 	// swarm nodes via the Docker socket and drives/capacity via the MinIO admin API.
 	adminHandler.ConfigureInfraSync(admin.InfraSyncConfig{
@@ -366,6 +367,10 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 			},
 		})
 	})
+	// Browser-safe PayPal client token (JS SDK v6 init, e.g. the Apple Pay
+	// button) for the public interest page — always the live client, same as
+	// /config above. Domain-bound and SDK-init-only by design.
+	v1.GET("/config/paypal-client-token", billingHandler.PublicClientToken)
 	v1.GET("/invitations/:token", h.ValidateInvitationToken)
 	v1.POST("/interest", h.SubmitInterestForm)
 	// Native-app account request form: no Turnstile (the app cannot render
@@ -575,6 +580,13 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 
 		// Public PayPal config for the web frontend's JS SDK (react-paypal-js).
 		protected.GET("/billing/config", billingHandler.GetConfig)
+		// Browser-safe client token for the PayPal JS SDK v6 (Apple Pay);
+		// honors the admin sandbox-payments toggle like /billing/config.
+		protected.GET("/billing/client-token", billingHandler.GetClientToken)
+
+		// Admin-managed storage line items for a server, priced for the calling
+		// user (discounts applied). Empty items = fall back to legacy plans.
+		protected.GET("/billing/storage/plans", billingHandler.GetStoragePlans)
 
 		// Storage add-on billing — four payment methods, each backed by PayPal.
 		protected.POST("/billing/storage/order", billingHandler.CreateWalletOrder)
@@ -696,6 +708,15 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 			adminGroup.POST("/subscriptions/:id/cancel", ordersHandler.CancelSubscription)
 			adminGroup.POST("/subscriptions/:id/revert-allocation", ordersHandler.RevertSubscriptionAllocation)
 			adminGroup.POST("/expansion-requests/:id/cancel", expansionHandler.CancelRequest)
+
+			// Product pricing — per-server storage line items and discounts.
+			adminGroup.GET("/pricing/servers", adminHandler.ListPricingServers)
+			adminGroup.GET("/pricing", adminHandler.GetPricing)
+			adminGroup.POST("/pricing/items", adminHandler.CreatePricingItem)
+			adminGroup.PATCH("/pricing/items/:item_id", adminHandler.UpdatePricingItem)
+			adminGroup.DELETE("/pricing/items/:item_id", adminHandler.DeletePricingItem)
+			adminGroup.POST("/pricing/discounts", adminHandler.CreatePricingDiscount)
+			adminGroup.DELETE("/pricing/discounts/:discount_id", adminHandler.DeletePricingDiscount)
 
 			adminGroup.GET("/interest", adminHandler.ListInterestSubmissions)
 			adminGroup.GET("/interest/settings", adminHandler.GetInterestFormSettings)

@@ -21,6 +21,15 @@ export function getPublicConfig() {
   return get<PublicConfig>('/config')
 }
 
+// Unauthenticated counterpart of getPayPalClientToken (api/billing.ts) for the
+// public interest page's Apple Pay button — always the live client, like
+// getPublicConfig above.
+export function getPublicPayPalClientToken() {
+  return get<{ client_token: string; expires_in: number; environment: 'sandbox' | 'live' }>(
+    '/config/paypal-client-token',
+  )
+}
+
 export type StorageType = 'nvme' | 'hdd'
 
 export interface SubmitInterestPayload {

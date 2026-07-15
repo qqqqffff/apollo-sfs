@@ -74,6 +74,18 @@ type AdminQuerier interface {
 	UpsertAlarmSubscription(ctx context.Context, email, alarmType string, nodeID, driveID *uuid.UUID, threshold float64) (*models.AlarmSubscription, error)
 	DeleteAlarmSubscription(ctx context.Context, email, alarmType string, nodeID, driveID *uuid.UUID) error
 
+	// Product pricing (admin pricing page)
+	ListPricingServers(ctx context.Context) ([]db.PricingServer, error)
+	ListPricingItems(ctx context.Context, serverID uuid.UUID) ([]models.PricingItem, error)
+	GetPricingItem(ctx context.Context, id uuid.UUID) (*models.PricingItem, error)
+	CreatePricingItem(ctx context.Context, p db.CreatePricingItemParams) (*models.PricingItem, error)
+	UpdatePricingItem(ctx context.Context, id uuid.UUID, bytes int64, priceCents, sortOrder int) (*models.PricingItem, error)
+	DeletePricingItem(ctx context.Context, id uuid.UUID) error
+	ListActivePricingDiscounts(ctx context.Context, serverID uuid.UUID) ([]models.PricingDiscount, error)
+	CreatePricingDiscount(ctx context.Context, d *models.PricingDiscount) error
+	DeletePricingDiscount(ctx context.Context, id uuid.UUID) error
+	ListDiscountRecipients(ctx context.Context, group string, serverID uuid.UUID, storageType string, premiumOnly bool) ([]string, error)
+
 	// Interest form
 	ListInterestSubmissions(ctx context.Context, in db.PageInput) (*db.PageResult[models.InterestSubmission], error)
 	GetInterestFormSettings(ctx context.Context) (*models.InterestFormSettings, error)

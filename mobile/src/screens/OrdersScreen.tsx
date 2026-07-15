@@ -28,7 +28,7 @@ import {
 } from '../api/billing';
 import { listMySubscriptions, type PremiumSubscriptionOrder } from '../api/payments';
 import { revertAdminOrderAllocation } from '../api/admin';
-import { canMakeApplePayments, requestApplePayment } from '../services/nativeApplePay';
+import { canMakeApplePayments, completeApplePayment, requestApplePayment } from '../services/nativeApplePay';
 import { APPLE_PAY_MERCHANT_ID, API_BASE_URL } from '../config';
 import { useAuth } from '../context/AuthContext';
 import { card, colors, radius, spacing } from '../theme';
@@ -608,7 +608,15 @@ function PayRemainingSheet({ request, onClose, onPaid }: {
         APPLE_PAY_MERCHANT_ID,
         `Apollo SFS expansion balance`,
       );
-      await payRemainingByApplePay(request.id, token);
+      // The sheet stays open while the token is charged through PayPal — it
+      // only shows the checkmark once the backend confirms the capture.
+      try {
+        await payRemainingByApplePay(request.id, token);
+        await completeApplePayment(true);
+      } catch (chargeErr) {
+        await completeApplePayment(false);
+        throw chargeErr;
+      }
       Alert.alert('Payment received', 'Your remaining balance is paid — the capacity is yours.');
       onPaid();
     } catch (e: any) {

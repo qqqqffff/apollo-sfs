@@ -20,6 +20,10 @@ type Querier interface {
 	AddUserQuotaAndAllocation(ctx context.Context, username string, driveID *uuid.UUID, bytesAdded int64) (int64, error)
 	ListAdminEmails(ctx context.Context) ([]string, error)
 
+	// Admin-managed pricing (see billing.PricingQuerier).
+	GetPricingItem(ctx context.Context, id uuid.UUID) (*models.PricingItem, error)
+	ListActivePricingDiscounts(ctx context.Context, serverID uuid.UUID) ([]models.PricingDiscount, error)
+
 	CreateExpansionRequest(ctx context.Context, p db.CreateExpansionRequestParams) (*models.ServerExpansionRequest, error)
 	GetExpansionRequestByID(ctx context.Context, id uuid.UUID) (*models.ServerExpansionRequest, error)
 	GetExpansionRequestByPayPalOrderID(ctx context.Context, orderID string) (*models.ServerExpansionRequest, error)

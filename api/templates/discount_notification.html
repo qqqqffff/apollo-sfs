@@ -1,0 +1,80 @@
+{{/*
+  Template name : "discount_notification"
+  Trigger       : Admin creates a pricing discount with a notification group
+                  selected on the admin pricing page
+  Data fields   :
+    AppName     string
+    AppURL      string
+    Email       string
+    ServerName  string — server the discount lives on
+    ScopeLabel  string — e.g. "all Fast (NVMe) storage plans on Atlas"
+    Deals       []map — Label, OldPrice, NewPrice (pre-formatted), Percent int
+    ExpiresAt   string — pre-formatted expiry timestamp, "" = no expiry
+    PremiumOnly bool   — discount applies to premium users and admins only
+*/}}
+{{define "discount_notification"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <title>Storage sale — {{.AppName}}</title>
+</head>
+<body>
+  <div class="email-wrapper">
+    <div class="email-card">
+
+      {{template "header" .}}
+
+      <div class="email-body">
+        <h1>Storage prices just dropped</h1>
+        <p>
+          We&#39;ve discounted {{.ScopeLabel}}.
+          {{if .PremiumOnly}}This offer is exclusive to premium members.{{end}}
+        </p>
+
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin: 16px 0; border-collapse: collapse;">
+          {{range .Deals}}
+          <tr>
+            <td style="padding: 8px 0; border-bottom: 1px solid #e5e7eb;">
+              <strong>{{.Label}}</strong>
+            </td>
+            <td align="right" style="padding: 8px 0; border-bottom: 1px solid #e5e7eb; white-space: nowrap;">
+              <span style="text-decoration: line-through; color: #9ca3af;">{{.OldPrice}}</span>
+              &nbsp;<strong>{{.NewPrice}}</strong>
+              &nbsp;<span style="background: #dcfce7; color: #15803d; border-radius: 9999px; padding: 2px 8px; font-size: 12px; font-weight: 700;">&#8722;{{.Percent}}%</span>
+            </td>
+          </tr>
+          {{end}}
+        </table>
+
+        {{if .ExpiresAt}}
+        <div class="alert alert-warning">
+          This offer ends <strong>{{.ExpiresAt}}</strong> — prices return to
+          normal after that.
+        </div>
+        {{else}}
+        <p>No end date has been set for this offer, but prices can change at any time.</p>
+        {{end}}
+
+        <div class="btn-wrapper">
+          <a href="{{.AppURL}}" class="btn-primary">Get more storage</a>
+        </div>
+
+        <hr class="email-divider" />
+
+        <p>
+          You&#39;re receiving this because you have an account on
+          {{.AppName}}{{if .PremiumOnly}} with premium access{{end}}. Discounts
+          are applied automatically at checkout — no code needed.
+        </p>
+      </div>
+
+      {{template "footer" .}}
+
+    </div>
+  </div>
+</body>
+</html>
+{{end}}

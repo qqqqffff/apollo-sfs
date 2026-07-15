@@ -208,6 +208,52 @@ func (s *EmailService) SendQuotaLimit(
 	)
 }
 
+// DiscountDeal is one line of a discount announcement: a storage plan with
+// its old and new price and the badge percentage.
+type DiscountDeal struct {
+	Label    string // e.g. "256 GB Fast (NVMe)"
+	OldPrice string // pre-formatted, e.g. "$80.00"
+	NewPrice string // pre-formatted, e.g. "$60.00"
+	Percent  int    // e.g. 25
+}
+
+// DiscountEmailData is the display payload of a discount announcement.
+type DiscountEmailData struct {
+	ServerName  string
+	ScopeLabel  string // e.g. "all Fast (NVMe) storage plans on Atlas"
+	Deals       []DiscountDeal
+	ExpiresAt   string // pre-formatted expiry, "" = no expiry
+	PremiumOnly bool
+}
+
+// SendDiscountNotification enqueues a storage-discount announcement created
+// from the admin pricing page.
+func (s *EmailService) SendDiscountNotification(ctx context.Context, toEmail string, data DiscountEmailData) error {
+	deals := make([]map[string]any, len(data.Deals))
+	for i, d := range data.Deals {
+		deals[i] = map[string]any{
+			"Label":    d.Label,
+			"OldPrice": d.OldPrice,
+			"NewPrice": d.NewPrice,
+			"Percent":  d.Percent,
+		}
+	}
+	return s.enqueue(ctx, toEmail,
+		fmt.Sprintf("Storage sale — save on %s", data.ScopeLabel),
+		"discount_notification",
+		map[string]any{
+			"AppName":     s.appName,
+			"AppURL":      s.appURL,
+			"Email":       toEmail,
+			"ServerName":  data.ServerName,
+			"ScopeLabel":  data.ScopeLabel,
+			"Deals":       deals,
+			"ExpiresAt":   data.ExpiresAt,
+			"PremiumOnly": data.PremiumOnly,
+		},
+	)
+}
+
 // SendInterestFormNotification enqueues an admin notification email for every
 // address in adminEmails when a new interest form submission arrives.
 func (s *EmailService) SendInterestFormNotification(

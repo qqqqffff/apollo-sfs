@@ -27,7 +27,7 @@ import {
   type StorageType,
 } from '../api/billing';
 import { listServersWithPing, type ServerInfoWithPing } from '../api/storage';
-import { canMakeApplePayments, requestApplePayment } from '../services/nativeApplePay';
+import { canMakeApplePayments, completeApplePayment, requestApplePayment } from '../services/nativeApplePay';
 import { canMakeGooglePayments, requestGooglePayment } from '../services/nativeGooglePay';
 import { APPLE_PAY_MERCHANT_ID, PAYPAL_MERCHANT_ID } from '../config';
 import { colors, radius, shadow, spacing } from '../theme';
@@ -200,15 +200,24 @@ export default function StorageUpgradeModal({
         amount, 'USD', APPLE_PAY_MERCHANT_ID,
         isExpansion ? `Apollo SFS ${selectedPlan.label} Expansion Deposit` : `Apollo SFS ${selectedPlan.label} Storage`,
       );
-      if (isExpansion && selectedServerId) {
-        const { expansion_request_id, expires_at } = await createApplePayExpansionOrder(selectedPlanId, storageType, selectedServerId, token);
-        setExpansionRequestId(expansion_request_id);
-        setExpansionExpiresAt(expires_at);
-        setPurchaseState('expansion_success');
-        onExpansionRequested?.(expansion_request_id, expires_at);
-      } else {
-        const { new_quota_bytes } = await createApplePayStorageOrder(selectedPlanId, storageType, token);
-        onPurchased(new_quota_bytes);
+      // The sheet stays open while the token is charged through PayPal — it
+      // only shows the checkmark once the backend confirms the capture.
+      try {
+        if (isExpansion && selectedServerId) {
+          const { expansion_request_id, expires_at } = await createApplePayExpansionOrder(selectedPlanId, storageType, selectedServerId, token);
+          await completeApplePayment(true);
+          setExpansionRequestId(expansion_request_id);
+          setExpansionExpiresAt(expires_at);
+          setPurchaseState('expansion_success');
+          onExpansionRequested?.(expansion_request_id, expires_at);
+        } else {
+          const { new_quota_bytes } = await createApplePayStorageOrder(selectedPlanId, storageType, token);
+          await completeApplePayment(true);
+          onPurchased(new_quota_bytes);
+        }
+      } catch (chargeErr) {
+        await completeApplePayment(false);
+        throw chargeErr;
       }
     } catch (e: any) {
       if ((e as any).code !== 'CANCELLED') Alert.alert('Apple Pay failed', apiError(e));

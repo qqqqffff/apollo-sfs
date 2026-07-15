@@ -384,6 +384,32 @@ func (s *stubAdminQuerier) ListUserBans(_ context.Context, _ bool, _ db.PageInpu
 func (s *stubAdminQuerier) GetDriveSummaries(_ context.Context) ([]models.DriveSummary, error) {
 	return []models.DriveSummary{}, nil
 }
+func (s *stubAdminQuerier) ListPricingServers(_ context.Context) ([]db.PricingServer, error) {
+	return []db.PricingServer{}, nil
+}
+func (s *stubAdminQuerier) ListPricingItems(_ context.Context, _ uuid.UUID) ([]models.PricingItem, error) {
+	return []models.PricingItem{}, nil
+}
+func (s *stubAdminQuerier) GetPricingItem(_ context.Context, _ uuid.UUID) (*models.PricingItem, error) {
+	return nil, nil
+}
+func (s *stubAdminQuerier) CreatePricingItem(_ context.Context, _ db.CreatePricingItemParams) (*models.PricingItem, error) {
+	return &models.PricingItem{ID: uuid.New()}, nil
+}
+func (s *stubAdminQuerier) UpdatePricingItem(_ context.Context, _ uuid.UUID, _ int64, _, _ int) (*models.PricingItem, error) {
+	return nil, nil
+}
+func (s *stubAdminQuerier) DeletePricingItem(_ context.Context, _ uuid.UUID) error { return nil }
+func (s *stubAdminQuerier) ListActivePricingDiscounts(_ context.Context, _ uuid.UUID) ([]models.PricingDiscount, error) {
+	return []models.PricingDiscount{}, nil
+}
+func (s *stubAdminQuerier) CreatePricingDiscount(_ context.Context, _ *models.PricingDiscount) error {
+	return nil
+}
+func (s *stubAdminQuerier) DeletePricingDiscount(_ context.Context, _ uuid.UUID) error { return nil }
+func (s *stubAdminQuerier) ListDiscountRecipients(_ context.Context, _ string, _ uuid.UUID, _ string, _ bool) ([]string, error) {
+	return nil, nil
+}
 func (s *stubAdminQuerier) GetMaxAvailableQuota(_ context.Context) (int64, error) { return 0, nil }
 func (s *stubAdminQuerier) CountServersByState(_ context.Context, _ string) (int, error) {
 	return 0, nil

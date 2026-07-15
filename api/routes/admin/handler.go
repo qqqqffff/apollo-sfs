@@ -75,6 +75,10 @@ type Handler struct {
 	// paypal is used to refund the interest-form deposit when a submission is
 	// denied. nil is tolerated and causes DenyInterestSubmission to 503.
 	paypal *services.PayPalClient
+
+	// discountMailer announces new pricing discounts to users (see
+	// SetDiscountMailer). nil skips notifications.
+	discountMailer DiscountMailer
 }
 
 // NewHandler constructs an admin Handler.

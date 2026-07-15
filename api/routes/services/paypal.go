@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -47,6 +48,13 @@ type PayPalClient struct {
 	tokenMu sync.Mutex
 	token   string
 	expires time.Time
+
+	// Browser-safe client token cache (JS SDK v6 init) — separate from the
+	// bearer token above; see BrowserSafeClientToken.
+	clientTokenMu      sync.Mutex
+	clientToken        string
+	clientTokenExpires time.Time
+	clientTokenDomains string
 }
 
 // PayPalClients bundles the live and (optional) sandbox PayPalClient
@@ -125,6 +133,59 @@ func (p *PayPalClient) bearer(ctx context.Context) (string, error) {
 	p.token = tr.AccessToken
 	p.expires = time.Now().Add(time.Duration(tr.ExpiresIn) * time.Second)
 	return p.token, nil
+}
+
+// BrowserSafeClientToken mints (and caches) a browser-safe client token used
+// to initialise the PayPal JS SDK v6 on the web frontend
+// (paypal.createInstance({ clientToken }) — the Apple Pay integration
+// standard, https://developer.paypal.com/apple-pay/integrate). Unlike
+// bearer()'s access token, this token is domain-bound and safe to hand to the
+// browser: PayPal issues it for response_type=client_token and it can only
+// initialise the SDK, not call the REST API. Returns the token plus the
+// seconds it remains valid.
+func (p *PayPalClient) BrowserSafeClientToken(ctx context.Context, domains []string) (string, int, error) {
+	key := strings.Join(domains, ",")
+	p.clientTokenMu.Lock()
+	defer p.clientTokenMu.Unlock()
+	if p.clientToken != "" && p.clientTokenDomains == key && time.Now().Add(60*time.Second).Before(p.clientTokenExpires) {
+		return p.clientToken, int(time.Until(p.clientTokenExpires).Seconds()), nil
+	}
+
+	// Per the v6 SDK docs the domains[] value is a single comma-separated
+	// list, not a repeated form field.
+	form := "grant_type=client_credentials&response_type=client_token&intent=sdk_init"
+	if key != "" {
+		form += "&domains[]=" + url.QueryEscape(key)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/v1/oauth2/token", strings.NewReader(form))
+	if err != nil {
+		return "", 0, err
+	}
+	req.SetBasicAuth(p.cfg.ClientID, p.cfg.ClientSecret)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := p.http.Do(req)
+	if err != nil {
+		return "", 0, fmt.Errorf("paypal client token: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return "", 0, fmt.Errorf("paypal client token: %s: %s", resp.Status, string(b))
+	}
+	var tr struct {
+		AccessToken string `json:"access_token"`
+		ExpiresIn   int    `json:"expires_in"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&tr); err != nil {
+		return "", 0, err
+	}
+	if tr.AccessToken == "" {
+		return "", 0, errors.New("paypal client token: empty access_token in response")
+	}
+	p.clientToken = tr.AccessToken
+	p.clientTokenExpires = time.Now().Add(time.Duration(tr.ExpiresIn) * time.Second)
+	p.clientTokenDomains = key
+	return p.clientToken, tr.ExpiresIn, nil
 }
 
 // ── Orders ────────────────────────────────────────────────────────────────────

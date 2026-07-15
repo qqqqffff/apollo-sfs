@@ -8,6 +8,11 @@ interface Props {
   clientId: string
   currency: string
   environment: 'sandbox' | 'live'
+  // Resolves a browser-safe client token for the Apple Pay button's PayPal
+  // Web SDK v6 instance (getPayPalClientToken on protected surfaces,
+  // getPublicPayPalClientToken on the public interest page). Must come from
+  // the same environment as `environment`.
+  getClientToken: () => Promise<string>
   // Creates the order server-side and resolves to its PayPal order id — shared
   // by the Apple Pay button, the Google Pay button, and (once "Pay with card"
   // is chosen) HostedCardFields.
@@ -31,16 +36,31 @@ interface Props {
 // that hands off to HostedCardFields. Kept as one component so all four stay
 // pixel- and behavior-identical instead of drifting copy to copy.
 export function PayPalCheckoutOptions({
-  clientId, currency, environment, createOrder, getApprovalUrl, onApprove, onError, amount, canPay, onChooseCard,
+  clientId, currency, environment, getClientToken, createOrder, getApprovalUrl, onApprove, onError, amount, canPay, onChooseCard,
 }: Props) {
   return (
     <div className={`flex flex-col gap-2 ${canPay ? '' : 'opacity-50 pointer-events-none'}`}>
+      {/* Apple Pay runs on the PayPal Web SDK v6 (client-token init, loaded
+          by the button itself) — deliberately outside the legacy
+          PayPalScriptProvider below, which only the Google Pay button still
+          needs. The v6 core coexists with the legacy SDK by attaching as
+          window.paypal.v6. */}
+      <PayPalApplePayButton
+        environment={environment}
+        currencyCode={currency}
+        amount={amount}
+        getClientToken={getClientToken}
+        createOrder={createOrder}
+        onApprove={onApprove}
+        onError={onError}
+        enabled={canPay}
+      />
       <PayPalScriptProvider
         options={{
           clientId,
           currency,
           intent: 'capture',
-          components: 'googlepay,applepay',
+          components: 'googlepay',
           // 'card' is disabled here because that funding source sends the
           // shopper to PayPal's hosted guest-checkout page (extra "ship to
           // billing address" / age-confirm copy we don't want) — "Pay with
@@ -48,14 +68,6 @@ export function PayPalCheckoutOptions({
           disableFunding: 'paylater,card',
         }}
       >
-        <PayPalApplePayButton
-          currencyCode={currency}
-          amount={amount}
-          createOrder={createOrder}
-          onApprove={onApprove}
-          onError={onError}
-          enabled={canPay}
-        />
         <PayPalGooglePayButton
           environment={environment}
           currencyCode={currency}

@@ -21,6 +21,11 @@ type Querier interface {
 	GetServer(ctx context.Context, id uuid.UUID) (*models.Server, error)
 	GetServerCapacity(ctx context.Context, serverID uuid.UUID, driveType string) (*db.ServerCapacity, error)
 	ListUserOrders(ctx context.Context, username string) ([]db.AdminOrder, error)
+
+	// Admin-managed pricing (see plans.go's PricingQuerier).
+	GetPricingItem(ctx context.Context, id uuid.UUID) (*models.PricingItem, error)
+	ListPricingItems(ctx context.Context, serverID uuid.UUID) ([]models.PricingItem, error)
+	ListActivePricingDiscounts(ctx context.Context, serverID uuid.UUID) ([]models.PricingDiscount, error)
 }
 
 // Compile-time check.

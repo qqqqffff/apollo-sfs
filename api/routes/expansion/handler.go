@@ -2,6 +2,7 @@ package expansion
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -121,7 +122,7 @@ func (h *Handler) CreateWalletOrder(c *gin.Context) {
 		return
 	}
 
-	pl, fullCents, depositCents, ok := h.resolvePlan(c, req.PlanID, req.StorageType, req.CustomBytes)
+	pl, fullCents, depositCents, ok := h.resolvePlan(c, req.PlanID, req.StorageType, username, serverID)
 	if !ok {
 		return
 	}
@@ -271,7 +272,7 @@ func (h *Handler) CaptureHostedCardExpansion(c *gin.Context) {
 		return
 	}
 
-	pl, fullCents, depositCents, ok := h.resolvePlan(c, req.PlanID, req.StorageType, req.CustomBytes)
+	pl, fullCents, depositCents, ok := h.resolvePlan(c, req.PlanID, req.StorageType, username, serverID)
 	if !ok {
 		return
 	}
@@ -340,7 +341,7 @@ func (h *Handler) ChargeCardExpansion(c *gin.Context) {
 		return
 	}
 
-	pl, fullCents, depositCents, ok := h.resolvePlan(c, req.PlanID, req.StorageType, req.CustomBytes)
+	pl, fullCents, depositCents, ok := h.resolvePlan(c, req.PlanID, req.StorageType, username, serverID)
 	if !ok {
 		return
 	}
@@ -410,7 +411,7 @@ func (h *Handler) ChargeApplePayExpansion(c *gin.Context) {
 		return
 	}
 
-	pl, fullCents, depositCents, ok := h.resolvePlan(c, req.PlanID, req.StorageType, req.CustomBytes)
+	pl, fullCents, depositCents, ok := h.resolvePlan(c, req.PlanID, req.StorageType, username, serverID)
 	if !ok {
 		return
 	}
@@ -474,7 +475,7 @@ func (h *Handler) ChargeGooglePayExpansion(c *gin.Context) {
 		return
 	}
 
-	pl, fullCents, depositCents, ok := h.resolvePlan(c, req.PlanID, req.StorageType, req.CustomBytes)
+	pl, fullCents, depositCents, ok := h.resolvePlan(c, req.PlanID, req.StorageType, username, serverID)
 	if !ok {
 		return
 	}
@@ -690,7 +691,7 @@ func (h *Handler) CreateInvoice(c *gin.Context) {
 		c.Request.Context(),
 		req.UserEmail,
 		req.ServerName,
-		planLabel(req.PlanID, req.StorageType),
+		planLabel(req.PlanID, req.StorageType, req.BytesRequested),
 		inv.InvoiceNumber,
 		formatCents(int(inv.TotalCents), req.Currency),
 		depositFmt,
@@ -1412,7 +1413,7 @@ func (h *Handler) MarkExpanded(c *gin.Context) {
 			c.Request.Context(),
 			req.UserEmail,
 			req.ServerName,
-			planLabel(req.PlanID, req.StorageType),
+			planLabel(req.PlanID, req.StorageType, req.BytesRequested),
 			formatCents(remainingCents, req.Currency),
 			revertAt.Format("Mon, 02 Jan 2006"),
 			paymentURL,
@@ -1504,7 +1505,7 @@ func (h *Handler) CancelRequest(c *gin.Context) {
 		c.Request.Context(),
 		req.UserEmail,
 		req.ServerName,
-		planLabel(req.PlanID, req.StorageType),
+		planLabel(req.PlanID, req.StorageType, req.BytesRequested),
 		formatCents(req.DepositAmountCents, req.Currency),
 		body.Reason,
 	); err != nil {
@@ -1677,7 +1678,7 @@ func (h *Handler) processUnpaidBalances(ctx context.Context) {
 			ctx,
 			r.UserEmail,
 			r.ServerName,
-			planLabel(r.PlanID, r.StorageType),
+			planLabel(r.PlanID, r.StorageType, r.BytesRequested),
 			formatCents(remainingCents, r.Currency),
 			revertAt.Format("Mon, 02 Jan 2006"),
 			paymentURL,
@@ -1795,7 +1796,7 @@ func (h *Handler) notifyAdmins(ctx context.Context, r *models.ServerExpansionReq
 		r.Username,
 		r.UserEmail,
 		r.ServerName,
-		planLabel(r.PlanID, r.StorageType),
+		planLabel(r.PlanID, r.StorageType, r.BytesRequested),
 		formatCents(r.DepositAmountCents, r.Currency),
 		r.ExpiresAt.Format(time.RFC1123),
 	); err != nil {
@@ -1815,25 +1816,29 @@ func (h *Handler) currentUsername(c *gin.Context) (string, bool) {
 // resolvePlan resolves a fixed plan for the deposit endpoints. Custom
 // capacity is rejected here: custom requests are submitted without payment
 // (estimated price only) via SubmitCustomRequest and invoiced after review.
-// Returns (plan, full price cents, 50% deposit cents, ok).
-func (h *Handler) resolvePlan(c *gin.Context, planID, storageType string, _ int64) (billing.Plan, int, int, bool) {
+// planID may be a legacy slug or an admin-managed pricing-item UUID — see
+// billing.ResolvePlanPrice, which also applies any active discount for this
+// user. Returns (plan, full price cents, 50% deposit cents, ok).
+func (h *Handler) resolvePlan(c *gin.Context, planID, storageType, username string, serverID uuid.UUID) (billing.Plan, int, int, bool) {
 	if planID == billing.CustomPlanID {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{
 			"error": "custom capacity requests are invoiced after review — submit via the custom request endpoint",
 		})
 		return billing.Plan{}, 0, 0, false
 	}
-	pl, found := billing.LookupPlan(planID)
-	if !found {
-		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "unknown plan_id"})
-		return billing.Plan{}, 0, 0, false
+	pl, fullCents, err := billing.ResolvePlanPrice(
+		c.Request.Context(), h.queries, planID, storageType, username, &serverID,
+	)
+	switch {
+	case err == nil:
+		return pl, fullCents, fullCents / 2, true
+	case errors.Is(err, billing.ErrPlanNotFound), errors.Is(err, billing.ErrPlanMismatch):
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	default:
+		log.Printf("expansion resolvePlan: %v", err)
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "resolve plan"})
 	}
-	fullCents, ok := pl.PriceCents[storageType]
-	if !ok {
-		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "unknown storage_type for plan"})
-		return billing.Plan{}, 0, 0, false
-	}
-	return pl, fullCents, fullCents / 2, true
+	return billing.Plan{}, 0, 0, false
 }
 
 // checkRequestAllowed rejects users who have accumulated maxFailedRequests
@@ -1880,16 +1885,35 @@ func (h *Handler) currencyOrDefault() string {
 	return "USD"
 }
 
-func planLabel(planID, storageType string) string {
+func planLabel(planID, storageType string, bytes int64) string {
 	labels := map[string]string{
 		"64gb": "64 GB", "128gb": "128 GB", "256gb": "256 GB",
 		"512gb": "512 GB", "1tb": "1 TB", billing.CustomPlanID: "Custom",
 	}
 	label := labels[planID]
 	if label == "" {
-		label = planID
+		// Admin-managed pricing items carry a UUID plan id — label those by
+		// their size instead.
+		label = formatBytesLabel(bytes)
 	}
 	return label + " " + strings.ToUpper(storageType)
+}
+
+// formatBytesLabel renders a storage quantity the way plan labels do:
+// whole GB below 1 TiB, and TB with up to two decimals above.
+func formatBytesLabel(bytes int64) string {
+	const gib = int64(1) << 30
+	const tib = int64(1) << 40
+	if bytes <= 0 {
+		return "0 GB"
+	}
+	if bytes < tib {
+		return fmt.Sprintf("%d GB", (bytes+gib-1)/gib)
+	}
+	tb := float64(bytes) / float64(tib)
+	s := strconv.FormatFloat(tb, 'f', 2, 64)
+	s = strings.TrimRight(strings.TrimRight(s, "0"), ".")
+	return s + " TB"
 }
 
 func formatCents(cents int, currency string) string {

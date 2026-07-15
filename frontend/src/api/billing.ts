@@ -73,6 +73,21 @@ export function getBillingConfig() {
   return get<BillingConfig>('/billing/config')
 }
 
+// Browser-safe client token for the PayPal JS SDK v6 (the Apple Pay button).
+// Minted and cached server-side (POST /v1/oauth2/token with
+// response_type=client_token); domain-bound and SDK-init-only, so safe in the
+// browser by design. Environment follows the admin sandbox-payments toggle,
+// matching getBillingConfig().
+export interface PayPalClientTokenResult {
+  client_token: string
+  expires_in: number
+  environment: 'sandbox' | 'live'
+}
+
+export function getPayPalClientToken() {
+  return get<PayPalClientTokenResult>('/billing/client-token')
+}
+
 // ── Direct storage purchases (server-side create + capture) ───────────────────
 
 export interface StorageOrderResult {

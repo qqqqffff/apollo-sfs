@@ -1,9 +1,12 @@
 package billing
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -99,6 +102,57 @@ func (h *Handler) GetConfig(c *gin.Context) {
 	})
 }
 
+// ── GET /api/v1/billing/client-token ──────────────────────────────────────────
+
+// GetClientToken mints a browser-safe client token for the PayPal JS SDK v6 —
+// paypal.createInstance({ clientToken }) replaces the older SDK's client-id
+// script query param and is required by the documented Apple Pay integration
+// (https://developer.paypal.com/apple-pay/integrate). Honors the admin
+// sandbox-payments toggle the same way GetConfig does, so the token always
+// matches the environment the surface's other config came from.
+func (h *Handler) GetClientToken(c *gin.Context) {
+	client, env := h.resolveClient(c)
+	h.clientToken(c, client, env)
+}
+
+// PublicClientToken is the unauthenticated variant backing the public
+// interest page — always the live client, mirroring GET /config. Client
+// tokens are browser-safe by design (domain-bound, SDK-init only), so
+// exposing this without a session leaks nothing the client ID didn't.
+func (h *Handler) PublicClientToken(c *gin.Context) {
+	h.clientToken(c, h.paypal.Live, services.PayPalEnvLive)
+}
+
+func (h *Handler) clientToken(c *gin.Context, client *services.PayPalClient, env string) {
+	if client == nil {
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "payments not configured"})
+		return
+	}
+	token, expiresIn, err := client.BrowserSafeClientToken(c.Request.Context(), h.sdkDomains())
+	if err != nil {
+		log.Printf("billing clientToken paypal: %v", err)
+		c.AbortWithStatusJSON(http.StatusBadGateway, gin.H{"error": "paypal error"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"client_token": token,
+		"expires_in":   expiresIn,
+		"environment":  env,
+	})
+}
+
+// sdkDomains derives the domain list bound into browser-safe client tokens
+// from the frontend origin: the apex host plus its www. variant (PayPal's
+// domain checks probe both — see nginx's www vhost rationale).
+func (h *Handler) sdkDomains() []string {
+	u, err := url.Parse(h.cfg.AppBaseURL)
+	if err != nil || u.Hostname() == "" {
+		return nil
+	}
+	host := strings.TrimPrefix(u.Hostname(), "www.")
+	return []string{host, "www." + host}
+}
+
 func (h *Handler) premiumPlans() []PremiumPlanOption {
 	return []PremiumPlanOption{
 		{Plan: "monthly", PriceCents: h.cfg.PremiumMonthlyPriceCents},
@@ -158,7 +212,7 @@ func (h *Handler) CreateWalletOrder(c *gin.Context) {
 		return
 	}
 
-	pl, amountCents, ok := h.resolvePlan(c, req.PlanID, req.StorageType)
+	pl, amountCents, ok := h.resolvePlan(c, req.PlanID, req.StorageType, req.ServerID)
 	if !ok {
 		return
 	}
@@ -322,7 +376,7 @@ func (h *Handler) CaptureHostedCard(c *gin.Context) {
 		return
 	}
 
-	pl, expectedCents, ok := h.resolvePlan(c, req.PlanID, req.StorageType)
+	pl, expectedCents, ok := h.resolvePlan(c, req.PlanID, req.StorageType, req.ServerID)
 	if !ok {
 		return
 	}
@@ -386,7 +440,7 @@ func (h *Handler) ChargeCard(c *gin.Context) {
 		return
 	}
 
-	pl, amountCents, ok := h.resolvePlan(c, req.PlanID, req.StorageType)
+	pl, amountCents, ok := h.resolvePlan(c, req.PlanID, req.StorageType, req.ServerID)
 	if !ok {
 		return
 	}
@@ -453,7 +507,7 @@ func (h *Handler) ChargeApplePay(c *gin.Context) {
 		return
 	}
 
-	pl, amountCents, ok := h.resolvePlan(c, req.PlanID, req.StorageType)
+	pl, amountCents, ok := h.resolvePlan(c, req.PlanID, req.StorageType, req.ServerID)
 	if !ok {
 		return
 	}
@@ -514,7 +568,7 @@ func (h *Handler) ChargeGooglePay(c *gin.Context) {
 		return
 	}
 
-	pl, amountCents, ok := h.resolvePlan(c, req.PlanID, req.StorageType)
+	pl, amountCents, ok := h.resolvePlan(c, req.PlanID, req.StorageType, req.ServerID)
 	if !ok {
 		return
 	}
@@ -704,18 +758,29 @@ func (h *Handler) currentUsername(c *gin.Context) (string, bool) {
 	return username, true
 }
 
-func (h *Handler) resolvePlan(c *gin.Context, planID, storageType string) (Plan, int, bool) {
-	pl, found := lookupPlan(planID)
-	if !found {
-		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "unknown plan_id"})
-		return Plan{}, 0, false
+// resolvePlan resolves planID (legacy slug or pricing-item UUID) to the plan
+// and the amount the calling user pays, with any active discount applied —
+// see ResolvePlanPrice. serverIDStr may be empty or invalid here; a UUID plan
+// is then validated against its own server, and validatePurchaseServer still
+// rejects malformed ids afterwards.
+func (h *Handler) resolvePlan(c *gin.Context, planID, storageType, serverIDStr string) (Plan, int, bool) {
+	var serverID *uuid.UUID
+	if id, err := uuid.Parse(serverIDStr); err == nil {
+		serverID = &id
 	}
-	amountCents, ok := pl.PriceCents[storageType]
-	if !ok {
-		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "unknown storage_type for plan"})
-		return Plan{}, 0, false
+	pl, amountCents, err := ResolvePlanPrice(
+		c.Request.Context(), h.queries, planID, storageType, c.GetString("username"), serverID,
+	)
+	switch {
+	case err == nil:
+		return pl, amountCents, true
+	case errors.Is(err, ErrPlanNotFound), errors.Is(err, ErrPlanMismatch):
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	default:
+		log.Printf("billing resolvePlan: %v", err)
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "resolve plan"})
 	}
-	return pl, amountCents, true
+	return Plan{}, 0, false
 }
 
 func (h *Handler) currencyOrDefault() string {

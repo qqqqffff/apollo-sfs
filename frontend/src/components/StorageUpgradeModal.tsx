@@ -26,13 +26,16 @@ import {
   createStorageOrder,
   customPriceCents,
   formatCents,
+  getPayPalClientToken,
   listMyExpansionRequests,
   submitCustomRequest,
   type StorageType,
 } from '../api/billing'
 import { ApiError } from '../api/client'
+import { listServerStoragePlans, type StoragePlanDiscount } from '../api/pricing'
 import { PayPalCheckoutOptions, CheckoutBackButton } from './PayPalCheckoutOptions'
 import { HostedCardFields } from './HostedCardFields'
+import { DiscountCountdown, MarkedDownPrice } from './DiscountBadge'
 
 // Requests still working their way through review/provisioning — anything not
 // in this closed set counts as "in progress" for blocking a duplicate custom
@@ -67,6 +70,17 @@ interface ServerRow extends PublicServer {
   // whichever row sorts first (hdd), making every fast plan look unavailable
   // even when the fast tier has room — so rows are keyed by id + tier instead.
   row_key: string
+}
+
+// DisplayPlan unifies admin-managed pricing items (UUID ids, per-server, with
+// discounts) and the legacy hardcoded plans (slug ids) for rendering.
+interface DisplayPlan {
+  id: string
+  label: string
+  addBytes: number
+  priceCents: number
+  effectiveCents: number
+  discount?: StoragePlanDiscount
 }
 
 interface Props {
@@ -160,12 +174,52 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
   const selectedServer = servers?.find((s) => s.row_key === selectedServerKey)
   const isCustom = selectedPlanId === CUSTOM_PLAN_ID
   const customBytes = CUSTOM_TIB_STOPS[customStopIdx] * TIB
-  const selectedPlan = STORAGE_PLANS.find((p) => p.id === selectedPlanId)
+
+  // Admin-managed line items for the selected server, priced for this user
+  // (discounts already applied server-side). Empty = the server has no
+  // managed pricing for this tier and the legacy hardcoded plans apply.
+  const { data: serverPlans, refetch: refetchServerPlans } = useQuery({
+    queryKey: ['billing', 'storage-plans', selectedServer?.id],
+    queryFn: () => listServerStoragePlans(selectedServer!.id),
+    enabled: !!selectedServer,
+    staleTime: 30 * 1000,
+  })
+
+  const displayPlans = useMemo((): DisplayPlan[] => {
+    const managed = (serverPlans ?? []).filter((p) => p.storage_type === storageType)
+    if (managed.length > 0) {
+      return managed.map((p) => ({
+        id: p.id,
+        label: formatSize(p.bytes),
+        addBytes: p.bytes,
+        priceCents: p.price_cents,
+        effectiveCents: p.effective_cents,
+        discount: p.discount,
+      }))
+    }
+    return STORAGE_PLANS.map((p) => ({
+      id: p.id,
+      label: p.label,
+      addBytes: p.addBytes,
+      priceCents: p.priceCents[storageType],
+      effectiveCents: p.priceCents[storageType],
+    }))
+  }, [serverPlans, storageType])
+
+  const selectedPlan = displayPlans.find((p) => p.id === selectedPlanId)
+
+  // Drop a selection that no longer exists after a server/tier switch (plan
+  // ids differ between servers once pricing is admin-managed).
+  useEffect(() => {
+    if (selectedPlanId && selectedPlanId !== CUSTOM_PLAN_ID && !selectedPlan) {
+      setSelectedPlanId(null)
+    }
+  }, [selectedPlanId, selectedPlan])
 
   const planBytes = isCustom ? customBytes : (selectedPlan?.addBytes ?? 0)
   const fullPriceCents = isCustom
     ? customPriceCents(customBytes, storageType)
-    : (selectedPlan?.priceCents[storageType] ?? 0)
+    : (selectedPlan?.effectiveCents ?? 0)
   const depositCents = Math.ceil(fullPriceCents / 2)
 
   const serverAtCapacity = !!selectedServer && selectedServer.allocated_pct >= MAX_ALLOCATED_PCT
@@ -640,10 +694,11 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
               <div>
                 <SectionLabel>Capacity</SectionLabel>
                 <div className="flex flex-col gap-2">
-                  {STORAGE_PLANS.map((plan) => {
+                  {displayPlans.map((plan) => {
                     const sel = selectedPlanId === plan.id
                     const unavailable = !!selectedServer &&
                       (expansionOverride || serverAtCapacity || selectedServer.drive_type !== storageType || plan.addBytes > selectedServer.available_bytes)
+                    const discounted = !!plan.discount && plan.effectiveCents < plan.priceCents
                     return (
                       <button
                         key={plan.id}
@@ -658,15 +713,34 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
                       >
                         <div>
                           <span className={`text-sm font-semibold ${sel ? 'text-blue-700' : 'text-gray-800'}`}>{plan.label}</span>
+                          {discounted && plan.discount?.premium_only && (
+                            <span className="ml-2 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider bg-purple-100 text-purple-700 rounded">
+                              Premium deal
+                            </span>
+                          )}
                           <p className="text-xs m-0 mt-0.5 text-gray-400">
                             {unavailable
                               ? <span className="text-amber-600">Server expansion required</span>
                               : user ? `New total: ${formatSize(user.storage_quota_bytes + plan.addBytes)}` : ''}
                           </p>
                         </div>
-                        <span className={`text-sm font-semibold ${sel ? 'text-blue-700' : 'text-gray-600'}`}>
-                          {formatCents(plan.priceCents[storageType])}{unavailable ? '*' : ''}
-                        </span>
+                        {discounted ? (
+                          <span className="flex flex-col items-end gap-0.5 text-sm">
+                            <MarkedDownPrice
+                              originalLabel={formatCents(plan.priceCents)}
+                              currentLabel={`${formatCents(plan.effectiveCents)}${unavailable ? '*' : ''}`}
+                              percent={plan.discount!.percent}
+                            />
+                            <DiscountCountdown
+                              expiresAt={plan.discount!.expires_at}
+                              onExpired={() => refetchServerPlans()}
+                            />
+                          </span>
+                        ) : (
+                          <span className={`text-sm font-semibold ${sel ? 'text-blue-700' : 'text-gray-600'}`}>
+                            {formatCents(plan.effectiveCents)}{unavailable ? '*' : ''}
+                          </span>
+                        )}
                       </button>
                     )
                   })}
@@ -810,6 +884,7 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
                     clientId={config.paypal_client_id}
                     currency={config.currency || 'USD'}
                     environment={config.environment}
+                    getClientToken={async () => (await getPayPalClientToken()).client_token}
                     amount={() => (amountCents / 100).toFixed(2)}
                     createOrder={handleCreateOrder}
                     getApprovalUrl={handleGetApprovalUrl}

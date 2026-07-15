@@ -173,6 +173,28 @@ sudo nginx -t && sudo systemctl reload nginx
 
 If you skip this step, the card-payment button still works for storage add-ons; only the Apple Pay tile fails to render in Safari.
 
+### Why the web Apple Pay button can't be tested via the sandbox-payments toggle
+
+PayPal issues a **different** domain-association file per environment, and each environment separately requires its own registered domain serving its own file at the same `/.well-known/` path — so one domain can only ever be verified with one PayPal app. `apollo-sfs.com` is (rightly) verified with the **live** app; the sandbox app therefore always reports this domain ineligible, and under the sandbox-payments toggle the Apple Pay tile simply stays hidden (the button's `config()` eligibility check fails silently). Hosting the sandbox file would require serving the checkout from a second, sandbox-registered domain — deliberately not done, to keep the deployment simple and avoid exposing a second app origin.
+
+**Testing Apple Pay is therefore done against live:** buy the cheapest storage plan with a real card in Safari on the production site, then refund it (PayPal dashboard, or the admin orders page's refund/revert tooling). Everything *around* Apple Pay is still covered by the sandbox toggle — Google Pay (TEST), the PayPal wallet buttons, and hosted card fields all share the same order create/confirm/capture code paths the Apple Pay button drives.
+
+Native iOS Apple Pay is unaffected by any of this: domain-association files only gate Apple Pay **on the web**. The app's PassKit flow tests against sandbox with a device signed into a sandbox iCloud account (with Apple's test cards in the Wallet) and the sandbox-payments toggle on.
+
+### How the Apple Pay button is integrated (PayPal JS SDK v6)
+
+The web Apple Pay button (`frontend/src/components/PayPalApplePayButton.tsx`) follows PayPal's current integration standard (<https://developer.paypal.com/apple-pay/integrate>), which differs from the legacy `paypal.com/sdk/js` integration the other buttons use:
+
+1. **Browser-safe client token** — the SDK is initialised with a short-lived, domain-bound token instead of the client ID in the script URL. The API mints and caches it (`PayPalClient.BrowserSafeClientToken`, `POST /v1/oauth2/token` with `response_type=client_token`) and exposes it at:
+   - `GET /api/v1/billing/client-token` (protected; honors the admin sandbox-payments toggle like `/billing/config`)
+   - `GET /api/v1/config/paypal-client-token` (public, always live — for the interest page)
+2. **Two SDK scripts**, loaded by the button component itself:
+   - Apple's Apple Pay JS SDK (`https://applepay.cdn-apple.com/jsapi/v1/apple-pay-sdk.js`) — registers the official `<apple-pay-button>` element (allowed in the nginx CSP `script-src`).
+   - PayPal Web SDK v6 core (`https://www.paypal.com/web-sdk/v6/core`, or `www.sandbox.paypal.com` under the sandbox toggle). The v6 core coexists with the legacy SDK by attaching as `window.paypal.v6` when the legacy SDK owns `window.paypal`.
+3. **Flow** — `createInstance({ clientToken, components: ['applepay-payments'] })` → `createApplePayOneTimePaymentSession()` → eligibility via `.config()` → on tap, `new ApplePaySession(4, …)` → `validateMerchant` → create order server-side → `confirmOrder({ orderId, token })` → capture server-side → `completePayment`. The sheet only shows success after the capture returns, so the checkmark means the charge actually completed.
+
+The iOS app mirrors the same semantics natively: `RNApplePay` (PassKit) resolves the tokenized payment while the sheet stays open, the app charges it through the API's direct-charge endpoints (Orders v2 with `payment_source.apple_pay`), then calls `completePayment(success)` so the sheet reflects the real outcome. Apple auto-fails the sheet if no result is delivered within ~30 seconds of authorization.
+
 ---
 
 ## 6. Environment variables

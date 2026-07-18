@@ -155,6 +155,10 @@ services:
       GOOGLE_WEB_CLIENT_SECRET: ${GOOGLE_WEB_OAUTH_CLIENT_SECRET:-}
       PREMIUM_TIER_PRICE_CENTS: ${PREMIUM_TIER_PRICE_CENTS:-999}
       PREMIUM_TIER_CURRENCY: ${PREMIUM_TIER_CURRENCY:-USD}
+      # AI recognition sidecar (premium face/pet/object indexing). Empty
+      # RECOGNITION_URL disables the feature and the background worker.
+      RECOGNITION_URL: http://recognition:8000
+      RECOGNITION_TOKEN: ${RECOGNITION_TOKEN:-}
     volumes:
       # Local HDD (standard tier) for disk-stats reads
       - /srv/minio/hdd-01:/data:ro
@@ -374,6 +378,39 @@ services:
         constraints: [node.labels.tier == standard]
       restart_policy:
         condition: any
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  # ── AI recognition sidecar — internal inference service (faces/pets/objects) ─
+  # Stateless: the api decrypts media server-side and POSTs plaintext bytes
+  # here (X-Internal-Token auth); this container never sees keys, the DB, or
+  # MinIO. Overlay-only, never proxied by nginx. Pinned to the Ryzen manager
+  # (amd64 — broadest ONNX Runtime support; the Pi only runs minio-fast).
+  #
+  # resources.limits implements the recognition resource pool: set
+  # RECOGNITION_CPU_LIMIT / RECOGNITION_MEM_LIMIT to ~50% of the node's
+  # cores/RAM so indexing can never starve the rest of the stack. These are
+  # the stack's first/only resource limits — every other service is unlimited.
+  # To enable a future NVIDIA GPU see docs/ai_recognition_setup.md (build
+  # recognition/Dockerfile.cuda, advertise the GPU as a Swarm generic
+  # resource, and add a generic_resources reservation here).
+  recognition:
+    image: ${REGISTRY:-192.168.68.57:5000}/apollo-sfs_recognition:${RECOGNITION_TAG}
+    environment:
+      # Shared secret authenticating api → sidecar analyze calls.
+      RECOGNITION_TOKEN: ${RECOGNITION_TOKEN:-}
+    networks: [app-network]
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.labels.tier == standard]
+      restart_policy:
+        condition: any
+      resources:
+        limits:
+          cpus: "${RECOGNITION_CPU_LIMIT:-6}"
+          memory: ${RECOGNITION_MEM_LIMIT:-16G}
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "3" }

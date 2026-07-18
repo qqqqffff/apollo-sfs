@@ -130,6 +130,10 @@ type FileService struct {
 	transcode    *TranscodeService
 	meta         *MetadataService
 	quotaWarnPct int
+	// recognition enqueues freshly uploaded media into AI-indexing-enabled
+	// collections. Optional (nil when the sidecar is not configured); wired
+	// via SetRecognitionEnqueuer to keep the dependency one-directional.
+	recognition RecognitionEnqueuer
 
 	userCacheMu sync.RWMutex
 	userCache   map[string]cachedUser
@@ -161,6 +165,21 @@ func NewFileService(q *db.Queries, registry *MinIORegistry, enc *EncryptionServi
 		raCache:      make(map[raKey]*raEntry),
 		raInflight:   make(map[raKey]struct{}),
 	}
+}
+
+// SetRecognitionEnqueuer installs the AI-recognition upload hook. nil is
+// tolerated (feature disabled).
+func (s *FileService) SetRecognitionEnqueuer(r RecognitionEnqueuer) {
+	s.recognition = r
+}
+
+// enqueueRecognitionAsync fires the AI-recognition hook for a stored media
+// file. Fire-and-forget: durability comes from the job row once inserted.
+func (s *FileService) enqueueRecognitionAsync(file *models.File, username, trigger string) {
+	if s.recognition == nil || file == nil {
+		return
+	}
+	go s.recognition.EnqueueFileIfEnabled(context.Background(), file, username, trigger)
 }
 
 // storageFor returns the MinIOService and driveID for the given user. Results
@@ -532,6 +551,9 @@ func (s *FileService) Upload(ctx context.Context, in UploadInput) (*models.File,
 		go s.extractTakenAtAsync(file, in.Username)
 	}
 
+	// 12. Enqueue AI recognition when the destination collection has it enabled.
+	s.enqueueRecognitionAsync(file, in.Username, "upload")
+
 	return file, nil
 }
 
@@ -765,6 +787,16 @@ func (s *FileService) Delete(ctx context.Context, fileID, userID uuid.UUID, user
 		}
 	}
 
+	// Best-effort: remove AI-recognition crop blobs (rows cascade with the
+	// file) and note their size so the quota refund below includes them.
+	var cropBytes int64
+	if crops, err := q.ListRecognitionCropsByFile(ctx, fileID); err == nil {
+		for _, c := range crops {
+			cropBytes += c.SizeBytes
+			_ = storage.RemoveObject(ctx, c.ObjectKey)
+		}
+	}
+
 	if err := storage.RemoveObject(ctx, file.MinIOObjectKey); err != nil {
 		return fmt.Errorf("delete: remove blob: %w", err)
 	}
@@ -775,7 +807,7 @@ func (s *FileService) Delete(ctx context.Context, fileID, userID uuid.UUID, user
 		return fmt.Errorf("delete: commit: %w", err)
 	}
 	// AddStorageUsed touches the users table (no RLS) — use the pool directly.
-	if err := s.queries.AddStorageUsed(ctx, username, -file.SizeBytes); err != nil {
+	if err := s.queries.AddStorageUsed(ctx, username, -(file.SizeBytes + cropBytes)); err != nil {
 		return fmt.Errorf("delete: update storage: %w", err)
 	}
 	return nil
@@ -1437,6 +1469,10 @@ func (s *FileService) FinalizeChunkedUpload(ctx context.Context, sess *UploadSes
 	if isMediaMime(mimeType) {
 		go s.extractTakenAtAsync(file, sess.Username)
 	}
+
+	// Enqueue AI recognition when the destination collection has it enabled.
+	// (Chunked uploads bypass Upload, so the hook must fire here too.)
+	s.enqueueRecognitionAsync(file, sess.Username, "upload")
 
 	return file, nil
 }

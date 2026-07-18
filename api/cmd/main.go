@@ -159,6 +159,24 @@ func main() {
 	folderSvc := services.NewFolderService(queries)
 	favSvc := services.NewFavoriteService(queries)
 
+	// AI recognition (premium): nil client (RECOGNITION_URL unset) leaves the
+	// endpoints returning 503 and skips the worker.
+	recogClient := services.NewRecognitionClient(cfg.RecognitionURL, cfg.RecognitionToken)
+	recogSvc := services.NewRecognitionService(queries, fileSvc, recogClient, transcodeSvc, services.RecognitionConfig{
+		URL:           cfg.RecognitionURL,
+		Token:         cfg.RecognitionToken,
+		Concurrency:   cfg.RecognitionConcurrency,
+		MaxKeyframes:  cfg.RecognitionMaxKeyframes,
+		FaceThreshold: float32(cfg.RecognitionFaceThreshold),
+		PetThreshold:  float32(cfg.RecognitionPetThreshold),
+	})
+	if recogSvc.Available() {
+		fileSvc.SetRecognitionEnqueuer(recogSvc)
+		log.Printf("recognition: sidecar at %s — premium AI indexing enabled", cfg.RecognitionURL)
+	} else {
+		log.Printf("recognition: RECOGNITION_URL not set — premium AI indexing disabled")
+	}
+
 	inviteSvc := services.NewInviteService(queries, emailSvc, cfg.AppBaseURL, 0)
 
 	metricsSvc := services.NewMetricsService(queries, cfg.DiskStatsPath)
@@ -185,9 +203,10 @@ func main() {
 	go rotationSvc.StartScheduler(context.Background())
 	go metricsSvc.Start(context.Background())
 	go emailSvc.Start(context.Background())
+	go recogSvc.Start(context.Background())
 
 	shutdownCh := make(chan struct{})
-	r := setupRouter(cfg, queries, oidcVerifier, authSvc, fileSvc, folderSvc, favSvc, inviteSvc, metricsSvc, registry, geoReader, emailSvc, inboundEmailSvc, shutdownCh)
+	r := setupRouter(cfg, queries, oidcVerifier, authSvc, fileSvc, folderSvc, favSvc, inviteSvc, metricsSvc, registry, geoReader, emailSvc, inboundEmailSvc, recogSvc, shutdownCh)
 
 	addr := ":" + cfg.Port
 	log.Printf("apollo-sfs API listening on %s", addr)
@@ -218,7 +237,7 @@ func main() {
 	log.Println("server stopped")
 }
 
-func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVerifier, authSvc *services.AuthService, fileSvc *services.FileService, folderSvc *services.FolderService, favSvc *services.FavoriteService, inviteSvc *services.InviteService, metricsSvc *services.MetricsService, registry *services.MinIORegistry, geoReader *geoip2.Reader, emailSvc *services.EmailService, inboundEmailSvc *services.InboundEmailService, shutdownCh chan struct{}) *gin.Engine {
+func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVerifier, authSvc *services.AuthService, fileSvc *services.FileService, folderSvc *services.FolderService, favSvc *services.FavoriteService, inviteSvc *services.InviteService, metricsSvc *services.MetricsService, registry *services.MinIORegistry, geoReader *geoip2.Reader, emailSvc *services.EmailService, inboundEmailSvc *services.InboundEmailService, recogSvc *services.RecognitionService, shutdownCh chan struct{}) *gin.Engine {
 	r := gin.New()
 	r.Use(gin.Logger())
 	r.Use(gin.Recovery())
@@ -258,6 +277,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	routes.SetAPIKeyService(h, apiKeySvc)
 	routes.SetMathGameService(h, services.NewMathGameService(queries))
 	routes.SetShareService(h, services.NewShareService(queries, emailSvc, cfg.AppBaseURL))
+	routes.SetRecognitionService(h, recogSvc)
 	authHandler := auth.NewHandler(authSvc, cfg.CookieDomain, cfg.CookieSecure)
 	adminHandler := admin.NewHandler(queries, inviteSvc, metricsSvc, authSvc, fileSvc, registry, geoReader, cfg.DiskStatsPath, cfg.DiskStatsDriveLabel, cfg.BackendTestURL, cfg.AppDir, cfg.FrontendTestURL, cfg.FrontendE2EURL, shutdownCh)
 	adminHandler.SetDiscountMailer(emailSvc)
@@ -638,6 +658,16 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 			premiumGroup.POST("/collections/:collection_id/items/:file_id", h.CopyFileToCollection)
 			premiumGroup.PATCH("/collections/:collection_id/items/:file_id/move", h.MoveCollectionItem)
 			premiumGroup.DELETE("/collections/:collection_id/items/:file_id", h.RemoveFileFromCollection)
+
+			// AI recognition — per-collection face/pet/object indexing.
+			premiumGroup.GET("/collections/:collection_id/recognition", h.GetCollectionRecognition)
+			premiumGroup.PUT("/collections/:collection_id/recognition", h.SetCollectionRecognition)
+			premiumGroup.GET("/collections/:collection_id/recognition/groups", h.ListRecognitionGroups)
+			premiumGroup.GET("/recognition/groups/:group_id/files", h.GetRecognitionGroupFiles)
+			premiumGroup.PATCH("/recognition/groups/:group_id", h.UpdateRecognitionGroup)
+			premiumGroup.POST("/recognition/groups/:group_id/merge", h.MergeRecognitionGroups)
+			premiumGroup.DELETE("/recognition/groups/:group_id", h.DeleteRecognitionGroup)
+			premiumGroup.GET("/recognition/detections/:detection_id/thumb", h.GetRecognitionThumb)
 
 			// Email backup — provider mailbox backups into 'email' folders.
 			// Provider OAuth is entirely client-side (mirrors Google backup);

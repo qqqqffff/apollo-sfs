@@ -19,12 +19,16 @@ import {
   Folder,
   GalleryHorizontalEnd,
   Image,
+  Info,
   Music,
   Plus,
+  Search,
+  Sparkles,
   Star,
   Trash2,
   Upload,
   Video,
+  X,
   ZoomIn,
   ZoomOut,
 } from 'lucide-react-native';
@@ -40,7 +44,11 @@ import {
   type ApiFile,
   type ApiFolder,
 } from '../api/files';
+import { searchWithGroups, type RecognitionGroupSearchHit } from '../api/recognition';
+import CollectionSettingsSheet from '../components/CollectionSettingsSheet';
 import MediaGallery from '../components/MediaGallery';
+import RecognitionGroupsModal from '../components/RecognitionGroupsModal';
+import { useAuth } from '../context/AuthContext';
 import { colors, radius, shadow, spacing } from '../theme';
 
 interface Crumb { id: string; name: string; }
@@ -63,6 +71,8 @@ function formatBytes(bytes: number): string {
 type CreateKind = 'regular' | 'media';
 
 export default function FilesScreen() {
+  const { profile } = useAuth();
+  const isPremiumUser = !!(profile?.is_premium || profile?.is_admin);
   const [currentFolder, setCurrentFolder] = useState<ApiFolder | null>(null);
   const [subfolders, setSubfolders] = useState<ApiFolder[]>([]);
   const [files, setFiles] = useState<ApiFile[]>([]);
@@ -70,6 +80,15 @@ export default function FilesScreen() {
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // AI recognition (premium)
+  const [settingsVisible, setSettingsVisible] = useState(false);
+  const [groupsModal, setGroupsModal] = useState<{ collectionID: string; initialGroupID?: string } | null>(null);
+
+  // Search (file names + labeled recognition groups)
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<{ files: ApiFile[]; groups: RecognitionGroupSearchHit[] } | null>(null);
+  const [searching, setSearching] = useState(false);
 
   // Create folder modal
   const [galleryCols, setGalleryCols] = useState(3);
@@ -105,8 +124,33 @@ export default function FilesScreen() {
 
   useEffect(() => { load(); }, [load]);
 
+  // Debounced search over file names + labeled recognition groups. Cleared
+  // whenever the user navigates.
+  useEffect(() => {
+    const q = searchQuery.trim();
+    if (!q) { setSearchResults(null); setSearching(false); return; }
+    setSearching(true);
+    const t = setTimeout(async () => {
+      try {
+        setSearchResults(await searchWithGroups(q));
+      } catch {
+        setSearchResults({ files: [], groups: [] });
+      } finally {
+        setSearching(false);
+      }
+    }, 300);
+    return () => clearTimeout(t);
+  }, [searchQuery]);
+
   const enterFolder = (folder: ApiFolder) => {
+    setSearchQuery('');
     setBreadcrumb((prev) => [...prev, { id: folder.id, name: folder.name }]);
+  };
+
+  const openSearchedGroup = (hit: RecognitionGroupSearchHit) => {
+    setSearchQuery('');
+    setBreadcrumb([{ id: hit.collection_id, name: hit.collection_name }]);
+    setGroupsModal({ collectionID: hit.collection_id, initialGroupID: hit.id });
   };
 
   const navigateToCrumb = (index: number) => {
@@ -225,6 +269,24 @@ export default function FilesScreen() {
             </React.Fragment>
           ))}
         </ScrollView>
+        {isMediaFolder && currentFolder?.ai_recognition_enabled && (
+          <TouchableOpacity
+            style={styles.addBtn}
+            onPress={() => setGroupsModal({ collectionID: currentFolder.id })}
+            testID="recognition-groups-btn"
+          >
+            <Sparkles size={18} color={colors.warning} strokeWidth={2} />
+          </TouchableOpacity>
+        )}
+        {isMediaFolder && (
+          <TouchableOpacity
+            style={styles.addBtn}
+            onPress={() => setSettingsVisible(true)}
+            testID="collection-info-btn"
+          >
+            <Info size={18} color={colors.primary} strokeWidth={2} />
+          </TouchableOpacity>
+        )}
         {isMediaFolder && (
           <TouchableOpacity
             style={styles.addBtn}
@@ -243,7 +305,67 @@ export default function FilesScreen() {
         )}
       </View>
 
-      {loading ? (
+      {/* Search bar (hidden inside media galleries, which have their own UI) */}
+      {!isMediaFolder && (
+        <View style={styles.searchRow}>
+          <Search size={16} color={colors.textMuted} />
+          <TextInput
+            value={searchQuery}
+            onChangeText={setSearchQuery}
+            placeholder="Search files and labeled groups"
+            placeholderTextColor={colors.textMuted}
+            style={styles.searchInput}
+            autoCorrect={false}
+            testID="files-search-input"
+          />
+          {searchQuery !== '' && (
+            <TouchableOpacity onPress={() => setSearchQuery('')} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+              <X size={16} color={colors.textMuted} />
+            </TouchableOpacity>
+          )}
+        </View>
+      )}
+
+      {searchQuery.trim() !== '' && !isMediaFolder ? (
+        // ── Search results ────────────────────────────────────────────────
+        <ScrollView contentContainerStyle={styles.list}>
+          {searching && <ActivityIndicator style={{ marginTop: spacing.md }} color={colors.primary} />}
+          {!searching && searchResults && searchResults.groups.length > 0 && (
+            <>
+              <Text style={styles.searchSection}>People &amp; groups</Text>
+              <View style={styles.groupChipWrap}>
+                {searchResults.groups.map((g) => (
+                  <TouchableOpacity key={g.id} style={styles.groupChip} onPress={() => openSearchedGroup(g)}>
+                    <Sparkles size={13} color={colors.warning} />
+                    <Text style={styles.groupChipLabel}>{g.label}</Text>
+                    <Text style={styles.groupChipMeta}>{g.file_count} · {g.collection_name}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </>
+          )}
+          {!searching && searchResults && searchResults.files.length > 0 && (
+            <>
+              <Text style={styles.searchSection}>Files</Text>
+              {searchResults.files.map((f) => {
+                const Icon = fileMimeIcon(f.mime_type);
+                return (
+                  <TouchableOpacity key={f.id} style={styles.searchFileRow} onPress={() => handleDownload(f)}>
+                    <Icon size={18} color={colors.textSecondary} />
+                    <Text style={styles.searchFileName} numberOfLines={1}>{f.name}</Text>
+                    <Text style={styles.searchFileSize}>{formatBytes(f.size_bytes)}</Text>
+                    <Download size={16} color={colors.textMuted} />
+                  </TouchableOpacity>
+                );
+              })}
+            </>
+          )}
+          {!searching && searchResults &&
+            searchResults.files.length === 0 && searchResults.groups.length === 0 && (
+            <Text style={styles.emptySearchText}>No results for “{searchQuery.trim()}”.</Text>
+          )}
+        </ScrollView>
+      ) : loading ? (
         <ActivityIndicator style={styles.center} color={colors.primary} />
       ) : error ? (
         <View style={styles.center}>
@@ -409,12 +531,80 @@ export default function FilesScreen() {
           </Pressable>
         </Pressable>
       </Modal>
+
+      {/* AI recognition: collection settings + groups browser */}
+      {currentFolder && isMediaFolder && (
+        <CollectionSettingsSheet
+          visible={settingsVisible}
+          folder={currentFolder}
+          isPremium={isPremiumUser}
+          onClose={() => setSettingsVisible(false)}
+          onChanged={load}
+        />
+      )}
+      {groupsModal && (
+        <RecognitionGroupsModal
+          visible
+          collectionID={groupsModal.collectionID}
+          initialGroupID={groupsModal.initialGroupID}
+          onClose={() => setGroupsModal(null)}
+        />
+      )}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },
+
+  searchRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    marginHorizontal: spacing.md,
+    marginBottom: spacing.sm,
+    paddingHorizontal: spacing.md,
+    paddingVertical: 8,
+    backgroundColor: colors.surface,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  searchInput: { flex: 1, fontSize: 14, color: colors.textPrimary, padding: 0 },
+  searchSection: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: colors.textMuted,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginTop: spacing.md,
+    marginBottom: spacing.sm,
+  },
+  groupChipWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm },
+  groupChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: spacing.md,
+    paddingVertical: 8,
+    backgroundColor: colors.surface,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  groupChipLabel: { fontSize: 13, color: colors.textPrimary, fontWeight: '500' },
+  groupChipMeta: { fontSize: 11, color: colors.textMuted },
+  searchFileRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.divider,
+  },
+  searchFileName: { flex: 1, fontSize: 14, color: colors.textPrimary },
+  searchFileSize: { fontSize: 11, color: colors.textMuted },
+  emptySearchText: { fontSize: 13, color: colors.textSecondary, marginTop: spacing.md },
 
   breadcrumbWrapper: {
     flexDirection: 'row',

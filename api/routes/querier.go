@@ -70,6 +70,7 @@ type Querier interface {
 	// Search
 	SearchFoldersByUser(ctx context.Context, userID uuid.UUID, term string, in db.PageInput) (*db.PageResult[models.Folder], error)
 	SearchFilesByUser(ctx context.Context, userID uuid.UUID, term string, in db.PageInput) (*db.PageResult[models.File], error)
+	SearchRecognitionGroupsByUser(ctx context.Context, userID uuid.UUID, term string, in db.PageInput) (*db.PageResult[db.RecognitionGroupSearchHit], error)
 
 	// Interest form
 	GetInterestFormSettings(ctx context.Context) (*models.InterestFormSettings, error)

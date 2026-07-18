@@ -28,6 +28,8 @@ export interface ApiFolder {
   parent_id: string | null;
   name: string;
   kind: 'regular' | 'media';
+  // Premium AI face/pet/object indexing toggle (media collections only).
+  ai_recognition_enabled?: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -72,7 +74,7 @@ export async function uploadFile(
   return res.data;
 }
 
-function arrayBufferToBase64(buf: ArrayBuffer): string {
+export function arrayBufferToBase64(buf: ArrayBuffer): string {
   const bytes = new Uint8Array(buf);
   const chunks: string[] = [];
   for (let i = 0; i < bytes.length; i += 4096) {

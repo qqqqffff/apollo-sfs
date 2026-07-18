@@ -13,6 +13,7 @@ apollo-sfs/
 ├── nginx/          # Host nginx config (TLS termination, rate-limiting)
 ├── fail2ban/       # Fail2ban filter/jail/action for API scan detection
 ├── keycloak/       # Keycloak 26.0.7 realm, themes, and Apple IdP provider
+├── recognition/    # Python AI inference sidecar (faces/pets/objects, ONNX Runtime)
 ├── docs/           # Architecture and setup documentation
 ├── docker-compose.yml   # Single-node / development deployment (DEPRECATED — see note below)
 └── docker-stack.yml     # Docker Swarm production deployment (actively used)
@@ -65,6 +66,7 @@ docker service logs apollo-sfs_api --follow
 | `frontend` | 3000 (internal) | standard |
 | `api` | 8080 (internal) | standard |
 | `node-metrics-ingest` | 8080 (internal) | standard |
+| `recognition` | 8000 (internal) | standard |
 | `keycloak` | 8180 (internal) | standard |
 | `postfix` | 587 (internal) | standard |
 | `db-app` | 5432 (internal) | standard |
@@ -72,6 +74,8 @@ docker service logs apollo-sfs_api --follow
 | `minio-fast` | 9000 (internal) | fast (Pi 5) |
 | `minio-standard` | 9001 (internal) | standard |
 | `ddns` | — | standard |
+
+`recognition` is the stateless Python inference sidecar for the premium AI recognition feature (faces/pets/objects): the `api` decrypts media server-side and POSTs plaintext bytes to it over the overlay network (`X-Internal-Token` auth); it never touches keys, the DB, or MinIO. It carries the stack's only `deploy.resources.limits` block — sized to ~50% of the manager's CPU/RAM so indexing can't starve the stack. See `docs/ai_recognition_setup.md` (including how to enable a future NVIDIA GPU).
 
 `node-metrics-ingest` is a small standalone Go service (`api/cmd/node-metrics-ingest`) split out of the `api` service specifically to receive the per-node hardware pushes from `node-agent-standard`/`node-agent-fast` (see the API's `CLAUDE.md`). Keeping it separate isolates that internal, constant-frequency traffic (and any incident on it) from the public-facing `api` service; it shares no in-memory state with `api` — both read/write the same Postgres tables.
 
@@ -115,6 +119,7 @@ All secrets live in `.env` (never commit this file). Key groups:
 | `CLOUDFLARE_*` | API token (DDNS), Turnstile site/secret keys |
 | `SENDGRID_*` | SMTP password (via Postfix relay) and inbound webhook secret |
 | `SFS_API_KEY_PEPPER` | Pepper mixed into argon2id API key hashes |
+| `RECOGNITION_*` | AI recognition sidecar: shared token, CPU/RAM pool limits, clustering thresholds (see `docs/ai_recognition_setup.md`) |
 | `VITE_MS_CLIENT_ID` | Azure AD app (client) ID for the email backup's Microsoft sign-in. Build-time only: deploy.sh passes it to the frontend image build (`--build-arg`), where Vite inlines it into the bundle |
 
 ## Networking and Public Access
@@ -138,5 +143,6 @@ Docker logging uses the JSON file driver with rotation (10 MB max, 3 files). Ngi
 - `docs/mobile_app_setup.md` — React Native build and release
 - `docs/paypal_setup.md` — PayPal payment integration
 - `docs/email_backup_setup.md` — Gmail/Microsoft email backup feature (OAuth setup, architecture)
+- `docs/ai_recognition_setup.md` — premium AI recognition (models, resource pool, GPU enablement)
 - `docs/sfs_api.md` — SFS public API reference
 - `docs/file_server_links.md` — premium WebDAV mount links (file server feature)

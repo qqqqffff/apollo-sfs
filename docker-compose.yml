@@ -170,6 +170,10 @@ services:
       BACKEND_TEST_URL: http://api-tests:9228/run-tests
       FRONTEND_TEST_URL: http://frontend-tests:9229/run-tests
       FRONTEND_E2E_URL: http://frontend-tests:9229/run-e2e
+      # AI recognition sidecar (premium face/pet/object indexing). Empty
+      # RECOGNITION_URL disables the feature and the background worker.
+      RECOGNITION_URL: http://recognition:8000
+      RECOGNITION_TOKEN: ${RECOGNITION_TOKEN:-dev-recognition-token}
     volumes:
       # Read-only mount of the mergerfs pool (nvme-01 + nvme-02) so the API's
       # disk-stats reader reports COMBINED capacity. See docs/nvme_capacity_expansion.md.
@@ -213,6 +217,31 @@ services:
         condition: service_started
       frontend-tests:
         condition: service_started
+    networks:
+      - app-network
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ── AI recognition sidecar ─────────────────────────────────────────────────
+  # Stateless internal inference service (faces/pets/objects). The api decrypts
+  # media and POSTs plaintext bytes here; this container never sees keys, the
+  # DB, or MinIO. CPU/memory caps implement the recognition resource pool —
+  # set the env vars to ~50% of the host's cores/RAM (see
+  # docs/ai_recognition_setup.md, including how to enable an NVIDIA GPU later).
+  recognition:
+    build:
+      context: ./recognition
+      dockerfile: Dockerfile
+    platform: linux/arm64
+    container_name: apollo-sfs-recognition
+    restart: unless-stopped
+    cpus: ${RECOGNITION_CPU_LIMIT:-2}
+    mem_limit: ${RECOGNITION_MEM_LIMIT:-2g}
+    environment:
+      RECOGNITION_TOKEN: ${RECOGNITION_TOKEN:-dev-recognition-token}
     networks:
       - app-network
     logging:

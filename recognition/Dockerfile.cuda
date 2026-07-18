@@ -1,0 +1,30 @@
+# GPU image (build when an NVIDIA GPU is added to the Ryzen node — see
+# docs/ai_recognition_setup.md "Enabling GPU later"). Identical app code:
+# sessions.py already prefers CUDAExecutionProvider; with onnxruntime-gpu and
+# the CUDA libraries present it runs accelerated, otherwise it falls back to
+# CPU. Verify the active provider via GET /healthz.
+FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 python3-pip libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /srv
+
+COPY requirements.txt .
+# Swap the CPU onnxruntime wheel for the CUDA build; everything else matches.
+RUN sed 's/^onnxruntime==/onnxruntime-gpu==/' requirements.txt > requirements-gpu.txt \
+    && pip3 install --no-cache-dir -r requirements-gpu.txt
+
+COPY download_models.py .
+RUN MODEL_DIR=/srv/models python3 download_models.py
+
+COPY app ./app
+
+RUN useradd --uid 65532 --no-create-home nonroot
+USER 65532
+
+ENV MODEL_DIR=/srv/models
+EXPOSE 8000
+
+CMD ["python3", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

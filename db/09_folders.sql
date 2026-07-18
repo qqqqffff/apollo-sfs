@@ -8,14 +8,20 @@
 -- kind distinguishes a normal folder ('regular') from a media collection
 -- ('media'). A media folder is a top-level picture/video collection; any folder
 -- nested beneath it acts as a subcollection.
+-- drive_id optionally pins uploads into this folder to a specific drive
+-- (upload-routing hint; NULL preserves dynamic routing) — see migration 026.
+-- ai_recognition_enabled turns on premium AI face/pet/object indexing for a
+-- media collection — see migration 052 and 36_recognition.sql.
 CREATE TABLE folders (
-    id         UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id    UUID        NOT NULL,
-    parent_id  UUID        REFERENCES folders (id) ON DELETE CASCADE,
-    name       TEXT        NOT NULL,
-    kind       TEXT        NOT NULL DEFAULT 'regular',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    id                     UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id                UUID        NOT NULL,
+    parent_id              UUID        REFERENCES folders (id) ON DELETE CASCADE,
+    drive_id               UUID        REFERENCES drives (id),
+    name                   TEXT        NOT NULL,
+    kind                   TEXT        NOT NULL DEFAULT 'regular',
+    ai_recognition_enabled BOOLEAN     NOT NULL DEFAULT FALSE,
+    created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
     CONSTRAINT folders_unique_name_per_parent
         UNIQUE NULLS NOT DISTINCT (user_id, parent_id, name)
@@ -23,6 +29,7 @@ CREATE TABLE folders (
 
 CREATE INDEX folders_user_id_idx   ON folders (user_id);
 CREATE INDEX folders_parent_id_idx ON folders (parent_id);
+CREATE INDEX folders_drive_id_idx  ON folders (drive_id);
 
 -- Row-level security: queries must run inside a transaction that sets
 -- app.current_user_id to the requesting user's UUID via db.Queries.ForUser().

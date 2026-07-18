@@ -6,6 +6,7 @@ import {
   MdAlternateEmail,
   MdArrowBack,
   MdBolt,
+  MdAutoAwesome,
   MdCheck,
   MdCloudQueue,
   MdCloudUpload,
@@ -24,7 +25,8 @@ import {
   MdVisibility,
 } from 'react-icons/md'
 import { createFolder, deleteFolder, moveFolder, requestDriveMigration } from '../../api/folders'
-import { deleteFile, downloadUrl, fileQueryOptions, moveFile } from '../../api/files'
+import { deleteFile, downloadUrl, fileQueryOptions, moveFile, previewUrl } from '../../api/files'
+import { detectionThumbUrl } from '../../api/recognition'
 import { meQueryOptions, preferencesQueryOptions, updatePreferences } from '../../api/me'
 import { listMyServers, resolveDrive, type MyServer } from '../../api/storage'
 import { infrastructureQueryOptions, type DriveSummary } from '../../api/admin'
@@ -81,10 +83,11 @@ import {
 export const Route = createFileRoute('/_auth/client/')({
   // All keys optional so navigations to /client elsewhere need not pass every
   // one. Only keys with a concrete value are included.
-  validateSearch: (search: Record<string, unknown>): { file?: string; folder?: string; action?: FilesAction } => {
-    const out: { file?: string; folder?: string; action?: FilesAction } = {}
+  validateSearch: (search: Record<string, unknown>): { file?: string; folder?: string; action?: FilesAction; recognitionGroup?: string } => {
+    const out: { file?: string; folder?: string; action?: FilesAction; recognitionGroup?: string } = {}
     if (typeof search.file === 'string') out.file = search.file
     if (typeof search.folder === 'string') out.folder = search.folder
+    if (typeof search.recognitionGroup === 'string') out.recognitionGroup = search.recognitionGroup
     const action = parseFilesAction(search.action)
     if (action) out.action = action
     return out
@@ -155,7 +158,7 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
   const queryClient = useQueryClient()
   const { notify } = useNotification()
   const { data: user } = useQuery(meQueryOptions)
-  const { action: sidebarAction } = useSearch({ from: '/_auth/client/' })
+  const { action: sidebarAction, recognitionGroup } = useSearch({ from: '/_auth/client/' })
   const { impersonatedUser } = useImpersonation()
   const readOnly = impersonatedUser !== null
   const isPremium = user?.is_premium || user?.is_admin
@@ -251,6 +254,7 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
     folder,
     folders: rawSubfolders,
     files: rawFiles,
+    recognitionGroups,
     isLoading,
     error,
     hasNextPage,
@@ -549,6 +553,7 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
         folderId={folder.id}
         folder={folder}
         readOnly={readOnly}
+        initialRecognitionGroup={recognitionGroup}
         onBack={goBack}
         onOpenFolder={openFolder}
         onOpenFile={openFile}
@@ -590,7 +595,7 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
     folderId === 'root' ? null : (folder?.drive_id ?? null),
     myServers,
   )
-  const hasContent = rawSubfolders.length > 0 || rawFiles.length > 0
+  const hasContent = rawSubfolders.length > 0 || rawFiles.length > 0 || recognitionGroups.length > 0
   const noResults = search && !isLoading && !hasNextPage && !hasContent
   const viewingUser = impersonatedUser ?? user
 
@@ -738,6 +743,42 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
         </p>
       )}
       {noResults && <p className="text-sm text-gray-400">No results for &ldquo;{search}&rdquo;.</p>}
+
+      {/* Labeled AI-recognition groups matching the search (premium). */}
+      {search && recognitionGroups.length > 0 && (
+        <section className="mb-5">
+          <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">People &amp; groups</h3>
+          <div className="flex flex-wrap gap-2">
+            {recognitionGroups.map((g) => (
+              <button
+                key={g.id}
+                onClick={() =>
+                  navigate({
+                    to: '/client',
+                    search: { file: undefined, folder: g.collection_id, recognitionGroup: g.id },
+                  })
+                }
+                className="inline-flex items-center gap-2 pl-1 pr-3 py-1 border border-gray-200 rounded-full hover:bg-gray-50 cursor-pointer transition-colors bg-white"
+                title={`${g.label} in ${g.collection_name}`}
+              >
+                <span className="w-7 h-7 rounded-full overflow-hidden bg-gray-100 flex items-center justify-center shrink-0">
+                  {g.kind !== 'object' && g.cover_detection_id ? (
+                    <img src={detectionThumbUrl(g.cover_detection_id)} alt="" className="w-full h-full object-cover" />
+                  ) : g.cover_file_id ? (
+                    <img src={previewUrl(g.cover_file_id)} alt="" className="w-full h-full object-cover" />
+                  ) : (
+                    <MdAutoAwesome className="text-amber-400 text-sm" />
+                  )}
+                </span>
+                <span className="text-sm text-gray-700">{g.label}</span>
+                <span className="text-[10px] text-gray-400">
+                  {g.file_count} · {g.collection_name}
+                </span>
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
 
       {hasContent && <SortControls sort={sort} onSort={onSort} />}
 

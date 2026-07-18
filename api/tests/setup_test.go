@@ -283,6 +283,9 @@ func (s *stubQuerier) SearchFoldersByUser(_ context.Context, _ uuid.UUID, _ stri
 func (s *stubQuerier) SearchFilesByUser(_ context.Context, _ uuid.UUID, _ string, _ db.PageInput) (*db.PageResult[models.File], error) {
 	return &db.PageResult[models.File]{}, nil
 }
+func (s *stubQuerier) SearchRecognitionGroupsByUser(_ context.Context, _ uuid.UUID, _ string, _ db.PageInput) (*db.PageResult[db.RecognitionGroupSearchHit], error) {
+	return &db.PageResult[db.RecognitionGroupSearchHit]{Items: []db.RecognitionGroupSearchHit{}}, nil
+}
 func (s *stubQuerier) InsertAuditLog(_ context.Context, _ db.AuditInput) error { return nil }
 func (s *stubQuerier) ListAuditLogsForUser(_ context.Context, _ string, _ db.PageInput) (*db.PageResult[models.AuditLog], error) {
 	return &db.PageResult[models.AuditLog]{Items: []models.AuditLog{}}, nil

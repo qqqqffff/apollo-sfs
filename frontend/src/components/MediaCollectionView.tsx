@@ -3,6 +3,7 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tansta
 import {
   MdAdd,
   MdArrowBack,
+  MdAutoAwesome,
   MdCheck,
   MdClose,
   MdCreateNewFolder,
@@ -18,9 +19,12 @@ import { getMediaFolder, createFolder } from '../api/folders'
 import { hideFile, unhideFile, previewUrl, streamUrl } from '../api/files'
 import { copyToCollection, removeFromCollection } from '../api/collections'
 import { meQueryOptions } from '../api/me'
+import { recognitionStatusQueryOptions } from '../api/recognition'
 import { listMyServers, resolveDrive } from '../api/storage'
 import { useNotification } from '../context/NotificationContext'
 import { useFileUpload } from '../hooks/useFileUpload'
+import { CollectionInfoModal } from './CollectionInfoModal'
+import { RecognitionGroupsModal } from './RecognitionGroupsModal'
 import { UploadModal } from './UploadModal'
 import { UploadToast } from './UploadToast'
 import type { File, Folder, HiddenMode, MediaSort } from '../types/api'
@@ -29,6 +33,8 @@ interface Props {
   folderId: string
   folder: Folder
   readOnly: boolean
+  // Deep link from a search result: auto-open the groups modal on this group.
+  initialRecognitionGroup?: string
   onBack: () => void
   onOpenFolder: (id: string) => void
   onOpenFile: (id: string) => void
@@ -55,10 +61,11 @@ function useInfiniteMedia(folderId: string, sort: MediaSort, hidden: HiddenMode)
   }
 }
 
-export function MediaCollectionView({ folderId, folder, readOnly, onBack, onOpenFolder, onOpenFile }: Props) {
+export function MediaCollectionView({ folderId, folder, readOnly, initialRecognitionGroup, onBack, onOpenFolder, onOpenFile }: Props) {
   const queryClient = useQueryClient()
   const { notify } = useNotification()
   const { data: user } = useQuery(meQueryOptions)
+  const isPremium = !!(user?.is_premium || user?.is_admin)
   const { data: myServers } = useQuery({ queryKey: ['storage', 'my-servers'], queryFn: listMyServers })
   const { drive: uploadDrive, isPinned: uploadDriveIsPinned } = resolveDrive(folder.drive_id, myServers)
   const [sort, setSort] = useState<MediaSort>('taken_at')
@@ -66,9 +73,14 @@ export function MediaCollectionView({ folderId, folder, readOnly, onBack, onOpen
   const [creating, setCreating] = useState(false)
   const [newName, setNewName] = useState('')
   const [infoFile, setInfoFile] = useState<File | null>(null)
+  const [showCollectionInfo, setShowCollectionInfo] = useState(false)
+  const [showGroups, setShowGroups] = useState(!!initialRecognitionGroup)
   const fileRef = useRef<HTMLInputElement>(null)
   const [pendingFiles, setPendingFiles] = useState<globalThis.File[]>([])
   const { progress, startUpload, dismiss } = useFileUpload()
+
+  // Polls while indexing is active; disabled entirely for non-premium users.
+  const { data: recognitionStatus } = useQuery(recognitionStatusQueryOptions(folderId, isPremium))
 
   const { subfolders, files, isLoading, error, hasNextPage, isFetchingNextPage, fetchNextPage } =
     useInfiniteMedia(folderId, sort, hidden)
@@ -120,6 +132,14 @@ export function MediaCollectionView({ folderId, folder, readOnly, onBack, onOpen
         </button>
         <MdPhotoLibrary className="text-purple-400 text-lg" />
         <h2 className="text-lg font-semibold text-gray-900 m-0">{folder.name}</h2>
+        <button
+          onClick={() => setShowCollectionInfo(true)}
+          className="text-gray-400 hover:text-gray-600 bg-transparent border-0 p-0.5 cursor-pointer"
+          title="Collection info"
+          aria-label="Collection info"
+        >
+          <MdInfoOutline className="text-lg" />
+        </button>
       </div>
 
       {/* Controls */}
@@ -139,6 +159,16 @@ export function MediaCollectionView({ folderId, folder, readOnly, onBack, onOpen
           <ToggleBtn active={hidden === 'show'} onClick={() => setHidden('show')} label="Show hidden" />
           <ToggleBtn active={hidden === 'only'} onClick={() => setHidden('only')} label="Hidden" />
         </div>
+
+        {recognitionStatus?.enabled && (
+          <button
+            onClick={() => setShowGroups(true)}
+            className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs border border-amber-200 bg-amber-50 rounded-lg text-amber-700 hover:bg-amber-100 cursor-pointer transition-colors"
+            title="Browse recognized people, pets, and objects"
+          >
+            <MdAutoAwesome className="text-sm" /> People &amp; pets
+          </button>
+        )}
 
         {!readOnly && (
           <>
@@ -278,6 +308,24 @@ export function MediaCollectionView({ folderId, folder, readOnly, onBack, onOpen
       <UploadToast progress={progress} onDismiss={dismiss} />
 
       {infoFile && <MediaInfoModal file={infoFile} onClose={() => setInfoFile(null)} />}
+
+      {showCollectionInfo && (
+        <CollectionInfoModal
+          folder={folder}
+          isPremium={isPremium}
+          readOnly={readOnly}
+          onClose={() => setShowCollectionInfo(false)}
+        />
+      )}
+
+      {showGroups && (
+        <RecognitionGroupsModal
+          collectionId={folderId}
+          initialGroupId={initialRecognitionGroup}
+          onOpenFile={onOpenFile}
+          onClose={() => setShowGroups(false)}
+        />
+      )}
     </div>
   )
 }

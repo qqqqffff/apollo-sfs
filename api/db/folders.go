@@ -10,13 +10,13 @@ import (
 	"apollo-sfs.com/api/models"
 )
 
-const folderColumns = `id, user_id, parent_id, drive_id, name, kind, created_at, updated_at`
+const folderColumns = `id, user_id, parent_id, drive_id, name, kind, ai_recognition_enabled, created_at, updated_at`
 
 // folderListSelect projects every column needed by the folder listing endpoints,
 // including a recursive descendant-size aggregate. LATERAL lets the inner CTE
 // reference each row's id while RLS on files keeps the sum scoped to the user.
 const folderListSelect = `
-SELECT f.id, f.user_id, f.parent_id, f.drive_id, f.name, f.kind, f.created_at, f.updated_at,
+SELECT f.id, f.user_id, f.parent_id, f.drive_id, f.name, f.kind, f.ai_recognition_enabled, f.created_at, f.updated_at,
        COALESCE(s.total, 0) AS size_bytes
 FROM folders f
 LEFT JOIN LATERAL (
@@ -32,7 +32,7 @@ LEFT JOIN LATERAL (
 func scanFolder(row *sql.Row) (*models.Folder, error) {
 	var f models.Folder
 	var parentID, driveID uuid.NullUUID
-	err := row.Scan(&f.ID, &f.UserID, &parentID, &driveID, &f.Name, &f.Kind, &f.CreatedAt, &f.UpdatedAt)
+	err := row.Scan(&f.ID, &f.UserID, &parentID, &driveID, &f.Name, &f.Kind, &f.AIRecognitionEnabled, &f.CreatedAt, &f.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -48,7 +48,7 @@ func scanFolder(row *sql.Row) (*models.Folder, error) {
 func scanFolderRow(rows *sql.Rows) (*models.Folder, error) {
 	var f models.Folder
 	var parentID, driveID uuid.NullUUID
-	err := rows.Scan(&f.ID, &f.UserID, &parentID, &driveID, &f.Name, &f.Kind, &f.CreatedAt, &f.UpdatedAt)
+	err := rows.Scan(&f.ID, &f.UserID, &parentID, &driveID, &f.Name, &f.Kind, &f.AIRecognitionEnabled, &f.CreatedAt, &f.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -66,7 +66,7 @@ func scanFolderRow(rows *sql.Rows) (*models.Folder, error) {
 func scanFolderListRow(rows *sql.Rows) (*models.Folder, error) {
 	var f models.Folder
 	var parentID, driveID uuid.NullUUID
-	err := rows.Scan(&f.ID, &f.UserID, &parentID, &driveID, &f.Name, &f.Kind, &f.CreatedAt, &f.UpdatedAt, &f.SizeBytes)
+	err := rows.Scan(&f.ID, &f.UserID, &parentID, &driveID, &f.Name, &f.Kind, &f.AIRecognitionEnabled, &f.CreatedAt, &f.UpdatedAt, &f.SizeBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -318,6 +318,19 @@ func (q *Queries) UpdateFolderParent(ctx context.Context, id uuid.UUID, parentID
 // migration has finished moving its direct files. Runs outside the
 // user-scoped transaction (called from the background migration job), so it
 // is intentionally not gated by RLS — folder ids are unguessable UUIDs.
+func (q *Queries) SetFolderAIRecognition(ctx context.Context, id uuid.UUID, enabled bool) error {
+	res, err := q.db.ExecContext(ctx, `
+		UPDATE folders SET ai_recognition_enabled = $2, updated_at = NOW() WHERE id = $1
+	`, id, enabled)
+	if err != nil {
+		return fmt.Errorf("SetFolderAIRecognition %s: %w", id, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
 func (q *Queries) SetFolderDriveID(ctx context.Context, id, driveID uuid.UUID) error {
 	_, err := q.db.ExecContext(ctx, `
 		UPDATE folders SET drive_id = $2, updated_at = NOW() WHERE id = $1

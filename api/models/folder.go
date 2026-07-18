@@ -23,6 +23,9 @@ type Folder struct {
 	// subcollections. An email folder holds a provider mailbox backup (its
 	// name is the backed-up email address) and renders as a mail viewer.
 	Kind string `json:"kind" db:"kind"`
+	// AIRecognitionEnabled turns on premium AI face/pet/object indexing for a
+	// media collection. Only meaningful when Kind == "media".
+	AIRecognitionEnabled bool `json:"ai_recognition_enabled" db:"ai_recognition_enabled"`
 	// SizeBytes is the recursive sum of all file sizes under the folder
 	// (including descendants). Computed by the listing queries; 0 on bare
 	// inserts/updates that don't compute it.

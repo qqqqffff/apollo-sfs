@@ -38,6 +38,16 @@ type Config struct {
 
 	KeyEncryptionKey         string
 	QuotaWarningThresholdPct int
+
+	// AI recognition sidecar (premium face/pet/object indexing). Empty
+	// RecognitionURL disables the feature: endpoints return 503 and the
+	// background worker never starts.
+	RecognitionURL           string
+	RecognitionToken         string
+	RecognitionConcurrency   int
+	RecognitionMaxKeyframes  int
+	RecognitionFaceThreshold float64
+	RecognitionPetThreshold  float64
 	DiskStatsPath            string
 	DiskStatsDriveLabel      string
 
@@ -133,6 +143,10 @@ type Config struct {
 
 func loadConfig() Config {
 	quotaPct, _ := strconv.Atoi(getEnv("QUOTA_WARNING_THRESHOLD_PERCENT", "80"))
+	recognitionConcurrency, _ := strconv.Atoi(getEnv("RECOGNITION_CONCURRENCY", "2"))
+	recognitionMaxKeyframes, _ := strconv.Atoi(getEnv("RECOGNITION_MAX_KEYFRAMES", "20"))
+	recognitionFaceThreshold, _ := strconv.ParseFloat(getEnv("RECOGNITION_FACE_THRESHOLD", "0.50"), 64)
+	recognitionPetThreshold, _ := strconv.ParseFloat(getEnv("RECOGNITION_PET_THRESHOLD", "0.88"), 64)
 	premiumMonthlyPrice, _ := strconv.Atoi(getEnv("PREMIUM_MONTHLY_PRICE_CENTS", "100"))
 	premiumAnnualPrice, _ := strconv.Atoi(getEnv("PREMIUM_ANNUAL_PRICE_CENTS", "1000"))
 
@@ -174,6 +188,13 @@ func loadConfig() Config {
 
 		KeyEncryptionKey:         requireEnv("KEY_ENCRYPTION_KEY"),
 		QuotaWarningThresholdPct: quotaPct,
+
+		RecognitionURL:           getEnv("RECOGNITION_URL", ""),
+		RecognitionToken:         getEnv("RECOGNITION_TOKEN", ""),
+		RecognitionConcurrency:   recognitionConcurrency,
+		RecognitionMaxKeyframes:  recognitionMaxKeyframes,
+		RecognitionFaceThreshold: recognitionFaceThreshold,
+		RecognitionPetThreshold:  recognitionPetThreshold,
 		DiskStatsPath:            getEnv("DISK_STATS_PATH", "/mnt/data"),
 		DiskStatsDriveLabel:      getEnv("DISK_STATS_DRIVE_LABEL", ""),
 

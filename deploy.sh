@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # deploy.sh — build, tag, push, and deploy Apollo SFS's custom images
-# (frontend, api, node-agent) to the private registry and the Swarm stack.
+# (frontend, api, node-agent, recognition) to the private registry and the
+# Swarm stack.
 #
 # WHY THIS EXISTS
 #   docker-stack.yml pins each custom image to its OWN tag variable
@@ -48,28 +49,34 @@ BUILDER_NAME="apollo-builder"
 # posts must match what node-metrics-ingest expects), so the two must always be
 # built/redeployed together. See BUNDLE below, which pulls it in whenever
 # node-agent is selected.
-ORDER=(frontend api node-agent)
+ORDER=(frontend api node-agent recognition)
 declare -A IMAGE_REPO=(
   [frontend]="apollo-sfs_frontend"
   [api]="apollo-sfs_api"
   [node-agent]="apollo-sfs-node-agent"
   [node-metrics-ingest]="apollo-sfs_node-metrics-ingest"
+  [recognition]="apollo-sfs_recognition"
 )
 declare -A IMAGE_CONTEXT=(
   [frontend]="frontend/"
   [api]="api/"
   [node-agent]="api/"
   [node-metrics-ingest]="api/"
+  [recognition]="recognition/"
 )
 declare -A IMAGE_DOCKERFILE=(
   [node-agent]="api/Dockerfile.node-agent"
   [node-metrics-ingest]="api/Dockerfile.node-metrics-ingest"
+  [recognition]="recognition/Dockerfile"
 )
 declare -A IMAGE_PLATFORMS=(
   [frontend]="linux/amd64"
   [api]="linux/amd64,linux/arm64"
   [node-agent]="linux/amd64,linux/arm64"
-  [node-metrics-ingest]="linux/amd64"
+  # amd64 only: runs pinned to the Ryzen manager (tier=standard). Build the
+  # CUDA variant (recognition/Dockerfile.cuda) manually when a GPU is added —
+  # see docs/ai_recognition_setup.md.
+  [recognition]="linux/amd64"
 )
 # Swarm service name(s) to query for "what tag is currently deployed" when a
 # service isn't rebuilt this run. node-agent runs as two services (fast/standard)
@@ -79,6 +86,7 @@ declare -A SWARM_SERVICES=(
   [api]="apollo-sfs_api"
   [node-agent]="apollo-sfs_node-agent-standard apollo-sfs_node-agent-fast"
   [node-metrics-ingest]="apollo-sfs_node-metrics-ingest"
+  [recognition]="apollo-sfs_recognition"
 )
 # Services bundled with another: selecting the key also selects the value, so
 # they're always built/deployed together (see comment above ORDER).
@@ -371,6 +379,7 @@ export API_TAG="${RESOLVED_TAG[api]}"
 export FRONTEND_TAG="${RESOLVED_TAG[frontend]}"
 export NODE_AGENT_TAG="${RESOLVED_TAG[node-agent]}"
 export NODE_METRICS_INGEST_TAG="${RESOLVED_TAG[node-metrics-ingest]}"
+export RECOGNITION_TAG="${RESOLVED_TAG[recognition]}"
 
 echo "── Deploying $STACK_NAME ──"
 run docker stack deploy -c "$STACK_FILE" "$STACK_NAME"

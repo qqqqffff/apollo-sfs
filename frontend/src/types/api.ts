@@ -110,6 +110,9 @@ export interface Folder {
   // Optional pin to a specific drive for this folder's direct uploads. Null
   // means dynamic primary-first/least-full routing (today's default behavior).
   drive_id: string | null
+  // Premium AI face/pet/object indexing toggle. Only meaningful for media
+  // collections.
+  ai_recognition_enabled: boolean
   created_at: string
   updated_at: string
 }
@@ -168,6 +171,68 @@ export interface FolderContents {
 export interface PageResult<T> {
   items: T[]
   next_token: string
+}
+
+// ── AI recognition (premium) ────────────────────────────────────────────────
+
+export type RecognitionKind = 'face' | 'pet' | 'object'
+
+export interface RecognitionJobCounts {
+  pending: number
+  processing: number
+  done: number
+  failed: number
+  skipped: number
+}
+
+export interface RecognitionGroupCounts {
+  face: number
+  pet: number
+  object: number
+}
+
+export interface RecognitionStatus {
+  enabled: boolean
+  service_available: boolean
+  counts: RecognitionJobCounts
+  groups: RecognitionGroupCounts
+  // Encrypted crop bytes this collection's indexing stores against the
+  // user's quota (shown as the storage note in the groups modal).
+  storage_bytes: number
+}
+
+export interface RecognitionGroup {
+  id: string
+  user_id: string
+  collection_id: string
+  kind: RecognitionKind
+  class_label?: string
+  auto_label: string
+  user_label?: string
+  member_count: number
+  cover_detection_id?: string
+  file_count: number
+  cover_file_id?: string
+  created_at: string
+  updated_at: string
+}
+
+export interface RecognitionGroupSearchHit {
+  id: string
+  collection_id: string
+  collection_name: string
+  kind: RecognitionKind
+  class_label?: string
+  label: string
+  file_count: number
+  cover_detection_id?: string
+  cover_file_id?: string
+}
+
+// SearchResults is the /search payload: the classic folders+files lists plus
+// labeled recognition groups for premium users (key absent otherwise).
+export interface SearchResults extends FolderContents {
+  recognition_groups?: PageResult<RecognitionGroupSearchHit>
 }
 
 export interface Invitation {

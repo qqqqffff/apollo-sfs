@@ -98,6 +98,20 @@ All `files` and `folders` queries are executed after calling `db.Queries.ForUser
 
 `routes/media.go` accepts video uploads, stores the original, then enqueues a background FFmpeg transcode. Variants (lower resolution) are stored in MinIO and tracked in the `video_variants` table with statuses `pending`, `ready`, or `failed`. Streaming uses range requests and WebSocket for real-time progress.
 
+## AI Recognition (Premium)
+
+Per-collection face/pet/object indexing. `routes/services/recognition.go` owns
+the durable job queue (`recognition_jobs`, claimed with FOR UPDATE SKIP LOCKED
+and interleaved per-user so no single user monopolizes it) and a background
+worker started next to the email worker in `cmd/main.go`. Per file it decrypts
+the media (same path as transcoding), samples video frames with FFmpeg, POSTs
+plaintext bytes to the `recognition` sidecar (`RECOGNITION_URL`,
+`X-Internal-Token`), stores detections + encrypted quota-counted crops, and
+cluster-assigns embeddings into `recognition_groups` via incremental centroid
+matching (`recognition_cluster.go`, embeddings as BYTEA — no pgvector).
+Endpoints are premium-gated in `routes/recognition.go`; lifecycle events audit
+to `audit_logs`. See `docs/ai_recognition_setup.md`.
+
 ## Real-Time Metrics
 
 `routes/admin/infrastructure.go` streams server metrics (CPU, RAM, disk) over WebSocket using `gopsutil`. The frontend connects via `hooks/useMetricsStream.ts`.
@@ -163,6 +177,9 @@ The `Dockerfile.test` sidecar runs the full test suite against a live database a
 | `CLOUDFLARE_TURNSTILE_SECRET_KEY` | Server-side Turnstile verification |
 | `SFS_API_KEY_PEPPER` | Mixed into argon2id hashes for SFS API keys |
 | `QUOTA_WARNING_THRESHOLD_PERCENT` | Triggers quota warning emails |
+| `RECOGNITION_URL` / `RECOGNITION_TOKEN` | AI recognition sidecar endpoint + shared secret (empty URL disables the feature) |
+| `RECOGNITION_CONCURRENCY` / `RECOGNITION_MAX_KEYFRAMES` | Worker parallelism and video frame sampling |
+| `RECOGNITION_FACE_THRESHOLD` / `RECOGNITION_PET_THRESHOLD` | Clustering cosine thresholds |
 | `DISK_STATS_DRIVE_LABEL` | Mount label used for drive capacity reports |
 
 ## Adding a Route

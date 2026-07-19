@@ -1,0 +1,5 @@
+# Test-only dependencies — not needed by the running service, only by
+# tests/test_analyze.py (FastAPI's TestClient needs httpx). Installed
+# separately from requirements.txt so the production image doesn't carry them.
+pytest==8.3.5
+httpx==0.28.1

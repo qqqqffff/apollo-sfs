@@ -150,10 +150,15 @@ function RouteComponent() {
     },
   })
 
-  function validateForm(): boolean {
-    if (captchaRequired && !captchaToken) { setError('Please complete the security check.'); return false }
-    if (!selectedPlanId) { setError('Please select a storage plan.'); return false }
-    return true
+  // Returns the specific reason the form isn't ready to submit, or null when
+  // it is. Callers below both display this message directly and thread it
+  // into the Error they throw, so the button components' generic onError
+  // handler (which just does setError(msg)) re-sets the SAME message instead
+  // of clobbering it with an unrelated one.
+  function validationError(): string | null {
+    if (captchaRequired && !captchaToken) return 'Please complete the security check.'
+    if (!selectedPlanId) return 'Please select a storage plan.'
+    return null
   }
 
   // ── PayPal wallet button + Google Pay (inline; same order create/capture
@@ -161,7 +166,8 @@ function RouteComponent() {
 
   async function handleCreateOrder(): Promise<string> {
     setError(null)
-    if (!validateForm()) throw new Error('Please complete the required fields.')
+    const invalid = validationError()
+    if (invalid) { setError(invalid); throw new Error(invalid) }
     try {
       const { order_id } = await createInterestDepositOrder(selectedPlanId!, storageType, 'paypal')
       return order_id
@@ -177,7 +183,8 @@ function RouteComponent() {
   // hold server-side so they survive the round trip (see SavedInterestState).
   async function handleGetApprovalUrl(): Promise<string> {
     setError(null)
-    if (!validateForm()) throw new Error('Please complete the required fields.')
+    const invalid = validationError()
+    if (invalid) { setError(invalid); throw new Error(invalid) }
     try {
       const { approve_url } = await createInterestDepositOrder(selectedPlanId!, storageType, 'paypal')
       const saved: SavedInterestState = { name, email, storageType, selectedPlanId: selectedPlanId!, useCase }
@@ -201,7 +208,8 @@ function RouteComponent() {
   }
 
   function handleChooseCard() {
-    if (!validateForm()) return
+    const invalid = validationError()
+    if (invalid) { setError(invalid); return }
     setError(null)
     setShowCardForm(true)
   }
@@ -210,7 +218,8 @@ function RouteComponent() {
 
   async function createCardOrder(): Promise<string> {
     setError(null)
-    if (!validateForm()) throw new Error('Please complete the required fields.')
+    const invalid = validationError()
+    if (invalid) { setError(invalid); throw new Error(invalid) }
     try {
       const { order_id } = await createInterestDepositOrder(selectedPlanId!, storageType, 'card')
       return order_id

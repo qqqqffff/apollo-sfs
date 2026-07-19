@@ -115,7 +115,9 @@ describe('Admin Alarm Configuration page', () => {
     fireEvent.click(screen.getByText('alice'))
     expect(screen.getByText(/subscriptions for alice/i)).toBeInTheDocument()
     expect(screen.getByText(/add alarm for alice/i)).toBeInTheDocument()
-    expect(screen.getByText('High CPU usage')).toBeInTheDocument()
+    // Appears twice: once as the select option in the add form, once as the
+    // existing subscription's row label.
+    expect(screen.getAllByText('High CPU usage').length).toBe(2)
   })
 
   test('shows an empty state when a user has no alarms', () => {
@@ -126,8 +128,11 @@ describe('Admin Alarm Configuration page', () => {
 
   test('toggling a subscription off calls a mutation', () => {
     const mutate = jest.fn()
-    mockMutation.mockReturnValue({ mutate, isPending: false })
     setup()
+    // Must override setup()'s default mutation mock AFTER setup() runs —
+    // setup() itself calls mockMutation.mockReturnValue with its own jest.fn(),
+    // which would otherwise clobber this one before the initial render.
+    mockMutation.mockReturnValue({ mutate, isPending: false })
     fireEvent.click(screen.getByText('alice'))
     fireEvent.click(screen.getByRole('switch', { name: /toggle high cpu usage alarm/i }))
     expect(mutate).toHaveBeenCalled()

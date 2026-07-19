@@ -912,6 +912,8 @@ function RouteComponent() {
               <TestSuiteRow label="Backend" entry={testResult.backend} />
               <TestSuiteRow label="Frontend" entry={testResult.frontend} />
               <TestSuiteRow label="Frontend E2E" entry={testResult.frontend_e2e} />
+              <TestSuiteRow label="Mobile" entry={testResult.mobile} />
+              <TestSuiteRow label="Recognition" entry={testResult.recognition} />
               <button
                 onClick={() => setTestOutputOpen(o => !o)}
                 className="text-xs text-gray-400 hover:text-gray-700 cursor-pointer bg-transparent border-0 text-left w-fit"
@@ -928,6 +930,12 @@ function RouteComponent() {
                   )}
                   {testResult.frontend_e2e.enabled && testResult.frontend_e2e.result && (
                     <OutputBlock label="Frontend E2E" output={testResult.frontend_e2e.result.output} />
+                  )}
+                  {testResult.mobile.enabled && testResult.mobile.result && (
+                    <OutputBlock label="Mobile" output={testResult.mobile.result.output} />
+                  )}
+                  {testResult.recognition.enabled && testResult.recognition.result && (
+                    <OutputBlock label="Recognition" output={testResult.recognition.result.output} />
                   )}
                 </div>
               )}

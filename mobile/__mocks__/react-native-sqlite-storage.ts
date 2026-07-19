@@ -36,15 +36,30 @@ function executeSql(sql: string, params: any[] = []): Promise<[any]> {
 
   // ── INSERT OR IGNORE ──────────────────────────────────────────────────────
   if (n.startsWith('insert or ignore')) {
-    const colMatch = sql.match(/\(\s*([\w\s,]+)\)\s+VALUES/i);
-    if (!colMatch) return Promise.resolve([result()]);
-    const cols = colMatch[1].split(',').map((c) => c.trim());
+    // Match both the column list and the VALUES tuple — some columns (e.g.
+    // status, retry_count) are written as SQL literals rather than `?`
+    // placeholders, so params can't just be zipped to cols by position.
+    const match = sql.match(/\(\s*([\w\s,]+)\)\s*VALUES\s*\(([^)]+)\)/i);
+    if (!match) return Promise.resolve([result()]);
+    const cols = match[1].split(',').map((c) => c.trim());
+    const valueTokens = match[2].split(',').map((v) => v.trim());
     const pk = params[0];
     if (store.some((r) => r.local_asset_id === pk)) {
       return Promise.resolve([result([], 0)]);
     }
     const row: Row = {};
-    cols.forEach((col, i) => { row[col] = params[i] !== undefined ? params[i] : null; });
+    let paramIndex = 0;
+    cols.forEach((col, i) => {
+      const token = valueTokens[i];
+      if (token === '?') {
+        row[col] = params[paramIndex] !== undefined ? params[paramIndex] : null;
+        paramIndex++;
+      } else if (/^'.*'$/.test(token)) {
+        row[col] = token.slice(1, -1);
+      } else {
+        row[col] = Number(token);
+      }
+    });
     store.push(row);
     return Promise.resolve([result([], 1, store.length)]);
   }

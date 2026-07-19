@@ -109,7 +109,7 @@ docker exec "$(docker ps -q -f name=apollo-sfs_api)" \
 The service publishes no ports and is never proxied by nginx; only the api can
 reach it on the overlay network, and every call requires `X-Internal-Token`.
 
-Sidecar unit tests need no Docker or models: `cd recognition && RECOGNITION_TOKEN=test python -m pytest tests/`.
+Sidecar unit tests need no Docker or models: `cd recognition && pip install -r requirements.txt -r requirements-test.txt && RECOGNITION_TOKEN=test python -m pytest tests/`. `requirements-test.txt` carries the pytest/httpx test-only deps (the FastAPI `TestClient` needs `httpx`) — not installed in the production image. They also run as part of the unified `test-runner` Swarm service (see `test-runner/CLAUDE.md` and the root `CLAUDE.md`), which reports them alongside the api/frontend/mobile suites on the admin metrics page. Like `recognition` itself, `test-runner` is Swarm-only — the deprecated `docker-compose.yml` has neither service.
 
 ## Resource pool (~50% CPU / 50% RAM)
 

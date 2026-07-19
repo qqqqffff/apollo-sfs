@@ -279,7 +279,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	routes.SetShareService(h, services.NewShareService(queries, emailSvc, cfg.AppBaseURL))
 	routes.SetRecognitionService(h, recogSvc)
 	authHandler := auth.NewHandler(authSvc, cfg.CookieDomain, cfg.CookieSecure)
-	adminHandler := admin.NewHandler(queries, inviteSvc, metricsSvc, authSvc, fileSvc, registry, geoReader, cfg.DiskStatsPath, cfg.DiskStatsDriveLabel, cfg.BackendTestURL, cfg.AppDir, cfg.FrontendTestURL, cfg.FrontendE2EURL, shutdownCh)
+	adminHandler := admin.NewHandler(queries, inviteSvc, metricsSvc, authSvc, fileSvc, registry, geoReader, cfg.DiskStatsPath, cfg.DiskStatsDriveLabel, cfg.TestRunnerURL, cfg.AppDir, shutdownCh)
 	adminHandler.SetDiscountMailer(emailSvc)
 	// Configure the on-demand infrastructure sync (POST /system/sync): discover
 	// swarm nodes via the Docker socket and drives/capacity via the MinIO admin API.

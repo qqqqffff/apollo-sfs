@@ -64,7 +64,6 @@ frontend/
 ├── playwright.config.ts         # Playwright E2E config
 ├── tsconfig.json / tsconfig.*.json
 ├── Dockerfile                   # Multi-stage: Node build → nginx serve
-├── Dockerfile.test              # Jest + Playwright test runner sidecar
 ├── package.json
 └── package-lock.json
 ```
@@ -122,10 +121,9 @@ npm test
 
 # E2E (requires running API + DB)
 npm run test:e2e
-
-# Via Docker sidecar
-docker compose run frontend-tests
 ```
+
+The full cross-service suite (this suite plus backend/mobile/recognition) runs via the unified `test-runner` Swarm service (`docker-stack.yml`) — Swarm-only, no `docker-compose.yml` equivalent (deprecated, see root `CLAUDE.md`). Normally triggered from the admin metrics page's "Run tests" button; see `test-runner/CLAUDE.md` to trigger it manually.
 
 Playwright tests are in `src/__tests__/` or a top-level `e2e/` directory. Jest tests co-locate with their source files or live in `__tests__/` folders.
 

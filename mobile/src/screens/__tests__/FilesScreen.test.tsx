@@ -260,8 +260,13 @@ describe('create folder modal', () => {
     fireEvent.press(touchables[touchables.length - 2]);
 
     await screen.findByText('New…');
-    // Create button must be disabled when name is empty
-    expect(screen.getByText('Create').parent?.props.disabled).toBe(true);
+    // Create button must be disabled when name is empty. TouchableOpacity
+    // doesn't forward `disabled` as a plain prop on an ancestor — it surfaces
+    // as accessibilityState.disabled on the underlying host View, two levels
+    // up from the "Create" Text (Text → Text wrapper → host View).
+    const createText = screen.getByText('Create');
+    const createTouchable = createText.parent?.parent;
+    expect(createTouchable?.props.accessibilityState?.disabled).toBe(true);
   });
 
   it('Cancel button closes the modal', async () => {
@@ -354,8 +359,9 @@ describe('file row actions', () => {
     const actionBtns = screen.UNSAFE_getAllByType(TouchableOpacity).filter(
       (t: any) => t.props.onPress,
     );
-    // Star and Trash buttons are the last two in the row
-    fireEvent.press(actionBtns[actionBtns.length - 2]); // star
+    // Row order is Download, Star, Trash, followed by the screen's own upload
+    // FAB (rendered after the list) — so Star is third from the end, not second.
+    fireEvent.press(actionBtns[actionBtns.length - 3]); // star
     expect(favoriteFile).toHaveBeenCalledWith('f1');
   });
 
@@ -368,7 +374,9 @@ describe('file row actions', () => {
     const actionBtns = screen.UNSAFE_getAllByType(TouchableOpacity).filter(
       (t: any) => t.props.onPress,
     );
-    fireEvent.press(actionBtns[actionBtns.length - 1]); // trash
+    // The screen's upload FAB renders after the list, so it — not Trash — is
+    // actually last; Trash is second from the end.
+    fireEvent.press(actionBtns[actionBtns.length - 2]); // trash
     await waitFor(() => expect(screen.queryByText('photo.jpg')).toBeNull());
   });
 });

@@ -14,6 +14,7 @@ apollo-sfs/
 ├── fail2ban/       # Fail2ban filter/jail/action for API scan detection
 ├── keycloak/       # Keycloak 26.0.7 realm, themes, and Apple IdP provider
 ├── recognition/    # Python AI inference sidecar (faces/pets/objects, ONNX Runtime)
+├── test-runner/    # Unified test-runner sidecar (Swarm service — see docker-stack.yml below)
 ├── docs/           # Architecture and setup documentation
 ├── docker-compose.yml   # Single-node / development deployment (DEPRECATED — see note below)
 └── docker-stack.yml     # Docker Swarm production deployment (actively used)
@@ -74,16 +75,19 @@ docker service logs apollo-sfs_api --follow
 | `minio-fast` | 9000 (internal) | fast (Pi 5) |
 | `minio-standard` | 9001 (internal) | standard |
 | `ddns` | — | standard |
+| `test-runner` | 9228 (internal) | standard |
 
 `recognition` is the stateless Python inference sidecar for the premium AI recognition feature (faces/pets/objects): the `api` decrypts media server-side and POSTs plaintext bytes to it over the overlay network (`X-Internal-Token` auth); it never touches keys, the DB, or MinIO. It carries the stack's only `deploy.resources.limits` block — sized to ~50% of the manager's CPU/RAM so indexing can't starve the stack. See `docs/ai_recognition_setup.md` (including how to enable a future NVIDIA GPU).
 
 `node-metrics-ingest` is a small standalone Go service (`api/cmd/node-metrics-ingest`) split out of the `api` service specifically to receive the per-node hardware pushes from `node-agent-standard`/`node-agent-fast` (see the API's `CLAUDE.md`). Keeping it separate isolates that internal, constant-frequency traffic (and any incident on it) from the public-facing `api` service; it shares no in-memory state with `api` — both read/write the same Postgres tables.
 
+`test-runner` is the unified test-runner sidecar backing the admin metrics page's "Run tests" button: one container carrying the Go, Node, and Python toolchains needed to run every suite (backend, frontend Jest + Playwright E2E, mobile Jest, recognition pytest) in sequence, returning one combined JSON report over its own HTTP API (`POST /run-tests`) that the `api` service proxies via `TEST_RUNNER_URL`. Like `recognition`, it is Swarm-only — see `test-runner/CLAUDE.md` for the full design and how to add a new suite.
+
 All services communicate on the `app-network` overlay network. No service ports are exposed directly to the internet; host nginx terminates TLS and proxies inbound traffic.
 
 ## Development (Single-Node) — DEPRECATED
 
-**`docker-compose.yml` is deprecated.** The two-node `docker-stack.yml` Swarm deployment (see above) is now the only stack actually run/maintained — do not assume `docker-compose.yml` is kept in sync with it (e.g. new services added to `docker-stack.yml` may not have a compose equivalent, or vice versa). Treat it as a historical reference, not a working local dev setup, unless told otherwise.
+**`docker-compose.yml` is deprecated.** It predates the two-node storage-tier split: MinIO now runs as two independent instances — fast-tier NVMe on the Pi 5, standard-tier HDD on the manager — and spreading them across two physical nodes is only expressible in `docker-stack.yml`'s two-node Swarm placement; a single-node compose file has no way to pin a second MinIO instance to a second machine. `docker-stack.yml` is now the only stack actually run/maintained — do not assume `docker-compose.yml` is kept in sync with it (e.g. new services added to `docker-stack.yml`, like `test-runner`, may not have a compose equivalent, or vice versa). Treat it as a historical reference, not a working local dev setup, unless told otherwise.
 
 ```bash
 # Copy and populate environment file
@@ -94,13 +98,9 @@ docker compose up -d
 
 # Watch API logs
 docker compose logs -f api
-
-# Run tests
-docker compose run api-tests
-docker compose run frontend-tests
 ```
 
-`docker-compose.yml` includes test-runner sidecars (`api-tests`, `frontend-tests`) that are not present in `docker-stack.yml`.
+Like `recognition`, the unified `test-runner` sidecar (`test-runner/Dockerfile`, context = repo root) is Swarm-only and has no `docker-compose.yml` equivalent — the admin metrics page's "Run tests" button is inert under compose. Rather than a separate sidecar per service, ONE container carries the Go, Node, and Python toolchains needed to run every suite — backend (`go test`), frontend (Jest + Playwright), mobile (Jest, native modules mocked — no Xcode/Android SDK needed), and recognition (pytest, fake pipelines — no model files/ORT needed) — in sequence, and returns one combined JSON report from `POST /run-tests`. The `api` service calls that endpoint (`TEST_RUNNER_URL`, set only in `docker-stack.yml`) and surfaces the report on the admin metrics page's "Run tests" panel, with a pass/fail + expandable output block per suite. There's no mobile or recognition E2E suite yet (would need Detox/Appium or a live model-serving setup) — only the frontend has a Playwright E2E leg, run against the already-up `frontend` container.
 
 ## Environment Variables
 

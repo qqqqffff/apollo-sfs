@@ -49,7 +49,6 @@ api/
 ├── sanitize/            # Input validation and sanitization helpers
 ├── tests/               # Unit and integration tests
 ├── Dockerfile                      # Multi-stage Alpine build (main api service)
-├── Dockerfile.test                 # Test runner sidecar image
 ├── Dockerfile.node-agent           # Per-node metrics collector image
 ├── Dockerfile.node-metrics-ingest  # Node metrics ingest service image
 ├── go.mod
@@ -150,12 +149,14 @@ GOOS=linux GOARCH=arm64 go build -o api-arm64 ./cmd/...
 # Run unit tests
 go test ./...
 
-# Via Docker sidecar (matches CI) — NOTE: docker-compose.yml is deprecated
-# (see root CLAUDE.md); this sidecar has no docker-stack.yml equivalent yet.
-docker compose run api-tests
+# The full cross-service suite (backend/frontend/frontend-E2E/mobile/recognition)
+# runs via the unified test-runner Swarm service (docker-stack.yml) — Swarm-only,
+# no docker-compose.yml equivalent (deprecated, see root CLAUDE.md). Normally
+# triggered from the admin metrics page's "Run tests" button; to trigger
+# manually from the manager, see test-runner/CLAUDE.md.
 ```
 
-The `Dockerfile.test` sidecar runs the full test suite against a live database and MinIO, matching the production environment as closely as possible.
+The old `api/Dockerfile.test` sidecar image and its `cmd/testserver` entrypoint were removed in favor of the unified `test-runner/` sidecar (repo root) — `TEST_RUNNER_URL` replaces the old `BACKEND_TEST_URL`. `APP_DIR` still works as a local-dev fallback for just the backend suite when `TEST_RUNNER_URL` is unset (see `routes/admin/tests.go`).
 
 ## Key Environment Variables
 

@@ -65,23 +65,18 @@ type Config struct {
 	// work without a new env var.
 	PresignSecret string
 
-	// BackendTestURL is the internal URL of the api-tests sidecar container.
-	// e.g. "http://api-tests:9228/run-tests". Preferred over AppDir in Docker.
-	BackendTestURL string
+	// TestRunnerURL is the internal URL of the unified test-runner sidecar
+	// container (e.g. "http://test-runner:9228/run-tests"). One container runs
+	// the backend, frontend (Jest + Playwright), mobile, and recognition test
+	// suites and returns a combined report — replacing what used to be separate
+	// api-tests/frontend-tests/mobile-tests sidecars. Preferred over AppDir.
+	TestRunnerURL string
 
 	// AppDir is the absolute path to the api/ source directory on the host.
-	// Used for local dev when BackendTestURL is unset (needs Go toolchain + source).
+	// Local-dev fallback for JUST the backend suite when TestRunnerURL is unset
+	// (needs Go toolchain + source) — the other suites need the sidecar's
+	// toolchains and report disabled without it.
 	AppDir string
-
-	// FrontendTestURL is the internal URL of the frontend-tests sidecar container.
-	// e.g. "http://frontend-tests:9229/run-tests"
-	// Leave empty to disable the Jest unit test runner.
-	FrontendTestURL string
-
-	// FrontendE2EURL is the internal URL of the Playwright E2E sidecar endpoint.
-	// e.g. "http://frontend-tests:9229/run-e2e"
-	// Leave empty to disable the E2E test runner.
-	FrontendE2EURL string
 
 	// ── Premium tier + SFS API key + PayPal ─────────────────────────────────
 	// SFSAPIKeyPepper is mixed into the argon2id hash of API key secrets so
@@ -205,10 +200,8 @@ func loadConfig() Config {
 
 		PresignSecret: getEnvOrKey("PRESIGN_SECRET", "SESSION_KEY"),
 
-		BackendTestURL:  getEnv("BACKEND_TEST_URL", ""),
-		AppDir:          getEnv("APP_DIR", ""),
-		FrontendTestURL: getEnv("FRONTEND_TEST_URL", ""),
-		FrontendE2EURL:  getEnv("FRONTEND_E2E_URL", ""),
+		TestRunnerURL: getEnv("TEST_RUNNER_URL", ""),
+		AppDir:        getEnv("APP_DIR", ""),
 
 		SFSAPIKeyPepper:           requireEnv("SFS_API_KEY_PEPPER"),
 		PayPalClientID:            paypalClientID,

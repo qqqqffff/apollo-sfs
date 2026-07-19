@@ -166,6 +166,7 @@ function RouteComponent() {
                     <AdminDropdownLink to="/admin/pricing" onClick={() => setAdminMenuOpen(false)}>Pricing</AdminDropdownLink>
                     <AdminDropdownLink to="/admin/emails" onClick={() => setAdminMenuOpen(false)}>Emails</AdminDropdownLink>
                     <AdminDropdownLink to="/admin/bans" onClick={() => setAdminMenuOpen(false)}>Bans & Suspensions</AdminDropdownLink>
+                    <AdminDropdownLink to="/admin/feedback" onClick={() => setAdminMenuOpen(false)}>Feedback</AdminDropdownLink>
                     <AdminDropdownLink to="/admin/metrics" onClick={() => setAdminMenuOpen(false)}>Metrics</AdminDropdownLink>
                     <AdminDropdownLink to="/admin/alarm" onClick={() => setAdminMenuOpen(false)}>Alarms</AdminDropdownLink>
                   </div>
@@ -273,6 +274,7 @@ function RouteComponent() {
               <MobileNavLink to="/admin/pricing" onClick={closeMenu}>Pricing</MobileNavLink>
               <MobileNavLink to="/admin/emails" onClick={closeMenu}>Emails</MobileNavLink>
               <MobileNavLink to="/admin/bans" onClick={closeMenu}>Bans & Suspensions</MobileNavLink>
+              <MobileNavLink to="/admin/feedback" onClick={closeMenu}>Feedback</MobileNavLink>
               <MobileNavLink to="/admin/metrics" onClick={closeMenu}>Metrics</MobileNavLink>
               <MobileNavLink to="/admin/alarm" onClick={closeMenu}>Alarms</MobileNavLink>
             </>

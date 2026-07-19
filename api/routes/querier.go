@@ -100,4 +100,7 @@ type Querier interface {
 	DeltaSyncFiles(ctx context.Context, userID uuid.UUID, since time.Time) ([]models.File, error)
 	DeltaSyncDeleted(ctx context.Context, userID uuid.UUID, since time.Time) ([]uuid.UUID, error)
 	FindFileByHash(ctx context.Context, userID uuid.UUID, hash string) (*models.File, error)
+
+	// Feedback (profile page submission; reviewed on the admin feedback page)
+	CreateFeedback(ctx context.Context, userID uuid.UUID, username, category, message string) (*models.Feedback, error)
 }

@@ -109,6 +109,7 @@ type stubQuerier struct {
 	quotaChangeNotifErr   error
 	recentQuotaChanges    []db.QuotaChangeNotification
 	recentQuotaChangesErr error
+	createFeedbackErr     error
 }
 
 func (s *stubQuerier) GetUserByUsername(_ context.Context, _ string) (*models.User, error) {
@@ -311,6 +312,21 @@ func (s *stubQuerier) DeltaSyncDeleted(_ context.Context, _ uuid.UUID, _ time.Ti
 func (s *stubQuerier) FindFileByHash(_ context.Context, _ uuid.UUID, _ string) (*models.File, error) {
 	return nil, nil
 }
+func (s *stubQuerier) CreateFeedback(_ context.Context, userID uuid.UUID, username, category, message string) (*models.Feedback, error) {
+	if s.createFeedbackErr != nil {
+		return nil, s.createFeedbackErr
+	}
+	return &models.Feedback{
+		ID:        uuid.New(),
+		UserID:    userID,
+		Username:  username,
+		Category:  category,
+		Message:   message,
+		Status:    "new",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}, nil
+}
 
 // ── Stub InviteService (routes package) ───────────────────────────────────────
 
@@ -349,6 +365,11 @@ type stubAdminQuerier struct {
 	alarmSubs       []models.AlarmSubscription
 	alarmSubsErr    error
 	subscriptionErr error
+	// feedback review fields
+	feedback             []models.Feedback
+	feedbackErr          error
+	updateFeedbackErr    error
+	setFeedbackAccessErr error
 }
 
 func (s *stubAdminQuerier) ListUsers(_ context.Context, _ db.PageInput) (*db.PageResult[models.User], error) {
@@ -373,6 +394,9 @@ func (s *stubAdminQuerier) GetUserByUsername(_ context.Context, _ string) (*mode
 }
 func (s *stubAdminQuerier) UpdateUserQuota(_ context.Context, _ string, _ int64) error {
 	return s.updateQuotaErr
+}
+func (s *stubAdminQuerier) SetUserFeedbackAccess(_ context.Context, _ string, _ bool) error {
+	return s.setFeedbackAccessErr
 }
 func (s *stubAdminQuerier) GetUserDrive(_ context.Context, _ string) (*models.UserDriveAllocation, error) {
 	return s.userDrive, s.userDriveErr
@@ -558,6 +582,19 @@ func (s *stubAdminQuerier) MarkInterestSubmissionProvisioned(_ context.Context, 
 }
 func (s *stubAdminQuerier) DenyInterestSubmission(_ context.Context, _ uuid.UUID, _ string) error {
 	return s.denyErr
+}
+func (s *stubAdminQuerier) ListFeedback(_ context.Context, _ string, _ db.PageInput) (*db.PageResult[models.Feedback], error) {
+	items := s.feedback
+	if items == nil {
+		items = []models.Feedback{}
+	}
+	return &db.PageResult[models.Feedback]{Items: items}, s.feedbackErr
+}
+func (s *stubAdminQuerier) UpdateFeedbackStatus(_ context.Context, id uuid.UUID, status string) (*models.Feedback, error) {
+	if s.updateFeedbackErr != nil {
+		return nil, s.updateFeedbackErr
+	}
+	return &models.Feedback{ID: id, Status: status}, nil
 }
 
 // ── Stub AdminInviteService ───────────────────────────────────────────────────

@@ -28,6 +28,9 @@ export interface User {
   // When true, the Add Storage modal always routes purchases through the
   // capacity expansion request flow instead of a direct buy.
   expansion_override_enabled: boolean
+  // Gates the profile-page feedback form — disabled by default; admins grant
+  // it per-user from the admin Feedback → Access tab.
+  feedback_access_enabled: boolean
 }
 
 export type APIKeyOperation = 'read' | 'write' | 'delete' | 'list'
@@ -406,6 +409,26 @@ export interface ServerExpansionRequest {
   invoice_status?: string
   invoice_sent_at?: string
   invoice_accept_due_at?: string
+}
+
+export type FeedbackCategory = 'bug' | 'feature' | 'general'
+export type FeedbackStatus = 'new' | 'reviewed' | 'archived'
+
+export interface Feedback {
+  id: string
+  user_id: string
+  username: string
+  category: FeedbackCategory
+  message: string
+  status: FeedbackStatus
+  created_at: string
+  updated_at: string
+}
+
+export const FEEDBACK_CATEGORIES: Record<FeedbackCategory, string> = {
+  bug:     'Bug report',
+  feature: 'Feature request',
+  general: 'General feedback',
 }
 
 export const VIOLATION_CODES: Record<string, string> = {

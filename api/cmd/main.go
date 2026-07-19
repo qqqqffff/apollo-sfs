@@ -552,6 +552,9 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		protected.POST("/favorites/folders/:folder_id", h.FavoriteFolder)
 		protected.DELETE("/favorites/folders/:folder_id", h.UnfavoriteFolder)
 
+		// Feedback (profile page submission; reviewed on the admin feedback page)
+		protected.POST("/feedback", h.SubmitFeedback)
+
 		// Math game scores (per-user history for the /math-game test)
 		protected.GET("/math-game/scores", h.ListMathScores)
 		protected.POST("/math-game/scores", h.SaveMathScore)
@@ -691,6 +694,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 			adminGroup.GET("/users/:user_id", adminHandler.GetUser)
 			adminGroup.PATCH("/users/:user_id/quota", adminHandler.UpdateUserQuota)
 			adminGroup.PATCH("/users/:user_id/username", adminHandler.UpdateUsername)
+			adminGroup.PATCH("/users/:user_id/feedback-access", adminHandler.UpdateUserFeedbackAccess)
 			adminGroup.GET("/users/:user_id/storage", h.AdminGetUserStorage)
 			adminGroup.PUT("/users/:user_id/storage/allocations", h.AdminUpdateUserStorageAllocations)
 			adminGroup.GET("/users/:user_id/folders", h.AdminListUserFolders)
@@ -737,6 +741,9 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 			adminGroup.POST("/users/:user_id/suspend", adminHandler.SuspendUser)
 			adminGroup.POST("/users/:user_id/pardon", adminHandler.PardonUser)
 			adminGroup.GET("/bans", adminHandler.ListUserBans)
+
+			adminGroup.GET("/feedback", adminHandler.ListFeedback)
+			adminGroup.PATCH("/feedback/:id/status", adminHandler.UpdateFeedbackStatus)
 
 			adminGroup.GET("/expansion-requests", expansionHandler.ListRequests)
 			adminGroup.POST("/expansion-requests/:id/approve", expansionHandler.ApproveRequest)

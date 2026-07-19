@@ -13,7 +13,7 @@ import (
 const userColumns = `
 	username, email, encrypted_key, key_nonce, master_key_version,
 	storage_used_bytes, storage_quota_bytes, last_seen_at, created_at, is_admin,
-	is_premium, premium_granted_at`
+	is_premium, premium_granted_at, feedback_access_enabled`
 
 func scanUser(row *sql.Row) (*models.User, error) {
 	var u models.User
@@ -21,7 +21,7 @@ func scanUser(row *sql.Row) (*models.User, error) {
 	err := row.Scan(
 		&u.Username, &u.Email, &u.EncryptedKey, &u.KeyNonce, &u.MasterKeyVersion,
 		&u.StorageUsedBytes, &u.StorageQuotaBytes, &lastSeenAt, &u.CreatedAt, &u.IsAdmin,
-		&u.IsPremium, &premiumGrantedAt,
+		&u.IsPremium, &premiumGrantedAt, &u.FeedbackAccessEnabled,
 	)
 	if err != nil {
 		return nil, err
@@ -41,7 +41,7 @@ func scanUserRow(rows *sql.Rows) (*models.User, error) {
 	err := rows.Scan(
 		&u.Username, &u.Email, &u.EncryptedKey, &u.KeyNonce, &u.MasterKeyVersion,
 		&u.StorageUsedBytes, &u.StorageQuotaBytes, &lastSeenAt, &u.CreatedAt, &u.IsAdmin,
-		&u.IsPremium, &premiumGrantedAt,
+		&u.IsPremium, &premiumGrantedAt, &u.FeedbackAccessEnabled,
 	)
 	if err != nil {
 		return nil, err
@@ -116,7 +116,7 @@ func (q *Queries) ListUsers(ctx context.Context, in PageInput) (*PageResult[mode
 	rows, err := q.db.QueryContext(ctx, `
 		SELECT u.username, u.email, u.encrypted_key, u.key_nonce, u.master_key_version,
 		       u.storage_used_bytes, u.storage_quota_bytes, u.last_seen_at, u.created_at, u.is_admin,
-		       u.is_premium, u.premium_granted_at,
+		       u.is_premium, u.premium_granted_at, u.feedback_access_enabled,
 		       b.id, b.ban_type, b.violation_code, b.comments, b.banned_by,
 		       b.banned_at, b.expires_at, b.pardoned_at, b.pardoned_by,
 		       EXISTS (
@@ -161,10 +161,10 @@ func (q *Queries) ListUsers(ctx context.Context, in PageInput) (*PageResult[mode
 // ListUsers above, which other callers (e.g. the alarm-subscription user
 // picker) use to page through every user with no search/sort/filter needs.
 type ListUsersFilter struct {
-	Search   string // matches username/email, case-insensitive substring
-	Role     string // "" (all) | "admin" | "premium" | "user" (neither)
-	Sort     string // "username" | "email" | "role" | "created_at" (default) | "last_seen_at"
-	Dir      string // "asc" | "desc" — default depends on Sort, see sortColumn
+	Search   string   // matches username/email, case-insensitive substring
+	Role     string   // "" (all) | "admin" | "premium" | "user" (neither)
+	Sort     string   // "username" | "email" | "role" | "created_at" (default) | "last_seen_at"
+	Dir      string   // "asc" | "desc" — default depends on Sort, see sortColumn
 	ServerID string   // "" (all) | a servers.id — restricts to users with a drive_allocations row on that server
 	Tiers    []string // subset of "nvme"/"hdd"; empty = all tiers — restricts to users with an allocation of that tier (on ServerID, if also set)
 }
@@ -256,7 +256,7 @@ func (q *Queries) ListAdminUsers(ctx context.Context, f ListUsersFilter, limit, 
 	query := fmt.Sprintf(`
 		SELECT u.username, u.email, u.encrypted_key, u.key_nonce, u.master_key_version,
 		       u.storage_used_bytes, u.storage_quota_bytes, u.last_seen_at, u.created_at, u.is_admin,
-		       u.is_premium, u.premium_granted_at,
+		       u.is_premium, u.premium_granted_at, u.feedback_access_enabled,
 		       b.id, b.ban_type, b.violation_code, b.comments, b.banned_by,
 		       b.banned_at, b.expires_at, b.pardoned_at, b.pardoned_by,
 		       EXISTS (
@@ -314,7 +314,7 @@ func scanUserWithBanRow(rows *sql.Rows) (*models.User, error) {
 	err := rows.Scan(
 		&u.Username, &u.Email, &u.EncryptedKey, &u.KeyNonce, &u.MasterKeyVersion,
 		&u.StorageUsedBytes, &u.StorageQuotaBytes, &lastSeenAt, &u.CreatedAt, &u.IsAdmin,
-		&u.IsPremium, &premiumGrantedAt,
+		&u.IsPremium, &premiumGrantedAt, &u.FeedbackAccessEnabled,
 		&banID, &banType, &violationCode, &comments, &bannedBy,
 		&bannedAt, &expiresAt, &pardonedAt, &pardonedBy,
 		&u.PremiumSubscribed,
@@ -406,6 +406,20 @@ func (q *Queries) SetUserPremium(ctx context.Context, username string, isPremium
 	`, username, isPremium)
 	if err != nil {
 		return fmt.Errorf("SetUserPremium %q: %w", username, err)
+	}
+	return nil
+}
+
+// SetUserFeedbackAccess toggles whether a user may submit the profile-page
+// feedback form. Disabled by default for every user; admins grant it
+// per-user from the admin Feedback → Access tab.
+func (q *Queries) SetUserFeedbackAccess(ctx context.Context, username string, enabled bool) error {
+	_, err := q.db.ExecContext(ctx,
+		`UPDATE users SET feedback_access_enabled = $2 WHERE username = $1`,
+		username, enabled,
+	)
+	if err != nil {
+		return fmt.Errorf("SetUserFeedbackAccess %q: %w", username, err)
 	}
 	return nil
 }

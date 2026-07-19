@@ -1,5 +1,5 @@
 import { del, get, patch, post, put } from './client'
-import type { AuditLog, BannedIP, FavoriteList, FolderContents, Invitation, InterestSubmission, InterestFormSettings, PageResult, ServerExpansionRequest, User, UserBan } from '../types/api'
+import type { AuditLog, BannedIP, Feedback, FeedbackStatus, FavoriteList, FolderContents, Invitation, InterestSubmission, InterestFormSettings, PageResult, ServerExpansionRequest, User, UserBan } from '../types/api'
 
 // ── Admin user file browsing ───────────────────────────────────────────────────
 
@@ -150,6 +150,13 @@ export function updateUserQuota(username: string, quota_bytes: number) {
 
 export function updateUsername(username: string, newUsername: string) {
   return patch<{ message: string }>(`/admin/users/${username}/username`, { new_username: newUsername })
+}
+
+export function updateUserFeedbackAccess(username: string, enabled: boolean) {
+  return patch<{ message: string; feedback_access_enabled: boolean }>(
+    `/admin/users/${encodeURIComponent(username)}/feedback-access`,
+    { enabled },
+  )
 }
 
 // ── Invitations ────────────────────────────────────────────────────────────────
@@ -520,6 +527,21 @@ export function listUserBans(status: BanStatus, cursor?: string, limit?: number)
   if (cursor) params.set('cursor', cursor)
   if (limit) params.set('limit', String(limit))
   return get<PageResult<UserBan>>(`/admin/bans?${params}`)
+}
+
+// ── Feedback review ────────────────────────────────────────────────────────────
+
+export function listFeedback(status?: FeedbackStatus, cursor?: string, limit?: number) {
+  const params = new URLSearchParams()
+  if (status) params.set('status', status)
+  if (cursor) params.set('cursor', cursor)
+  if (limit) params.set('limit', String(limit))
+  const qs = params.toString()
+  return get<PageResult<Feedback>>(`/admin/feedback${qs ? `?${qs}` : ''}`)
+}
+
+export function updateFeedbackStatus(id: string, status: FeedbackStatus) {
+  return patch<Feedback>(`/admin/feedback/${id}/status`, { status })
 }
 
 export const adminUserBansInfiniteQueryOptions = {

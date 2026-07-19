@@ -164,8 +164,8 @@ func (h *Handler) UpdateUserQuota(c *gin.Context) {
 		maxQuota := avail + user.StorageQuotaBytes
 		if req.QuotaBytes > maxQuota {
 			c.JSON(http.StatusConflict, gin.H{
-				"error":      "quota exceeds drive capacity",
-				"max_bytes":  maxQuota,
+				"error":       "quota exceeds drive capacity",
+				"max_bytes":   maxQuota,
 				"drive_label": alloc.Drive.Label,
 			})
 			return
@@ -178,6 +178,34 @@ func (h *Handler) UpdateUserQuota(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "quota updated"})
+}
+
+type updateFeedbackAccessRequest struct {
+	Enabled *bool `json:"enabled" binding:"required"`
+}
+
+// UpdateUserFeedbackAccess handles PATCH /api/v1/admin/users/:user_id/feedback-access.
+// Toggles whether the user may submit the profile-page feedback form —
+// disabled by default for every account.
+func (h *Handler) UpdateUserFeedbackAccess(c *gin.Context) {
+	username := sanitize.String(c.Param("user_id"))
+	if username == "" || len(username) > 150 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user_id"})
+		return
+	}
+
+	var req updateFeedbackAccessRequest
+	if err := c.ShouldBindJSON(&req); err != nil || req.Enabled == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "enabled is required"})
+		return
+	}
+
+	if err := h.queries.SetUserFeedbackAccess(c.Request.Context(), username, *req.Enabled); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not update feedback access"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "feedback access updated", "feedback_access_enabled": *req.Enabled})
 }
 
 type updateUsernameRequest struct {

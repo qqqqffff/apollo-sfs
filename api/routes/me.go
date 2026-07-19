@@ -205,6 +205,9 @@ type meResponse struct {
 	// middleware.ExpansionOverrideEnabled) — always false for non-admins, and
 	// resets on logout/session expiry since it isn't persisted.
 	ExpansionOverrideEnabled bool `json:"expansion_override_enabled"`
+	// FeedbackAccessEnabled gates the profile-page feedback form — disabled by
+	// default; admins grant it per-user from the admin Feedback → Access tab.
+	FeedbackAccessEnabled bool `json:"feedback_access_enabled"`
 }
 
 // Me handles GET /api/v1/me.
@@ -321,6 +324,7 @@ func (h *Handler) Me(c *gin.Context) {
 		LinkedProviders:          linkedProviders,
 		SandboxPaymentsEnabled:   middleware.SandboxEnabled(c),
 		ExpansionOverrideEnabled: middleware.ExpansionOverrideEnabled(c),
+		FeedbackAccessEnabled:    user.FeedbackAccessEnabled,
 	})
 }
 
@@ -734,8 +738,8 @@ func (h *Handler) gatherNotificationItems(ctx context.Context, username, userID 
 			}
 			if age := time.Since(*last); age > backupStaleAfter {
 				items = append(items, notificationItem{
-					ID:   fmt.Sprintf("backup-stale:%s:%d", strings.ToLower(chk.label), last.Unix()),
-					Kind: "backup_stale",
+					ID:    fmt.Sprintf("backup-stale:%s:%d", strings.ToLower(chk.label), last.Unix()),
+					Kind:  "backup_stale",
 					Title: fmt.Sprintf("%s backup is out of date", chk.label),
 					Body: fmt.Sprintf("Your last %s backup completed %d days ago — over the 30-day reminder threshold.",
 						strings.ToLower(chk.label), int(age.Hours()/24)),

@@ -1,7 +1,7 @@
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
 import { useEffect, useRef, useCallback, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { MdAddCircleOutline, MdAssignment, MdCheck, MdClose, MdEdit, MdHistory, MdOpenInNew, MdPhotoLibrary, MdRocketLaunch, MdShield, MdStorage, MdBolt, MdRefresh, MdScience } from 'react-icons/md'
+import { MdAddCircleOutline, MdAssignment, MdCheck, MdClose, MdEdit, MdFeedback, MdHistory, MdOpenInNew, MdPhotoLibrary, MdRocketLaunch, MdShield, MdStorage, MdBolt, MdRefresh, MdScience } from 'react-icons/md'
 import { FaApple } from 'react-icons/fa'
 import { meQueryOptions, updateUsername, preferencesQueryOptions, updatePreferences, updateStorageUIPreferences, updateSandboxPayments, updateExpansionOverride, unlinkProvider, lastBackupSyncQueryOptions, updateBackupReminderPreference } from '../../api/me'
 import { formatTimeSince } from '../../components/LastSyncNote'
@@ -165,6 +165,25 @@ function RouteComponent() {
           </button>
         </div>
       </div>
+
+      {user.feedback_access_enabled && (
+        <div className="bg-white border border-gray-200 rounded-xl px-5 py-4">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-semibold text-gray-800 m-0">Feedback</h3>
+              <p className="text-xs text-gray-500 m-0 mt-1">
+                Found a bug or have an idea? Let us know.
+              </p>
+            </div>
+            <button
+              onClick={() => navigate({ to: '/client/feedback' as never })}
+              className="shrink-0 inline-flex items-center gap-1.5 px-3 py-2 text-xs border border-gray-200 rounded-lg text-gray-700 hover:bg-gray-50 cursor-pointer transition-colors"
+            >
+              <MdFeedback className="text-sm text-blue-600" /> Send feedback
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

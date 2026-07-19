@@ -19,6 +19,7 @@ type AdminQuerier interface {
 	ListAdminUsers(ctx context.Context, f db.ListUsersFilter, limit, offset int) ([]models.User, int, error)
 	GetUserByUsername(ctx context.Context, username string) (*models.User, error)
 	UpdateUserQuota(ctx context.Context, username string, quotaBytes int64) error
+	SetUserFeedbackAccess(ctx context.Context, username string, enabled bool) error
 	GetUserDrive(ctx context.Context, username string) (*models.UserDriveAllocation, error)
 	GetDriveAvailableBytes(ctx context.Context, driveID uuid.UUID) (int64, error)
 
@@ -93,6 +94,10 @@ type AdminQuerier interface {
 	GetInterestSubmissionByID(ctx context.Context, id uuid.UUID) (*models.InterestSubmission, error)
 	MarkInterestSubmissionProvisioned(ctx context.Context, id uuid.UUID, invitationID uuid.UUID) error
 	DenyInterestSubmission(ctx context.Context, id uuid.UUID, refundID string) error
+
+	// Feedback review
+	ListFeedback(ctx context.Context, status string, in db.PageInput) (*db.PageResult[models.Feedback], error)
+	UpdateFeedbackStatus(ctx context.Context, id uuid.UUID, status string) (*models.Feedback, error)
 }
 
 // AdminInviteService is the subset of *services.InviteService used by admin handlers.

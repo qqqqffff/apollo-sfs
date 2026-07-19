@@ -63,16 +63,18 @@ in only if you accept that risk.
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `RECOGNITION_TOKEN` | — (required) | Shared secret for api → sidecar calls. Generate: `openssl rand -hex 32` |
-| `RECOGNITION_CPU_LIMIT` | 6 (prod) / 2 (dev) | Container CPU cap — set to **~50% of the node's cores** |
-| `RECOGNITION_MEM_LIMIT` | 16G (prod) / 2g (dev) | Container memory cap — set to **~50% of the node's RAM** |
+| `RECOGNITION_CPU_LIMIT` | 6 | Container CPU cap — set to **~50% of the node's cores** |
+| `RECOGNITION_MEM_LIMIT` | 16G | Container memory cap — set to **~50% of the node's RAM** |
 | `RECOGNITION_CONCURRENCY` | 2 | api-side concurrent jobs (decrypt/crop/ffmpeg are bounded by this) |
 | `RECOGNITION_MAX_KEYFRAMES` | 20 | Frames sampled per video |
 | `RECOGNITION_FACE_THRESHOLD` | 0.50 | Cosine threshold to join a face group (higher = more splitting) |
 | `RECOGNITION_PET_THRESHOLD` | 0.88 | Cosine threshold for individual pets (kept strict; merge UI fixes over-splits) |
 
-`RECOGNITION_URL` is set in the compose/stack files (`http://recognition:8000`);
-leaving it empty disables the feature entirely (endpoints return 503, worker
-never starts).
+`RECOGNITION_URL` is set on the `api` service in `docker-stack.yml`
+(`http://recognition:8000`); leaving it empty disables the feature entirely
+(endpoints return 503, worker never starts). The deprecated
+`docker-compose.yml` deliberately has no `recognition` service and no
+`RECOGNITION_URL`, so the feature is off under compose.
 
 ## Threshold tuning
 
@@ -85,31 +87,29 @@ never starts).
 - Thresholds apply to *new* assignments only; re-cluster a collection by
   disabling with "delete recognition data" and re-enabling.
 
-## Development (single-node compose)
+## Deployment (Swarm only)
 
-```bash
-docker compose build recognition api
-docker compose up -d
-# Verify the sidecar from inside the network:
-docker compose exec api wget -qO- http://recognition:8000/healthz
-# Apply the schema migration:
-PSQL="docker compose exec -T db-app psql" ./db/apply-migrations.sh
-```
-
-Sidecar unit tests (no models needed): `cd recognition && RECOGNITION_TOKEN=test python -m pytest tests/`.
-
-## Production (Swarm)
-
-`./deploy.sh` now includes `recognition` as a checklist item (amd64 image,
-pinned to `tier == standard` — the Ryzen manager). First deploy:
+Recognition runs only as a Swarm service, pinned to the manager
+(`node.labels.tier == standard`, amd64 image). It is not part of the
+deprecated `docker-compose.yml`. `./deploy.sh` includes `recognition` as a
+checklist item. First deploy:
 
 ```bash
 # .env: add RECOGNITION_TOKEN (+ optional limits/thresholds)
 ./deploy.sh --migrate --services recognition,api,frontend
 ```
 
+Verify the sidecar from inside the api container on the manager:
+
+```bash
+docker exec "$(docker ps -q -f name=apollo-sfs_api)" \
+  wget -qO- http://recognition:8000/healthz
+```
+
 The service publishes no ports and is never proxied by nginx; only the api can
 reach it on the overlay network, and every call requires `X-Internal-Token`.
+
+Sidecar unit tests need no Docker or models: `cd recognition && RECOGNITION_TOKEN=test python -m pytest tests/`.
 
 ## Resource pool (~50% CPU / 50% RAM)
 
@@ -169,10 +169,10 @@ is packaging + Swarm configuration only:
              kind: "NVIDIA-GPU"
              value: 1
    ```
-5. **Verify:** `docker compose exec api wget -qO- http://recognition:8000/healthz`
-   (or the Swarm equivalent) should list `CUDAExecutionProvider` in
-   `providers`. Keep the CPU limits — they still cap the Python-side pre/post
-   processing; GPU inference frees CPU rather than adding to it.
+5. **Verify:** the `/healthz` check from the Deployment section should list
+   `CUDAExecutionProvider` in `providers`. Keep the CPU limits — they still
+   cap the Python-side pre/post processing; GPU inference frees CPU rather
+   than adding to it.
 
 ## Operational notes
 

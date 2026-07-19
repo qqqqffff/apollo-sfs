@@ -152,7 +152,10 @@ run() {
 # OPTIONS) in place.
 declare -a OPTIONS=("migrate" "${ORDER[@]}")
 declare -a OPTION_LABELS=("Run DB migrations (db/apply-migrations.sh)" "${ORDER[@]}")
-declare -a SELECTED=(0 0 0 0)
+# One slot per option, all off — sized from OPTIONS so adding a service to
+# ORDER can't leave SELECTED short (set -u makes that an unbound-variable crash).
+declare -a SELECTED=()
+for _ in "${OPTIONS[@]}"; do SELECTED+=(0); done
 CURSOR=0
 
 select_services() {

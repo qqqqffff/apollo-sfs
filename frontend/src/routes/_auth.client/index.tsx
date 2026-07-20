@@ -12,6 +12,7 @@ import {
   MdCloudUpload,
   MdClose,
   MdDeleteOutline,
+  MdEdit,
   MdFolder,
   MdFolderOpen,
   MdInfoOutline,
@@ -24,8 +25,8 @@ import {
   MdUploadFile,
   MdVisibility,
 } from 'react-icons/md'
-import { createFolder, deleteFolder, moveFolder, requestDriveMigration } from '../../api/folders'
-import { deleteFile, downloadUrl, fileQueryOptions, moveFile, previewUrl } from '../../api/files'
+import { createFolder, deleteFolder, moveFolder, renameFolder, requestDriveMigration } from '../../api/folders'
+import { deleteFile, downloadUrl, fileQueryOptions, moveFile, previewUrl, renameFile } from '../../api/files'
 import { detectionThumbUrl } from '../../api/recognition'
 import { meQueryOptions, preferencesQueryOptions, updatePreferences } from '../../api/me'
 import { listMyServers, resolveDrive, type MyServer } from '../../api/storage'
@@ -169,6 +170,8 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
   const [search, setSearch] = useState('')
   const [creatingFolder, setCreatingFolder] = useState(false)
   const [newFolderName, setNewFolderName] = useState('')
+  const [renaming, setRenaming] = useState<{ type: 'file' | 'folder'; id: string; ext: string } | null>(null)
+  const [renameValue, setRenameValue] = useState('')
   const [newFolderKind, setNewFolderKind] = useState<FolderKind>('regular')
   const [newFolderDriveId, setNewFolderDriveId] = useState<string | null>(null)
   const { progress, startUpload, dismiss } = useFileUpload()
@@ -353,6 +356,47 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
     },
     onError: () => notify('error', 'Failed to delete file'),
   })
+
+  const renameFileMutation = useMutation({
+    mutationFn: ({ id, name }: { id: string; name: string }) => renameFile(id, name),
+    onSuccess: () => {
+      setRenaming(null)
+      queryClient.invalidateQueries({ queryKey: ['folders', folderId] })
+    },
+    onError: (err) => notify('error', err instanceof ApiError ? err.message : 'Failed to rename file'),
+  })
+
+  const renameFolderMutation = useMutation({
+    mutationFn: ({ id, name }: { id: string; name: string }) => renameFolder(id, name),
+    onSuccess: () => {
+      setRenaming(null)
+      queryClient.invalidateQueries({ queryKey: ['folders', folderId] })
+    },
+    onError: (err) => notify('error', err instanceof ApiError ? err.message : 'Failed to rename folder'),
+  })
+
+  // Files keep their extension locked during rename — only the base name is
+  // editable — since changing it silently would change how the OS/browser
+  // treats the downloaded file. Folders have no extension concept.
+  function startRename(type: 'file' | 'folder', id: string, name: string) {
+    const { base, ext } = type === 'file' ? splitExtension(name) : { base: name, ext: '' }
+    setRenaming({ type, id, ext })
+    setRenameValue(base)
+  }
+
+  function confirmRename() {
+    if (!renaming) return
+    const base = renameValue.trim()
+    if (!base) return
+    const name = base + renaming.ext
+    if (renaming.type === 'file') renameFileMutation.mutate({ id: renaming.id, name })
+    else renameFolderMutation.mutate({ id: renaming.id, name })
+  }
+
+  function cancelRename() {
+    setRenaming(null)
+    setRenameValue('')
+  }
 
   function handleDeleteClick(type: 'file' | 'folder', id: string, name: string) {
     if (user && readSkipDeleteCookie(user.username)) {
@@ -854,33 +898,72 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
                     : 'hover:bg-gray-50'
                 } ${draggingFolderId === f.id ? 'opacity-40' : ''}`}
               >
-                <button
-                  onClick={() => openFolder(f.id)}
-                  className="flex-1 flex items-center gap-2 bg-transparent border-0 cursor-pointer text-left text-sm text-gray-800 hover:text-gray-900 p-0 min-w-0"
-                >
-                  {f.kind === 'media'
-                    ? <MdPhotoLibrary className="text-purple-400 text-lg shrink-0" />
-                    : f.kind === 'email'
-                      ? <MdAlternateEmail className="text-teal-500 text-lg shrink-0" title="Email backup" />
-                      : <MdFolder className="text-blue-400 text-lg shrink-0" />}
-                  <span className="truncate">{f.name}</span>
-                </button>
-                <span className="text-xs text-gray-400 shrink-0 hidden sm:inline">
-                  {new Date(f.created_at).toLocaleDateString()}
-                </span>
-                <span className="text-xs text-gray-400 shrink-0">{formatSize(f.size_bytes)}</span>
-                {!readOnly && (
+                {renaming?.type === 'folder' && renaming.id === f.id ? (
                   <>
-                    {f.kind === 'media' && (
-                      <AutoUploadButton
-                        active={autoUploadTargetId === f.id}
-                        onClick={() => toggleAutoUploadTarget(f.id)}
-                      />
+                    {f.kind === 'media'
+                      ? <MdPhotoLibrary className="text-purple-400 text-lg shrink-0" />
+                      : f.kind === 'email'
+                        ? <MdAlternateEmail className="text-teal-500 text-lg shrink-0" title="Email backup" />
+                        : <MdFolder className="text-blue-400 text-lg shrink-0" />}
+                    <input
+                      autoFocus
+                      type="text"
+                      value={renameValue}
+                      onChange={(e) => setRenameValue(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') confirmRename()
+                        if (e.key === 'Escape') cancelRename()
+                      }}
+                      className="flex-1 min-w-0 bg-transparent border-0 outline-none text-sm text-gray-800"
+                    />
+                    <button
+                      onClick={confirmRename}
+                      disabled={!renameValue.trim() || renameFolderMutation.isPending}
+                      title="Save"
+                      className="text-green-500 hover:text-green-700 disabled:opacity-30 cursor-pointer bg-transparent border-0 p-0.5 transition-colors"
+                    >
+                      <MdCheck className="text-lg" />
+                    </button>
+                    <button
+                      onClick={cancelRename}
+                      title="Cancel"
+                      className="text-gray-400 hover:text-gray-600 cursor-pointer bg-transparent border-0 p-0.5 transition-colors"
+                    >
+                      <MdClose className="text-lg" />
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <button
+                      onClick={() => openFolder(f.id)}
+                      className="flex-1 flex items-center gap-2 bg-transparent border-0 cursor-pointer text-left text-sm text-gray-800 hover:text-gray-900 p-0 min-w-0"
+                    >
+                      {f.kind === 'media'
+                        ? <MdPhotoLibrary className="text-purple-400 text-lg shrink-0" />
+                        : f.kind === 'email'
+                          ? <MdAlternateEmail className="text-teal-500 text-lg shrink-0" title="Email backup" />
+                          : <MdFolder className="text-blue-400 text-lg shrink-0" />}
+                      <span className="truncate">{f.name}</span>
+                    </button>
+                    <span className="text-xs text-gray-400 shrink-0 hidden sm:inline">
+                      {new Date(f.created_at).toLocaleDateString()}
+                    </span>
+                    <span className="text-xs text-gray-400 shrink-0">{formatSize(f.size_bytes)}</span>
+                    {!readOnly && (
+                      <>
+                        {f.kind === 'media' && (
+                          <AutoUploadButton
+                            active={autoUploadTargetId === f.id}
+                            onClick={() => toggleAutoUploadTarget(f.id)}
+                          />
+                        )}
+                        <StarButton active={favoriteFolderIds.has(f.id)} onClick={() => toggleFolder(f.id)} title={favoriteFolderIds.has(f.id) ? 'Remove from favorites' : 'Add to favorites'} />
+                        <RenameButton onClick={() => startRename('folder', f.id, f.name)} title="Rename folder" />
+                        <ShareButton onClick={() => setPendingShare({ type: 'folder', id: f.id, name: f.name })} title="Share folder" />
+                        <DriveInfoButton folder={f} servers={myServers} isAdmin={!!user?.is_admin} />
+                        <DeleteButton onClick={() => handleDeleteClick('folder', f.id, f.name)} title="Delete folder" />
+                      </>
                     )}
-                    <StarButton active={favoriteFolderIds.has(f.id)} onClick={() => toggleFolder(f.id)} title={favoriteFolderIds.has(f.id) ? 'Remove from favorites' : 'Add to favorites'} />
-                    <ShareButton onClick={() => setPendingShare({ type: 'folder', id: f.id, name: f.name })} title="Share folder" />
-                    <DriveInfoButton folder={f} servers={myServers} isAdmin={!!user?.is_admin} />
-                    <DeleteButton onClick={() => handleDeleteClick('folder', f.id, f.name)} title="Delete folder" />
                   </>
                 )}
               </li>
@@ -899,22 +982,58 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
                 {...(!readOnly ? getFileDragHandlers(f) : {})}
                 className={`flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-gray-50 transition-colors ${!readOnly ? 'cursor-grab' : ''} ${draggingFileId === f.id ? 'opacity-40' : ''}`}
               >
-                <button
-                  onClick={() => openFile(f.id)}
-                  className="flex-1 flex items-center gap-2 bg-transparent border-0 cursor-pointer text-left text-sm text-gray-800 hover:text-gray-900 p-0 min-w-0"
-                >
-                  <MdInsertDriveFile className="text-gray-400 text-lg shrink-0" />
-                  <span className="truncate">{f.name}</span>
-                </button>
-                <span className="text-xs text-gray-400 shrink-0 hidden sm:inline">
-                  {new Date(f.created_at).toLocaleDateString()}
-                </span>
-                <span className="text-xs text-gray-400 shrink-0">{formatSize(f.size_bytes)}</span>
-                {!readOnly && (
+                {renaming?.type === 'file' && renaming.id === f.id ? (
                   <>
-                    <StarButton active={favoriteFileIds.has(f.id)} onClick={() => toggleFile(f.id)} title={favoriteFileIds.has(f.id) ? 'Remove from favorites' : 'Add to favorites'} />
-                    <ShareButton onClick={() => setPendingShare({ type: 'file', id: f.id, name: f.name })} title="Share file" />
-                    <DeleteButton onClick={() => handleDeleteClick('file', f.id, f.name)} title="Delete file" />
+                    <MdInsertDriveFile className="text-gray-400 text-lg shrink-0" />
+                    <input
+                      autoFocus
+                      type="text"
+                      value={renameValue}
+                      onChange={(e) => setRenameValue(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') confirmRename()
+                        if (e.key === 'Escape') cancelRename()
+                      }}
+                      className="flex-1 min-w-0 bg-transparent border-0 outline-none text-sm text-gray-800"
+                    />
+                    {renaming.ext && <span className="text-sm text-gray-400 shrink-0" title="File extension can't be changed">{renaming.ext}</span>}
+                    <button
+                      onClick={confirmRename}
+                      disabled={!renameValue.trim() || renameFileMutation.isPending}
+                      title="Save"
+                      className="text-green-500 hover:text-green-700 disabled:opacity-30 cursor-pointer bg-transparent border-0 p-0.5 transition-colors"
+                    >
+                      <MdCheck className="text-lg" />
+                    </button>
+                    <button
+                      onClick={cancelRename}
+                      title="Cancel"
+                      className="text-gray-400 hover:text-gray-600 cursor-pointer bg-transparent border-0 p-0.5 transition-colors"
+                    >
+                      <MdClose className="text-lg" />
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <button
+                      onClick={() => openFile(f.id)}
+                      className="flex-1 flex items-center gap-2 bg-transparent border-0 cursor-pointer text-left text-sm text-gray-800 hover:text-gray-900 p-0 min-w-0"
+                    >
+                      <MdInsertDriveFile className="text-gray-400 text-lg shrink-0" />
+                      <span className="truncate">{f.name}</span>
+                    </button>
+                    <span className="text-xs text-gray-400 shrink-0 hidden sm:inline">
+                      {new Date(f.created_at).toLocaleDateString()}
+                    </span>
+                    <span className="text-xs text-gray-400 shrink-0">{formatSize(f.size_bytes)}</span>
+                    {!readOnly && (
+                      <>
+                        <StarButton active={favoriteFileIds.has(f.id)} onClick={() => toggleFile(f.id)} title={favoriteFileIds.has(f.id) ? 'Remove from favorites' : 'Add to favorites'} />
+                        <RenameButton onClick={() => startRename('file', f.id, f.name)} title="Rename file" />
+                        <ShareButton onClick={() => setPendingShare({ type: 'file', id: f.id, name: f.name })} title="Share file" />
+                        <DeleteButton onClick={() => handleDeleteClick('file', f.id, f.name)} title="Delete file" />
+                      </>
+                    )}
                   </>
                 )}
               </li>
@@ -1133,6 +1252,18 @@ function ShareButton({ onClick, title }: { onClick: () => void; title: string })
       className="cursor-pointer bg-transparent border-0 p-0.5 text-gray-300 hover:text-blue-500 transition-colors"
     >
       <MdShare className="text-lg" />
+    </button>
+  )
+}
+
+function RenameButton({ onClick, title }: { onClick: () => void; title: string }) {
+  return (
+    <button
+      onClick={onClick}
+      title={title}
+      className="cursor-pointer bg-transparent border-0 p-0.5 text-gray-300 hover:text-emerald-500 transition-colors"
+    >
+      <MdEdit className="text-lg" />
     </button>
   )
 }
@@ -1486,6 +1617,15 @@ function DriveChangePopover({
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+// splitExtension separates a file name into its editable base and its
+// extension (including the leading dot). Leading-dot dotfiles (".gitignore")
+// and names with no dot are treated as having no extension.
+function splitExtension(name: string): { base: string; ext: string } {
+  const dot = name.lastIndexOf('.')
+  if (dot <= 0 || dot === name.length - 1) return { base: name, ext: '' }
+  return { base: name.slice(0, dot), ext: name.slice(dot) }
+}
 
 function formatSize(bytes: number): string {
   if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GB`

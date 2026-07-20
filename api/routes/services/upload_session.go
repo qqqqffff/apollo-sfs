@@ -29,6 +29,12 @@ type UploadSession struct {
 	// Set by the handler after Create, before any chunks are dispatched.
 	IgnoreRedirect bool
 
+	// RootDriveID is the tier-first browser's soft root-drive pin: the drive
+	// whose view a root upload targets. Set by the handler after Create (when
+	// FolderID is nil). Honored only for a root upload; a folder pin takes
+	// precedence. See UploadInput.RootDriveID for the full semantics.
+	RootDriveID *uuid.UUID
+
 	// Set by FileService.BeginChunkedUpload before any chunks are dispatched.
 	FileID        uuid.UUID
 	ObjectKey     string

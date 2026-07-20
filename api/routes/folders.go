@@ -33,6 +33,7 @@ func (h *Handler) ListFolders(c *gin.Context) {
 		userID,
 		parsePage(c, "folder"),
 		parsePage(c, "file"),
+		parseDriveFilter(c),
 	)
 	if err != nil {
 		log.Printf("ListFolders: userID=%s err=%v", c.GetString("userID"), err)
@@ -258,8 +259,9 @@ func (h *Handler) MoveFolder(c *gin.Context) {
 	}
 
 	userID, _ := uuid.Parse(c.GetString("userID"))
+	username := c.GetString("username")
 
-	updated, err := h.folders.Move(c.Request.Context(), folderID, targetID, userID)
+	updated, err := h.folders.Move(c.Request.Context(), folderID, targetID, userID, username)
 	if err != nil {
 		switch {
 		case errors.Is(err, services.ErrFolderNotFound):
@@ -267,6 +269,8 @@ func (h *Handler) MoveFolder(c *gin.Context) {
 		case errors.Is(err, services.ErrFolderCycle):
 			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 		case errors.Is(err, services.ErrDuplicateFolderName):
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		case errors.Is(err, services.ErrCrossDriveMove):
 			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 		default:
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "could not move folder"})
@@ -310,6 +314,10 @@ func (h *Handler) DeleteFolder(c *gin.Context) {
 
 type requestFolderDriveMigrationRequest struct {
 	DriveID string `json:"drive_id" binding:"required"`
+	// DestParentID is the destination folder to move into on the target drive.
+	// Omit or null to move to the destination drive's root (folder becomes
+	// top-level there).
+	DestParentID *string `json:"dest_parent_id"`
 }
 
 // RequestFolderDriveMigration handles POST /api/v1/folders/:folder_id/drive-migrations.
@@ -337,16 +345,30 @@ func (h *Handler) RequestFolderDriveMigration(c *gin.Context) {
 		return
 	}
 
+	var destParentID *uuid.UUID
+	if req.DestParentID != nil && *req.DestParentID != "" {
+		did, err := uuid.Parse(*req.DestParentID)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "dest_parent_id must be a valid UUID"})
+			return
+		}
+		destParentID = &did
+	}
+
 	userID, _ := uuid.Parse(c.GetString("userID"))
 	username := c.GetString("username")
 
-	migration, err := h.files.RequestDriveMigration(c.Request.Context(), userID, username, folderID, driveID)
+	migration, err := h.files.RequestDriveMigration(c.Request.Context(), userID, username, folderID, driveID, destParentID)
 	if err != nil {
 		switch {
 		case errors.Is(err, services.ErrFolderNotFound):
 			c.JSON(http.StatusNotFound, gin.H{"error": "folder not found"})
 		case errors.Is(err, services.ErrDriveNotAllocated):
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		case errors.Is(err, services.ErrInvalidMigrationDestination):
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		case errors.Is(err, services.ErrDuplicateFolderName):
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 		case errors.Is(err, services.ErrMigrationAlreadyRunning):
 			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 		case errors.Is(err, services.ErrMigrationRateLimited):
@@ -397,6 +419,29 @@ func (h *Handler) GetLatestFolderDriveMigration(c *gin.Context) {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+// parseDriveFilter reads the optional ?drive=<uuid> (and ?include_unassigned)
+// query params used by the tier-first browser to scope the virtual root to a
+// single drive (server & tier). Returns nil when no valid drive is given, which
+// ListRoot treats as "all drives" (legacy unfiltered behavior). An invalid UUID
+// is ignored (treated as absent) rather than erroring, matching parsePage's
+// lenient handling. include_unassigned should be set by the client only when
+// the drive is the user's primary, since a NULL drive_id resolves to the
+// primary at read time (see migration 055).
+func parseDriveFilter(c *gin.Context) *services.DriveFilter {
+	raw := strings.TrimSpace(c.Query("drive"))
+	if raw == "" {
+		return nil
+	}
+	id, err := uuid.Parse(raw)
+	if err != nil {
+		return nil
+	}
+	return &services.DriveFilter{
+		DriveID:           id,
+		IncludeUnassigned: c.Query("include_unassigned") == "true",
+	}
+}
 
 // parsePage reads ?{prefix}_cursor and ?{prefix}_limit from the query string
 // and returns a PageInput.

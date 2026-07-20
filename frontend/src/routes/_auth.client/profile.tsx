@@ -3,7 +3,7 @@ import { useEffect, useRef, useCallback, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { MdAddCircleOutline, MdArrowForward, MdAssignment, MdCheck, MdClose, MdEdit, MdFeedback, MdHistory, MdPhotoLibrary, MdRocketLaunch, MdShield, MdStorage, MdBolt, MdRefresh, MdScience } from 'react-icons/md'
 import { FaApple } from 'react-icons/fa'
-import { meQueryOptions, updateUsername, preferencesQueryOptions, updatePreferences, updateStorageUIPreferences, updateSandboxPayments, updateExpansionOverride, unlinkProvider, lastBackupSyncQueryOptions, updateBackupReminderPreference } from '../../api/me'
+import { meQueryOptions, updateUsername, preferencesQueryOptions, updatePreferences, updateStorageUIPreferences, updateDefaultDrive, updateSandboxPayments, updateExpansionOverride, unlinkProvider, lastBackupSyncQueryOptions, updateBackupReminderPreference } from '../../api/me'
 import { formatTimeSince } from '../../components/LastSyncNote'
 import { logout } from '../../api/auth'
 import { listRoot } from '../../api/folders'
@@ -192,6 +192,7 @@ const SPEED_RATE_LIMIT = 5
 
 function StorageInfraCard() {
   const queryClient = useQueryClient()
+  const { notify } = useNotification()
 
   const { data: breakdown, isLoading: breakdownLoading } = useQuery({
     queryKey: ['storage', 'breakdown'],
@@ -201,6 +202,13 @@ function StorageInfraCard() {
   const { data: myServers = [] } = useQuery({
     queryKey: ['storage', 'my-servers'],
     queryFn: listMyServers,
+  })
+
+  const { data: serverPrefs } = useQuery(preferencesQueryOptions)
+  const setDefaultDriveMutation = useMutation({
+    mutationFn: (driveId: string | null) => updateDefaultDrive(driveId),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['preferences'] }),
+    onError: () => notify('error', 'Failed to update default view'),
   })
 
   const [primaryPingMs, setPrimaryPingMs] = useState<number | null>(null)
@@ -409,6 +417,25 @@ function StorageInfraCard() {
                   </button>
                 ))}
               </div>
+              {myServers.length > 1 && (
+                <div className="mt-3 pt-3 border-t border-gray-100 flex items-center gap-2 flex-wrap">
+                  <span className="text-xs text-gray-500">Opens to</span>
+                  <select
+                    value={serverPrefs?.default_drive_id ?? ''}
+                    onChange={(e) => setDefaultDriveMutation.mutate(e.target.value || null)}
+                    disabled={setDefaultDriveMutation.isPending}
+                    className="text-xs border border-gray-200 rounded-md px-1.5 py-1 text-gray-700 bg-white cursor-pointer"
+                  >
+                    <option value="">Storage overview (all drives)</option>
+                    {myServers.map((s) => (
+                      <option key={s.drive_id} value={s.drive_id}>
+                        {s.drive_type === 'nvme' ? 'Fast' : 'Standard'} · {s.name}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="text-[11px] text-gray-400">when you open your files</span>
+                </div>
+              )}
             </div>
           </>
         )}

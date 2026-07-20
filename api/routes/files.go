@@ -68,6 +68,17 @@ func (h *Handler) UploadFile(c *gin.Context) {
 		}
 	}
 
+	// Optional tier-first browser root-drive pin: the drive whose view a root
+	// upload targets. Ignored (invalid → nil) unless folder_id is absent; the
+	// service applies it only when the file lands at root. Best-effort like
+	// device_id — a malformed value is treated as absent rather than a 400.
+	var rootDriveID *uuid.UUID
+	if raw := c.PostForm("drive_id"); raw != "" && folderID == nil {
+		if parsed, err := uuid.Parse(raw); err == nil {
+			rootDriveID = &parsed
+		}
+	}
+
 	// Upload origin tag (defaults to "web" in the service when blank).
 	source := c.PostForm("source")
 
@@ -92,14 +103,15 @@ func (h *Handler) UploadFile(c *gin.Context) {
 
 	// Client-provided Content-Type is a hint; the service re-detects from content.
 	file, err := h.files.Upload(c.Request.Context(), services.UploadInput{
-		Username: username,
-		UserID:   userID,
-		FolderID: folderID,
-		DeviceID: deviceID,
-		Source:   source,
-		Name:     name,
-		MimeType: fileHeader.Header.Get("Content-Type"),
-		Reader:   src,
+		Username:    username,
+		UserID:      userID,
+		FolderID:    folderID,
+		DeviceID:    deviceID,
+		RootDriveID: rootDriveID,
+		Source:      source,
+		Name:        name,
+		MimeType:    fileHeader.Header.Get("Content-Type"),
+		Reader:      src,
 	})
 	if err != nil {
 		if errors.Is(err, services.ErrQuotaExceeded) {
@@ -894,6 +906,7 @@ func (h *Handler) PresignUpload(c *gin.Context) {
 		Name           string  `json:"name"     binding:"required"`
 		Size           int64   `json:"size"     binding:"required,min=1,max=107374182400"`
 		FolderID       *string `json:"folder_id"`
+		DriveID        *string `json:"drive_id"`
 		IgnoreRedirect bool    `json:"ignore_redirect"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -928,7 +941,17 @@ func (h *Handler) PresignUpload(c *gin.Context) {
 		folderIDStr = req.FolderID
 	}
 
-	token, expiresAt, err := h.presign.IssueForUpload(userID, username, folderIDStr, req.Size, req.IgnoreRedirect, presignedUploadTTL)
+	// Tier-first browser root-drive pin — only meaningful for a root upload, so
+	// carry it only when no folder is targeted (the folder's own drive governs
+	// otherwise). Invalid UUID → ignored (treated as absent).
+	var driveIDStr *string
+	if folderIDStr == nil && req.DriveID != nil && *req.DriveID != "" {
+		if _, err := uuid.Parse(*req.DriveID); err == nil {
+			driveIDStr = req.DriveID
+		}
+	}
+
+	token, expiresAt, err := h.presign.IssueForUpload(userID, username, folderIDStr, driveIDStr, req.Size, req.IgnoreRedirect, presignedUploadTTL)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not generate upload token"})
 		return
@@ -992,6 +1015,13 @@ func (h *Handler) UploadFilePresigned(c *gin.Context) {
 		}
 	}
 
+	var rootDriveID *uuid.UUID
+	if folderID == nil && claim.DriveID != nil {
+		if parsed, err := uuid.Parse(*claim.DriveID); err == nil {
+			rootDriveID = &parsed
+		}
+	}
+
 	userID, err := uuid.Parse(claim.UserID)
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid presigned token"})
@@ -1009,6 +1039,7 @@ func (h *Handler) UploadFilePresigned(c *gin.Context) {
 		Username:       claim.Username,
 		UserID:         userID,
 		FolderID:       folderID,
+		RootDriveID:    rootDriveID,
 		Name:           name,
 		MimeType:       fileHeader.Header.Get("Content-Type"),
 		IgnoreRedirect: claim.IgnoreRedirect,
@@ -1066,6 +1097,7 @@ func (h *Handler) PresignChunkedUpload(c *gin.Context) {
 		TotalChunks    int     `json:"total_chunks" binding:"required,min=1"`
 		TotalSize      int64   `json:"total_size"   binding:"required,min=1,max=107374182400"`
 		FolderID       *string `json:"folder_id"`
+		DriveID        *string `json:"drive_id"`
 		IgnoreRedirect bool    `json:"ignore_redirect"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -1089,6 +1121,14 @@ func (h *Handler) PresignChunkedUpload(c *gin.Context) {
 		folderID = &parsed
 	}
 
+	// Tier-first browser root-drive pin — only for a root upload (no folder).
+	var rootDriveID *uuid.UUID
+	if folderID == nil && req.DriveID != nil && *req.DriveID != "" {
+		if parsed, err := uuid.Parse(*req.DriveID); err == nil {
+			rootDriveID = &parsed
+		}
+	}
+
 	username := c.GetString("username")
 	if err := h.files.CheckQuota(c.Request.Context(), username, req.TotalSize); err != nil {
 		if errors.Is(err, services.ErrQuotaExceeded) {
@@ -1107,6 +1147,7 @@ func (h *Handler) PresignChunkedUpload(c *gin.Context) {
 		return
 	}
 	sess.IgnoreRedirect = req.IgnoreRedirect
+	sess.RootDriveID = rootDriveID
 
 	if err := h.files.BeginChunkedUpload(c.Request.Context(), sess); err != nil {
 		h.uploads.Delete(sess.ID)

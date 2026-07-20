@@ -60,6 +60,7 @@ func (h *Handler) AdminListUserFolders(c *gin.Context) {
 		userID,
 		parsePage(c, "folder"),
 		parsePage(c, "file"),
+		parseDriveFilter(c),
 	)
 	if err != nil {
 		log.Printf("AdminListUserFolders: username=%s err=%v", username, err)

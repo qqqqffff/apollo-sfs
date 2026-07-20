@@ -1,8 +1,13 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import type { File as ApiFile, Folder } from '../types/api'
 
 const FILE_DRAG_TYPE = 'application/x-apollo-file'
 const FOLDER_DRAG_TYPE = 'application/x-apollo-folder'
+
+// How long a folder must stay hovered mid-drag before it auto-opens (mirrors
+// "spring-loaded folder" behavior in desktop file managers) — long enough
+// that a drag passing through on its way elsewhere doesn't trigger it.
+const HOVER_OPEN_DELAY_MS = 700
 
 function createGhost(name: string, isFolder = false): HTMLElement {
   const el = document.createElement('div')
@@ -28,10 +33,35 @@ function createGhost(name: string, isFolder = false): HTMLElement {
 export function useFileDrag(
   onMoveFile: (fileId: string, targetFolderId: string) => void,
   onMoveFolder: (folderId: string, targetFolderId: string) => void,
+  // Optional: called when a folder has been hovered continuously (mid-drag)
+  // for HOVER_OPEN_DELAY_MS, so the caller can navigate into it. The drag
+  // itself is untouched by that navigation — draggingFileId/draggingFolderId/
+  // dragOverFolderId all live here and survive a re-render of the caller.
+  onHoverOpen?: (folderId: string) => void,
 ) {
   const [draggingFileId, setDraggingFileId] = useState<string | null>(null)
   const [draggingFolderId, setDraggingFolderId] = useState<string | null>(null)
   const [dragOverFolderId, setDragOverFolderId] = useState<string | null>(null)
+  const hoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const hoverFolderIdRef = useRef<string | null>(null)
+
+  function clearHoverTimer() {
+    if (hoverTimerRef.current !== null) {
+      clearTimeout(hoverTimerRef.current)
+      hoverTimerRef.current = null
+    }
+    hoverFolderIdRef.current = null
+  }
+
+  function scheduleHoverOpen(folderId: string) {
+    if (!onHoverOpen || hoverFolderIdRef.current === folderId) return
+    clearHoverTimer()
+    hoverFolderIdRef.current = folderId
+    hoverTimerRef.current = setTimeout(() => {
+      onHoverOpen(folderId)
+      clearHoverTimer()
+    }, HOVER_OPEN_DELAY_MS)
+  }
 
   function getFileDragHandlers(file: ApiFile) {
     return {
@@ -47,6 +77,7 @@ export function useFileDrag(
       onDragEnd() {
         setDraggingFileId(null)
         setDragOverFolderId(null)
+        clearHoverTimer()
       },
     }
   }
@@ -65,6 +96,7 @@ export function useFileDrag(
       onDragEnd() {
         setDraggingFolderId(null)
         setDragOverFolderId(null)
+        clearHoverTimer()
       },
     }
   }
@@ -78,6 +110,7 @@ export function useFileDrag(
         if (hasFolder && draggingFolderId === folder.id) return
         e.preventDefault()
         setDragOverFolderId(folder.id)
+        scheduleHoverOpen(folder.id)
       },
       onDragOver(e: React.DragEvent) {
         const hasFile = e.dataTransfer.types.includes(FILE_DRAG_TYPE)
@@ -90,11 +123,13 @@ export function useFileDrag(
       onDragLeave(e: React.DragEvent) {
         if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
           setDragOverFolderId((prev) => (prev === folder.id ? null : prev))
+          if (hoverFolderIdRef.current === folder.id) clearHoverTimer()
         }
       },
       onDrop(e: React.DragEvent) {
         e.preventDefault()
         setDragOverFolderId(null)
+        clearHoverTimer()
         const fileId = e.dataTransfer.getData(FILE_DRAG_TYPE)
         if (fileId) { onMoveFile(fileId, folder.id); return }
         const folderId = e.dataTransfer.getData(FOLDER_DRAG_TYPE)

@@ -138,11 +138,15 @@ export interface Folder {
 
 export type FolderDriveMigrationStatus = 'pending' | 'in_progress' | 'completed' | 'failed'
 
-// FolderDriveMigration tracks a single job moving a folder's direct files
-// from one drive to another (potentially across servers/tiers).
+// FolderDriveMigration tracks a single job moving a folder's whole subtree
+// (its files plus every descendant folder's files) from one drive to another
+// server & tier, and reparenting the folder under dest_parent_id on arrival.
 export interface FolderDriveMigration {
   id: string
   folder_id: string
+  // Destination folder the folder is reparented under on the target drive.
+  // Null = the destination drive's root (folder becomes top-level there).
+  dest_parent_id: string | null
   status: FolderDriveMigrationStatus
   total_files: number
   files_moved: number
@@ -174,6 +178,10 @@ export interface UserPreferences {
   // Warn in the notification bell when the most recent Google or email backup
   // is more than 30 days old. Premium-only; default false.
   backup_stale_notify: boolean
+  // Drive (server & tier) the file browser lands on for a multi-drive user.
+  // Null = no default (falls back to the primary drive / drive picker). A
+  // display preference, distinct from the upload-routing primary drive.
+  default_drive_id: string | null
   created_at: string
   updated_at: string
 }

@@ -8,6 +8,7 @@ import {
   MdBolt,
   MdAutoAwesome,
   MdCheck,
+  MdChevronRight,
   MdCloudQueue,
   MdCloudUpload,
   MdClose,
@@ -43,6 +44,8 @@ import { DeleteConfirmModal, readSkipDeleteCookie } from '../../components/Delet
 import { FolderBreadcrumb } from '../../components/FolderBreadcrumb'
 import { AccountBadges } from '../../components/GroupBadge'
 import { TierIcon } from '../../components/TierIcon'
+import { StorageTierBars } from '../../components/StorageTierBars'
+import { DriveDestinationPicker } from '../../components/DriveDestinationPicker'
 import { UploadToast } from '../../components/UploadToast'
 import { SortControls } from '../../components/SortControls'
 import { SearchBar } from '../../components/SearchBar'
@@ -84,10 +87,11 @@ import {
 export const Route = createFileRoute('/_auth/client/')({
   // All keys optional so navigations to /client elsewhere need not pass every
   // one. Only keys with a concrete value are included.
-  validateSearch: (search: Record<string, unknown>): { file?: string; folder?: string; action?: FilesAction; recognitionGroup?: string } => {
-    const out: { file?: string; folder?: string; action?: FilesAction; recognitionGroup?: string } = {}
+  validateSearch: (search: Record<string, unknown>): { file?: string; folder?: string; drive?: string; action?: FilesAction; recognitionGroup?: string } => {
+    const out: { file?: string; folder?: string; drive?: string; action?: FilesAction; recognitionGroup?: string } = {}
     if (typeof search.file === 'string') out.file = search.file
     if (typeof search.folder === 'string') out.folder = search.folder
+    if (typeof search.drive === 'string') out.drive = search.drive
     if (typeof search.recognitionGroup === 'string') out.recognitionGroup = search.recognitionGroup
     const action = parseFilesAction(search.action)
     if (action) out.action = action
@@ -97,12 +101,118 @@ export const Route = createFileRoute('/_auth/client/')({
 })
 
 function RouteComponent() {
-  const { file: fileId, folder: folderId } = useSearch({ from: '/_auth/client/' })
+  const { file: fileId, folder: folderId, drive: driveParam } = useSearch({ from: '/_auth/client/' })
 
   return (
     <FilesLayout>
-      {fileId ? <FileView fileId={fileId} /> : <FolderView folderId={folderId ?? 'root'} />}
+      {fileId
+        ? <FileView fileId={fileId} />
+        : folderId
+          ? <FolderView folderId={folderId} />
+          : <RootView driveParam={driveParam} />}
     </FilesLayout>
+  )
+}
+
+// RootView resolves what the "super level" shows: the drive picker (a user with
+// multiple drives and no default landing), or a single drive's root view (one
+// drive, an explicit ?drive, or a saved default). While impersonating, the
+// tier-first grouping is skipped — the admin sees the target user's whole root
+// flat, since the drive list is the caller's own — so it renders the plain
+// unscoped root exactly as before.
+function RootView({ driveParam }: { driveParam?: string }) {
+  const { impersonatedUser } = useImpersonation()
+  const { data: prefs } = useQuery(preferencesQueryOptions)
+  const { data: myServers, isLoading } = useQuery({
+    queryKey: ['storage', 'my-servers'],
+    queryFn: listMyServers,
+    enabled: impersonatedUser === null,
+  })
+
+  if (impersonatedUser !== null) return <FolderView folderId="root" />
+
+  if (isLoading) return <p className="text-sm text-gray-500">Loading…</p>
+  const servers = myServers ?? []
+
+  // No drives yet → plain root (its empty-state messaging applies). A single
+  // drive always lands straight in it — there's no drive layer to choose from.
+  if (servers.length === 0) return <FolderView folderId="root" />
+  if (servers.length === 1) return <FolderView folderId="root" driveId={servers[0].drive_id} />
+
+  // 'all' is the explicit "show the picker" sentinel set by the All storage
+  // link, so it wins over the saved-default auto-landing (otherwise clicking
+  // All storage would bounce straight back into the default drive).
+  if (driveParam === DRIVE_OVERVIEW) return <DrivePicker servers={servers} />
+
+  const named = driveParam && servers.find((s) => s.drive_id === driveParam)
+  if (named) return <FolderView folderId="root" driveId={named.drive_id} />
+
+  // Bare /client (no valid drive): land in the saved default when it still
+  // exists, otherwise show the picker.
+  const dflt = prefs?.default_drive_id && servers.find((s) => s.drive_id === prefs.default_drive_id)
+  if (dflt) return <FolderView folderId="root" driveId={dflt.drive_id} />
+  return <DrivePicker servers={servers} />
+}
+
+// DRIVE_OVERVIEW is the ?drive sentinel meaning "show the drive picker" — a real
+// drive id is always a UUID, so this can never collide with one.
+const DRIVE_OVERVIEW = 'all'
+
+// DrivePicker is the "super level": the granular per-drive quota bars plus a
+// clickable list of the drives (server & tier) the user owns. Clicking a drive
+// enters that drive's root view. Shown only to multi-drive users with no saved
+// default — single-drive users and defaults land straight in a drive.
+function DrivePicker({ servers }: { servers: MyServer[] }) {
+  const navigate = useNavigate()
+  const { data: user } = useQuery(meQueryOptions)
+  const openDrive = (driveId: string) =>
+    navigate({ to: '/client', search: { file: undefined, drive: driveId } })
+
+  return (
+    <div>
+      <div className="flex items-center gap-3 mb-5">
+        <FilesSidebarToggle />
+        <h2 className="text-lg font-semibold text-gray-900 mt-0 mb-0">My Files</h2>
+        {(user?.is_premium || user?.is_admin) && (
+          <AccountBadges user={user} className="text-[10px]" />
+        )}
+      </div>
+
+      <StorageTierBars servers={servers} />
+
+      <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Your storage</h3>
+      <ul className="list-none m-0 p-0">
+        {servers.map((s) => {
+          const isFast = s.drive_type === 'nvme'
+          return (
+            <li key={s.drive_id}>
+              <button
+                onClick={() => openDrive(s.drive_id)}
+                className="w-full flex items-center gap-3 px-2 py-2.5 rounded-lg hover:bg-gray-50 cursor-pointer bg-transparent border-0 text-left transition-colors"
+              >
+                <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${isFast ? 'bg-blue-50' : 'bg-amber-50'}`}>
+                  {isFast ? <MdBolt className="text-blue-600" /> : <MdStorage className="text-amber-500" />}
+                </div>
+                <span className="flex-1 min-w-0">
+                  <span className="flex items-center gap-2">
+                    <span className="text-sm font-medium text-gray-800">{tierLabel(s.drive_type)} · {s.name}</span>
+                    {s.is_primary && (
+                      <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider bg-blue-50 text-blue-600 rounded">
+                        Primary
+                      </span>
+                    )}
+                  </span>
+                  <span className="block text-xs text-gray-400">
+                    {formatSize(s.used_bytes)} of {formatSize(s.quota_bytes)} used
+                  </span>
+                </span>
+                <MdChevronRight className="text-gray-300 text-xl shrink-0" />
+              </button>
+            </li>
+          )
+        })}
+      </ul>
+    </div>
   )
 }
 
@@ -110,11 +220,11 @@ function RouteComponent() {
 
 function FileView({ fileId }: { fileId: string }) {
   const navigate = useNavigate()
-  const { folder: currentFolder } = useSearch({ from: '/_auth/client/' })
+  const { folder: currentFolder, drive: currentDrive } = useSearch({ from: '/_auth/client/' })
   const { data: file, isLoading, error } = useQuery(fileQueryOptions(fileId))
 
   function close() {
-    navigate({ to: '/client', search: { file: undefined, folder: currentFolder } })
+    navigate({ to: '/client', search: { file: undefined, folder: currentFolder, drive: currentDrive } })
   }
 
   if (isLoading) return <p className="text-sm text-gray-500">Loading…</p>
@@ -154,7 +264,7 @@ function FileView({ fileId }: { fileId: string }) {
 
 // ── Folder view ───────────────────────────────────────────────────────────────
 
-function FolderView({ folderId }: { folderId: string | 'root' }) {
+function FolderView({ folderId, driveId }: { folderId: string | 'root'; driveId?: string }) {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const { notify } = useNotification()
@@ -253,6 +363,11 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sidebarAction, user])
 
+  // At a drive's root the listing is scoped to that drive; the primary drive
+  // also owns NULL-drive rows (they resolve to the primary at read time).
+  const rootDrive = folderId === 'root' && driveId ? myServers?.find((s) => s.drive_id === driveId) : undefined
+  const driveScope = rootDrive ? { driveId: rootDrive.drive_id, includeUnassigned: rootDrive.is_primary } : undefined
+
   const {
     folder,
     folders: rawSubfolders,
@@ -263,7 +378,14 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
     hasNextPage,
     isFetchingNextPage,
     fetchNextPage,
-  } = useInfiniteFolderContents(folderId, search, impersonatedUser?.username)
+  } = useInfiniteFolderContents(folderId, search, impersonatedUser?.username, driveScope)
+
+  // The drive (server & tier) the current view lives on: the scoped drive at a
+  // drive root, otherwise the folder's own drive (NULL resolves to primary).
+  // Drives the granular quota bar, uploads, and new-folder binding.
+  const currentDrive = folderId === 'root'
+    ? rootDrive
+    : resolveDrive(folder?.drive_id ?? null, myServers).drive
 
   const moveFileMutation = useMutation({
     mutationFn: ({ fileId, targetFolderId }: { fileId: string; targetFolderId: string }) =>
@@ -287,6 +409,7 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
     useFileDrag(
       (fileId, targetFolderId) => moveFileMutation.mutate({ fileId, targetFolderId }),
       (folderId, targetFolderId) => moveFolderMutation.mutate({ folderId, targetFolderId }),
+      (hoveredFolderId) => openFolder(hoveredFolderId),
     )
 
   const setAutoUploadMutation = useMutation({
@@ -322,8 +445,10 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
   function startCreate(kind: FolderKind) {
     setNewFolderKind(kind)
     setNewFolderName('')
-    const primary = myServers?.find((s) => s.is_primary)
-    setNewFolderDriveId(primary?.drive_id ?? null)
+    // Bind the new folder to the current drive context: the scoped drive at a
+    // drive root, or the parent folder's drive when nested (the backend inherits
+    // the parent's drive for subfolders regardless, so this is just a hint).
+    setNewFolderDriveId(currentDrive?.drive_id ?? myServers?.find((s) => s.is_primary)?.drive_id ?? null)
     setCreatingFolder(true)
   }
 
@@ -412,12 +537,25 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
   }
 
   function openFile(id: string) {
-    navigate({ to: '/client', search: { file: id, folder: folderId === 'root' ? undefined : folderId } })
+    navigate({
+      to: '/client',
+      search: {
+        file: id,
+        folder: folderId === 'root' ? undefined : folderId,
+        drive: folderId === 'root' ? driveId : undefined,
+      },
+    })
   }
 
   function goBack() {
     if (folderId === 'root') return
-    navigate({ to: '/client', search: { file: undefined, folder: folder?.parent_id ?? undefined } })
+    if (folder?.parent_id) {
+      navigate({ to: '/client', search: { file: undefined, folder: folder.parent_id } })
+    } else {
+      // Top-level folder → back to its drive's root (or the super level when the
+      // user has a single drive and there's no drive layer to return to).
+      navigate({ to: '/client', search: { file: undefined, drive: currentDrive?.drive_id } })
+    }
   }
 
   if (isLoading) return <p className="text-sm text-gray-500">Loading…</p>
@@ -635,10 +773,11 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
   const files = sortedFiles(rawFiles, sort)
   // null = root upload (no folder); backend accepts absent folder_id for root.
   const uploadFolderId: string | null = folderId === 'root' ? null : folderId
-  const { drive: uploadDrive, isPinned: uploadDriveIsPinned } = resolveDrive(
-    folderId === 'root' ? null : (folder?.drive_id ?? null),
-    myServers,
-  )
+  // Root uploads in a drive view pin to that drive; inside a folder the folder's
+  // own drive governs (resolveDrive falls back to primary when unpinned).
+  const { drive: uploadDrive, isPinned: uploadDriveIsPinned } = folderId === 'root'
+    ? { drive: currentDrive, isPinned: !!currentDrive }
+    : resolveDrive(folder?.drive_id ?? null, myServers)
   const hasContent = rawSubfolders.length > 0 || rawFiles.length > 0 || recognitionGroups.length > 0
   const noResults = search && !isLoading && !hasNextPage && !hasContent
   const viewingUser = impersonatedUser ?? user
@@ -653,37 +792,69 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
 
   return (
     <div>
-      {folderId !== 'root' ? (
-        <div className="mb-2">
-          <div className="flex items-center gap-3">
-            <FilesSidebarToggle />
-            <FolderBreadcrumb
-              folderId={folderId}
-              onNavigate={(id) => navigate({ to: '/client', search: { file: undefined, folder: id } })}
-              asUsername={impersonatedUser?.username}
-            />
+      {(() => {
+        // Drive crumb data for the breadcrumb: the drive whose view we're in,
+        // with an "All storage" step back to the super level when the user owns
+        // more than one drive (and isn't impersonating).
+        const multiDrive = !readOnly && (myServers?.length ?? 0) > 1
+        const driveCrumb = !readOnly && currentDrive
+          ? {
+              id: currentDrive.drive_id,
+              label: `${tierLabel(currentDrive.drive_type)} · ${currentDrive.name}`,
+              type: currentDrive.drive_type,
+              showAllStorage: multiDrive,
+            }
+          : undefined
+        const goToDriveRoot = (dId: string) => navigate({ to: '/client', search: { file: undefined, drive: dId } })
+        const goToAllStorage = () => navigate({ to: '/client', search: { file: undefined, drive: DRIVE_OVERVIEW } })
+        return folderId !== 'root' ? (
+          <div className="mb-2">
+            <div className="flex items-center gap-3">
+              <FilesSidebarToggle />
+              <FolderBreadcrumb
+                folderId={folderId}
+                onNavigate={(id) => navigate({ to: '/client', search: { file: undefined, folder: id, drive: id ? undefined : currentDrive?.drive_id } })}
+                asUsername={impersonatedUser?.username}
+                drive={driveCrumb}
+                onNavigateDrive={goToDriveRoot}
+                onNavigateAllStorage={goToAllStorage}
+                getFolderDropHandlers={!readOnly ? getFolderDropHandlers : undefined}
+                dragOverFolderId={!readOnly ? dragOverFolderId : null}
+              />
+            </div>
+            {folder && (
+              <div className="flex items-center gap-1">
+                <h2 className="text-lg font-semibold text-gray-900 m-0">{folder.name}</h2>
+                {!readOnly && (
+                  <DriveInfoButton folder={folder} servers={myServers} isAdmin={!!user?.is_admin} align="left" />
+                )}
+              </div>
+            )}
           </div>
-          {folder && (
-            <div className="flex items-center gap-1">
-              <h2 className="text-lg font-semibold text-gray-900 m-0">{folder.name}</h2>
-              {!readOnly && (
-                <DriveInfoButton folder={folder} servers={myServers} isAdmin={!!user?.is_admin} align="left" />
+        ) : (
+          <div className="mb-5">
+            {driveCrumb?.showAllStorage && (
+              <button
+                onClick={goToAllStorage}
+                className="inline-flex items-center gap-1 text-sm text-blue-600 hover:underline bg-transparent border-0 p-0 cursor-pointer mb-2"
+              >
+                <MdArrowBack className="text-base" /> All storage
+              </button>
+            )}
+            <div className="flex items-center gap-3">
+              <FilesSidebarToggle />
+              <h2 className="text-lg font-semibold text-gray-900 mt-0 mb-0 flex items-center gap-1.5">
+                {!readOnly && currentDrive
+                  ? (<><TierIcon type={currentDrive.drive_type} /> {tierLabel(currentDrive.drive_type)} · {currentDrive.name}</>)
+                  : readOnly ? `${impersonatedUser!.username}'s Files` : 'My Files'}
+              </h2>
+              {(user?.is_premium || user?.is_admin) && (
+                <AccountBadges user={user} className="text-[10px]" />
               )}
             </div>
-          )}
-        </div>
-      ) : (
-        <div className="flex items-center gap-3 mb-5">
-          <FilesSidebarToggle />
-          <h2 className="text-lg font-semibold text-gray-900 mt-0 mb-0">
-            {readOnly ? `${impersonatedUser!.username}'s Files` : 'My Files'}
-          </h2>
-          <DriveInfoButton folder={null} servers={myServers} isAdmin={!!user?.is_admin} align="left" />
-          {(user?.is_premium || user?.is_admin) && (
-            <AccountBadges user={user} className="text-[10px]" />
-          )}
-        </div>
-      )}
+          </div>
+        )
+      })()}
 
       {!readOnly && (
         <div className="flex gap-2 mb-4">
@@ -716,7 +887,17 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
         </div>
       )}
 
-      {viewingUser && (
+      {/* Granular quota bar: the current drive's own used/quota when we're in a
+          drive view (own account), else the account-wide aggregate (used while
+          impersonating or when drives haven't loaded). */}
+      {currentDrive && !readOnly ? (
+        <QuotaBar
+          used={currentDrive.used_bytes}
+          quota={currentDrive.quota_bytes}
+          label={`${tierLabel(currentDrive.drive_type)} · ${currentDrive.name}`}
+          onAddStorage={showStorageButtons ? () => setStorageModalReason('open') : undefined}
+        />
+      ) : viewingUser && (
         <QuotaBar
           used={viewingUser.storage_used_bytes}
           quota={viewingUser.storage_quota_bytes}
@@ -848,27 +1029,15 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
                   placeholder={newFolderKind === 'media' ? 'Collection name' : 'Folder name'}
                   className="flex-1 bg-transparent border-0 outline-none text-sm text-gray-800 placeholder-gray-400"
                 />
-                {myServers && myServers.length > 0 && (() => {
-                  const selected = myServers.find((s) => s.drive_id === newFolderDriveId)
-                  const tier = selected?.drive_type ?? myServers.find((s) => s.is_primary)?.drive_type ?? 'nvme'
-                  const hasBothTiers = myServers.some((s) => s.drive_type === 'nvme') && myServers.some((s) => s.drive_type === 'hdd')
-                  const serversInTier = myServers.filter((s) => s.drive_type === tier)
-                  function handleTierChange(t: 'nvme' | 'hdd') {
-                    const inTier = myServers!.filter((s) => s.drive_type === t)
-                    const primaryInTier = inTier.find((s) => s.is_primary)
-                    setNewFolderDriveId(primaryInTier?.drive_id ?? inTier[0]?.drive_id ?? null)
-                  }
-                  return (
-                    <>
-                      {hasBothTiers
-                        ? <TierToggle value={tier} onChange={handleTierChange} />
-                        : <span className="text-xs text-gray-500 shrink-0">{tierLabel(tier)} tier</span>}
-                      {serversInTier.length > 1
-                        ? <ServerDropdown servers={serversInTier} value={newFolderDriveId ?? ''} onChange={setNewFolderDriveId} />
-                        : serversInTier[0] && <span className="text-xs text-gray-500 shrink-0">{serversInTier[0].name}</span>}
-                    </>
-                  )
-                })()}
+                {/* The new folder is bound to the current drive context (the
+                    drive whose view this is, or the parent folder's drive for a
+                    subfolder). It's fixed, not a chooser — a folder subtree can
+                    never straddle tiers — so we just show where it will land. */}
+                {currentDrive && (
+                  <span className="inline-flex items-center gap-1 text-xs text-gray-500 shrink-0">
+                    <TierIcon type={currentDrive.drive_type} /> {tierLabel(currentDrive.drive_type)} · {currentDrive.name}
+                  </span>
+                )}
                 <button
                   onClick={confirmNewFolder}
                   disabled={!newFolderName.trim() || createFolderMutation.isPending}
@@ -1064,10 +1233,13 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
           onConfirm={(ignoreRedirectIndices) => {
             const filesToUpload = pendingFiles
             setPendingFiles([])
+            // Pin root uploads to the drive whose view we're in; inside a folder
+            // the folder's own drive governs (pass undefined).
             startUpload(filesToUpload, uploadFolderId, () => {
               queryClient.invalidateQueries({ queryKey: ['folders', folderId] })
               queryClient.invalidateQueries({ queryKey: ['me'] })
-            }, ignoreRedirectIndices)
+              queryClient.invalidateQueries({ queryKey: ['storage', 'my-servers'] })
+            }, ignoreRedirectIndices, folderId === 'root' ? driveId : undefined)
           }}
           onCancel={() => setPendingFiles([])}
         />
@@ -1191,7 +1363,7 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
 
 // ── Shared components ─────────────────────────────────────────────────────────
 
-function QuotaBar({ used, quota, onAddStorage }: { used: number; quota: number; onAddStorage?: () => void }) {
+function QuotaBar({ used, quota, onAddStorage, label }: { used: number; quota: number; onAddStorage?: () => void; label?: string }) {
   const pct = quota > 0 ? (used / quota) * 100 : 0
   const color =
     pct >= 90 ? 'bg-red-500' :
@@ -1200,7 +1372,7 @@ function QuotaBar({ used, quota, onAddStorage }: { used: number; quota: number; 
   return (
     <div className="mb-4">
       <div className="flex justify-between text-xs text-gray-400 mb-1">
-        <span>{formatSize(used)} used</span>
+        <span>{label ? `${label} — ` : ''}{formatSize(used)} used</span>
         <span className="flex items-center gap-1">
           {formatSize(quota)} quota
           {onAddStorage && (
@@ -1329,24 +1501,6 @@ function TierToggle({ value, onChange }: { value: 'nvme' | 'hdd'; onChange: (tie
         <MdStorage className="text-sm" /> Standard
       </button>
     </div>
-  )
-}
-
-// ServerDropdown is a plain native <select> — there's no existing reusable
-// dropdown component elsewhere in this codebase to prefer over one.
-function ServerDropdown({
-  servers, value, onChange,
-}: { servers: MyServer[]; value: string; onChange: (driveId: string) => void }) {
-  return (
-    <select
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      className="text-xs border border-gray-200 rounded-md px-1.5 py-1 text-gray-700 bg-white cursor-pointer"
-    >
-      {servers.map((s) => (
-        <option key={s.drive_id} value={s.drive_id}>{s.name}</option>
-      ))}
-    </select>
   )
 }
 
@@ -1499,6 +1653,9 @@ function DriveChangePopover({
 
   const [selectedServerId, setSelectedServerId] = useState(() => current?.server_id ?? '')
   const [selectedTier, setSelectedTier] = useState<'nvme' | 'hdd'>(() => current?.drive_type ?? 'nvme')
+  // Destination folder on the target drive (null = the drive's root). Reset
+  // whenever the target drive changes (below, once driveId is known).
+  const [destParentId, setDestParentId] = useState<string | null>(null)
 
   // When preview mode toggles (or the infra listing loads), the option set
   // changes — re-validate the current selection against it.
@@ -1521,9 +1678,16 @@ function DriveChangePopover({
 
   const selectedOption = tiersForSelectedServer.find((o) => o.drive_type === selectedTier) ?? tiersForSelectedServer[0]
   const driveId = selectedOption?.drive_id ?? ''
+  const selectedDriveIsPrimary = servers?.find((s) => s.drive_id === driveId)?.is_primary ?? false
+
+  // A different target drive means a different destination tree — reset the
+  // chosen destination folder back to the drive's root.
+  useEffect(() => {
+    setDestParentId(null)
+  }, [driveId])
 
   const migrateMutation = useMutation({
-    mutationFn: () => requestDriveMigration(folder.id, driveId),
+    mutationFn: () => requestDriveMigration(folder.id, driveId, destParentId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['folders', folder.id, 'drive-migration'] })
     },
@@ -1599,6 +1763,19 @@ function DriveChangePopover({
               Reached {eligibility.limit} storage changes for this folder this period — next available{' '}
               {new Date(eligibility.next_eligible_at).toLocaleDateString()}.
             </p>
+          )}
+
+          {hasChange && !previewMode && driveId && (
+            <div className="mb-2">
+              <p className="text-[11px] text-gray-500 mb-1">Move into which folder on the destination?</p>
+              <DriveDestinationPicker
+                driveId={driveId}
+                includeUnassigned={selectedDriveIsPrimary}
+                excludeFolderId={folder.id}
+                value={destParentId}
+                onSelect={(id) => setDestParentId(id)}
+              />
+            </div>
           )}
 
           {hasChange && (

@@ -306,3 +306,59 @@ func (h *Handler) UpdateStorageUIPreferences(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, prefs)
 }
+
+type updateDefaultDriveRequest struct {
+	// DefaultDriveID: a drive UUID to make the browser's default landing view, or
+	// null to clear it (fall back to the primary drive / drive picker). The field
+	// must be present in the body.
+	DefaultDriveID *string `json:"default_drive_id"`
+}
+
+// UpdateDefaultDrive handles PUT /api/v1/me/preferences/default-drive.
+// Sets the drive (server & tier) whose contents the file browser lands on for a
+// multi-drive user — a display preference, distinct from the upload-routing
+// primary drive. Body: {"default_drive_id": "<uuid>" | null}. A non-null drive
+// must be one of the caller's own allocations.
+func (h *Handler) UpdateDefaultDrive(c *gin.Context) {
+	var req updateDefaultDriveRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	username := c.GetString("username")
+	userID := c.GetString("userID")
+
+	var driveID *uuid.UUID
+	if req.DefaultDriveID != nil && *req.DefaultDriveID != "" {
+		did, err := uuid.Parse(*req.DefaultDriveID)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "default_drive_id must be a valid UUID"})
+			return
+		}
+		drives, err := h.queries.GetUserDrives(c.Request.Context(), username, userID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "could not load drives"})
+			return
+		}
+		owned := false
+		for _, d := range drives {
+			if d.DriveID == did {
+				owned = true
+				break
+			}
+		}
+		if !owned {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "you have no storage on that drive"})
+			return
+		}
+		driveID = &did
+	}
+
+	prefs, err := h.queries.SetDefaultDrive(c.Request.Context(), username, driveID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not save preferences"})
+		return
+	}
+	c.JSON(http.StatusOK, prefs)
+}

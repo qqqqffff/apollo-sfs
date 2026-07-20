@@ -35,13 +35,19 @@ type DriveMigrationStatus struct {
 	NextEligibleAt *time.Time                   `json:"next_eligible_at"`
 }
 
-// RequestDriveMigration validates and enqueues a folder tier/server change.
-// The folder must be owned by userID, toDriveID must be one of the user's
-// current drive allocations, no migration for the folder may already be
-// pending/in_progress, and the folder must not have hit the rolling rate
-// limit. On success a pending row is inserted and the background mover is
-// launched; the row is returned immediately (the caller responds 202).
-func (s *FileService) RequestDriveMigration(ctx context.Context, userID uuid.UUID, username string, folderID, toDriveID uuid.UUID) (*models.FolderDriveMigration, error) {
+// RequestDriveMigration validates and enqueues a folder tier/server change —
+// the "move to another server & tier" flow. The folder must be owned by userID,
+// toDriveID must be one of the user's current drive allocations, no migration
+// for the folder may already be pending/in_progress, and the folder must not
+// have hit the rolling rate limit. destParentID, when non-nil, is the
+// destination folder the folder is reparented under on the destination drive
+// (nil = the destination drive's root); it must be owned by the user, live on
+// toDriveID, not be the folder itself or one of its descendants, and not
+// already contain a sibling with the folder's name. On success a pending row is
+// inserted and the background mover is launched; the row is returned
+// immediately (the caller responds 202). The whole subtree's bytes and drive_id
+// move together, so a folder subtree never straddles drives.
+func (s *FileService) RequestDriveMigration(ctx context.Context, userID uuid.UUID, username string, folderID, toDriveID uuid.UUID, destParentID *uuid.UUID) (*models.FolderDriveMigration, error) {
 	// folders and folder_drive_migrations both FORCE row-level security, so any
 	// read/write against them must go through a ForUser-scoped q/tx (matching
 	// every other write path in this package, e.g. FolderService.Create) or
@@ -72,6 +78,18 @@ func (s *FileService) RequestDriveMigration(ctx context.Context, userID uuid.UUI
 		return nil, ErrDriveNotAllocated
 	}
 
+	// Validate the destination folder (when one was chosen): owned, on the
+	// destination drive, not inside the moving subtree, and no name clash.
+	if destParentID != nil {
+		if err := s.validateMigrationDestination(ctx, q, userID, *destParentID, folderID, folder.Name, toDriveID, primaryDriveID(drives)); err != nil {
+			return nil, err
+		}
+	} else if err := s.checkDestNameClash(ctx, q, userID, nil, folderID, folder.Name); err != nil {
+		// Reparenting to the destination drive's root: still guard the (user,
+		// root, name) uniqueness so the reparent at completion can't fail.
+		return nil, err
+	}
+
 	if _, err := q.GetPendingOrInProgressFolderDriveMigration(ctx, folderID); err == nil {
 		return nil, ErrMigrationAlreadyRunning
 	} else if !errors.Is(err, sql.ErrNoRows) {
@@ -91,7 +109,7 @@ func (s *FileService) RequestDriveMigration(ctx context.Context, userID uuid.UUI
 		return nil, fmt.Errorf("%w: next available %s", ErrMigrationRateLimited, nextEligible.Format(time.RFC3339))
 	}
 
-	migration, err := q.CreateFolderDriveMigration(ctx, folderID, userID, folder.DriveID, toDriveID)
+	migration, err := q.CreateFolderDriveMigration(ctx, folderID, userID, folder.DriveID, toDriveID, destParentID)
 	if err != nil {
 		return nil, fmt.Errorf("request drive migration: create: %w", err)
 	}
@@ -99,9 +117,63 @@ func (s *FileService) RequestDriveMigration(ctx context.Context, userID uuid.UUI
 		return nil, fmt.Errorf("request drive migration: commit: %w", err)
 	}
 
-	go s.runDriveMigration(migration.ID, folderID, userID, username, folder.DriveID, toDriveID)
+	go s.runDriveMigration(migration.ID, folderID, userID, username, folder.DriveID, toDriveID, destParentID)
 
 	return migration, nil
+}
+
+// validateMigrationDestination checks that destParentID is a valid target for
+// moving folderID (named folderName) onto toDriveID: owned by the user, on the
+// destination drive (a NULL drive_id resolves to primaryDrive), not the folder
+// itself or one of its descendants, and free of a same-named sibling.
+func (s *FileService) validateMigrationDestination(ctx context.Context, q *db.Queries, userID, destParentID, folderID uuid.UUID, folderName string, toDriveID uuid.UUID, primaryDrive *uuid.UUID) error {
+	if destParentID == folderID {
+		return ErrInvalidMigrationDestination
+	}
+	dest, err := q.GetFolderByID(ctx, destParentID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrFolderNotFound
+		}
+		return fmt.Errorf("request drive migration: get destination: %w", err)
+	}
+	if dest.UserID != userID {
+		return ErrFolderNotFound
+	}
+	// Destination must live on the target drive. Resolve a NULL pin to primary.
+	destDrive := dest.DriveID
+	if destDrive == nil {
+		destDrive = primaryDrive
+	}
+	if destDrive == nil || *destDrive != toDriveID {
+		return ErrInvalidMigrationDestination
+	}
+	// Can't move a folder into its own subtree.
+	inside, err := q.IsFolderDescendant(ctx, folderID, destParentID)
+	if err != nil {
+		return fmt.Errorf("request drive migration: descendant check: %w", err)
+	}
+	if inside {
+		return ErrInvalidMigrationDestination
+	}
+	return s.checkDestNameClash(ctx, q, userID, &destParentID, folderID, folderName)
+}
+
+// checkDestNameClash rejects the migration when the destination parent (nil =
+// root) already contains a different folder with the same name, so the reparent
+// at completion can't hit the (user_id, parent_id, name) unique constraint.
+func (s *FileService) checkDestNameClash(ctx context.Context, q *db.Queries, userID uuid.UUID, destParentID *uuid.UUID, folderID uuid.UUID, folderName string) error {
+	existing, err := q.FindFolderByParentAndName(ctx, userID, destParentID, folderName)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return fmt.Errorf("request drive migration: name-clash check: %w", err)
+	}
+	if existing.ID != folderID {
+		return ErrDuplicateFolderName
+	}
+	return nil
 }
 
 // GetLatestDriveMigration returns the most recent migration row for folderID
@@ -154,20 +226,27 @@ func (s *FileService) GetLatestDriveMigration(ctx context.Context, userID, folde
 	}, nil
 }
 
-// runDriveMigration physically moves a folder's direct files (not recursively
-// into subfolders — an explicit scope decision, see the design doc) from
-// fromDriveID to toDriveID, updating progress as it goes. Runs as a background
+// runDriveMigration physically relocates a folder's ENTIRE subtree (the folder
+// plus every descendant folder's files, recursively) onto toDriveID, updating
+// progress as it goes, then sets drive_id on the folder and all descendant
+// folders to toDriveID and reparents the folder under destParentID (nil = the
+// destination drive's root). Under the tier-first model a folder subtree always
+// shares one drive, so the move must be recursive. Runs as a background
 // goroutine kicked off by RequestDriveMigration, so — mirroring createVariant
 // — it takes no ctx parameter and constructs its own context.Background()
 // internally: the HTTP request's ctx is cancelled as soon as the 202 response
 // is sent, but this job must keep running after that.
+// Each file's source storage is resolved from its own drive_id, so a subtree
+// whose files were historically spread across drives still consolidates
+// correctly; files already on toDriveID are counted without a needless copy.
 // Video transcoded low-quality variants are NOT moved by this operation — only
 // the primary file object (known V1 limitation).
 // On any per-file error the migration is marked failed with the error message,
 // leaving already-moved files moved; there is no automatic rollback, matching
 // this codebase's existing "surface the error, don't silently retry" style.
-func (s *FileService) runDriveMigration(migrationID, folderID, userID uuid.UUID, username string, fromDriveID *uuid.UUID, toDriveID uuid.UUID) {
+func (s *FileService) runDriveMigration(migrationID, folderID, userID uuid.UUID, username string, fromDriveID *uuid.UUID, toDriveID uuid.UUID, destParentID *uuid.UUID) {
 	ctx := context.Background()
+	_ = fromDriveID // retained for the audit trail; source is resolved per file
 
 	markFailed := func(err error) {
 		log.Printf("drive migration: %s: %v", migrationID, err)
@@ -183,12 +262,9 @@ func (s *FileService) runDriveMigration(migrationID, folderID, userID uuid.UUID,
 		}
 	}()
 
-	// List files directly in the folder — reuses the same query that backs the
-	// plain folder-contents endpoint rather than adding a second one. A large
-	// page size covers realistic folder sizes in one call; PageInput's default
-	// applies if left zero, so request an explicit high limit here. This job
-	// runs across possibly-slow MinIO I/O between database writes, so each
-	// write below opens its own short-lived ForUser transaction rather than
+	// List every file in the folder subtree (folder + all descendant folders).
+	// This job runs across possibly-slow MinIO I/O between database writes, so
+	// each write below opens its own short-lived ForUser transaction rather than
 	// holding one open (and a connection pinned) for the whole job.
 	files, err := s.listMigrationFiles(ctx, userID, folderID)
 	if err != nil {
@@ -205,11 +281,6 @@ func (s *FileService) runDriveMigration(migrationID, folderID, userID uuid.UUID,
 		return
 	}
 
-	sourceStorage, err := s.resolveMigrationStorage(ctx, username, fromDriveID)
-	if err != nil {
-		markFailed(fmt.Errorf("resolve source storage: %w", err))
-		return
-	}
 	destStorage, err := s.storageForDrive(ctx, toDriveID)
 	if err != nil {
 		markFailed(fmt.Errorf("resolve destination storage: %w", err))
@@ -220,6 +291,26 @@ func (s *FileService) runDriveMigration(migrationID, folderID, userID uuid.UUID,
 	var bytesMoved int64
 	for i := range files {
 		f := &files[i]
+
+		// Skip the byte copy for files already on the destination drive (a
+		// partially-consolidated subtree), but still count them toward progress.
+		if f.DriveID != nil && *f.DriveID == toDriveID {
+			filesMoved++
+			bytesMoved += f.SizeBytes
+			if err := s.recordFileMovedAndProgress(ctx, userID, f.ID, toDriveID, migrationID, filesMoved, bytesMoved); err != nil {
+				markFailed(fmt.Errorf("update drive_id for file %s: %w", f.ID, err))
+				return
+			}
+			continue
+		}
+
+		// Resolve the source from the file's own drive so a subtree whose files
+		// were historically spread across drives still consolidates correctly.
+		sourceStorage, err := s.storageForFile(ctx, username, f)
+		if err != nil {
+			markFailed(fmt.Errorf("resolve source storage for file %s: %w", f.ID, err))
+			return
+		}
 
 		obj, err := sourceStorage.GetObject(ctx, f.MinIOObjectKey)
 		if err != nil {
@@ -253,7 +344,7 @@ func (s *FileService) runDriveMigration(migrationID, folderID, userID uuid.UUID,
 		}
 	}
 
-	if err := s.completeMigration(ctx, userID, folderID, migrationID, toDriveID); err != nil {
+	if err := s.completeMigration(ctx, userID, folderID, migrationID, toDriveID, destParentID); err != nil {
 		markFailed(fmt.Errorf("finalize: %w", err))
 		return
 	}
@@ -274,11 +365,9 @@ func (s *FileService) listMigrationFiles(ctx context.Context, userID, folderID u
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	page, err := q.ListFilesByFolder(ctx, folderID, db.PageInput{Limit: db.MaxPageLimit})
-	if err != nil {
-		return nil, err
-	}
-	return page.Items, nil
+	// Recursive: every file in the folder subtree, since the whole subtree moves
+	// to the destination drive together.
+	return q.ListFilesInFolderSubtree(ctx, folderID)
 }
 
 func (s *FileService) markMigrationInProgress(ctx context.Context, userID, migrationID uuid.UUID, totalFiles int, totalBytes int64) error {
@@ -308,13 +397,20 @@ func (s *FileService) recordFileMovedAndProgress(ctx context.Context, userID, fi
 	return tx.Commit()
 }
 
-func (s *FileService) completeMigration(ctx context.Context, userID, folderID, migrationID, toDriveID uuid.UUID) error {
+func (s *FileService) completeMigration(ctx context.Context, userID, folderID, migrationID, toDriveID uuid.UUID, destParentID *uuid.UUID) error {
 	q, tx, err := s.queries.ForUser(ctx, userID)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := q.SetFolderDriveID(ctx, folderID, toDriveID); err != nil {
+	// Pin the folder and its whole subtree to the destination drive, then
+	// reparent the folder under the chosen destination (nil = destination drive
+	// root). The name-clash and cycle checks were validated up front in
+	// RequestDriveMigration, so the reparent can't hit the unique constraint.
+	if err := q.SetFolderSubtreeDriveID(ctx, folderID, toDriveID); err != nil {
+		return err
+	}
+	if _, err := q.UpdateFolderParent(ctx, folderID, destParentID); err != nil {
 		return err
 	}
 	if err := q.MarkFolderDriveMigrationCompleted(ctx, migrationID); err != nil {
@@ -335,18 +431,6 @@ func (s *FileService) markMigrationFailed(ctx context.Context, userID, migration
 	return tx.Commit()
 }
 
-// resolveMigrationStorage returns the MinIOService files should be read from
-// before a migration. fromDriveID is nil when the folder previously had no
-// pinned drive, in which case the user's current primary drive is used — this
-// matches how unpinned uploads have always resolved their storage.
-func (s *FileService) resolveMigrationStorage(ctx context.Context, username string, fromDriveID *uuid.UUID) (*MinIOService, error) {
-	if fromDriveID != nil {
-		return s.storageForDrive(ctx, *fromDriveID)
-	}
-	storage, _, err := s.storageFor(ctx, username)
-	return storage, err
-}
-
 // ── Sentinel errors ───────────────────────────────────────────────────────────
 
 // ErrMigrationAlreadyRunning is returned when a folder already has a
@@ -356,3 +440,8 @@ var ErrMigrationAlreadyRunning = errors.New("a storage change is already in prog
 // ErrMigrationRateLimited is returned when a folder has reached the rolling
 // rate limit for drive-migration requests.
 var ErrMigrationRateLimited = errors.New("reached the storage-change limit for this folder")
+
+// ErrInvalidMigrationDestination is returned when the chosen destination folder
+// for a drive migration is unusable: it is not on the target drive, is the
+// folder being moved or one of its descendants, or is otherwise ineligible.
+var ErrInvalidMigrationDestination = errors.New("invalid destination folder for this storage change")

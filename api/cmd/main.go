@@ -490,6 +490,8 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		// PUT /me/preferences is premium-only (media auto-upload); registered below.
 		// Storage UI toggles are available to every user.
 		protected.PUT("/me/preferences/storage-ui", h.UpdateStorageUIPreferences)
+		// Default display drive (server & tier the browser lands on) — every user.
+		protected.PUT("/me/preferences/default-drive", h.UpdateDefaultDrive)
 		// Admin-only, session-scoped sandbox-payments toggle (not persisted).
 		protected.PUT("/me/sandbox-payments", h.UpdateSandboxPayments)
 		// Admin-only, session-scoped storage-expansion-override toggle (not persisted).

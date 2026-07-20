@@ -137,6 +137,12 @@ func (s *stubQuerier) SetStorageUIPreferences(_ context.Context, userID string, 
 	}
 	return p, nil
 }
+func (s *stubQuerier) SetDefaultDrive(_ context.Context, userID string, driveID *uuid.UUID) (*models.UserPreferences, error) {
+	return &models.UserPreferences{UserID: userID, DefaultDriveID: driveID}, nil
+}
+func (s *stubQuerier) GetUserDrives(_ context.Context, _, _ string) ([]db.UserDriveInfo, error) {
+	return nil, nil
+}
 func (s *stubQuerier) CountActiveExpansionRequests(_ context.Context, _ string) (int, error) {
 	return 0, nil
 }
@@ -687,7 +693,7 @@ func (s *stubFileService) FinalizeChunkedUpload(_ context.Context, _ *services.U
 	return s.file, s.fileErr
 }
 func (s *stubFileService) AdminDeleteAllFiles(_ context.Context, _ string) error { return s.fileErr }
-func (s *stubFileService) RequestDriveMigration(_ context.Context, _ uuid.UUID, _ string, _, _ uuid.UUID) (*models.FolderDriveMigration, error) {
+func (s *stubFileService) RequestDriveMigration(_ context.Context, _ uuid.UUID, _ string, _, _ uuid.UUID, _ *uuid.UUID) (*models.FolderDriveMigration, error) {
 	return s.migration, s.fileErr
 }
 func (s *stubFileService) GetLatestDriveMigration(_ context.Context, _, _ uuid.UUID) (*services.DriveMigrationStatus, error) {
@@ -702,7 +708,7 @@ type stubFolderService struct {
 	contents  *services.FolderContents
 }
 
-func (s *stubFolderService) ListRoot(_ context.Context, _ uuid.UUID, _, _ db.PageInput) (*services.FolderContents, error) {
+func (s *stubFolderService) ListRoot(_ context.Context, _ uuid.UUID, _, _ db.PageInput, _ *services.DriveFilter) (*services.FolderContents, error) {
 	if s.contents != nil {
 		return s.contents, nil
 	}
@@ -743,7 +749,7 @@ func (s *stubFolderService) Create(_ context.Context, _ uuid.UUID, _ *uuid.UUID,
 func (s *stubFolderService) Rename(_ context.Context, _, _ uuid.UUID, _ string) (*models.Folder, error) {
 	return s.folder, s.folderErr
 }
-func (s *stubFolderService) Move(_ context.Context, _, _, _ uuid.UUID) (*models.Folder, error) {
+func (s *stubFolderService) Move(_ context.Context, _, _, _ uuid.UUID, _ string) (*models.Folder, error) {
 	return s.folder, s.folderErr
 }
 func (s *stubFolderService) Delete(_ context.Context, _, _ uuid.UUID) error {

@@ -29,6 +29,21 @@ export function canPreview(mimeType: string): boolean {
   return previewKind(mimeType) !== 'unsupported'
 }
 
+// Centered notice + optional download fallback, used for every "can't show
+// this" state (unsupported type, failed render). Fills its flex parent and
+// centers both axes so the message reads correctly on mobile, where the modal
+// body stretches its child rather than centering it.
+function PreviewNotice({ message, downloadUrl }: { message: string; downloadUrl?: string }) {
+  return (
+    <div className="w-full h-full flex flex-col items-center justify-center text-center text-gray-500 text-sm p-10">
+      <p className="mb-3">{message}</p>
+      {downloadUrl && (
+        <a href={downloadUrl} className="text-blue-600 hover:underline">Download instead</a>
+      )}
+    </div>
+  )
+}
+
 // ── DOCX viewer ───────────────────────────────────────────────────────────────
 
 type DocxState =
@@ -64,14 +79,7 @@ function DocxViewer({ previewUrl, downloadUrl }: { previewUrl: string; downloadU
   }
 
   if (state.status === 'error') {
-    return (
-      <div className="p-10 text-center text-gray-500 text-sm">
-        <p className="mb-3">Could not render this document.</p>
-        {downloadUrl && (
-          <a href={downloadUrl} className="text-blue-600 hover:underline">Download instead</a>
-        )}
-      </div>
-    )
+    return <PreviewNotice message="Could not render this document." downloadUrl={downloadUrl || undefined} />
   }
 
   return (
@@ -191,12 +199,7 @@ export function FilePreviewModal({ file, onClose }: Props) {
 
           {kind === 'pdf' && previewLink && (
             pdfFailed ? (
-              <div className="p-10 text-center text-gray-500 text-sm">
-                <p className="mb-3">Could not render this PDF.</p>
-                {downloadLink && (
-                  <a href={downloadLink} className="text-blue-600 hover:underline">Download instead</a>
-                )}
-              </div>
+              <PreviewNotice message="Could not render this PDF." downloadUrl={downloadLink || undefined} />
             ) : (
               <PdfViewer url={previewLink} onError={() => setPdfFailed(true)} />
             )
@@ -227,12 +230,7 @@ export function FilePreviewModal({ file, onClose }: Props) {
           )}
 
           {kind === 'unsupported' && (
-            <div className="p-16 text-center text-gray-500 text-sm">
-              <p className="mb-3">Preview not available for this file type.</p>
-              {downloadLink && (
-                <a href={downloadLink} className="text-blue-600 hover:underline">Download instead</a>
-              )}
-            </div>
+            <PreviewNotice message="Preview not available for this file type." downloadUrl={downloadLink || undefined} />
           )}
         </div>
       </div>

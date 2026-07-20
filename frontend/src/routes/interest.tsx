@@ -1,8 +1,9 @@
-import { createFileRoute } from '@tanstack/react-router'
+import { createFileRoute, useNavigate } from '@tanstack/react-router'
 import { useState, useRef, useEffect } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { Turnstile } from '@marsidev/react-turnstile'
 import type { TurnstileInstance } from '@marsidev/react-turnstile'
+import { MdArrowBack, MdScience } from 'react-icons/md'
 import {
   submitInterestForm,
   createInterestDepositOrder,
@@ -17,6 +18,14 @@ import { PayPalCheckoutOptions, CheckoutBackButton } from '../components/PayPalC
 
 export const Route = createFileRoute('/interest')({
   component: RouteComponent,
+  // sandbox: set by the admin profile page's "Open account request form"
+  // link (see SandboxAccountRequestCard in profile.tsx) when sandbox
+  // payments are enabled — flags this pass through the public form as an
+  // admin sandbox test rather than a real request, since this page has no
+  // authenticated session to read that context from otherwise.
+  validateSearch: (search: Record<string, unknown>): { sandbox?: boolean } => ({
+    sandbox: search.sandbox === true || search.sandbox === 'true' ? true : undefined,
+  }),
 })
 
 interface Plan {
@@ -65,6 +74,8 @@ function RequiredStar() {
 
 function RouteComponent() {
   const { data: config } = useQuery(publicConfigQueryOptions)
+  const navigate = useNavigate()
+  const { sandbox } = Route.useSearch()
 
   const [name, setName] = useState('')
   const [email, setEmail] = useState('')
@@ -288,6 +299,15 @@ function RouteComponent() {
   return (
     <div className="min-h-screen bg-gray-50 flex items-center justify-center px-4 py-12">
       <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-8 max-w-lg w-full">
+        {sandbox && (
+          <button
+            type="button"
+            onClick={() => navigate({ to: '/client/profile' })}
+            className="inline-flex items-center gap-1 text-sm text-gray-500 hover:text-gray-900 cursor-pointer bg-transparent border-0 p-0 mb-4 transition-colors"
+          >
+            <MdArrowBack className="text-base" /> Back to profile
+          </button>
+        )}
         {showCardForm ? (
           <>
             <CheckoutBackButton onClick={() => { setShowCardForm(false); setError(null) }} disabled={isPending} />
@@ -321,7 +341,14 @@ function RouteComponent() {
           </>
         ) : (
           <>
-            <h1 className="text-xl font-semibold text-gray-900 mb-1">Request access</h1>
+            <div className="flex items-center gap-2 mb-1">
+              <h1 className="text-xl font-semibold text-gray-900 m-0">Request access</h1>
+              {sandbox && (
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800">
+                  <MdScience className="text-sm" /> Sandbox Payment
+                </span>
+              )}
+            </div>
             <p className="text-sm text-gray-500 mb-1">
               Apollo SFS is currently invite-only. Fill out this form and pay a refundable 50%
               deposit to reserve your spot.
@@ -488,6 +515,7 @@ function RouteComponent() {
                     onError={(msg) => setError(msg)}
                     canPay={formReady && !isPending}
                     onChooseCard={handleChooseCard}
+                    showApplePay={!sandbox}
                   />
                 )}
 

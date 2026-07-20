@@ -29,6 +29,7 @@ export interface MyServer {
   capacity_bytes: number
   used_bytes: number
   drive_used_pct: number
+  quota_bytes: number
   is_primary: boolean
   ping_url: string
 }

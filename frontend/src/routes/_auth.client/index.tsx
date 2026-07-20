@@ -660,6 +660,7 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
             <FolderBreadcrumb
               folderId={folderId}
               onNavigate={(id) => navigate({ to: '/client', search: { file: undefined, folder: id } })}
+              asUsername={impersonatedUser?.username}
             />
           </div>
           {folder && (

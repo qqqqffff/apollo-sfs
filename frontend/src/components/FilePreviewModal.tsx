@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { MdClose, MdDownload } from 'react-icons/md'
 import type { File } from '../types/api'
 import { presignFile, streamUrl } from '../api/files'
+import { PdfViewer } from './PdfViewer'
 
 interface Props {
   file: File
@@ -89,9 +90,11 @@ export function FilePreviewModal({ file, onClose }: Props) {
   // Presigned URLs fetched on mount for non-video previews and downloads.
   const [downloadLink, setDownloadLink] = useState('')
   const [previewLink, setPreviewLink] = useState('')
+  const [pdfFailed, setPdfFailed] = useState(false)
 
   useEffect(() => {
     let cancelled = false
+    setPdfFailed(false)
     presignFile(file.id).then(({ download_url, preview_url }) => {
       if (!cancelled) {
         setDownloadLink(download_url)
@@ -187,11 +190,16 @@ export function FilePreviewModal({ file, onClose }: Props) {
           )}
 
           {kind === 'pdf' && previewLink && (
-            <iframe
-              src={previewLink}
-              title={file.name}
-              className="w-full h-full border-0 block"
-            />
+            pdfFailed ? (
+              <div className="p-10 text-center text-gray-500 text-sm">
+                <p className="mb-3">Could not render this PDF.</p>
+                {downloadLink && (
+                  <a href={downloadLink} className="text-blue-600 hover:underline">Download instead</a>
+                )}
+              </div>
+            ) : (
+              <PdfViewer url={previewLink} onError={() => setPdfFailed(true)} />
+            )
           )}
 
           {kind === 'video' && (

@@ -1,5 +1,5 @@
 import { del, get, patch, post, put } from './client'
-import type { AuditLog, BannedIP, Feedback, FeedbackStatus, FavoriteList, FolderContents, Invitation, InterestSubmission, InterestFormSettings, PageResult, ServerExpansionRequest, User, UserBan } from '../types/api'
+import type { AuditLog, BannedIP, Feedback, FeedbackStatus, FavoriteList, Folder, FolderContents, Invitation, InterestSubmission, InterestFormSettings, PageResult, ServerExpansionRequest, User, UserBan } from '../types/api'
 
 // ── Admin user file browsing ───────────────────────────────────────────────────
 
@@ -25,6 +25,10 @@ export function adminListUserRoot(username: string, p: AdminFolderParams = {}) {
 
 export function adminGetUserFolder(username: string, folderId: string, p: AdminFolderParams = {}) {
   return get<FolderContents>(`/admin/users/${encodeURIComponent(username)}/folders/${folderId}${adminFolderQS(p)}`)
+}
+
+export function adminGetUserAncestors(username: string, folderId: string) {
+  return get<{ ancestors: Folder[] }>(`/admin/users/${encodeURIComponent(username)}/folders/${folderId}/ancestors`)
 }
 
 export function adminGetUserFavorites(username: string) {

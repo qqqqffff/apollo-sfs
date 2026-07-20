@@ -2,6 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { useLayoutEffect, useRef, useState } from 'react'
 import { MdChevronRight } from 'react-icons/md'
 import { ancestorsQueryOptions } from '../api/folders'
+import { adminGetUserAncestors } from '../api/admin'
 import type { Folder } from '../types/api'
 
 interface Props {
@@ -10,18 +11,25 @@ interface Props {
   // Optional trailing slot — the share-directory button sits here on premium
   // accounts so the breadcrumb row stays as one visual unit.
   trailing?: React.ReactNode
+  // Set while an admin is browsing another user's files via impersonation —
+  // routes the ancestors lookup through the admin-scoped endpoint instead of
+  // the caller's own, since the folders belong to a different user.
+  asUsername?: string
 }
 
 // FolderBreadcrumb renders the clickable path from root → current folder.
 // The leading "root" is always the root sentinel. When the path doesn't fit
 // the available width, the leftmost segments collapse into a single ".."
 // button that navigates to the immediate parent of the current folder.
-export function FolderBreadcrumb({ folderId, onNavigate, trailing }: Props) {
+export function FolderBreadcrumb({ folderId, onNavigate, trailing, asUsername }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const [available, setAvailable] = useState<number>(0)
   const isRoot = folderId === 'root'
   const { data, isLoading } = useQuery({
-    ...ancestorsQueryOptions(folderId),
+    queryKey: ['folders', folderId, 'ancestors', asUsername ?? ''] as const,
+    queryFn: asUsername
+      ? () => adminGetUserAncestors(asUsername, folderId)
+      : ancestorsQueryOptions(folderId).queryFn,
     enabled: !isRoot,
   })
 

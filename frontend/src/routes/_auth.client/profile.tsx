@@ -280,7 +280,6 @@ function StorageInfraCard() {
     }
   }, [settingPrimary, queryClient])
 
-  const allocatedBytes = breakdown?.quota_bytes ?? 0
   const ownedTypes = new Set(myServers.map((s) => s.drive_type))
   const showNvme = ownedTypes.size === 0 || ownedTypes.has('nvme')
   const showHdd = ownedTypes.size === 0 || ownedTypes.has('hdd')
@@ -384,11 +383,11 @@ function StorageInfraCard() {
                       <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden mb-1.5">
                         <div
                           className={`h-full rounded-full transition-all ${srv.drive_type === 'nvme' ? 'bg-blue-500' : 'bg-amber-400'}`}
-                          style={{ width: `${allocatedBytes > 0 ? Math.min((srv.used_bytes / allocatedBytes) * 100, 100) : 0}%` }}
+                          style={{ width: `${srv.quota_bytes > 0 ? Math.min((srv.used_bytes / srv.quota_bytes) * 100, 100) : 0}%` }}
                         />
                       </div>
                       <p className="text-xs text-gray-400 m-0">
-                        {formatSize(srv.used_bytes)} used of {formatSize(allocatedBytes)}
+                        {formatSize(srv.used_bytes)} used of {formatSize(srv.quota_bytes)}
                         {srv.is_primary && (
                           primaryTesting
                             ? ' · Testing…'

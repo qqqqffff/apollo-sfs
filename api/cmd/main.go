@@ -700,6 +700,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 			adminGroup.PUT("/users/:user_id/storage/allocations", h.AdminUpdateUserStorageAllocations)
 			adminGroup.GET("/users/:user_id/folders", h.AdminListUserFolders)
 			adminGroup.GET("/users/:user_id/folders/:folder_id", h.AdminGetUserFolder)
+			adminGroup.GET("/users/:user_id/folders/:folder_id/ancestors", h.AdminGetUserAncestors)
 			adminGroup.GET("/users/:user_id/favorites", h.AdminGetUserFavorites)
 			adminGroup.GET("/users/:user_id/audit-logs", h.AdminGetUserAuditLogs)
 			adminGroup.POST("/users/:user_id/audit-logs", h.AdminLogImpersonation)

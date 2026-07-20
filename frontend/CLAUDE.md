@@ -15,6 +15,7 @@ React 18.3 + TypeScript single-page application built with Vite 7. Served in pro
 | Bot protection | Cloudflare Turnstile (`@marsidev/react-turnstile`) |
 | HTML sanitization | DOMPurify 3.4 |
 | DOCX preview | mammoth 1.12 |
+| PDF preview | pdfjs-dist 6.1 (canvas rendering — iOS WebKit's native `<iframe>` PDF plugin only shows page 1, so previews are hand-rendered instead of embedded; see `PdfViewer.tsx`) |
 | Unit tests | Jest 29 + `@testing-library/react` |
 | E2E tests | Playwright 1.60 |
 

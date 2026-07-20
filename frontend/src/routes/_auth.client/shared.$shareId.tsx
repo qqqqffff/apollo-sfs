@@ -1,6 +1,6 @@
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   MdArrowBack,
   MdDownload,
@@ -18,6 +18,7 @@ import {
 } from '../../api/shares'
 import { ApiError } from '../../api/client'
 import { useNotification } from '../../context/NotificationContext'
+import { PdfViewer } from '../../components/PdfViewer'
 import type { File as ApiFile, Share } from '../../types/api'
 
 export const Route = createFileRoute('/_auth/client/shared/$shareId')({
@@ -331,6 +332,8 @@ function SharedPreview({ name, mimeType, sizeBytes, ownerEmail, previewUrl, down
   downloadUrl: string | null
 }) {
   const kind = previewKind(mimeType)
+  const [pdfFailed, setPdfFailed] = useState(false)
+  useEffect(() => setPdfFailed(false), [previewUrl])
 
   return (
     <div className="bg-white border border-gray-200 rounded-xl overflow-hidden mt-2">
@@ -356,7 +359,16 @@ function SharedPreview({ name, mimeType, sizeBytes, ownerEmail, previewUrl, down
           <img src={previewUrl} alt={name} className="max-w-full max-h-[75svh] object-contain block" />
         )}
         {kind === 'pdf' && (
-          <iframe src={previewUrl} title={name} className="w-full h-[75svh] border-0 block" />
+          pdfFailed ? (
+            <div className="p-16 text-center text-gray-500 text-sm">
+              <p className="mb-3">Could not render this PDF.</p>
+              {downloadUrl && (
+                <a href={downloadUrl} className="text-blue-600 hover:underline">Download instead</a>
+              )}
+            </div>
+          ) : (
+            <PdfViewer url={previewUrl} onError={() => setPdfFailed(true)} className="h-[75svh]" />
+          )
         )}
         {kind === 'video' && (
           <video src={previewUrl} controls playsInline preload="metadata" className="max-w-full max-h-[75svh] block" />

@@ -20,6 +20,28 @@ jest.mock('dompurify', () => ({
   default: { sanitize: (s: string) => s },
 }))
 
+// Isolates PdfViewer from `import.meta.url`, which Jest's CommonJS transform
+// can't parse (Vite-only ESM syntax) — see src/utils/pdfWorker.ts.
+jest.mock('../../utils/pdfWorker', () => ({
+  pdfWorkerUrl: () => 'test://pdf-worker',
+}))
+
+// pdfjs-dist is only imported inside PdfViewer; mock a one-page document so
+// the canvas-rendering path resolves deterministically in jsdom (which has
+// no real 2D canvas context).
+jest.mock('pdfjs-dist', () => ({
+  GlobalWorkerOptions: {},
+  getDocument: () => ({
+    promise: Promise.resolve({
+      numPages: 1,
+      getPage: () => Promise.resolve({
+        getViewport: ({ scale }: { scale: number }) => ({ width: 100 * scale, height: 100 * scale }),
+        render: () => ({ promise: Promise.resolve() }),
+      }),
+    }),
+  }),
+}))
+
 function makeFile(overrides: Partial<ApiFile> = {}): ApiFile {
   return {
     id: 'f1',
@@ -104,15 +126,14 @@ describe('FilePreviewModal', () => {
     expect(img).toBeTruthy()
   })
 
-  test('renders <iframe> for PDF files with presigned src', async () => {
+  test('renders PDF pages onto <canvas> elements (not an iframe)', async () => {
     const { container } = render(
       <FilePreviewModal file={makeFile({ id: 'pdf1', mime_type: 'application/pdf' })} onClose={onClose} />,
     )
     await waitFor(() => {
-      const iframe = container.querySelector('iframe')
-      expect(iframe).toBeInTheDocument()
-      expect(iframe?.src).toContain('/preview/p?token=')
+      expect(container.querySelector('canvas')).toBeInTheDocument()
     })
+    expect(container.querySelector('iframe')).not.toBeInTheDocument()
   })
 
   test('renders <video> for video files using streamUrl (not presigned)', () => {

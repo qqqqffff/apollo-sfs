@@ -150,6 +150,7 @@ type myServerResponse struct {
 	CapacityBytes int64  `json:"capacity_bytes"`
 	UsedBytes     int64  `json:"used_bytes"`       // this user's bytes on the server
 	DriveUsedPct  int    `json:"drive_used_pct"`   // physical fullness across all users
+	QuotaBytes    int64  `json:"quota_bytes"`      // this user's own per-drive quota allocation
 	IsPrimary     bool   `json:"is_primary"`
 	PingURL       string `json:"ping_url"`
 }
@@ -181,6 +182,7 @@ func (h *Handler) ListMyServers(c *gin.Context) {
 			CapacityBytes: d.CapacityBytes,
 			UsedBytes:     d.UserUsedBytes,
 			DriveUsedPct:  pct,
+			QuotaBytes:    d.QuotaBytes,
 			IsPrimary:     d.IsPrimary,
 			PingURL:       fmt.Sprintf("/api/v1/storage/servers/%s/ping", d.ServerID),
 		}

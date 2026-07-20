@@ -119,6 +119,50 @@ func (h *Handler) AdminGetUserFolder(c *gin.Context) {
 	c.JSON(http.StatusOK, contents)
 }
 
+// AdminGetUserAncestors handles GET
+// /api/v1/admin/users/:user_id/folders/:folder_id/ancestors. Returns the
+// breadcrumb chain from root → leaf for the specified user (admin only,
+// read-only) — the impersonation counterpart to GetFolderAncestors, backing
+// FolderBreadcrumb while an admin is browsing another user's directory
+// structure via the sandbox/impersonation view.
+func (h *Handler) AdminGetUserAncestors(c *gin.Context) {
+	username := sanitize.String(c.Param("user_id"))
+	if username == "" || len(username) > 150 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user_id"})
+		return
+	}
+
+	folderID, err := parseUUID(c, "folder_id")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid folder_id"})
+		return
+	}
+
+	if _, err := h.queries.GetUserByUsername(c.Request.Context(), username); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not fetch user"})
+		return
+	}
+
+	userID, err := h.kcID(c, username)
+	if err != nil {
+		log.Printf("AdminGetUserAncestors: resolve KC ID for %q: %v", username, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not resolve user identity"})
+		return
+	}
+
+	chain, err := h.folders.GetAncestors(c.Request.Context(), folderID, userID)
+	if err != nil {
+		log.Printf("AdminGetUserAncestors: folder=%s username=%s err=%v", folderID, username, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not retrieve ancestors"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ancestors": chain})
+}
+
 // AdminGetUserFavorites handles GET /api/v1/admin/users/:user_id/favorites.
 // Returns the favorites for the specified user (admin only, read-only).
 func (h *Handler) AdminGetUserFavorites(c *gin.Context) {

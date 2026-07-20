@@ -176,25 +176,31 @@ for _ in "${OPTIONS[@]}"; do SELECTED+=(0); done
 CURSOR=0
 
 select_services() {
-  local total_lines=$(( ${#OPTIONS[@]} + 3 ))
   local key rest notice=""
 
   draw() {
     local i mark
-    printf '\r\033[2K%s\n' "Select images to build + push, then deploy:"
-    printf '\r\033[2K%s\n' "  up/down (or j/k) move   ·   space toggle   ·   enter confirm   ·   q quit"
+    printf '%s\n' "Select images to build + push, then deploy:"
+    printf '%s\n' "  up/down (or j/k) move · space toggle · enter confirm · q quit"
     for i in "${!OPTIONS[@]}"; do
       mark=" "; [[ ${SELECTED[$i]} -eq 1 ]] && mark="x"
       if [[ $i -eq $CURSOR ]]; then
-        printf '\r\033[2K\033[1;36m> [%s] %s\033[0m\n' "$mark" "${OPTION_LABELS[$i]}"
+        printf '\033[1;36m> [%s] %s\033[0m\n' "$mark" "${OPTION_LABELS[$i]}"
       else
-        printf '\r\033[2K  [%s] %s\n' "$mark" "${OPTION_LABELS[$i]}"
+        printf '  [%s] %s\n' "$mark" "${OPTION_LABELS[$i]}"
       fi
     done
-    printf '\r\033[2K%s\n' "$notice"
+    printf '%s\n' "$notice"
   }
 
   tput civis 2>/dev/null || true
+  # Save the cursor position once, before the first frame, then jump back to
+  # it and erase everything below before every redraw. This is immune to a
+  # printed line wrapping in a narrow terminal — the previous approach moved
+  # the cursor up a hardcoded number of LOGICAL lines (\033[nA), which
+  # undercounts as soon as any row wraps to two physical rows, so frames
+  # stacked instead of overwriting.
+  tput sc 2>/dev/null || printf '\0337'
   draw
   while true; do
     IFS= read -rsn1 key
@@ -218,7 +224,8 @@ select_services() {
         fi
         ;;
     esac
-    printf '\033[%dA' "$total_lines"
+    tput rc 2>/dev/null || printf '\0338'
+    tput ed 2>/dev/null || printf '\033[J'
     draw
   done
   tput cnorm 2>/dev/null || true
@@ -250,6 +257,26 @@ fi
 if [[ -n "$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null || true)" ]]; then
   echo "Warning: working tree has uncommitted changes — the pushed image won't exactly match a commit." >&2
 fi
+
+# docker-stack.yml passes RECOGNITION_MEM_LIMIT straight into
+# deploy.resources.limits.memory. Docker's size parser silently accepts a
+# bare number as BYTES when no unit suffix is given, so e.g. "8" (meant as
+# 8G) becomes an 8-byte limit and fails deep inside `docker stack deploy`
+# with a cryptic "Must be at least 4MiB" — catch it here instead.
+check_mem_limit() {
+  local var="$1"
+  local val="${!var-}"
+  [[ -z "$val" ]] && return 0
+  if [[ "$val" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+    echo "$var=\"$val\" has no unit — Docker reads that as $val BYTES, not GB. Use e.g. \"${val}G\" or \"${val}g\" in .env." >&2
+    exit 1
+  fi
+  if ! [[ "$val" =~ ^[0-9]+(\.[0-9]+)?[bBkKmMgGtT][bB]?$ ]]; then
+    echo "$var=\"$val\" is not a valid Docker memory size (expected a number + unit, e.g. \"8G\")." >&2
+    exit 1
+  fi
+}
+check_mem_limit RECOGNITION_MEM_LIMIT
 
 # ── Choose which services to build + deploy ───────────────────────────────────
 SELECTED_SERVICES=()

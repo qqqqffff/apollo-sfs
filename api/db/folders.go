@@ -349,14 +349,14 @@ func (q *Queries) SetFolderDriveID(ctx context.Context, id, driveID uuid.UUID) e
 func (q *Queries) GetFolderAncestors(ctx context.Context, userID, folderID uuid.UUID) ([]models.Folder, error) {
 	rows, err := q.db.QueryContext(ctx, `
 		WITH RECURSIVE chain AS (
-			SELECT id, user_id, parent_id, drive_id, name, kind, created_at, updated_at, 0 AS depth
+			SELECT id, user_id, parent_id, drive_id, name, kind, ai_recognition_enabled, created_at, updated_at, 0 AS depth
 			FROM folders WHERE id = $2 AND user_id = $1
 			UNION ALL
-			SELECT f.id, f.user_id, f.parent_id, f.drive_id, f.name, f.kind, f.created_at, f.updated_at, c.depth + 1
+			SELECT f.id, f.user_id, f.parent_id, f.drive_id, f.name, f.kind, f.ai_recognition_enabled, f.created_at, f.updated_at, c.depth + 1
 			FROM folders f JOIN chain c ON f.id = c.parent_id
 			WHERE f.user_id = $1
 		)
-		SELECT id, user_id, parent_id, drive_id, name, kind, created_at, updated_at
+		SELECT `+folderColumns+`
 		FROM chain ORDER BY depth DESC
 	`, userID, folderID)
 	if err != nil {

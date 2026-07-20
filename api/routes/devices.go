@@ -42,6 +42,24 @@ func (h *Handler) RegisterDevice(c *gin.Context) {
 	c.JSON(http.StatusCreated, device)
 }
 
+// ListDevices handles GET /api/v1/devices.
+// Returns the authenticated user's registered devices, used by the web app to
+// resolve a file's device_id to a human-readable device name.
+func (h *Handler) ListDevices(c *gin.Context) {
+	userID, err := uuid.Parse(c.GetString("userID"))
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	devices, err := h.queries.ListDevicesByUser(c.Request.Context(), userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not list devices"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"items": devices})
+}
+
 // DeleteDevice handles DELETE /api/v1/devices/:device_id.
 // Removes a device registration. Only the owning user may delete their devices.
 func (h *Handler) DeleteDevice(c *gin.Context) {

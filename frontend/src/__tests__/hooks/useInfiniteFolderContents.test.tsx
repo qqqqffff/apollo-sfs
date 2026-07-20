@@ -45,7 +45,7 @@ function page(
       next_token: nextFolderToken,
     },
     files: {
-      items: files.map(f => ({ ...f, user_id: 'u1', mime_type: 'text/plain', size_bytes: 100, taken_at: null, hidden: false, created_at: '', updated_at: '', folder_id: null })),
+      items: files.map(f => ({ ...f, user_id: 'u1', mime_type: 'text/plain', size_bytes: 100, taken_at: null, hidden: false, created_at: '', updated_at: '', folder_id: null, source: 'web' })),
       next_token: nextFileToken,
     },
   }

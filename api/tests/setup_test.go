@@ -303,6 +303,9 @@ func (s *stubQuerier) UpdateDeviceLastSeen(_ context.Context, _ uuid.UUID, _ *st
 	return nil
 }
 func (s *stubQuerier) DeleteDevice(_ context.Context, _ uuid.UUID) error { return nil }
+func (s *stubQuerier) ListDevicesByUser(_ context.Context, _ uuid.UUID) ([]db.Device, error) {
+	return []db.Device{}, nil
+}
 func (s *stubQuerier) DeltaSyncFiles(_ context.Context, _ uuid.UUID, _ time.Time) ([]models.File, error) {
 	return []models.File{}, nil
 }

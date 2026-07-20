@@ -95,6 +95,7 @@ type Querier interface {
 	GetDevice(ctx context.Context, id uuid.UUID) (*db.Device, error)
 	UpdateDeviceLastSeen(ctx context.Context, id uuid.UUID, pushToken *string) error
 	DeleteDevice(ctx context.Context, id uuid.UUID) error
+	ListDevicesByUser(ctx context.Context, userID uuid.UUID) ([]db.Device, error)
 
 	// Sync (mobile)
 	DeltaSyncFiles(ctx context.Context, userID uuid.UUID, since time.Time) ([]models.File, error)

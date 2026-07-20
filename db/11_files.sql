@@ -4,7 +4,8 @@
 -- folder_id is nullable: NULL means the file lives at the root level.
 -- device_id links the file to the uploading mobile device (NULL for web uploads).
 -- latitude/longitude are populated from GPS EXIF data when available.
--- source records the upload origin: 'web' | 'device' | 'google_drive' | 'google_photos'.
+-- source records the upload origin: 'web' | 'device' | 'google_drive' |
+-- 'google_photos' | 'email_backup_gmail' | 'email_backup_microsoft' | 'file_server'.
 -- taken_at is the capture date extracted from media metadata; NULL falls back to created_at.
 -- hidden files are excluded from collection listings unless explicitly requested.
 -- sha256_hash enables client-side dedup: mobile clients skip re-uploading identical content.

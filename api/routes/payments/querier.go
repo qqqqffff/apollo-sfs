@@ -3,6 +3,7 @@ package payments
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	"apollo-sfs.com/api/db"
 	"apollo-sfs.com/api/models"
@@ -10,9 +11,16 @@ import (
 
 // Querier is the subset of *db.Queries used by the payments handler. The
 // payment service has its own narrow surface; only the handler-direct
-// reads/writes (user lookup) live here.
+// reads/writes (user lookup, subscription bookkeeping) live here.
 type Querier interface {
 	GetUserByUsername(ctx context.Context, username string) (*models.User, error)
+	HasActivePremiumSubscription(ctx context.Context, username string) (bool, error)
+	CreatePendingSubscription(ctx context.Context, s *models.PremiumSubscription) error
+	ExpireStalePendingSubscriptions(ctx context.Context, username string) error
+	GetSubscriptionByPayPalID(ctx context.Context, paypalSubscriptionID string) (*models.PremiumSubscription, error)
+	GetActiveSubscriptionForUser(ctx context.Context, username string) (*models.PremiumSubscription, error)
+	ListPastDueActiveSubscriptions(ctx context.Context, cutoff time.Time) ([]models.PremiumSubscription, error)
+	ListSubscriptionsForUser(ctx context.Context, username string) ([]db.SubscriptionOrderSummary, error)
 }
 
 // Compile-time check.

@@ -148,6 +148,7 @@ function RouteComponent() {
                   currency: config.currency || 'USD',
                   intent: 'capture',
                   components: 'buttons',
+                  disableFunding: 'paylater',
                 }}
               >
                 <PayPalButtons

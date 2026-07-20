@@ -72,9 +72,25 @@ type FolderServicer interface {
 	GetAncestors(ctx context.Context, folderID, userID uuid.UUID) ([]models.Folder, error)
 }
 
+// RecognitionServicer is the subset of *services.RecognitionService used by
+// route handlers.
+type RecognitionServicer interface {
+	Available() bool
+	SetEnabled(ctx context.Context, userID uuid.UUID, username string, collectionID uuid.UUID, enabled, purge bool) (int, int64, error)
+	Status(ctx context.Context, userID uuid.UUID, collectionID uuid.UUID) (*services.RecognitionStatus, error)
+	ListGroups(ctx context.Context, userID uuid.UUID, collectionID uuid.UUID, kind string, labeledOnly bool) ([]models.RecognitionGroup, error)
+	GroupFiles(ctx context.Context, userID uuid.UUID, groupID uuid.UUID, in db.PageInput) (*db.PageResult[models.File], error)
+	LabelGroup(ctx context.Context, userID uuid.UUID, username string, groupID uuid.UUID, label string) (*models.RecognitionGroup, error)
+	MergeGroups(ctx context.Context, userID uuid.UUID, username string, targetID uuid.UUID, sourceIDs []uuid.UUID) (*models.RecognitionGroup, error)
+	DeleteGroup(ctx context.Context, userID uuid.UUID, username string, groupID uuid.UUID) error
+	DetectionThumb(ctx context.Context, userID uuid.UUID, username string, detectionID uuid.UUID) ([]byte, error)
+	EnqueueFileIfEnabled(ctx context.Context, file *models.File, username, trigger string)
+}
+
 // Compile-time checks that the concrete service types satisfy these interfaces.
 var _ FileServicer = (*services.FileService)(nil)
 var _ FolderServicer = (*services.FolderService)(nil)
+var _ RecognitionServicer = (*services.RecognitionService)(nil)
 
 // Handler holds shared dependencies for route handlers in the routes package.
 // Methods on Handler implement the individual endpoint logic.
@@ -93,6 +109,8 @@ type Handler struct {
 	apiKeys         *services.APIKeyService
 	shares          *services.ShareService
 	fileServerLinks *services.FileServerLinkService
+	emailBackup     *services.EmailBackupService
+	recognition     RecognitionServicer
 	turnstileSecret string
 	// paypal is used for the interest-form deposit (nil is tolerated and
 	// causes the deposit endpoints to return 503).
@@ -140,6 +158,13 @@ func SetAPIKeyService(h *Handler, svc *services.APIKeyService) {
 // causes the share endpoints to return 503 (configured, not crash).
 func SetShareService(h *Handler, svc *services.ShareService) {
 	h.shares = svc
+}
+
+// SetRecognitionService installs the AI recognition service on an existing
+// Handler. Wired from main once the service is constructed; nil is tolerated
+// and causes the recognition endpoints to return 503 (configured, not crash).
+func SetRecognitionService(h *Handler, svc RecognitionServicer) {
+	h.recognition = svc
 }
 
 // SetFileServerLinkService installs the file-server mount link service on an

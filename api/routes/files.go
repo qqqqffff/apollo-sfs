@@ -106,6 +106,10 @@ func (h *Handler) UploadFile(c *gin.Context) {
 			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": err.Error()})
 			return
 		}
+		if errors.Is(err, services.ErrDriveUnavailable) {
+			c.JSON(http.StatusInsufficientStorage, gin.H{"error": err.Error()})
+			return
+		}
 		if errors.Is(err, services.ErrDuplicateName) {
 			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 			return
@@ -607,6 +611,10 @@ func (h *Handler) InitUpload(c *gin.Context) {
 
 	if err := h.files.BeginChunkedUpload(c.Request.Context(), sess); err != nil {
 		h.uploads.Delete(sess.ID)
+		if errors.Is(err, services.ErrDriveUnavailable) {
+			c.JSON(http.StatusInsufficientStorage, gin.H{"error": err.Error()})
+			return
+		}
 		log.Printf("init upload: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not initialise upload"})
 		return
@@ -1011,6 +1019,10 @@ func (h *Handler) UploadFilePresigned(c *gin.Context) {
 			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": err.Error()})
 			return
 		}
+		if errors.Is(err, services.ErrDriveUnavailable) {
+			c.JSON(http.StatusInsufficientStorage, gin.H{"error": err.Error()})
+			return
+		}
 		if errors.Is(err, services.ErrDuplicateName) {
 			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 			return
@@ -1098,6 +1110,10 @@ func (h *Handler) PresignChunkedUpload(c *gin.Context) {
 
 	if err := h.files.BeginChunkedUpload(c.Request.Context(), sess); err != nil {
 		h.uploads.Delete(sess.ID)
+		if errors.Is(err, services.ErrDriveUnavailable) {
+			c.JSON(http.StatusInsufficientStorage, gin.H{"error": err.Error()})
+			return
+		}
 		log.Printf("presign chunked upload: begin: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not initialise upload"})
 		return

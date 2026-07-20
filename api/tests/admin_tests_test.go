@@ -10,14 +10,14 @@ import (
 )
 
 // newTestRunnerHandler constructs a Handler with test-runner params only.
-func newTestRunnerHandler(apiDir, frontendTestURL, frontendE2EURL string) *admin.Handler {
-	return admin.NewHandler(&stubAdminQuerier{}, &stubAdminInviteService{}, nil, nil, nil, nil, nil, "", "", "", apiDir, frontendTestURL, frontendE2EURL, nil)
+func newTestRunnerHandler(apiDir, testRunnerURL string) *admin.Handler {
+	return admin.NewHandler(&stubAdminQuerier{}, &stubAdminInviteService{}, nil, nil, nil, nil, nil, "", "", testRunnerURL, apiDir, nil)
 }
 
 // ── Neither suite configured ──────────────────────────────────────────────────
 
 func TestRunTests_NeitherConfigured(t *testing.T) {
-	h := newTestRunnerHandler("", "", "")
+	h := newTestRunnerHandler("", "")
 	r := newEngine()
 	r.POST("/admin/system/tests", h.RunTests)
 
@@ -29,68 +29,57 @@ func TestRunTests_NeitherConfigured(t *testing.T) {
 	}
 }
 
-// ── Frontend disabled when URL not set ───────────────────────────────────────
+// ── Backend local-exec fallback (no test-runner sidecar) ─────────────────────
 
-func TestRunTests_FrontendDisabledWhenURLNotSet(t *testing.T) {
-	// Provide a fake apiDir so the backend entry is attempted (it will fail
-	// because the dir is invalid, but that's fine — we only check the frontend
-	// entry here).
-	h := newTestRunnerHandler("/nonexistent-dir", "", "")
+func TestRunTests_BackendLocalFallback_DisabledWhenDirNotSet(t *testing.T) {
+	h := newTestRunnerHandler("", "")
 	r := newEngine()
 	r.POST("/admin/system/tests", h.RunTests)
 
 	req := httptest.NewRequest(http.MethodPost, "/admin/system/tests", nil)
 	w := doRequest(r, req)
 
-	var body map[string]any
-	decodeBody(w, &body) //nolint
-
-	fe, _ := body["frontend"].(map[string]any)
-	if fe == nil {
-		t.Fatal("expected frontend key in response")
-	}
-	if fe["enabled"] != false {
-		t.Errorf("expected frontend.enabled=false when FRONTEND_TEST_URL is unset, got %v", fe["enabled"])
-	}
-	if fe["message"] == nil || fe["message"] == "" {
-		t.Error("expected frontend.message to be set")
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d (body: %s)", w.Code, w.Body.String())
 	}
 }
 
-// ── Backend disabled when apiDir not set ─────────────────────────────────────
-
-func TestRunTests_BackendDisabledWhenDirNotSet(t *testing.T) {
-	// Provide a sidecar stub so the endpoint returns a real response instead of 503.
-	sidecar := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{ //nolint
-			"passed": true, "exit_code": 0, "output": "PASS", "duration_ms": 10,
-		})
-	}))
-	defer sidecar.Close()
-
-	h := newTestRunnerHandler("", sidecar.URL+"/run-tests", "")
+func TestRunTests_BackendLocalFallback_OnlyBackendEnabled(t *testing.T) {
+	// Invalid dir so the command fails fast, but the entry should still be
+	// enabled=true (it was attempted) — every other suite is disabled since
+	// there's no test-runner sidecar to reach them through.
+	h := newTestRunnerHandler("/nonexistent-dir", "")
 	r := newEngine()
 	r.POST("/admin/system/tests", h.RunTests)
 
 	req := httptest.NewRequest(http.MethodPost, "/admin/system/tests", nil)
 	w := doRequest(r, req)
+
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422 when the backend suite fails, got %d (body: %s)", w.Code, w.Body.String())
+	}
 
 	var body map[string]any
 	decodeBody(w, &body) //nolint
 
 	be, _ := body["backend"].(map[string]any)
-	if be == nil {
-		t.Fatal("expected backend key in response")
+	if be == nil || be["enabled"] != true {
+		t.Errorf("expected backend.enabled=true, got %v", be)
 	}
-	if be["enabled"] != false {
-		t.Errorf("expected backend.enabled=false when APP_DIR is unset, got %v", be["enabled"])
+	for _, key := range []string{"frontend", "frontend_e2e", "mobile", "recognition"} {
+		entry, _ := body[key].(map[string]any)
+		if entry == nil {
+			t.Fatalf("expected %s key in response", key)
+		}
+		if entry["enabled"] != false {
+			t.Errorf("expected %s.enabled=false without a test-runner sidecar, got %v", key, entry["enabled"])
+		}
 	}
 }
 
-// ── Frontend sidecar — passing suite ─────────────────────────────────────────
+// ── Unified test-runner sidecar — passing report ─────────────────────────────
 
-func TestRunTests_FrontendSidecar_Pass(t *testing.T) {
+func TestRunTests_TestRunner_AllPass(t *testing.T) {
 	sidecar := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -98,15 +87,16 @@ func TestRunTests_FrontendSidecar_Pass(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{ //nolint
-			"passed":      true,
-			"exit_code":   0,
-			"output":      "PASS\nTest Suites: 0 passed, 0 total",
-			"duration_ms": 312,
+			"backend":      map[string]any{"enabled": true, "result": map[string]any{"passed": true, "exit_code": 0, "output": "ok", "duration_ms": 10}},
+			"frontend":     map[string]any{"enabled": true, "result": map[string]any{"passed": true, "exit_code": 0, "output": "ok", "duration_ms": 20}},
+			"frontend_e2e": map[string]any{"enabled": true, "result": map[string]any{"passed": true, "exit_code": 0, "output": "ok", "duration_ms": 30}},
+			"mobile":       map[string]any{"enabled": true, "result": map[string]any{"passed": true, "exit_code": 0, "output": "ok", "duration_ms": 40}},
+			"recognition":  map[string]any{"enabled": true, "result": map[string]any{"passed": true, "exit_code": 0, "output": "ok", "duration_ms": 50}},
 		})
 	}))
 	defer sidecar.Close()
 
-	h := newTestRunnerHandler("", sidecar.URL+"/run-tests", "")
+	h := newTestRunnerHandler("", sidecar.URL+"/run-tests")
 	r := newEngine()
 	r.POST("/admin/system/tests", h.RunTests)
 
@@ -114,40 +104,42 @@ func TestRunTests_FrontendSidecar_Pass(t *testing.T) {
 	w := doRequest(r, req)
 
 	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200 when frontend passes, got %d (body: %s)", w.Code, w.Body.String())
+		t.Fatalf("expected 200 when every suite passes, got %d (body: %s)", w.Code, w.Body.String())
 	}
 
 	var body map[string]any
 	decodeBody(w, &body) //nolint
 
-	fe, _ := body["frontend"].(map[string]any)
-	if fe["enabled"] != true {
-		t.Errorf("expected frontend.enabled=true")
-	}
-	result, _ := fe["result"].(map[string]any)
-	if result == nil {
-		t.Fatal("expected frontend.result to be present")
-	}
-	if result["passed"] != true {
-		t.Errorf("expected frontend.result.passed=true, got %v", result["passed"])
+	for _, key := range []string{"backend", "frontend", "frontend_e2e", "mobile", "recognition"} {
+		entry, _ := body[key].(map[string]any)
+		if entry == nil || entry["enabled"] != true {
+			t.Fatalf("expected %s.enabled=true, got %v", key, entry)
+		}
+		result, _ := entry["result"].(map[string]any)
+		if result == nil || result["passed"] != true {
+			t.Errorf("expected %s.result.passed=true, got %v", key, result)
+		}
 	}
 }
 
-// ── Frontend sidecar — failing suite ─────────────────────────────────────────
+// ── Unified test-runner sidecar — one suite fails ────────────────────────────
 
-func TestRunTests_FrontendSidecar_Fail(t *testing.T) {
+func TestRunTests_TestRunner_OneSuiteFails(t *testing.T) {
 	sidecar := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{ //nolint
-			"passed":      false,
-			"exit_code":   1,
-			"output":      "FAIL\n● MyComponent › renders correctly",
-			"duration_ms": 890,
+			"backend":      map[string]any{"enabled": true, "result": map[string]any{"passed": true, "exit_code": 0, "output": "ok", "duration_ms": 10}},
+			"frontend":     map[string]any{"enabled": true, "result": map[string]any{"passed": true, "exit_code": 0, "output": "ok", "duration_ms": 20}},
+			"frontend_e2e": map[string]any{"enabled": true, "result": map[string]any{"passed": true, "exit_code": 0, "output": "ok", "duration_ms": 30}},
+			"mobile":       map[string]any{"enabled": true, "result": map[string]any{"passed": true, "exit_code": 0, "output": "ok", "duration_ms": 40}},
+			"recognition": map[string]any{"enabled": true, "result": map[string]any{
+				"passed": false, "exit_code": 1, "output": "FAIL tests/test_analyze.py", "duration_ms": 50,
+			}},
 		})
 	}))
 	defer sidecar.Close()
 
-	h := newTestRunnerHandler("", sidecar.URL+"/run-tests", "")
+	h := newTestRunnerHandler("", sidecar.URL+"/run-tests")
 	r := newEngine()
 	r.POST("/admin/system/tests", h.RunTests)
 
@@ -155,35 +147,32 @@ func TestRunTests_FrontendSidecar_Fail(t *testing.T) {
 	w := doRequest(r, req)
 
 	if w.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("expected 422 when frontend fails, got %d", w.Code)
-	}
-}
-
-// ── Frontend sidecar — unreachable ───────────────────────────────────────────
-
-func TestRunTests_FrontendSidecar_Unreachable(t *testing.T) {
-	// Port 19229 is very unlikely to be listening.
-	h := newTestRunnerHandler("", "http://127.0.0.1:19229/run-tests", "")
-	r := newEngine()
-	r.POST("/admin/system/tests", h.RunTests)
-
-	req := httptest.NewRequest(http.MethodPost, "/admin/system/tests", nil)
-	w := doRequest(r, req)
-
-	// Sidecar unreachable → frontend result is a network error, treated as failure.
-	if w.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("expected 422 when sidecar is unreachable, got %d", w.Code)
+		t.Fatalf("expected 422 when one suite fails, got %d (body: %s)", w.Code, w.Body.String())
 	}
 
 	var body map[string]any
 	decodeBody(w, &body) //nolint
-
-	fe, _ := body["frontend"].(map[string]any)
-	if fe["enabled"] != true {
-		t.Errorf("expected frontend.enabled=true even when sidecar is unreachable")
-	}
-	result, _ := fe["result"].(map[string]any)
+	rec, _ := body["recognition"].(map[string]any)
+	result, _ := rec["result"].(map[string]any)
 	if result["passed"] != false {
-		t.Errorf("expected frontend.result.passed=false for unreachable sidecar")
+		t.Errorf("expected recognition.result.passed=false, got %v", result["passed"])
+	}
+}
+
+// ── Unified test-runner sidecar — unreachable ────────────────────────────────
+
+func TestRunTests_TestRunner_Unreachable(t *testing.T) {
+	// Port 19228 is very unlikely to be listening. Unlike a single-suite
+	// sidecar, an unreachable unified runner means NO suite results come
+	// back at all, so this is a hard error rather than a per-suite failure.
+	h := newTestRunnerHandler("", "http://127.0.0.1:19228/run-tests")
+	r := newEngine()
+	r.POST("/admin/system/tests", h.RunTests)
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/system/tests", nil)
+	w := doRequest(r, req)
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502 when the test-runner sidecar is unreachable, got %d (body: %s)", w.Code, w.Body.String())
 	}
 }

@@ -83,6 +83,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const logout = useCallback(async (): Promise<'success' | 'fail'> => {
     try {
       await apiLogout()
+      // Flip synchronously before clearing — see __root.tsx's session-expired
+      // handler for why clear() alone can leave isAuthenticated observers stale.
+      queryClient.setQueryData(meQueryOptions.queryKey, null)
       queryClient.clear()
       return 'success'
     } catch {

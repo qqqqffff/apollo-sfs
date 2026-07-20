@@ -13,7 +13,7 @@ import (
 
 const storageOrderColumns = `id, username, plan_id, storage_type, bytes_added,
 	amount_cents, currency, payment_method, status,
-	paypal_order_id, paypal_capture_id, server_id, raw_response, created_at, captured_at`
+	paypal_order_id, paypal_capture_id, server_id, raw_response, environment, created_at, captured_at`
 
 // CreateStorageOrder inserts a new storage order. For wallet (PayPal redirect)
 // orders, only paypal_order_id is set and status is "created". For direct
@@ -28,21 +28,26 @@ func (q *Queries) CreateStorageOrder(ctx context.Context, o *models.StorageOrder
 	if o.ServerID != nil {
 		serverID = *o.ServerID
 	}
+	env := o.Environment
+	if env == "" {
+		env = "live"
+	}
 	err := q.db.QueryRowContext(ctx, `
 		INSERT INTO storage_orders
 		    (username, plan_id, storage_type, bytes_added, amount_cents, currency,
 		     payment_method, status, paypal_order_id, paypal_capture_id, server_id,
-		     raw_response, captured_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13)
+		     raw_response, environment, captured_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13,$14)
 		RETURNING id, created_at
 	`,
 		o.Username, o.PlanID, o.StorageType, o.BytesAdded, o.AmountCents, o.Currency,
 		o.PaymentMethod, o.Status, o.PayPalOrderID, captureID, serverID,
-		rawWebhookOrNil(o.RawResponse), capturedAtOrNil(o.CapturedAt),
+		rawWebhookOrNil(o.RawResponse), env, capturedAtOrNil(o.CapturedAt),
 	).Scan(&o.ID, &o.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("CreateStorageOrder: %w", err)
 	}
+	o.Environment = env
 	return nil
 }
 
@@ -78,6 +83,11 @@ func (q *Queries) MarkStorageOrderCaptured(ctx context.Context, orderID, capture
 
 // AddUserQuota atomically adds bytesAdded to the user's storage_quota_bytes
 // and returns the new total. Used after a successful storage order capture.
+//
+// Deprecated: this only touches the aggregate. Since the storage allocation
+// editor introduced per-drive quota_bytes (which the upload path now
+// enforces), any caller that knows which drive the change applies to should
+// use AddUserQuotaAndAllocation instead, so the two numbers never drift.
 func (q *Queries) AddUserQuota(ctx context.Context, username string, bytesAdded int64) (int64, error) {
 	var newQuota int64
 	err := q.db.QueryRowContext(ctx, `
@@ -90,6 +100,37 @@ func (q *Queries) AddUserQuota(ctx context.Context, username string, bytesAdded 
 		return 0, fmt.Errorf("AddUserQuota: %w", err)
 	}
 	return newQuota, nil
+}
+
+// AddUserQuotaAndAllocation atomically adds bytesAdded to both
+// users.storage_quota_bytes and — when driveID is non-nil — the matching
+// user_drive_allocations.quota_bytes row, so the two numbers never drift
+// once per-drive quotas are enforced at upload time. driveID nil is
+// tolerated (e.g. a user with no drive allocation yet) and only updates the
+// aggregate. Returns the new aggregate quota.
+func (q *Queries) AddUserQuotaAndAllocation(ctx context.Context, username string, driveID *uuid.UUID, bytesAdded int64) (int64, error) {
+	tx, err := q.pool.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("AddUserQuotaAndAllocation: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var newQuota int64
+	if err := tx.QueryRowContext(ctx, `
+		UPDATE users SET storage_quota_bytes = storage_quota_bytes + $2
+		WHERE username = $1 RETURNING storage_quota_bytes
+	`, username, bytesAdded).Scan(&newQuota); err != nil {
+		return 0, fmt.Errorf("AddUserQuotaAndAllocation: user: %w", err)
+	}
+	if driveID != nil {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE user_drive_allocations SET quota_bytes = quota_bytes + $3
+			WHERE user_id = $1 AND drive_id = $2
+		`, username, *driveID, bytesAdded); err != nil {
+			return 0, fmt.Errorf("AddUserQuotaAndAllocation: allocation: %w", err)
+		}
+	}
+	return newQuota, tx.Commit()
 }
 
 // UserStorageBreakdown holds the user's actual used bytes split by drive type.
@@ -128,7 +169,7 @@ func scanStorageOrder(row *sql.Row) (*models.StorageOrder, error) {
 	if err := row.Scan(
 		&o.ID, &o.Username, &o.PlanID, &o.StorageType, &o.BytesAdded,
 		&o.AmountCents, &o.Currency, &o.PaymentMethod, &o.Status,
-		&o.PayPalOrderID, &captureID, &serverID, &rawResp, &o.CreatedAt, &capturedAt,
+		&o.PayPalOrderID, &captureID, &serverID, &rawResp, &o.Environment, &o.CreatedAt, &capturedAt,
 	); err != nil {
 		return nil, err
 	}

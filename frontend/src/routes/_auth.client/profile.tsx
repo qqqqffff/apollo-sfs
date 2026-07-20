@@ -1,15 +1,21 @@
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
 import { useEffect, useRef, useCallback, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { MdAddCircleOutline, MdCheck, MdClose, MdLink, MdPhotoLibrary, MdRocketLaunch, MdKey, MdStorage, MdVpnKey, MdCloudUpload, MdSpeed, MdBolt, MdRefresh } from 'react-icons/md'
+import { MdAddCircleOutline, MdAssignment, MdCheck, MdClose, MdEdit, MdFeedback, MdHistory, MdOpenInNew, MdPhotoLibrary, MdRocketLaunch, MdShield, MdStorage, MdBolt, MdRefresh, MdScience } from 'react-icons/md'
 import { FaApple } from 'react-icons/fa'
-import { meQueryOptions, changePassword, preferencesQueryOptions, updatePreferences, updateStorageUIPreferences, unlinkProvider } from '../../api/me'
+import { meQueryOptions, updateUsername, preferencesQueryOptions, updatePreferences, updateStorageUIPreferences, updateSandboxPayments, updateExpansionOverride, unlinkProvider, lastBackupSyncQueryOptions, updateBackupReminderPreference } from '../../api/me'
+import { formatTimeSince } from '../../components/LastSyncNote'
+import { logout } from '../../api/auth'
 import { listRoot } from '../../api/folders'
 import { ApiError } from '../../api/client'
 import { StorageUpgradeModal } from '../../components/StorageUpgradeModal'
-import { FileServerLinkModal, LinkDisplay } from '../../components/FileServerLinkModal'
-import { listFileServerLinks, deleteFileServerLink } from '../../api/fileServerLinks'
+import { PremiumUpgradeModal } from '../../components/PremiumUpgradeModal'
+import { AccountBadges } from '../../components/GroupBadge'
+import { FileServerLinksCard } from '../../components/FileServerLinksCard'
+import { useNotification } from '../../context/NotificationContext'
 import { formatCents, listMyExpansionRequests, type ExpansionRequest } from '../../api/billing'
+import { useBillingConfig } from '../../hooks/useBillingConfig'
+import { cancelPremiumSubscription } from '../../api/payments'
 import {
   getStorageBreakdown,
   listMyServers,
@@ -33,65 +39,12 @@ function formatSize(bytes: number): string {
   return `${bytes} B`
 }
 
-interface PasswordChecks {
-  length: boolean
-  upper: boolean
-  number: boolean
-  symbol: boolean
-  match: boolean
-}
-
-function getChecks(newPassword: string, confirm: string): PasswordChecks {
-  return {
-    length: newPassword.length >= 8,
-    upper: /[A-Z]/.test(newPassword),
-    number: /[0-9]/.test(newPassword),
-    symbol: /[^A-Za-z0-9]/.test(newPassword),
-    match: newPassword.length > 0 && newPassword === confirm,
-  }
-}
-
-function CheckItem({ ok, label }: { ok: boolean; label: string }) {
-  return (
-    <li className={`flex items-center gap-1.5 text-xs transition-colors ${ok ? 'text-green-600' : 'text-red-500'}`}>
-      {ok ? <MdCheck className="shrink-0" /> : <MdClose className="shrink-0" />}
-      {label}
-    </li>
-  )
-}
-
 function RouteComponent() {
   const navigate = useNavigate()
   const { data: user, isLoading } = useQuery(meQueryOptions)
 
   const [showUpgradeModal, setShowUpgradeModal] = useState(false)
   const [showStorageModal, setShowStorageModal] = useState(false)
-
-  const [current, setCurrent] = useState('')
-  const [newPw, setNewPw] = useState('')
-  const [confirm, setConfirm] = useState('')
-  const [touched, setTouched] = useState(false)
-  const [pwError, setPwError] = useState<string | null>(null)
-  const [pwSuccess, setPwSuccess] = useState(false)
-
-  const checks = getChecks(newPw, confirm)
-  const allValid = Object.values(checks).every(Boolean)
-
-  const pwMutation = useMutation({
-    mutationFn: () => changePassword(current, newPw),
-    onSuccess: () => {
-      setCurrent('')
-      setNewPw('')
-      setConfirm('')
-      setTouched(false)
-      setPwError(null)
-      setPwSuccess(true)
-      setTimeout(() => setPwSuccess(false), 4000)
-    },
-    onError: (err) => {
-      setPwError(err instanceof ApiError ? err.message : 'Failed to change password')
-    },
-  })
 
   if (isLoading) return <p className="text-sm text-gray-500">Loading…</p>
   if (!user) return null
@@ -106,9 +59,12 @@ function RouteComponent() {
       <h2 className="text-lg font-semibold text-gray-900 mb-6 mt-0">Profile</h2>
 
       <div className="bg-white border border-gray-200 rounded-xl divide-y divide-gray-100">
-        <Row label="Username" value={user.username} />
+        <UsernameRow currentUsername={user.username} />
         <Row label="Email" value={user.email} />
-        <Row label="Account type" value={user.is_admin ? 'Admin' : user.is_premium ? 'Premium' : 'User'} />
+        <div className="flex items-center justify-between px-5 py-3.5">
+          <span className="text-sm text-gray-500">Account type</span>
+          <AccountBadges user={user} />
+        </div>
         <Row
           label="Member since"
           value={new Date(user.created_at).toLocaleDateString(undefined, {
@@ -166,7 +122,12 @@ function RouteComponent() {
       <PremiumCard
         isPremium={user.is_premium}
         isAdmin={user.is_admin}
+        sandboxPaymentsEnabled={user.sandbox_payments_enabled}
         grantedAt={user.premium_granted_at}
+        premiumSubscribed={user.premium_subscribed}
+        premiumEnvironment={user.premium_environment ?? null}
+        premiumPlan={user.premium_plan ?? null}
+        premiumCurrentPeriodEnd={user.premium_current_period_end ?? null}
         onUpgrade={() => setShowUpgradeModal(true)}
       />
       {showUpgradeModal && <PremiumUpgradeModal onClose={() => setShowUpgradeModal(false)} />}
@@ -177,74 +138,52 @@ function RouteComponent() {
 
       <MediaAutoUpload />
 
+      {(user.is_premium || user.is_admin) && <BackupReminderCard />}
+
+      {user.is_admin && (
+        <SandboxPaymentsToggle
+          enabled={user.sandbox_payments_enabled}
+          expansionOverrideEnabled={user.expansion_override_enabled}
+        />
+      )}
+
+      {user.is_admin && user.sandbox_payments_enabled && <SandboxAccountRequestCard />}
+
       <div className="bg-white border border-gray-200 rounded-xl px-5 py-4">
-        <h3 className="text-sm font-semibold text-gray-800 mb-4">Change password</h3>
-        <form
-          onSubmit={(e) => {
-            e.preventDefault()
-            setPwError(null)
-            setPwSuccess(false)
-            pwMutation.mutate()
-          }}
-          className="flex flex-col gap-3"
-        >
-          <div className="flex flex-col gap-1">
-            <label className="text-xs text-gray-500">Current password</label>
-            <input
-              type="password"
-              value={current}
-              onChange={(e) => { setCurrent(e.target.value); setPwError(null) }}
-              autoComplete="current-password"
-              className="border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-            />
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-semibold text-gray-800 m-0">Password</h3>
+            <p className="text-xs text-gray-500 m-0 mt-1">
+              Changing your password requires a one-time code sent to your email.
+            </p>
           </div>
-
-          <div className="flex flex-col gap-1">
-            <label className="text-xs text-gray-500">New password</label>
-            <input
-              type="password"
-              value={newPw}
-              onChange={(e) => setNewPw(e.target.value)}
-              onFocus={() => setTouched(true)}
-              autoComplete="new-password"
-              className="border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-            />
-          </div>
-
-          <div className="flex flex-col gap-1">
-            <label className="text-xs text-gray-500">Confirm new password</label>
-            <input
-              type="password"
-              value={confirm}
-              onChange={(e) => setConfirm(e.target.value)}
-              onFocus={() => setTouched(true)}
-              autoComplete="new-password"
-              className="border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-            />
-          </div>
-
-          {touched && (
-            <ul className="space-y-1 pl-0.5">
-              <CheckItem ok={checks.length} label="At least 8 characters" />
-              <CheckItem ok={checks.upper}  label="One uppercase letter" />
-              <CheckItem ok={checks.number} label="One number" />
-              <CheckItem ok={checks.symbol} label="One symbol" />
-              <CheckItem ok={checks.match}  label="Passwords match" />
-            </ul>
-          )}
-
-          {pwError && <p className="text-xs text-red-500">{pwError}</p>}
-          {pwSuccess && <p className="text-xs text-green-600">Password changed successfully.</p>}
-
           <button
-            type="submit"
-            disabled={!current || !allValid || pwMutation.isPending}
-            className="self-start px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-lg disabled:opacity-50 transition-colors cursor-pointer"
+            onClick={() => navigate({ to: '/client/change-password' as never })}
+            className="shrink-0 inline-flex items-center gap-1.5 px-3 py-2 text-xs border border-gray-200 rounded-lg text-gray-700 hover:bg-gray-50 cursor-pointer transition-colors"
           >
-            {pwMutation.isPending ? 'Saving…' : 'Update password'}
+            <MdShield className="text-sm text-blue-600" /> Change password
           </button>
-        </form>
+        </div>
       </div>
+
+      {user.feedback_access_enabled && (
+        <div className="bg-white border border-gray-200 rounded-xl px-5 py-4">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-semibold text-gray-800 m-0">Feedback</h3>
+              <p className="text-xs text-gray-500 m-0 mt-1">
+                Found a bug or have an idea? Let us know.
+              </p>
+            </div>
+            <button
+              onClick={() => navigate({ to: '/client/feedback' as never })}
+              className="shrink-0 inline-flex items-center gap-1.5 px-3 py-2 text-xs border border-gray-200 rounded-lg text-gray-700 hover:bg-gray-50 cursor-pointer transition-colors"
+            >
+              <MdFeedback className="text-sm text-blue-600" /> Send feedback
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -355,7 +294,7 @@ function StorageInfraCard() {
       {/* Storage + Servers card */}
       <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
         <div className="px-5 py-4">
-          <h3 className="text-sm font-semibold text-gray-800 mb-3">Infrastructure</h3>
+          <h3 className="text-sm font-semibold text-gray-800 mb-3">Your Storage Infrastructure</h3>
 
           {breakdownLoading && !breakdown ? (
             <p className="text-sm text-gray-400">Loading…</p>
@@ -592,7 +531,7 @@ function ExpansionRequestsCard() {
       <div className="flex items-center justify-between mb-1">
         <h3 className="text-sm font-semibold text-gray-800 m-0">Capacity expansion requests</h3>
         <button
-          onClick={() => navigate({ to: '/client/orders' as never })}
+          onClick={() => navigate({ to: '/client/orders' as never, search: { tab: 'requests' } as never })}
           className="text-xs text-blue-600 hover:text-blue-700 bg-transparent border-0 p-0 cursor-pointer font-medium transition-colors"
         >
           View all orders
@@ -686,6 +625,106 @@ function StorageUIPreferences() {
   )
 }
 
+function SandboxPaymentsToggle({
+  enabled, expansionOverrideEnabled,
+}: {
+  enabled: boolean
+  expansionOverrideEnabled: boolean
+}) {
+  const queryClient = useQueryClient()
+  const [error, setError] = useState<string | null>(null)
+  const [expansionError, setExpansionError] = useState<string | null>(null)
+
+  const mutation = useMutation({
+    mutationFn: updateSandboxPayments,
+    onSuccess: () => {
+      // Both queries encode the toggle's effect (which PayPal environment is
+      // "sandbox" for this session) — invalidating only 'me' left billing
+      // config's 1-hour cache serving a stale environment after the toggle
+      // flipped or across a logout/login cycle.
+      queryClient.invalidateQueries({ queryKey: ['me'] })
+      queryClient.invalidateQueries({ queryKey: ['billing', 'config'] })
+      setError(null)
+    },
+    onError: (err) => setError(err instanceof ApiError ? err.message : 'Failed to save preference'),
+  })
+
+  const expansionMutation = useMutation({
+    mutationFn: updateExpansionOverride,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['me'] })
+      setExpansionError(null)
+    },
+    onError: (err) => setExpansionError(err instanceof ApiError ? err.message : 'Failed to save preference'),
+  })
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-xl px-5 py-4">
+      <h3 className="text-sm font-semibold text-gray-800 mb-1 flex items-center gap-1.5">
+        <MdScience className="text-gray-500" /> Sandbox payments
+      </h3>
+      <p className="text-xs text-gray-400 mb-4">
+        Route your own premium, storage, and expansion purchases through the PayPal sandbox
+        instead of live PayPal, so you can test checkout flows safely. Resets to off when you
+        log out or your session expires.
+      </p>
+      <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+        <input
+          type="checkbox"
+          checked={enabled}
+          onChange={(e) => mutation.mutate(e.target.checked)}
+          className="cursor-pointer"
+        />
+        Use PayPal sandbox for my purchases this session
+      </label>
+      {error && <p className="text-xs text-red-500 m-0 mt-2">{error}</p>}
+
+      <div className="mt-4 pt-4 border-t border-gray-100">
+        <h4 className="text-sm font-semibold text-gray-800 mb-1 flex items-center gap-1.5">
+          <MdStorage className="text-gray-500" /> Storage expansion override
+        </h4>
+        <p className="text-xs text-gray-400 mb-3">
+          Force the Add storage modal to always show a capacity expansion request instead of a
+          direct purchase, so you can test the request/deposit flow without needing a server
+          near capacity. Resets to off when you log out or your session expires.
+        </p>
+        <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={expansionOverrideEnabled}
+            onChange={(e) => expansionMutation.mutate(e.target.checked)}
+            className="cursor-pointer"
+          />
+          Always show server expansion requests in Add storage
+        </label>
+        {expansionError && <p className="text-xs text-red-500 m-0 mt-2">{expansionError}</p>}
+      </div>
+    </div>
+  )
+}
+
+function SandboxAccountRequestCard() {
+  return (
+    <div className="bg-white border border-gray-200 rounded-xl px-5 py-4">
+      <h3 className="text-sm font-semibold text-gray-800 mb-1 flex items-center gap-1.5">
+        <MdAssignment className="text-gray-500" /> Account request form
+      </h3>
+      <p className="text-xs text-gray-400 mb-3">
+        With sandbox payments on, use the public account request form to exercise the deposit
+        checkout flow end to end — sign in as a PayPal sandbox test buyer when prompted.
+      </p>
+      <a
+        href="/interest"
+        target="_blank"
+        rel="noopener noreferrer"
+        className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 font-medium transition-colors"
+      >
+        Open account request form <MdOpenInNew className="text-sm" />
+      </a>
+    </div>
+  )
+}
+
 function MediaAutoUpload() {
   const queryClient = useQueryClient()
   const { data: prefs } = useQuery(preferencesQueryOptions)
@@ -755,6 +794,64 @@ function MediaAutoUpload() {
   )
 }
 
+// BackupReminderCard toggles the premium-only bell warning shown when the
+// most recent Google or email backup is more than 30 days old. Shows the
+// current last-sync times for context.
+function BackupReminderCard() {
+  const queryClient = useQueryClient()
+  const { data: prefs } = useQuery(preferencesQueryOptions)
+  const { data: lastSync } = useQuery(lastBackupSyncQueryOptions)
+  const [error, setError] = useState<string | null>(null)
+  const [saved, setSaved] = useState(false)
+
+  const mutation = useMutation({
+    mutationFn: (enabled: boolean) => updateBackupReminderPreference(enabled),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['preferences'] })
+      queryClient.invalidateQueries({ queryKey: ['me', 'notifications'] })
+      setError(null)
+      setSaved(true)
+      setTimeout(() => setSaved(false), 3000)
+    },
+    onError: (err) => setError(err instanceof ApiError ? err.message : 'Failed to save preference'),
+  })
+
+  const lastLine = (label: string, iso: string | null | undefined) =>
+    `${label}: ${iso ? formatTimeSince(iso) : 'never backed up'}`
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-xl px-5 py-4">
+      <h3 className="text-sm font-semibold text-gray-800 mb-1 flex items-center gap-1.5">
+        <MdHistory className="text-gray-500" /> Backup reminder
+      </h3>
+      <p className="text-xs text-gray-400 mb-4">
+        Get a notification when your last Google or email backup is more than 30 days old.
+      </p>
+
+      <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+        <input
+          type="checkbox"
+          checked={prefs?.backup_stale_notify ?? false}
+          onChange={(e) => mutation.mutate(e.target.checked)}
+          disabled={mutation.isPending}
+          className="cursor-pointer"
+        />
+        Notify me when a backup is over 30 days old
+      </label>
+
+      {lastSync && (
+        <p className="text-xs text-gray-400 mt-3 mb-0">
+          {lastLine('Google backup', lastSync.google_last_sync)} ·{' '}
+          {lastLine('Email backup', lastSync.email_last_sync)}
+        </p>
+      )}
+
+      {error && <p className="text-xs text-red-500 mt-2 mb-0">{error}</p>}
+      {saved && <p className="text-xs text-green-600 mt-2 mb-0">Preference saved.</p>}
+    </div>
+  )
+}
+
 function GoogleIcon() {
   return (
     <svg viewBox="0 0 24 24" className="w-[18px] h-[18px]" aria-hidden="true">
@@ -766,14 +863,26 @@ function GoogleIcon() {
   )
 }
 
+function MicrosoftIcon() {
+  return (
+    <svg viewBox="0 0 24 24" className="w-[18px] h-[18px]" aria-hidden="true">
+      <rect x="3" y="3" width="8.5" height="8.5" fill="#F25022" />
+      <rect x="12.5" y="3" width="8.5" height="8.5" fill="#7FBA00" />
+      <rect x="3" y="12.5" width="8.5" height="8.5" fill="#00A4EF" />
+      <rect x="12.5" y="12.5" width="8.5" height="8.5" fill="#FFB900" />
+    </svg>
+  )
+}
+
 function LinkedAccountsCard({ linkedProviders }: { linkedProviders: string[] }) {
   const queryClient = useQueryClient()
   const [unlinking, setUnlinking] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   const providers = [
-    { key: 'google', label: 'Google', icon: <GoogleIcon /> },
-    { key: 'apple',  label: 'Apple',  icon: <FaApple className="text-gray-900 text-lg" /> },
+    { key: 'google',    label: 'Google',    icon: <GoogleIcon /> },
+    { key: 'apple',     label: 'Apple',     icon: <FaApple className="text-gray-900 text-lg" /> },
+    { key: 'microsoft', label: 'Microsoft', icon: <MicrosoftIcon /> },
   ]
 
   const handleUnlink = async (provider: string) => {
@@ -824,105 +933,6 @@ function LinkedAccountsCard({ linkedProviders }: { linkedProviders: string[] }) 
   )
 }
 
-// FileServerLinksCard lists the user's premium WebDAV mount links: view,
-// copy and delete, plus the creation modal. Rendered only for premium/admin.
-function FileServerLinksCard() {
-  const queryClient = useQueryClient()
-  const [showModal, setShowModal] = useState(false)
-  const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
-
-  const { data, isLoading: linksLoading } = useQuery({
-    queryKey: ['file-server-links'],
-    queryFn: listFileServerLinks,
-  })
-  const links = data?.items ?? []
-
-  const deleteMutation = useMutation({
-    mutationFn: (id: string) => deleteFileServerLink(id),
-    onSettled: () => {
-      setConfirmDelete(null)
-      queryClient.invalidateQueries({ queryKey: ['file-server-links'] })
-    },
-  })
-
-  return (
-    <div className="bg-white border border-gray-200 rounded-xl px-5 py-4">
-      <div className="flex items-center justify-between mb-1">
-        <h3 className="text-sm font-semibold text-gray-800 m-0 flex items-center gap-1.5">
-          <MdLink className="text-blue-600" /> File server links
-        </h3>
-        <button
-          onClick={() => setShowModal(true)}
-          className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 bg-transparent border-0 p-0 cursor-pointer font-medium transition-colors"
-        >
-          <MdAddCircleOutline className="text-sm" /> New link
-        </button>
-      </div>
-      <p className="text-xs text-gray-400 mt-0 mb-3">
-        Mount a storage server as a network drive and manage your files from it — one link per server.
-      </p>
-
-      {linksLoading && <p className="text-xs text-gray-400 m-0">Loading…</p>}
-      {!linksLoading && links.length === 0 && (
-        <p className="text-xs text-gray-400 m-0">No links yet.</p>
-      )}
-
-      <div className="space-y-3">
-        {links.map((link) => (
-          <div key={link.id} className="border border-gray-100 rounded-lg px-3 py-2.5 space-y-2">
-            <div className="flex items-center justify-between gap-2">
-              <span className="flex items-center gap-2 min-w-0">
-                <span className="text-sm text-gray-800 font-medium truncate">{link.server_name}</span>
-                {link.enhanced_security && (
-                  <span className="text-[10px] font-medium text-green-700 bg-green-50 rounded px-1.5 py-0.5 shrink-0">
-                    enhanced security
-                  </span>
-                )}
-              </span>
-              {confirmDelete === link.id ? (
-                <span className="flex items-center gap-2 shrink-0">
-                  <button
-                    onClick={() => deleteMutation.mutate(link.id)}
-                    disabled={deleteMutation.isPending}
-                    className="text-[11px] font-medium text-red-600 hover:text-red-700 bg-transparent border-0 p-0 cursor-pointer disabled:opacity-50"
-                  >
-                    {deleteMutation.isPending ? 'Deleting…' : 'Confirm delete'}
-                  </button>
-                  <button
-                    onClick={() => setConfirmDelete(null)}
-                    className="text-[11px] text-gray-400 hover:text-gray-600 bg-transparent border-0 p-0 cursor-pointer"
-                  >
-                    Cancel
-                  </button>
-                </span>
-              ) : (
-                <button
-                  onClick={() => setConfirmDelete(link.id)}
-                  className="text-[11px] text-gray-400 hover:text-red-600 bg-transparent border-0 p-0 cursor-pointer transition-colors shrink-0"
-                >
-                  Delete
-                </button>
-              )}
-            </div>
-            <LinkDisplay link={link} />
-            <p className="text-[11px] text-gray-400 m-0">
-              Created {new Date(link.created_at).toLocaleDateString()}
-              {link.last_used_at ? ` · last used ${new Date(link.last_used_at).toLocaleString()}` : ' · never used'}
-            </p>
-          </div>
-        ))}
-      </div>
-
-      {showModal && (
-        <FileServerLinkModal
-          onClose={() => setShowModal(false)}
-          existingLinks={links}
-        />
-      )}
-    </div>
-  )
-}
-
 function Row({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex items-center justify-between px-5 py-3.5">
@@ -932,42 +942,222 @@ function Row({ label, value }: { label: string; value: string }) {
   )
 }
 
-function PremiumCard({
-  isPremium, isAdmin, grantedAt, onUpgrade,
-}: { isPremium: boolean; isAdmin: boolean; grantedAt: string | null; onUpgrade: () => void }) {
+// UsernameRow shows the current username with inline editing. Because a rename
+// only takes effect for the current session on the next token refresh, a
+// successful change signs the user out so they log back in with the new name.
+function UsernameRow({ currentUsername }: { currentUsername: string }) {
+  const queryClient = useQueryClient()
   const navigate = useNavigate()
-  if (isPremium || isAdmin) {
+  const { notify } = useNotification()
+  const [editing, setEditing] = useState(false)
+  const [value, setValue] = useState(currentUsername)
+  const [error, setError] = useState<string | null>(null)
+
+  const mutation = useMutation({
+    mutationFn: () => updateUsername(value.trim()),
+    onSuccess: async () => {
+      notify('success', 'Username updated — please sign in again')
+      // The current token still holds the old username; sign out so the next
+      // login mints a token with the new identity.
+      try { await logout() } catch { /* ignore — redirect regardless */ }
+      // Flip the shared `me` query synchronously before clearing the cache —
+      // see the comment in __root.tsx's session-expired handler for why
+      // clear() alone can leave `isAuthenticated` observers stale.
+      queryClient.setQueryData(meQueryOptions.queryKey, null)
+      queryClient.clear()
+      navigate({ to: '/login', search: { social_error: undefined, link_provider: undefined, link_email: undefined, link_username: undefined } })
+    },
+    onError: (err) => setError(err instanceof ApiError ? err.message : 'Failed to update username'),
+  })
+
+  const trimmed = value.trim()
+  const valid = trimmed.length >= 3 && trimmed.length <= 150 && trimmed !== currentUsername
+
+  if (!editing) {
+    return (
+      <div className="flex items-center justify-between px-5 py-3.5">
+        <span className="text-sm text-gray-500">Username</span>
+        <span className="flex items-center gap-2">
+          <span className="text-sm text-gray-900 font-medium">{currentUsername}</span>
+          <button
+            onClick={() => { setValue(currentUsername); setError(null); setEditing(true) }}
+            title="Edit username"
+            className="text-gray-400 hover:text-blue-600 cursor-pointer bg-transparent border-0 p-0 transition-colors"
+          >
+            <MdEdit className="text-base" />
+          </button>
+        </span>
+      </div>
+    )
+  }
+
+  return (
+    <div className="px-5 py-3.5">
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-sm text-gray-500 shrink-0">Username</span>
+        <div className="flex items-center gap-1.5 flex-1 justify-end">
+          <input
+            autoFocus
+            value={value}
+            onChange={(e) => { setValue(e.target.value); setError(null) }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && valid && !mutation.isPending) mutation.mutate()
+              if (e.key === 'Escape') { setEditing(false); setValue(currentUsername) }
+            }}
+            className="w-48 max-w-full border border-gray-200 rounded-lg px-3 py-1.5 text-sm text-right focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+          />
+          <button
+            onClick={() => mutation.mutate()}
+            disabled={!valid || mutation.isPending}
+            title="Save username"
+            className="text-green-500 hover:text-green-700 disabled:opacity-30 cursor-pointer bg-transparent border-0 p-1 transition-colors"
+          >
+            <MdCheck className="text-lg" />
+          </button>
+          <button
+            onClick={() => { setEditing(false); setValue(currentUsername); setError(null) }}
+            title="Cancel"
+            className="text-gray-400 hover:text-gray-600 cursor-pointer bg-transparent border-0 p-1 transition-colors"
+          >
+            <MdClose className="text-lg" />
+          </button>
+        </div>
+      </div>
+      <p className="text-xs text-gray-400 m-0 mt-1.5 text-right">
+        Changing your username signs you out; log back in with the new name.
+      </p>
+      {error && <p className="text-xs text-red-500 m-0 mt-1 text-right">{error}</p>}
+    </div>
+  )
+}
+
+function PremiumCard({
+  isPremium, isAdmin, sandboxPaymentsEnabled, grantedAt,
+  premiumSubscribed, premiumEnvironment, premiumPlan, premiumCurrentPeriodEnd,
+  onUpgrade,
+}: {
+  isPremium: boolean
+  isAdmin: boolean
+  sandboxPaymentsEnabled: boolean
+  grantedAt: string | null
+  premiumSubscribed: boolean
+  premiumEnvironment: 'sandbox' | 'live' | null
+  premiumPlan: 'monthly' | 'annual' | null
+  premiumCurrentPeriodEnd: string | null
+  onUpgrade: () => void
+}) {
+  const queryClient = useQueryClient()
+  const { data: billingConfig } = useBillingConfig()
+  const [confirmingCancel, setConfirmingCancel] = useState(false)
+  const [cancelError, setCancelError] = useState<string | null>(null)
+
+  const cancelMutation = useMutation({
+    mutationFn: cancelPremiumSubscription,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['me'] })
+      setConfirmingCancel(false)
+    },
+    onError: (err) => setCancelError(err instanceof ApiError ? err.message : 'Could not cancel subscription'),
+  })
+
+  // Admins are implicitly premium — but a non-admin's is_premium always
+  // reflects a real grant of their own (subscription or legacy one-time
+  // purchase), so only admins need the extra premiumSubscribed check to tell
+  // a genuine subscription apart from the implicit admin grant.
+  const genuinelyPremium = isAdmin ? premiumSubscribed : isPremium
+
+  // When sandbox payments mode is on, show the real upgrade flow so it can
+  // actually be tested end-to-end even for an admin.
+  if (genuinelyPremium || (isAdmin && !sandboxPaymentsEnabled)) {
+    const planPrice = billingConfig?.premium_plans?.find((p) => p.plan === premiumPlan)?.price_cents
+    const periodEnd = premiumCurrentPeriodEnd ? new Date(premiumCurrentPeriodEnd) : null
+    const daysLeft = periodEnd ? Math.max(0, Math.ceil((periodEnd.getTime() - Date.now()) / 86_400_000)) : null
+
     return (
       <div className="bg-white border border-gray-200 rounded-xl px-5 py-4">
         <div className="flex items-start gap-3">
           <MdCheck className="text-green-500 text-xl shrink-0 mt-0.5" />
           <div className="flex-1">
-            <h3 className="text-sm font-semibold text-gray-800 m-0">Premium</h3>
-            <p className="text-xs text-gray-500 m-0 mt-1">
-              {isAdmin
-                ? 'Included with your admin account.'
-                : grantedAt ? `Activated on ${new Date(grantedAt).toLocaleDateString()}.` : 'Active.'}
-            </p>
+            <div className="flex items-center gap-2">
+              <h3 className="text-sm font-semibold text-gray-800 m-0">Premium</h3>
+              {premiumSubscribed && premiumEnvironment === 'sandbox' && (
+                <span className="px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider bg-purple-100 text-purple-700 rounded">
+                  Sandbox
+                </span>
+              )}
+            </div>
+            {premiumSubscribed ? (
+              <div className="text-xs text-gray-500 mt-1 flex flex-col gap-0.5">
+                {periodEnd && (
+                  <p className="m-0">
+                    Renews {periodEnd.toLocaleDateString()}
+                    {daysLeft !== null ? ` (${daysLeft} day${daysLeft === 1 ? '' : 's'})` : ''}
+                  </p>
+                )}
+                {planPrice !== undefined && periodEnd && (
+                  <p className="m-0">Next payment: {formatCents(planPrice)} on {periodEnd.toLocaleDateString()}</p>
+                )}
+              </div>
+            ) : (
+              <p className="text-xs text-gray-500 m-0 mt-1">
+                {isAdmin
+                  ? 'Included with your admin account.'
+                  : grantedAt ? `Since ${new Date(grantedAt).toLocaleDateString()}.` : 'Active.'}
+              </p>
+            )}
           </div>
-          <button
-            onClick={() => navigate({ to: '/settings/api-keys' as never })}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs border border-gray-200 rounded-lg text-gray-700 hover:bg-gray-50 cursor-pointer transition-colors"
-          >
-            <MdKey /> Manage API keys
-          </button>
         </div>
+
+        {premiumSubscribed && (
+          <div className="mt-3 pt-3 border-t border-gray-100">
+            {!confirmingCancel ? (
+              <button
+                onClick={() => { setCancelError(null); setConfirmingCancel(true) }}
+                className="text-xs text-red-500 hover:text-red-600 cursor-pointer bg-transparent border-0 p-0 transition-colors"
+              >
+                Cancel Premium Membership
+              </button>
+            ) : (
+              <div className="flex flex-col gap-2">
+                <p className="text-xs text-gray-600 m-0">
+                  This immediately revokes access — your SFS API keys and file-server links stop
+                  working right away. You&rsquo;d need to subscribe again to restore access.
+                </p>
+                {cancelError && <p className="text-xs text-red-500 m-0">{cancelError}</p>}
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => cancelMutation.mutate()}
+                    disabled={cancelMutation.isPending}
+                    className="px-3 py-1.5 text-xs bg-red-600 hover:bg-red-700 text-white rounded-lg font-medium disabled:opacity-50 cursor-pointer transition-colors"
+                  >
+                    {cancelMutation.isPending ? 'Cancelling…' : 'Yes, cancel membership'}
+                  </button>
+                  <button
+                    onClick={() => setConfirmingCancel(false)}
+                    disabled={cancelMutation.isPending}
+                    className="px-3 py-1.5 text-xs border border-gray-200 rounded-lg text-gray-700 hover:bg-gray-50 disabled:opacity-50 cursor-pointer transition-colors"
+                  >
+                    Never mind
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </div>
     )
   }
+
+  // Reachable here only when genuinelyPremium is false and the admin-implicit
+  // case above didn't apply — i.e. a base user without an active membership,
+  // or an admin who has sandbox payments on and no active sandbox
+  // subscription. Both should see the upgrade flow.
   return (
     <div className="bg-amber-50 border-2 border-amber-200 rounded-xl px-5 py-4">
       <div className="flex items-start gap-3">
         <MdRocketLaunch className="text-amber-500 text-2xl shrink-0 mt-0.5" />
         <div className="flex-1">
           <h3 className="text-sm font-semibold text-gray-900 m-0">Upgrade to Premium</h3>
-          <p className="text-xs text-gray-600 m-0 mt-1">
-            Unlocks the SFS S3-like API and per-directory API keys. One-time payment.
-          </p>
         </div>
         <button
           onClick={onUpgrade}
@@ -980,92 +1170,3 @@ function PremiumCard({
   )
 }
 
-const PREMIUM_FEATURES = [
-  {
-    icon: MdStorage,
-    title: 'Expanded storage quota',
-    description: 'Get significantly more storage space for your files and media.',
-  },
-  {
-    icon: MdVpnKey,
-    title: 'Per-directory API keys',
-    description: 'Issue scoped API keys tied to specific folders for fine-grained access control.',
-  },
-  {
-    icon: MdCloudUpload,
-    title: 'S3-compatible API',
-    description: 'Access your files via an S3-like HTTP API — compatible with standard S3 clients and SDKs.',
-  },
-  {
-    icon: MdSpeed,
-    title: 'Priority support',
-    description: 'Jump to the front of the queue when you need help from the SFS team.',
-  },
-]
-
-function PremiumUpgradeModal({ onClose }: { onClose: () => void }) {
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
-    document.addEventListener('keydown', handler)
-    return () => document.removeEventListener('keydown', handler)
-  }, [onClose])
-
-  useEffect(() => {
-    document.body.style.overflow = 'hidden'
-    return () => { document.body.style.overflow = '' }
-  }, [])
-
-  const navigate = useNavigate()
-
-  return (
-    <div
-      onClick={onClose}
-      className="fixed inset-0 bg-black/60 flex items-center justify-center z-50"
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className="bg-white rounded-xl shadow-xl w-120 max-w-[92vw] p-6 flex flex-col gap-5"
-      >
-        <div className="flex items-start gap-3">
-          <MdRocketLaunch className="text-amber-500 text-2xl shrink-0 mt-0.5" />
-          <div className="flex-1">
-            <h3 className="text-base font-semibold text-gray-900 m-0">Upgrade to Premium</h3>
-            <p className="text-sm text-gray-500 m-0 mt-1">One-time payment. No subscriptions.</p>
-          </div>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 cursor-pointer transition-colors">
-            <MdClose className="text-xl" />
-          </button>
-        </div>
-
-        <ul className="flex flex-col gap-3 m-0 p-0 list-none">
-          {PREMIUM_FEATURES.map(({ icon: Icon, title, description }) => (
-            <li key={title} className="flex items-start gap-3">
-              <div className="w-8 h-8 rounded-lg bg-amber-50 flex items-center justify-center shrink-0">
-                <Icon className="text-amber-500 text-base" />
-              </div>
-              <div>
-                <p className="text-sm font-medium text-gray-800 m-0">{title}</p>
-                <p className="text-xs text-gray-500 m-0 mt-0.5">{description}</p>
-              </div>
-            </li>
-          ))}
-        </ul>
-
-        <div className="flex justify-end gap-2 pt-1">
-          <button
-            onClick={onClose}
-            className="px-4 py-2 text-sm rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 cursor-pointer transition-colors"
-          >
-            Maybe later
-          </button>
-          <button
-            onClick={() => { onClose(); navigate({ to: '/premium' as never }) }}
-            className="px-4 py-2 text-sm rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-medium cursor-pointer transition-colors"
-          >
-            Get Premium
-          </button>
-        </div>
-      </div>
-    </div>
-  )
-}

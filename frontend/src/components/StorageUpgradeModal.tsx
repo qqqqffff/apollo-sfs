@@ -1,9 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import {
-  PayPalScriptProvider,
-  PayPalButtons,
-} from '@paypal/react-paypal-js'
+import { Link, useNavigate } from '@tanstack/react-router'
 import {
   MdBolt,
   MdCheckCircle,
@@ -16,6 +13,7 @@ import {
 } from 'react-icons/md'
 import { meQueryOptions } from '../api/me'
 import { listServers, pingServer, type PublicServer } from '../api/storage'
+import { useBillingConfig } from '../hooks/useBillingConfig'
 import {
   STORAGE_PLANS,
   CUSTOM_PLAN_ID,
@@ -28,11 +26,21 @@ import {
   createStorageOrder,
   customPriceCents,
   formatCents,
-  getBillingConfig,
+  getPayPalClientToken,
+  listMyExpansionRequests,
   submitCustomRequest,
   type StorageType,
 } from '../api/billing'
 import { ApiError } from '../api/client'
+import { listServerStoragePlans, type StoragePlanDiscount } from '../api/pricing'
+import { PayPalCheckoutOptions, CheckoutBackButton } from './PayPalCheckoutOptions'
+import { HostedCardFields } from './HostedCardFields'
+import { DiscountCountdown, MarkedDownPrice } from './DiscountBadge'
+
+// Requests still working their way through review/provisioning — anything not
+// in this closed set counts as "in progress" for blocking a duplicate custom
+// request. Mirrors the closed-request check implied by orders.tsx's grouping.
+const CLOSED_EXPANSION_STATUSES = new Set(['completed', 'expired', 'refunded', 'rejected'])
 
 // Allocation threshold above which direct purchases on a server are blocked
 // and the user is steered to an expansion request. Mirrors the backend rule.
@@ -55,9 +63,24 @@ function formatSize(bytes: number): string {
   return `${(bytes / 1024).toFixed(1)} KB`
 }
 
-interface ServerWithPing extends PublicServer {
-  ping_ms: number | null
+interface ServerRow extends PublicServer {
   allocated_pct: number
+  // One logical server can expose both tiers, yielding two rows with the SAME
+  // server id (one per drive_type). Selecting by bare id always resolves to
+  // whichever row sorts first (hdd), making every fast plan look unavailable
+  // even when the fast tier has room — so rows are keyed by id + tier instead.
+  row_key: string
+}
+
+// DisplayPlan unifies admin-managed pricing items (UUID ids, per-server, with
+// discounts) and the legacy hardcoded plans (slug ids) for rendering.
+interface DisplayPlan {
+  id: string
+  label: string
+  addBytes: number
+  priceCents: number
+  effectiveCents: number
+  discount?: StoragePlanDiscount
 }
 
 interface Props {
@@ -72,48 +95,70 @@ type Phase = 'select' | 'purchased' | 'expansion_requested' | 'custom_submitted'
 
 export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Props) {
   const queryClient = useQueryClient()
+  const navigate = useNavigate()
   const { data: user } = useQuery(meQueryOptions)
 
-  const { data: config, isLoading: configLoading } = useQuery({
-    queryKey: ['billing', 'config'],
-    queryFn: getBillingConfig,
-    staleTime: 60 * 60 * 1000,
-  })
+  const { data: config, isLoading: configLoading } = useBillingConfig()
 
   const { data: servers, isLoading: serversLoading, error: serversError } = useQuery({
-    queryKey: ['storage', 'servers', 'with-ping'],
-    queryFn: async (): Promise<ServerWithPing[]> => {
+    queryKey: ['storage', 'servers'],
+    queryFn: async (): Promise<ServerRow[]> => {
       const list = await listServers()
-      return Promise.all(
-        list.map(async (s) => ({
-          ...s,
-          ping_ms: await pingServer(s.ping_url).catch(() => null),
-          allocated_pct: s.total_capacity_bytes > 0
-            ? ((s.total_capacity_bytes - s.available_bytes) / s.total_capacity_bytes) * 100
-            : 0,
-        })),
-      )
+      return list.map((s) => ({
+        ...s,
+        allocated_pct: s.total_capacity_bytes > 0
+          ? ((s.total_capacity_bytes - s.available_bytes) / s.total_capacity_bytes) * 100
+          : 0,
+        row_key: `${s.id}:${s.drive_type}`,
+      }))
     },
     staleTime: 60 * 1000,
+  })
+
+  // Single latency reading against the manager (the node that actually serves
+  // the API/frontend) rather than one ping per server row — every row's ping
+  // URL round-trips through the same manager-hosted API regardless of which
+  // storage tier it names, so per-row pings only ever showed the same number
+  // twice with sampling jitter, not a real fast-vs-standard difference.
+  const { data: managerPingMs } = useQuery({
+    queryKey: ['storage', 'manager-ping'],
+    queryFn: () => pingServer('/api/v1/health'),
+    staleTime: 30 * 1000,
+    retry: false,
+  })
+
+  const { data: myExpansionRequests } = useQuery({
+    queryKey: ['billing', 'expansion-requests'],
+    queryFn: listMyExpansionRequests,
   })
 
   const [storageType, setStorageType] = useState<StorageType>('nvme')
   const [selectedPlanId, setSelectedPlanId] = useState<string | null>(null)
   const [customStopIdx, setCustomStopIdx] = useState(0)
-  const [selectedServerId, setSelectedServerId] = useState<string | null>(null)
+  const [selectedServerKey, setSelectedServerKey] = useState<string | null>(null)
   const [serverListOpen, setServerListOpen] = useState(false)
   const [phase, setPhase] = useState<Phase>('select')
+  const [showCardForm, setShowCardForm] = useState(false)
   const [busy, setBusy] = useState(false)
   const [payError, setPayError] = useState<string | null>(null)
   const [expansionResult, setExpansionResult] = useState<{ id: string; expiresAt: string } | null>(null)
   const [customResult, setCustomResult] = useState<{ reviewDueAt: string; estimateCents: number } | null>(null)
   const [newQuota, setNewQuota] = useState<number | null>(null)
 
-  // Default server selection once servers load.
+  // Default server selection once servers load, and re-select a server row
+  // matching the active storage type tab whenever it changes. Without this,
+  // the previously selected row (e.g. the standard-tier one, if it sorts
+  // first alphabetically) stays selected after switching to "Fast", making
+  // every plan look unavailable even when the fast tier has room.
   useEffect(() => {
     if (!servers || servers.length === 0) return
-    setSelectedServerId((prev) => (prev && servers.some((s) => s.id === prev) ? prev : servers[0].id))
-  }, [servers])
+    setSelectedServerKey((prev) => {
+      const prevServer = prev ? servers.find((s) => s.row_key === prev) : undefined
+      if (prevServer && prevServer.drive_type === storageType) return prev
+      const match = servers.find((s) => s.drive_type === storageType)
+      return (match ?? servers[0]).row_key
+    })
+  }, [servers, storageType])
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => { if (e.key === 'Escape' && !busy) onClose() }
@@ -126,27 +171,109 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
     return () => { document.body.style.overflow = '' }
   }, [])
 
-  const selectedServer = servers?.find((s) => s.id === selectedServerId)
+  const selectedServer = servers?.find((s) => s.row_key === selectedServerKey)
   const isCustom = selectedPlanId === CUSTOM_PLAN_ID
   const customBytes = CUSTOM_TIB_STOPS[customStopIdx] * TIB
-  const selectedPlan = STORAGE_PLANS.find((p) => p.id === selectedPlanId)
+
+  // Admin-managed line items for the selected server, priced for this user
+  // (discounts already applied server-side). Empty = the server has no
+  // managed pricing for this tier and the legacy hardcoded plans apply.
+  const { data: serverPlans, refetch: refetchServerPlans } = useQuery({
+    queryKey: ['billing', 'storage-plans', selectedServer?.id],
+    queryFn: () => listServerStoragePlans(selectedServer!.id),
+    enabled: !!selectedServer,
+    staleTime: 30 * 1000,
+  })
+
+  const displayPlans = useMemo((): DisplayPlan[] => {
+    const managed = (serverPlans ?? []).filter((p) => p.storage_type === storageType)
+    if (managed.length > 0) {
+      return managed.map((p) => ({
+        id: p.id,
+        label: formatSize(p.bytes),
+        addBytes: p.bytes,
+        priceCents: p.price_cents,
+        effectiveCents: p.effective_cents,
+        discount: p.discount,
+      }))
+    }
+    return STORAGE_PLANS.map((p) => ({
+      id: p.id,
+      label: p.label,
+      addBytes: p.addBytes,
+      priceCents: p.priceCents[storageType],
+      effectiveCents: p.priceCents[storageType],
+    }))
+  }, [serverPlans, storageType])
+
+  const selectedPlan = displayPlans.find((p) => p.id === selectedPlanId)
+
+  // Drop a selection that no longer exists after a server/tier switch (plan
+  // ids differ between servers once pricing is admin-managed).
+  useEffect(() => {
+    if (selectedPlanId && selectedPlanId !== CUSTOM_PLAN_ID && !selectedPlan) {
+      setSelectedPlanId(null)
+    }
+  }, [selectedPlanId, selectedPlan])
 
   const planBytes = isCustom ? customBytes : (selectedPlan?.addBytes ?? 0)
   const fullPriceCents = isCustom
     ? customPriceCents(customBytes, storageType)
-    : (selectedPlan?.priceCents[storageType] ?? 0)
+    : (selectedPlan?.effectiveCents ?? 0)
   const depositCents = Math.ceil(fullPriceCents / 2)
 
   const serverAtCapacity = !!selectedServer && selectedServer.allocated_pct >= MAX_ALLOCATED_PCT
   const serverTypeMismatch = !!selectedServer && selectedServer.drive_type !== storageType
   const serverLacksCapacity = !!selectedServer && planBytes > selectedServer.available_bytes
 
+  // Admin-only, session-scoped override (see SandboxPaymentsToggle on the
+  // profile page) that forces every plan purchase through the expansion
+  // request flow below, regardless of actual server capacity — lets an
+  // admin test that flow without needing a server actually near capacity.
+  const expansionOverride = !!user?.expansion_override_enabled
+
   // Deposit-based expansion request instead of a direct purchase when the
-  // server can't take the purchase (>=90% allocated, wrong tier, or not
-  // enough free capacity). Custom amounts never pay here: they are submitted
-  // without payment (estimated price) and invoiced after manual review.
+  // override above is on, or the server can't take the purchase (>=90%
+  // allocated, wrong tier, or not enough free capacity). Custom amounts
+  // never pay here: they are submitted without payment (estimated price)
+  // and invoiced after manual review.
   const isExpansion = !!selectedPlanId && !isCustom && !!selectedServer &&
-    (serverAtCapacity || serverTypeMismatch || serverLacksCapacity)
+    (expansionOverride || serverAtCapacity || serverTypeMismatch || serverLacksCapacity)
+
+  // An already-open custom request for this exact server + storage type —
+  // submitting another would just duplicate manual review work, so the
+  // custom option is replaced with a link to the existing request instead.
+  const existingCustomRequest = useMemo(
+    () => (myExpansionRequests ?? []).find((r) =>
+      r.is_custom &&
+      r.server_id === selectedServer?.id &&
+      r.storage_type === storageType &&
+      !CLOSED_EXPANSION_STATUSES.has(r.status),
+    ),
+    [myExpansionRequests, selectedServer, storageType],
+  )
+
+  // Clear an active custom selection if it becomes blocked underneath the
+  // user (e.g. they had it selected, then switched server/tier onto a
+  // combination that already has an in-progress custom request).
+  useEffect(() => {
+    if (isCustom && existingCustomRequest) setSelectedPlanId(null)
+  }, [isCustom, existingCustomRequest])
+
+  // The server list holds one row per (server, drive_type) — a server exposing
+  // both tiers yields two rows with the same id (see ServerRow.row_key).
+  // Group them back into one entry per physical server for the picker so
+  // e.g. "NH-0001" appears once, with a badge per tier it actually has,
+  // instead of as two separate list entries.
+  const groupedServers = useMemo(() => {
+    const byId = new Map<string, { id: string; name: string; rows: ServerRow[] }>()
+    for (const s of servers ?? []) {
+      const group = byId.get(s.id)
+      if (group) group.rows.push(s)
+      else byId.set(s.id, { id: s.id, name: s.name, rows: [s] })
+    }
+    return [...byId.values()]
+  }, [servers])
 
   const fastAvailable = useMemo(
     () => (servers ?? []).filter((s) => s.drive_type === 'nvme').reduce((sum, s) => sum + s.available_bytes, 0),
@@ -163,13 +290,13 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
 
   async function handleCreateOrder(): Promise<string> {
     setPayError(null)
-    if (!selectedPlanId || !selectedServerId) throw new Error('No plan selected')
+    if (!selectedPlanId || !selectedServer) throw new Error('No plan selected')
     try {
       if (isExpansion) {
-        const res = await createExpansionOrder(selectedPlanId, storageType, selectedServerId)
+        const res = await createExpansionOrder(selectedPlanId, storageType, selectedServer.id)
         return res.order_id
       }
-      const res = await createStorageOrder(selectedPlanId, storageType, selectedServerId)
+      const res = await createStorageOrder(selectedPlanId, storageType, selectedServer.id)
       return res.order_id
     } catch (err) {
       const msg = err instanceof ApiError ? err.message : 'Could not start checkout'
@@ -178,12 +305,34 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
     }
   }
 
+  // Same order-creation call as handleCreateOrder, for the "PayPal" wallet
+  // button — which redirects the browser to the approval URL rather than
+  // using the popup-based createOrder/onApprove pair (see
+  // PayPalWalletRedirectButton). A fresh order per click, same as every other
+  // payment method here.
+  async function handleGetApprovalUrl(): Promise<string> {
+    setPayError(null)
+    if (!selectedPlanId || !selectedServer) throw new Error('No plan selected')
+    try {
+      if (isExpansion) {
+        const res = await createExpansionOrder(selectedPlanId, storageType, selectedServer.id)
+        return res.approval_url
+      }
+      const res = await createStorageOrder(selectedPlanId, storageType, selectedServer.id)
+      return res.approval_url
+    } catch (err) {
+      const msg = err instanceof ApiError ? err.message : 'Could not start checkout'
+      setPayError(msg)
+      throw err
+    }
+  }
+
   async function handleSubmitCustom() {
-    if (!selectedServerId || !isCustom) return
+    if (!selectedServer || !isCustom) return
     setBusy(true)
     setPayError(null)
     try {
-      const res = await submitCustomRequest(storageType, selectedServerId, customBytes)
+      const res = await submitCustomRequest(storageType, selectedServer.id, customBytes)
       setCustomResult({ reviewDueAt: res.review_due_at, estimateCents: res.estimated_price_cents })
       setPhase('custom_submitted')
       queryClient.invalidateQueries({ queryKey: ['billing', 'expansion-requests'] })
@@ -233,7 +382,19 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
       >
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100 shrink-0">
-          <h3 className="text-base font-semibold text-gray-900 m-0">Add storage</h3>
+          <div className="flex items-center gap-2">
+            <h3 className="text-base font-semibold text-gray-900 m-0">Add storage</h3>
+            {config?.environment === 'sandbox' && (
+              <span className="px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider bg-purple-100 text-purple-700 rounded">
+                Sandbox payment
+              </span>
+            )}
+            {expansionOverride && (
+              <span className="px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider bg-amber-100 text-amber-700 rounded">
+                Server expansion only
+              </span>
+            )}
+          </div>
           <button
             onClick={onClose}
             disabled={busy}
@@ -321,7 +482,49 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
             </div>
           )}
 
-          {phase === 'select' && (
+          {phase === 'select' && showCardForm && (
+            <>
+              <CheckoutBackButton onClick={() => { setShowCardForm(false); setPayError(null) }} disabled={busy} />
+
+              {selectedServer && selectedPlanId && (
+                <div className="border border-gray-200 rounded-xl px-4 py-3">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium text-gray-800">
+                        {isCustom ? `Custom — ${formatSize(customBytes)}` : selectedPlan?.label}
+                      </span>
+                      <TierBadge type={storageType} />
+                    </div>
+                    <span className="text-sm font-semibold text-gray-800">
+                      {isExpansion ? `${formatCents(amountCents)} deposit` : formatCents(amountCents)}
+                    </span>
+                  </div>
+                  <p className="text-xs text-gray-400 m-0 mt-1">{selectedServer.name}</p>
+                </div>
+              )}
+
+              {payError && <p className="text-xs text-red-500 m-0">{payError}</p>}
+              {busy && <p className="text-xs text-gray-500 m-0">Verifying payment…</p>}
+
+              {config?.paypal_client_id && (
+                <HostedCardFields
+                  clientId={config.paypal_client_id}
+                  currency={config.currency || 'USD'}
+                  createOrder={handleCreateOrder}
+                  onApprove={(orderId) => handleApprove({ orderID: orderId })}
+                  onError={(msg) => { if (!payError) setPayError(msg) }}
+                  disabled={!canPay}
+                  submitLabel={isExpansion ? `Pay deposit — ${formatCents(amountCents)}` : `Pay ${formatCents(amountCents)}`}
+                />
+              )}
+              <p className="text-[11px] text-gray-400 text-center m-0">
+                Payments are processed securely by PayPal. Card details are entered directly into
+                PayPal and never touch our servers.
+              </p>
+            </>
+          )}
+
+          {phase === 'select' && !showCardForm && (
             <>
               {promptReason && (
                 <div className="flex items-start gap-2 px-3 py-2.5 bg-amber-50 border border-amber-200 rounded-lg">
@@ -354,7 +557,12 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
 
               {/* Server picker */}
               <div>
-                <SectionLabel>Server</SectionLabel>
+                <div className="flex items-center justify-between">
+                  <SectionLabel>Server</SectionLabel>
+                  {managerPingMs != null && (
+                    <span className="text-[11px] text-gray-400 mb-2">{managerPingMs} ms to server</span>
+                  )}
+                </div>
                 {serversLoading ? (
                   <p className="text-sm text-gray-400 m-0">Finding servers…</p>
                 ) : serversError || !servers || servers.length === 0 ? (
@@ -381,7 +589,6 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
                               )}
                             </div>
                             <p className="text-xs text-gray-400 m-0 mt-0.5">
-                              {selectedServer.ping_ms != null ? `${selectedServer.ping_ms} ms · ` : ''}
                               {formatSize(selectedServer.available_bytes)} available · {selectedServer.allocated_pct.toFixed(0)}% allocated
                             </p>
                           </>
@@ -393,28 +600,59 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
                     </button>
                     {serverListOpen && (
                       <div className="border-t border-gray-100 divide-y divide-gray-50">
-                        {servers.map((s) => (
-                          <button
-                            key={s.id}
-                            onClick={() => { setSelectedServerId(s.id); setServerListOpen(false) }}
-                            className={`flex items-center gap-3 w-full px-4 py-2.5 border-0 cursor-pointer text-left transition-colors ${
-                              s.id === selectedServerId ? 'bg-blue-50' : 'bg-transparent hover:bg-gray-50'
-                            }`}
-                          >
-                            <div className="flex-1 min-w-0">
-                              <div className="flex items-center gap-2">
-                                <span className={`text-sm ${s.id === selectedServerId ? 'font-semibold text-blue-700' : 'font-medium text-gray-800'}`}>
-                                  {s.name}
-                                </span>
-                                <TierBadge type={s.drive_type} />
+                        {groupedServers.map((group) => {
+                          const preferred = group.rows.find((r) => r.drive_type === storageType) ?? group.rows[0]
+                          const isSelected = group.rows.some((r) => r.row_key === selectedServerKey)
+                          return (
+                            <button
+                              key={group.id}
+                              onClick={() => {
+                                setStorageType(preferred.drive_type)
+                                setSelectedServerKey(preferred.row_key)
+                                setServerListOpen(false)
+                              }}
+                              className={`flex items-center gap-3 w-full px-4 py-2.5 border-0 cursor-pointer text-left transition-colors ${
+                                isSelected ? 'bg-blue-50' : 'bg-transparent hover:bg-gray-50'
+                              }`}
+                            >
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2">
+                                  <span className={`text-sm ${isSelected ? 'font-semibold text-blue-700' : 'font-medium text-gray-800'}`}>
+                                    {group.name}
+                                  </span>
+                                  {group.rows.map((s) => (
+                                    <span
+                                      key={s.row_key}
+                                      role="button"
+                                      tabIndex={0}
+                                      onClick={(e) => {
+                                        e.stopPropagation()
+                                        setStorageType(s.drive_type)
+                                        setSelectedServerKey(s.row_key)
+                                        setServerListOpen(false)
+                                      }}
+                                      onKeyDown={(e) => {
+                                        if (e.key !== 'Enter' && e.key !== ' ') return
+                                        e.stopPropagation()
+                                        setStorageType(s.drive_type)
+                                        setSelectedServerKey(s.row_key)
+                                        setServerListOpen(false)
+                                      }}
+                                      className={`rounded ${s.row_key === selectedServerKey ? 'ring-2 ring-blue-400' : ''}`}
+                                    >
+                                      <TierBadge type={s.drive_type} />
+                                    </span>
+                                  ))}
+                                </div>
+                                <p className="text-xs text-gray-400 m-0 mt-0.5">
+                                  {group.rows
+                                    .map((s) => `${s.drive_type === 'nvme' ? 'Fast' : 'Standard'} ${formatSize(s.available_bytes)} available · ${s.allocated_pct.toFixed(0)}% allocated`)
+                                    .join('  ·  ')}
+                                </p>
                               </div>
-                              <p className="text-xs text-gray-400 m-0 mt-0.5">
-                                {s.ping_ms != null ? `${s.ping_ms} ms · ` : ''}
-                                {formatSize(s.available_bytes)} available · {s.allocated_pct.toFixed(0)}% allocated
-                              </p>
-                            </div>
-                          </button>
-                        ))}
+                            </button>
+                          )
+                        })}
                       </div>
                     )}
                     <div className="flex items-center gap-3 px-4 py-2 border-t border-gray-100 bg-gray-50 text-[11px] text-gray-500">
@@ -456,10 +694,11 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
               <div>
                 <SectionLabel>Capacity</SectionLabel>
                 <div className="flex flex-col gap-2">
-                  {STORAGE_PLANS.map((plan) => {
+                  {displayPlans.map((plan) => {
                     const sel = selectedPlanId === plan.id
                     const unavailable = !!selectedServer &&
-                      (serverAtCapacity || selectedServer.drive_type !== storageType || plan.addBytes > selectedServer.available_bytes)
+                      (expansionOverride || serverAtCapacity || selectedServer.drive_type !== storageType || plan.addBytes > selectedServer.available_bytes)
+                    const discounted = !!plan.discount && plan.effectiveCents < plan.priceCents
                     return (
                       <button
                         key={plan.id}
@@ -474,82 +713,124 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
                       >
                         <div>
                           <span className={`text-sm font-semibold ${sel ? 'text-blue-700' : 'text-gray-800'}`}>{plan.label}</span>
+                          {discounted && plan.discount?.premium_only && (
+                            <span className="ml-2 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider bg-purple-100 text-purple-700 rounded">
+                              Premium deal
+                            </span>
+                          )}
                           <p className="text-xs m-0 mt-0.5 text-gray-400">
                             {unavailable
                               ? <span className="text-amber-600">Server expansion required</span>
                               : user ? `New total: ${formatSize(user.storage_quota_bytes + plan.addBytes)}` : ''}
                           </p>
                         </div>
-                        <span className={`text-sm font-semibold ${sel ? 'text-blue-700' : 'text-gray-600'}`}>
-                          {formatCents(plan.priceCents[storageType])}{unavailable ? '*' : ''}
-                        </span>
+                        {discounted ? (
+                          <span className="flex flex-col items-end gap-0.5 text-sm">
+                            <MarkedDownPrice
+                              originalLabel={formatCents(plan.priceCents)}
+                              currentLabel={`${formatCents(plan.effectiveCents)}${unavailable ? '*' : ''}`}
+                              percent={plan.discount!.percent}
+                            />
+                            <DiscountCountdown
+                              expiresAt={plan.discount!.expires_at}
+                              onExpired={() => refetchServerPlans()}
+                            />
+                          </span>
+                        ) : (
+                          <span className={`text-sm font-semibold ${sel ? 'text-blue-700' : 'text-gray-600'}`}>
+                            {formatCents(plan.effectiveCents)}{unavailable ? '*' : ''}
+                          </span>
+                        )}
                       </button>
                     )
                   })}
 
                   {/* Custom capacity */}
-                  <button
-                    onClick={() => setSelectedPlanId(CUSTOM_PLAN_ID)}
-                    className={`flex flex-col px-4 py-3 rounded-xl border cursor-pointer text-left transition-colors ${
-                      isCustom ? 'border-blue-600 bg-blue-50' : 'border-gray-200 bg-white hover:bg-gray-50'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between w-full">
-                      <div>
-                        <span className={`text-sm font-semibold ${isCustom ? 'text-blue-700' : 'text-gray-800'}`}>
-                          Custom {isCustom ? `— ${formatSize(customBytes)}` : ''}
-                        </span>
-                        <p className="text-xs text-gray-400 m-0 mt-0.5">
-                          Above 1 TB, up to 10 PB · manually reviewed within 3 business days
-                        </p>
-                      </div>
-                      <span className={`text-sm font-semibold text-right ${isCustom ? 'text-blue-700' : 'text-gray-600'}`}>
-                        {isCustom
-                          ? <>est. {formatCents(customPriceCents(customBytes, storageType))}</>
-                          : `est. from ${formatCents(customPriceCents(2 * TIB, storageType))}`}
-                      </span>
+                  {existingCustomRequest ? (
+                    <div className="flex flex-col px-4 py-3 rounded-xl border border-dashed border-gray-300 bg-gray-50">
+                      <span className="text-sm font-semibold text-gray-800">Custom</span>
+                      <p className="text-xs text-gray-500 m-0 mt-0.5">
+                        You already have an in-progress custom request for this server and storage type.
+                      </p>
+                      <button
+                        onClick={() => {
+                          onClose()
+                          navigate({ to: '/client/orders' as never, search: { tab: 'requests' } as never })
+                        }}
+                        className="self-start text-xs text-blue-600 hover:text-blue-700 bg-transparent border-0 p-0 mt-2 cursor-pointer font-medium transition-colors"
+                      >
+                        View request in your orders →
+                      </button>
                     </div>
-                    {isCustom && (
-                      <div className="mt-3 w-full" onClick={(e) => e.stopPropagation()}>
-                        <input
-                          type="range"
-                          min={0}
-                          max={CUSTOM_TIB_STOPS.length - 1}
-                          step={1}
-                          value={customStopIdx}
-                          onChange={(e) => setCustomStopIdx(Number(e.target.value))}
-                          className="w-full cursor-pointer accent-blue-600"
-                        />
-                        <div className="flex justify-between text-[10px] text-gray-400">
-                          <span>2 TB</span>
-                          <span>10 PB</span>
+                  ) : (
+                    <button
+                      onClick={() => setSelectedPlanId(CUSTOM_PLAN_ID)}
+                      className={`flex flex-col px-4 py-3 rounded-xl border cursor-pointer text-left transition-colors ${
+                        isCustom ? 'border-blue-600 bg-blue-50' : 'border-gray-200 bg-white hover:bg-gray-50'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between w-full">
+                        <div>
+                          <span className={`text-sm font-semibold ${isCustom ? 'text-blue-700' : 'text-gray-800'}`}>
+                            Custom {isCustom ? `— ${formatSize(customBytes)}` : ''}
+                          </span>
+                          <p className="text-xs text-gray-400 m-0 mt-0.5">
+                            Above 1 TB, up to 10 PB · manually reviewed within 3 business days
+                          </p>
                         </div>
-                        <p className="text-[11px] text-gray-400 m-0 mt-1">
-                          Estimated at {formatCents(CUSTOM_PER_TIB_CENTS[storageType])} per TB.
-                          The final price is confirmed by invoice after a 3-business-day manual review —
-                          no payment is taken now.
-                        </p>
+                        <span className={`text-sm font-semibold text-right ${isCustom ? 'text-blue-700' : 'text-gray-600'}`}>
+                          {isCustom
+                            ? <>est. {formatCents(customPriceCents(customBytes, storageType))}</>
+                            : `est. from ${formatCents(customPriceCents(2 * TIB, storageType))}`}
+                        </span>
                       </div>
-                    )}
-                  </button>
+                      {isCustom && (
+                        <div className="mt-3 w-full" onClick={(e) => e.stopPropagation()}>
+                          <input
+                            type="range"
+                            min={0}
+                            max={CUSTOM_TIB_STOPS.length - 1}
+                            step={1}
+                            value={customStopIdx}
+                            onChange={(e) => setCustomStopIdx(Number(e.target.value))}
+                            className="w-full cursor-pointer accent-blue-600"
+                          />
+                          <div className="flex justify-between text-[10px] text-gray-400">
+                            <span>2 TB</span>
+                            <span>10 PB</span>
+                          </div>
+                          <p className="text-[11px] text-gray-400 m-0 mt-1">
+                            Estimated at {formatCents(CUSTOM_PER_TIB_CENTS[storageType])} per TB.
+                            The final price is confirmed by invoice after a 3-business-day manual review —
+                            no payment is taken now.
+                          </p>
+                        </div>
+                      )}
+                    </button>
+                  )}
                 </div>
               </div>
 
-              {/* Expansion notice (fixed plans, deposit-based) */}
+              {/* Expansion notice (fixed plans, deposit-based) — full explanation of
+                  how the request/deposit/provisioning flow works now lives on the
+                  orders page instead of duplicated here. */}
               {isExpansion && (
                 <div className="px-4 py-3 bg-amber-50 border border-amber-200 rounded-xl">
                   <p className="text-xs font-semibold text-amber-800 m-0 mb-1">
                     Capacity expansion request
                   </p>
                   <p className="text-xs text-amber-800 m-0 leading-relaxed">
-                    {serverAtCapacity
-                      ? `This server is at ${selectedServer?.allocated_pct.toFixed(0)}% allocated capacity, so direct purchases are unavailable. Your request will be reviewed within 7 business days. `
-                      : `This server can't fit ${formatSize(planBytes)} of ${storageType === 'nvme' ? 'fast' : 'standard'} storage right now. Your request will be reviewed within 7 business days. `}
-                    Once approved, capacity is expanded within <span className="font-semibold">14 business days</span>.
-                    You pay a <span className="font-semibold">50% deposit ({formatCents(depositCents)})</span> now;
-                    if either deadline is missed, it is refunded automatically. The remaining balance is
-                    charged when your capacity is provisioned.
+                    This purchase requires a <span className="font-semibold">50% deposit ({formatCents(depositCents)})</span> and manual review.
                   </p>
+                  <Link
+                    to="/client/orders"
+                    search={{ tab: 'requests' } as never}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-xs text-amber-900 font-medium underline hover:no-underline mt-1 inline-block"
+                  >
+                    How expansion requests work →
+                  </Link>
                 </div>
               )}
 
@@ -591,7 +872,7 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
               ) : !config?.paypal_client_id ? (
                 <p className="text-sm text-red-500 m-0">Payments are not configured.</p>
               ) : (
-                <div className={canPay ? '' : 'opacity-50 pointer-events-none'}>
+                <div>
                   <p className="text-xs text-gray-500 mb-2 mt-0">
                     {selectedPlanId
                       ? isExpansion
@@ -599,29 +880,19 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
                         : `Pay: ${formatCents(amountCents)}`
                       : 'Select a capacity to continue'}
                   </p>
-                  <PayPalScriptProvider
-                    options={{
-                      clientId: config.paypal_client_id,
-                      currency: config.currency || 'USD',
-                      intent: 'capture',
-                      components: 'buttons',
-                    }}
-                  >
-                    <PayPalButtons
-                      forceReRender={[selectedPlanId, storageType, selectedServerId, isExpansion]}
-                      disabled={!canPay}
-                      style={{ layout: 'vertical', shape: 'rect', label: 'pay' }}
-                      createOrder={handleCreateOrder}
-                      onApprove={handleApprove}
-                      onError={(err) => {
-                        if (!payError) setPayError(err instanceof Error ? err.message : 'Payment failed')
-                      }}
-                      onCancel={() => setPayError(null)}
-                    />
-                  </PayPalScriptProvider>
-                  <p className="text-[11px] text-gray-400 text-center m-0">
-                    Payments are processed securely by PayPal.
-                  </p>
+                  <PayPalCheckoutOptions
+                    clientId={config.paypal_client_id}
+                    currency={config.currency || 'USD'}
+                    environment={config.environment}
+                    getClientToken={async () => (await getPayPalClientToken()).client_token}
+                    amount={() => (amountCents / 100).toFixed(2)}
+                    createOrder={handleCreateOrder}
+                    getApprovalUrl={handleGetApprovalUrl}
+                    onApprove={(orderId) => handleApprove({ orderID: orderId })}
+                    onError={(msg) => { if (!payError) setPayError(msg) }}
+                    canPay={canPay}
+                    onChooseCard={() => { setPayError(null); setShowCardForm(true) }}
+                  />
                 </div>
               )}
             </>

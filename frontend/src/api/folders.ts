@@ -77,6 +77,29 @@ export const ancestorsQueryOptions = (folderId: string) => ({
   queryFn: () => getAncestors(folderId),
 })
 
+// resolvePathToFolder walks a `/`-joined path of folder names down from the
+// virtual root, matching each segment against that level's subfolders by
+// name. Returns the matching Folder only if the *entire* path resolves to an
+// existing folder — a partial match returns null, since an unresolved
+// segment means that folder doesn't exist yet and will be auto-created
+// (unpinned, i.e. today's dynamic-routing default) the first time something
+// is written there. Used to seed the API key prefix picker from an existing
+// scope, and to derive the storage-location badge for existing keys (their
+// scopes only store the name-based path, not a folder id).
+export async function resolvePathToFolder(path: string): Promise<Folder | null> {
+  const segments = path.split('/').map((s) => s.trim()).filter(Boolean)
+  if (segments.length === 0) return null
+  let contents = await listRoot({ folderLimit: 200 })
+  let match: Folder | null = null
+  for (const seg of segments) {
+    const found = contents.subfolders.items.find((f) => f.name === seg)
+    if (!found) return null
+    match = found
+    contents = await getFolder(found.id, { folderLimit: 200 })
+  }
+  return match
+}
+
 // requestDriveMigration kicks off a background job moving a folder's direct
 // files to a different drive (potentially a different tier/server). Returns
 // the created migration row (202 Accepted — the move runs asynchronously).

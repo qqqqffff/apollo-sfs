@@ -20,10 +20,10 @@ import (
 	"apollo-sfs.com/api/routes"
 	"apollo-sfs.com/api/routes/admin"
 	"apollo-sfs.com/api/routes/auth"
-	"apollo-sfs.com/api/routes/middleware"
 	"apollo-sfs.com/api/routes/billing"
 	"apollo-sfs.com/api/routes/dav"
 	"apollo-sfs.com/api/routes/expansion"
+	"apollo-sfs.com/api/routes/middleware"
 	"apollo-sfs.com/api/routes/orders"
 	"apollo-sfs.com/api/routes/payments"
 	"apollo-sfs.com/api/routes/services"
@@ -100,15 +100,21 @@ func main() {
 		log.Fatalf("startup seed: %v", err)
 	}
 
-	// Sync capacity_bytes for all drives from the real disk on every startup so
-	// the value is always current (not just when a drive is first added).
+	// Sync capacity_bytes for the standard (HDD) tier from the real disk on
+	// every startup so the value is always current (not just when a drive is
+	// first added). This container's local disk stats path only ever reflects
+	// the node it runs on (the manager, tier=standard) — never the fast/NVMe
+	// tier, which lives on the Pi 5 and is synced separately (SyncInfrastructure
+	// reads it from its own MinIO endpoint over the network). Applying a
+	// node-local reading to every drive would overwrite the fast tier's real
+	// capacity with the standard tier's.
 	if cfg.DiskStatsPath != "" {
 		if usage, err := psdisk.Usage(cfg.DiskStatsPath); err == nil {
 			total := int64(usage.Used) + int64(usage.Free)
-			if err := queries.SyncAllDriveCapacities(context.Background(), total); err != nil {
+			if err := queries.SyncDriveCapacitiesByType(context.Background(), "hdd", total); err != nil {
 				log.Printf("warning: sync drive capacities: %v", err)
 			} else {
-				log.Printf("startup: synced all drives to %d bytes capacity", total)
+				log.Printf("startup: synced standard-tier drive capacities to %d bytes", total)
 			}
 		} else {
 			log.Printf("warning: could not read disk stats for sync: %v", err)
@@ -153,6 +159,24 @@ func main() {
 	folderSvc := services.NewFolderService(queries)
 	favSvc := services.NewFavoriteService(queries)
 
+	// AI recognition (premium): nil client (RECOGNITION_URL unset) leaves the
+	// endpoints returning 503 and skips the worker.
+	recogClient := services.NewRecognitionClient(cfg.RecognitionURL, cfg.RecognitionToken)
+	recogSvc := services.NewRecognitionService(queries, fileSvc, recogClient, transcodeSvc, services.RecognitionConfig{
+		URL:           cfg.RecognitionURL,
+		Token:         cfg.RecognitionToken,
+		Concurrency:   cfg.RecognitionConcurrency,
+		MaxKeyframes:  cfg.RecognitionMaxKeyframes,
+		FaceThreshold: float32(cfg.RecognitionFaceThreshold),
+		PetThreshold:  float32(cfg.RecognitionPetThreshold),
+	})
+	if recogSvc.Available() {
+		fileSvc.SetRecognitionEnqueuer(recogSvc)
+		log.Printf("recognition: sidecar at %s — premium AI indexing enabled", cfg.RecognitionURL)
+	} else {
+		log.Printf("recognition: RECOGNITION_URL not set — premium AI indexing disabled")
+	}
+
 	inviteSvc := services.NewInviteService(queries, emailSvc, cfg.AppBaseURL, 0)
 
 	metricsSvc := services.NewMetricsService(queries, cfg.DiskStatsPath)
@@ -179,9 +203,10 @@ func main() {
 	go rotationSvc.StartScheduler(context.Background())
 	go metricsSvc.Start(context.Background())
 	go emailSvc.Start(context.Background())
+	go recogSvc.Start(context.Background())
 
 	shutdownCh := make(chan struct{})
-	r := setupRouter(cfg, queries, oidcVerifier, authSvc, fileSvc, folderSvc, favSvc, inviteSvc, metricsSvc, registry, geoReader, emailSvc, inboundEmailSvc, shutdownCh)
+	r := setupRouter(cfg, queries, oidcVerifier, authSvc, fileSvc, folderSvc, favSvc, inviteSvc, metricsSvc, registry, geoReader, emailSvc, inboundEmailSvc, recogSvc, shutdownCh)
 
 	addr := ":" + cfg.Port
 	log.Printf("apollo-sfs API listening on %s", addr)
@@ -212,7 +237,7 @@ func main() {
 	log.Println("server stopped")
 }
 
-func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVerifier, authSvc *services.AuthService, fileSvc *services.FileService, folderSvc *services.FolderService, favSvc *services.FavoriteService, inviteSvc *services.InviteService, metricsSvc *services.MetricsService, registry *services.MinIORegistry, geoReader *geoip2.Reader, emailSvc *services.EmailService, inboundEmailSvc *services.InboundEmailService, shutdownCh chan struct{}) *gin.Engine {
+func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVerifier, authSvc *services.AuthService, fileSvc *services.FileService, folderSvc *services.FolderService, favSvc *services.FavoriteService, inviteSvc *services.InviteService, metricsSvc *services.MetricsService, registry *services.MinIORegistry, geoReader *geoip2.Reader, emailSvc *services.EmailService, inboundEmailSvc *services.InboundEmailService, recogSvc *services.RecognitionService, shutdownCh chan struct{}) *gin.Engine {
 	r := gin.New()
 	r.Use(gin.Logger())
 	r.Use(gin.Recovery())
@@ -252,8 +277,10 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	routes.SetAPIKeyService(h, apiKeySvc)
 	routes.SetMathGameService(h, services.NewMathGameService(queries))
 	routes.SetShareService(h, services.NewShareService(queries, emailSvc, cfg.AppBaseURL))
+	routes.SetRecognitionService(h, recogSvc)
 	authHandler := auth.NewHandler(authSvc, cfg.CookieDomain, cfg.CookieSecure)
-	adminHandler := admin.NewHandler(queries, inviteSvc, metricsSvc, authSvc, fileSvc, registry, geoReader, cfg.DiskStatsPath, cfg.DiskStatsDriveLabel, cfg.BackendTestURL, cfg.AppDir, cfg.FrontendTestURL, cfg.FrontendE2EURL, shutdownCh)
+	adminHandler := admin.NewHandler(queries, inviteSvc, metricsSvc, authSvc, fileSvc, registry, geoReader, cfg.DiskStatsPath, cfg.DiskStatsDriveLabel, cfg.TestRunnerURL, cfg.AppDir, shutdownCh)
+	adminHandler.SetDiscountMailer(emailSvc)
 	// Configure the on-demand infrastructure sync (POST /system/sync): discover
 	// swarm nodes via the Docker socket and drives/capacity via the MinIO admin API.
 	adminHandler.ConfigureInfraSync(admin.InfraSyncConfig{
@@ -269,36 +296,61 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	sfsHandler := sfs.NewHandler(queries, fileSvc, presignSvc, apiKeySvc)
 	fileServerLinkSvc := services.NewFileServerLinkService(queries, authSvc, emailSvc, cfg.AppBaseURL)
 	routes.SetFileServerLinkService(h, fileServerLinkSvc)
+	routes.SetEmailBackupService(h, services.NewEmailBackupService(queries, fileSvc, folderSvc))
 	davHandler := dav.NewHandler(fileServerLinkSvc, fileSvc, queries)
 	inboundEmailHandler := admin.NewInboundEmailHandler(inboundEmailSvc, cfg.SendgridWebhookSecret)
 
 	paypalClient := services.NewPayPalClient(services.PayPalConfig{
-		Environment:  cfg.PayPalEnvironment,
+		Environment:  services.PayPalEnvLive,
 		ClientID:     cfg.PayPalClientID,
 		ClientSecret: cfg.PayPalClientSecret,
 		WebhookID:    cfg.PayPalWebhookID,
 	})
+	// paypalSandboxClient backs the admin-only "sandbox payments" toggle (see
+	// middleware.SandboxEnabled). nil (and thus 503 from every handler) when
+	// PAYPAL_SANDBOX_CLIENT_ID/_SECRET aren't configured.
+	paypalSandboxClient := services.NewPayPalClient(services.PayPalConfig{
+		Environment:  services.PayPalEnvSandbox,
+		ClientID:     cfg.PayPalSandboxClientID,
+		ClientSecret: cfg.PayPalSandboxClientSecret,
+		WebhookID:    cfg.PayPalSandboxWebhookID,
+	})
+	paypalClients := services.PayPalClients{Live: paypalClient, Sandbox: paypalSandboxClient}
 	routes.SetPayPalClient(h, paypalClient, routes.InterestDepositConfig{
 		Currency:  cfg.PremiumTierCurrency,
 		ReturnURL: cfg.AppBaseURL + "/interest",
-		CancelURL: cfg.AppBaseURL + "/interest",
+		CancelURL: cfg.AppBaseURL + "/interest?cancelled=1",
 	})
 	adminHandler.SetPayPalClient(paypalClient)
 	paymentSvc := services.NewPaymentService(queries, authSvc)
-	paymentsHandler := payments.NewHandler(paypalClient, paymentSvc, queries, payments.Config{
-		AmountCents: cfg.PremiumTierPriceCents,
-		Currency:    cfg.PremiumTierCurrency,
-		AppBaseURL:  cfg.AppBaseURL,
+	paymentsHandler := payments.NewHandler(paypalClients, paymentSvc, queries, payments.Config{
+		AppBaseURL: cfg.AppBaseURL,
+		PlanIDs: map[string]string{
+			"monthly": cfg.PayPalPlanIDMonthly,
+			"annual":  cfg.PayPalPlanIDAnnual,
+		},
+		SandboxPlanIDs: map[string]string{
+			"monthly": cfg.PayPalSandboxPlanIDMonthly,
+			"annual":  cfg.PayPalSandboxPlanIDAnnual,
+		},
+		PlanPrices: map[string]int{
+			"monthly": cfg.PremiumMonthlyPriceCents,
+			"annual":  cfg.PremiumAnnualPriceCents,
+		},
+		Currency: cfg.PremiumTierCurrency,
 	})
 	storageHandler := storageroutes.NewHandler(queries)
-	billingHandler := billing.NewHandler(paypalClient, queries, billing.Config{
-		Currency:    cfg.PremiumTierCurrency,
-		ReturnURL:   "apollosfs://billing/storage/complete",
-		CancelURL:   "apollosfs://billing/storage/cancel",
-		ClientID:    cfg.PayPalClientID,
-		Environment: cfg.PayPalEnvironment,
+	billingHandler := billing.NewHandler(paypalClients, queries, billing.Config{
+		Currency:                 cfg.PremiumTierCurrency,
+		ReturnURL:                "apollosfs://billing/storage/complete",
+		CancelURL:                "apollosfs://billing/storage/cancel",
+		AppBaseURL:               cfg.AppBaseURL,
+		ClientID:                 cfg.PayPalClientID,
+		SandboxClientID:          cfg.PayPalSandboxClientID,
+		PremiumMonthlyPriceCents: cfg.PremiumMonthlyPriceCents,
+		PremiumAnnualPriceCents:  cfg.PremiumAnnualPriceCents,
 	})
-	expansionHandler := expansion.NewHandler(paypalClient, emailSvc, queries, expansion.Config{
+	expansionHandler := expansion.NewHandler(paypalClients, emailSvc, queries, expansion.Config{
 		Currency:  cfg.PremiumTierCurrency,
 		ReturnURL: "apollosfs://billing/expansion/complete",
 		CancelURL: "apollosfs://billing/expansion/cancel",
@@ -306,7 +358,9 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		AppName:   "Apollo SFS",
 	})
 	expansionHandler.StartExpiryLoop(context.Background())
-	ordersHandler := orders.NewHandler(paypalClient, queries)
+	ordersHandler := orders.NewHandler(paypalClients, queries, paymentSvc)
+	ordersHandler.StartAllocationRevertLoop(context.Background())
+	paymentsHandler.StartSubscriptionReconcileLoop(context.Background())
 	metricsSvc.SetSpeedTestProvider(adminHandler)
 	go adminHandler.SpeedTestLoop(context.Background())
 
@@ -318,17 +372,36 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	// ── Unauthenticated ──────────────────────────────────────────────────────
 	v1.GET("/health", routes.Health)
 	v1.GET("/config", func(c *gin.Context) {
-		c.JSON(200, gin.H{"turnstile_site_key": cfg.TurnstileSiteKey})
+		// paypal_client_id is public by design — the PayPal JS SDK needs it in
+		// the browser. Exposing it here (unauthenticated) lets the public
+		// interest/register pages load hosted card fields without a session.
+		// This is always the live client at the hardcoded live environment;
+		// there is no admin toggle on this unauthenticated surface.
+		c.JSON(200, gin.H{
+			"turnstile_site_key": cfg.TurnstileSiteKey,
+			"paypal_client_id":   cfg.PayPalClientID,
+			"paypal_currency":    cfg.PremiumTierCurrency,
+			"paypal_environment": services.PayPalEnvLive,
+			"premium_plans": []gin.H{
+				{"plan": "monthly", "price_cents": cfg.PremiumMonthlyPriceCents},
+				{"plan": "annual", "price_cents": cfg.PremiumAnnualPriceCents},
+			},
+		})
 	})
+	// Browser-safe PayPal client token (JS SDK v6 init, e.g. the Apple Pay
+	// button) for the public interest page — always the live client, same as
+	// /config above. Domain-bound and SDK-init-only by design.
+	v1.GET("/config/paypal-client-token", billingHandler.PublicClientToken)
 	v1.GET("/invitations/:token", h.ValidateInvitationToken)
 	v1.POST("/interest", h.SubmitInterestForm)
+	// Native-app account request form: no Turnstile (the app cannot render
+	// it) — the captured deposit plus the daily/per-IP caps remain.
+	v1.POST("/mobile/interest", h.SubmitMobileInterestForm)
 	// Interest-form deposit: fixed-tier pricing + 50% deposit, same as a
 	// direct storage purchase or expansion request — no custom amounts.
 	v1.POST("/interest/deposit/orders", h.CreateInterestDepositOrder)
 	v1.POST("/interest/deposit/orders/:order_id/capture", h.CaptureInterestDepositOrder)
-	v1.POST("/interest/deposit/orders/apple-pay", h.CreateApplePayInterestDeposit)
 	v1.POST("/interest/deposit/orders/google-pay", h.CreateGooglePayInterestDeposit)
-	v1.POST("/interest/deposit/apple-pay/validate", h.ValidateApplePayMerchantForDeposit)
 
 	// ── PayPal webhook (no auth — verified via signature) ────────────────────
 	v1.POST("/payments/webhook", paymentsHandler.Webhook)
@@ -348,10 +421,11 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 
 	// ── SFS S3-like API (API-key auth, premium only) ─────────────────────────
 	// Authenticated via Authorization: Bearer <sfs_..._...> (NOT cookie).
-	// IPRateLimit runs first (anti-stuffing); per-key limit could be added
-	// after RequireAPIKey but a single shared limit is sufficient for v1.
+	// mw.RateLimit() runs first (anti-stuffing, shared per-IP); the per-key
+	// limit (owner-configurable up to 1000/min) runs after RequireAPIKey
+	// since it needs the resolved key row.
 	sfsGroup := v1.Group("/sfs")
-	sfsGroup.Use(mw.RateLimit(), apiKeyMW.RequireAPIKey(), apiKeyMW.RequirePremiumAPI())
+	sfsGroup.Use(mw.RateLimit(), apiKeyMW.RequireAPIKey(), apiKeyMW.RequirePremiumAPI(), apiKeyMW.RequireKeyRateLimit())
 	{
 		sfsGroup.POST("/buckets/:bucket_id/put", sfsHandler.Put)
 		sfsGroup.POST("/buckets/:bucket_id/get", sfsHandler.Get)
@@ -406,12 +480,20 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		// login. Lives here (not in mobileAuthGroup) because it requires a valid
 		// brokered access token, which RequireAuth validates.
 		protected.POST("/mobile/auth/session", authHandler.MobileSession)
+		protected.POST("/me/password/request-code", h.RequestPasswordChangeCode)
 		protected.POST("/me/password", h.ChangePassword)
+		protected.PATCH("/me/username", h.UpdateMyUsername)
 		protected.GET("/me/preferences", h.GetPreferences)
 		protected.GET("/me/notifications", h.Notifications)
+		protected.POST("/me/notifications/dismiss", h.DismissNotifications)
+		protected.GET("/me/backups/last-sync", h.LastBackupSync)
 		// PUT /me/preferences is premium-only (media auto-upload); registered below.
 		// Storage UI toggles are available to every user.
 		protected.PUT("/me/preferences/storage-ui", h.UpdateStorageUIPreferences)
+		// Admin-only, session-scoped sandbox-payments toggle (not persisted).
+		protected.PUT("/me/sandbox-payments", h.UpdateSandboxPayments)
+		// Admin-only, session-scoped storage-expansion-override toggle (not persisted).
+		protected.PUT("/me/expansion-override", h.UpdateExpansionOverride)
 		protected.POST("/me/social/link", h.LinkSocial)
 		protected.DELETE("/me/social/unlink", h.UnlinkSocial)
 
@@ -470,6 +552,9 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		protected.POST("/favorites/folders/:folder_id", h.FavoriteFolder)
 		protected.DELETE("/favorites/folders/:folder_id", h.UnfavoriteFolder)
 
+		// Feedback (profile page submission; reviewed on the admin feedback page)
+		protected.POST("/feedback", h.SubmitFeedback)
+
 		// Math game scores (per-user history for the /math-game test)
 		protected.GET("/math-game/scores", h.ListMathScores)
 		protected.POST("/math-game/scores", h.SaveMathScore)
@@ -491,6 +576,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		// non-premium callers receive 402 from the handler.
 		protected.GET("/me/api-keys", h.ListAPIKeys)
 		protected.POST("/me/api-keys", h.CreateAPIKey)
+		protected.PATCH("/me/api-keys/:id", h.UpdateAPIKey)
 		protected.DELETE("/me/api-keys/:id", h.RevokeAPIKey)
 
 		// File-server mount links (premium WebDAV feature). Premium users
@@ -502,9 +588,11 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		protected.DELETE("/me/file-server-links/:id", h.DeleteFileServerLink)
 		protected.POST("/me/file-server-links/verify-location", h.VerifyFileServerLocation)
 
-		// Premium upgrade — create + capture a one-time PayPal order.
-		protected.POST("/payments/orders", paymentsHandler.CreateOrder)
-		protected.POST("/payments/orders/:order_id/capture", paymentsHandler.CaptureOrder)
+		// Premium upgrade — recurring PayPal subscription (monthly/annual).
+		protected.POST("/payments/subscriptions", paymentsHandler.CreateSubscription)
+		protected.GET("/payments/subscriptions", paymentsHandler.ListMySubscriptions)
+		protected.POST("/payments/subscriptions/:id/confirm", paymentsHandler.ConfirmSubscription)
+		protected.POST("/payments/subscriptions/cancel", paymentsHandler.CancelSubscription)
 
 		// User-facing storage info — separate from admin routes for security.
 		protected.GET("/storage/servers", storageHandler.ListServers)
@@ -517,6 +605,13 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 
 		// Public PayPal config for the web frontend's JS SDK (react-paypal-js).
 		protected.GET("/billing/config", billingHandler.GetConfig)
+		// Browser-safe client token for the PayPal JS SDK v6 (Apple Pay);
+		// honors the admin sandbox-payments toggle like /billing/config.
+		protected.GET("/billing/client-token", billingHandler.GetClientToken)
+
+		// Admin-managed storage line items for a server, priced for the calling
+		// user (discounts applied). Empty items = fall back to legacy plans.
+		protected.GET("/billing/storage/plans", billingHandler.GetStoragePlans)
 
 		// Storage add-on billing — four payment methods, each backed by PayPal.
 		protected.POST("/billing/storage/order", billingHandler.CreateWalletOrder)
@@ -562,9 +657,32 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		{
 			premiumGroup.GET("/folders/:folder_id/media", h.GetMediaFolder)
 			premiumGroup.PUT("/me/preferences", h.UpdatePreferences)
+			premiumGroup.PUT("/me/preferences/backup-reminder", h.UpdateBackupReminderPreference)
 			premiumGroup.POST("/collections/:collection_id/items/:file_id", h.CopyFileToCollection)
 			premiumGroup.PATCH("/collections/:collection_id/items/:file_id/move", h.MoveCollectionItem)
 			premiumGroup.DELETE("/collections/:collection_id/items/:file_id", h.RemoveFileFromCollection)
+
+			// AI recognition — per-collection face/pet/object indexing.
+			premiumGroup.GET("/collections/:collection_id/recognition", h.GetCollectionRecognition)
+			premiumGroup.PUT("/collections/:collection_id/recognition", h.SetCollectionRecognition)
+			premiumGroup.GET("/collections/:collection_id/recognition/groups", h.ListRecognitionGroups)
+			premiumGroup.GET("/recognition/groups/:group_id/files", h.GetRecognitionGroupFiles)
+			premiumGroup.PATCH("/recognition/groups/:group_id", h.UpdateRecognitionGroup)
+			premiumGroup.POST("/recognition/groups/:group_id/merge", h.MergeRecognitionGroups)
+			premiumGroup.DELETE("/recognition/groups/:group_id", h.DeleteRecognitionGroup)
+			premiumGroup.GET("/recognition/detections/:detection_id/thumb", h.GetRecognitionThumb)
+
+			// Email backup — provider mailbox backups into 'email' folders.
+			// Provider OAuth is entirely client-side (mirrors Google backup);
+			// these endpoints store/serve the encrypted messages.
+			premiumGroup.POST("/email-backup/folders", h.EnsureEmailBackupFolder)
+			premiumGroup.POST("/email-backup/messages", h.BackupEmailMessage)
+			premiumGroup.GET("/email-backup/folders/:folder_id/senders", h.ListEmailBackupSenders)
+			premiumGroup.GET("/email-backup/folders/:folder_id/messages", h.ListEmailBackupMessages)
+			premiumGroup.GET("/email-backup/messages/:id", h.GetEmailBackupMessage)
+			premiumGroup.PATCH("/email-backup/messages/:id/read", h.MarkEmailBackupMessageRead)
+			premiumGroup.DELETE("/email-backup/messages/:id", h.DeleteEmailBackupMessage)
+			premiumGroup.POST("/email-backup/runs", h.CompleteEmailBackupRun)
 		}
 
 		// ── Admin — JWT + admin realm role ───────────────────────────────────
@@ -572,10 +690,13 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		adminGroup.Use(mw.RequireAdmin())
 		{
 			adminGroup.GET("/users", adminHandler.GetUsers)
+			adminGroup.GET("/users/search", adminHandler.SearchUsers)
 			adminGroup.GET("/users/:user_id", adminHandler.GetUser)
 			adminGroup.PATCH("/users/:user_id/quota", adminHandler.UpdateUserQuota)
 			adminGroup.PATCH("/users/:user_id/username", adminHandler.UpdateUsername)
+			adminGroup.PATCH("/users/:user_id/feedback-access", adminHandler.UpdateUserFeedbackAccess)
 			adminGroup.GET("/users/:user_id/storage", h.AdminGetUserStorage)
+			adminGroup.PUT("/users/:user_id/storage/allocations", h.AdminUpdateUserStorageAllocations)
 			adminGroup.GET("/users/:user_id/folders", h.AdminListUserFolders)
 			adminGroup.GET("/users/:user_id/folders/:folder_id", h.AdminGetUserFolder)
 			adminGroup.GET("/users/:user_id/favorites", h.AdminGetUserFavorites)
@@ -600,6 +721,8 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 			adminGroup.GET("/system/nodes/:node_id/disks", adminHandler.GetNodeDisks)
 			adminGroup.GET("/system/drives/:drive_id/temps/history", adminHandler.GetDriveTempsHistory)
 			adminGroup.GET("/system/disks/:disk_id/temps/history", adminHandler.GetNodeDiskTempsHistory)
+			adminGroup.GET("/system/drives/:drive_id/io/history", adminHandler.GetDriveIOHistory)
+			adminGroup.GET("/system/disks/:disk_id/io/history", adminHandler.GetNodeDiskIOHistory)
 			adminGroup.POST("/system/servers", adminHandler.CreateServer)
 			adminGroup.PATCH("/system/servers/:server_id", adminHandler.UpdateServer)
 			adminGroup.POST("/system/servers/:server_id/nodes", adminHandler.CreateNode)
@@ -619,6 +742,9 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 			adminGroup.POST("/users/:user_id/pardon", adminHandler.PardonUser)
 			adminGroup.GET("/bans", adminHandler.ListUserBans)
 
+			adminGroup.GET("/feedback", adminHandler.ListFeedback)
+			adminGroup.PATCH("/feedback/:id/status", adminHandler.UpdateFeedbackStatus)
+
 			adminGroup.GET("/expansion-requests", expansionHandler.ListRequests)
 			adminGroup.POST("/expansion-requests/:id/approve", expansionHandler.ApproveRequest)
 			adminGroup.POST("/expansion-requests/:id/fulfill", expansionHandler.MarkExpanded)
@@ -629,7 +755,20 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 			// Combined orders view (premium payments + storage purchases).
 			adminGroup.GET("/orders", ordersHandler.List)
 			adminGroup.POST("/orders/:type/:id/refund", ordersHandler.Refund)
+			adminGroup.POST("/orders/:type/:id/revert-allocation", ordersHandler.RevertAllocation)
+			adminGroup.GET("/subscriptions", ordersHandler.ListSubscriptions)
+			adminGroup.POST("/subscriptions/:id/cancel", ordersHandler.CancelSubscription)
+			adminGroup.POST("/subscriptions/:id/revert-allocation", ordersHandler.RevertSubscriptionAllocation)
 			adminGroup.POST("/expansion-requests/:id/cancel", expansionHandler.CancelRequest)
+
+			// Product pricing — per-server storage line items and discounts.
+			adminGroup.GET("/pricing/servers", adminHandler.ListPricingServers)
+			adminGroup.GET("/pricing", adminHandler.GetPricing)
+			adminGroup.POST("/pricing/items", adminHandler.CreatePricingItem)
+			adminGroup.PATCH("/pricing/items/:item_id", adminHandler.UpdatePricingItem)
+			adminGroup.DELETE("/pricing/items/:item_id", adminHandler.DeletePricingItem)
+			adminGroup.POST("/pricing/discounts", adminHandler.CreatePricingDiscount)
+			adminGroup.DELETE("/pricing/discounts/:discount_id", adminHandler.DeletePricingDiscount)
 
 			adminGroup.GET("/interest", adminHandler.ListInterestSubmissions)
 			adminGroup.GET("/interest/settings", adminHandler.GetInterestFormSettings)

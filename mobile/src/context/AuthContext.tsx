@@ -1,17 +1,8 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import { clearTokens, getStoredTokens, setAuthFailureHandler } from '../api/client';
-import { getMe } from '../api/auth';
+import { getMe, type User } from '../api/me';
 
-interface UserProfile {
-  username: string;
-  email: string;
-  storage_used_bytes: number;
-  storage_quota_bytes: number;
-  is_admin: boolean;
-  is_premium: boolean;
-  premium_granted_at: string | null;
-  linked_providers: string[];
-}
+type UserProfile = User;
 
 interface AuthContextValue {
   isLoading: boolean;

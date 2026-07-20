@@ -42,6 +42,10 @@ func (f fakeStorage) Inspect(context.Context, string, string, string, bool) (ser
 	return f.info, nil
 }
 
+func (f fakeStorage) EnsureBucket(context.Context, string, string, string, bool, string) error {
+	return nil
+}
+
 // endpointStorage is a StorageInspector returning a different bucket set per
 // endpoint, so a multi-tier sync can be asserted to attach the right bucket to
 // the right node.
@@ -51,6 +55,10 @@ type endpointStorage struct {
 
 func (f endpointStorage) Inspect(_ context.Context, endpoint, _, _ string, _ bool) (services.StorageInfo, error) {
 	return f.byEndpoint[endpoint], nil
+}
+
+func (f endpointStorage) EnsureBucket(context.Context, string, string, string, bool, string) error {
+	return nil
 }
 
 // syncStub records the upserts the sync performs so the test can assert on them.

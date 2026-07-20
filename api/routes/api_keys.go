@@ -13,9 +13,12 @@ import (
 )
 
 type createAPIKeyRequest struct {
-	Name    string               `json:"name"     binding:"required"`
-	Scopes  []apiKeyScopeRequest `json:"scopes"   binding:"required,min=1,dive"`
-	TTLDays int                  `json:"ttl_days"`
+	Name   string               `json:"name"     binding:"required"`
+	Scopes []apiKeyScopeRequest `json:"scopes"   binding:"required,min=1,dive"`
+	// TTLDays: 0 means no expiry; max=3650 (10 years) is also enforced
+	// service-side (services.MaxAPIKeyTTL) for callers that skip this binding.
+	TTLDays         int `json:"ttl_days" binding:"min=0,max=3650"`
+	RateLimitPerMin int `json:"rate_limit_per_min" binding:"omitempty,min=1,max=1000"`
 }
 
 type apiKeyScopeRequest struct {
@@ -64,10 +67,11 @@ func (h *Handler) CreateAPIKey(c *gin.Context) {
 	}
 	ttl := time.Duration(req.TTLDays) * 24 * time.Hour
 	issued, err := h.apiKeys.Issue(c.Request.Context(), userID, services.IssueInput{
-		Username: user.Username,
-		Name:     req.Name,
-		Scopes:   scopes,
-		TTL:      ttl,
+		Username:        user.Username,
+		Name:            req.Name,
+		Scopes:          scopes,
+		TTL:             ttl,
+		RateLimitPerMin: req.RateLimitPerMin,
 	})
 	if err != nil {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -77,6 +81,72 @@ func (h *Handler) CreateAPIKey(c *gin.Context) {
 		RawKey: issued.RawKey,
 		Key:    issued.Key,
 	})
+}
+
+type updateAPIKeyRequest struct {
+	Name            string               `json:"name"     binding:"required"`
+	Scopes          []apiKeyScopeRequest `json:"scopes"   binding:"required,min=1,dive"`
+	TTLDays         int                  `json:"ttl_days" binding:"min=0,max=3650"`
+	RateLimitPerMin int                  `json:"rate_limit_per_min" binding:"omitempty,min=1,max=1000"`
+}
+
+// UpdateAPIKey is PATCH /api/v1/me/api-keys/:id. Full-replace semantics —
+// name, scopes, expiry (re-derived from ttl_days same as creation: 0 means
+// no expiry), and rate limit are all overwritten from the request body. The
+// key prefix/secret never change, so the raw key shown at issuance keeps
+// working immediately under the new rules.
+func (h *Handler) UpdateAPIKey(c *gin.Context) {
+	if h.apiKeys == nil {
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "api keys not configured"})
+		return
+	}
+	user, ok := h.loadCurrentUser(c)
+	if !ok {
+		return
+	}
+	if !(user.IsPremium || user.IsAdmin) {
+		c.AbortWithStatusJSON(http.StatusPaymentRequired, gin.H{"error": "premium tier required"})
+		return
+	}
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid key id"})
+		return
+	}
+
+	var req updateAPIKeyRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	scopes := make([]models.APIKeyScope, 0, len(req.Scopes))
+	for _, s := range req.Scopes {
+		scopes = append(scopes, models.APIKeyScope{
+			Operation:  s.Operation,
+			PathPrefix: s.PathPrefix,
+		})
+	}
+	userID, err := uuid.Parse(c.GetString("userID"))
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "invalid user id"})
+		return
+	}
+	var expiresAt *time.Time
+	if req.TTLDays > 0 {
+		t := time.Now().Add(time.Duration(req.TTLDays) * 24 * time.Hour).UTC()
+		expiresAt = &t
+	}
+	updated, err := h.apiKeys.Update(c.Request.Context(), userID, id, services.UpdateInput{
+		Name:            req.Name,
+		Scopes:          scopes,
+		ExpiresAt:       expiresAt,
+		RateLimitPerMin: req.RateLimitPerMin,
+	})
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, updated)
 }
 
 // listAPIKeyEntry is the shape returned by ListAPIKeys. MatchingOperations

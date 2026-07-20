@@ -34,6 +34,19 @@ type submitInterestRequest struct {
 	DepositOrderID string `json:"deposit_order_id" binding:"required"`
 }
 
+// submitMobileInterestRequest is the native-app variant of
+// submitInterestRequest: identical except there is no captcha token, since the
+// app cannot render the Cloudflare Turnstile widget. The captured 50% deposit
+// (a real payment) plus the daily/per-IP caps remain as the abuse barriers.
+type submitMobileInterestRequest struct {
+	Name           string `json:"name"             binding:"required,min=1,max=120"`
+	Email          string `json:"email"            binding:"required,email,max=254"`
+	PlanID         string `json:"plan_id"          binding:"required"`
+	StorageType    string `json:"storage_type"     binding:"required,oneof=nvme hdd"`
+	UseCase        string `json:"use_case"         binding:"required,min=1,max=2000"`
+	DepositOrderID string `json:"deposit_order_id" binding:"required"`
+}
+
 // SubmitInterestForm handles POST /api/v1/interest.
 // Public endpoint — no authentication required.
 // Protections applied in order:
@@ -56,6 +69,35 @@ func (h *Handler) SubmitInterestForm(c *gin.Context) {
 	if ok, err := verifyFn(h.turnstileSecret, req.CaptchaToken, c.ClientIP()); err != nil || !ok {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "captcha verification failed — please try again"})
 		return
+	}
+
+	h.processInterestSubmission(c, req.Name, req.Email, req.PlanID, req.StorageType, req.UseCase, req.DepositOrderID)
+}
+
+// SubmitMobileInterestForm handles POST /api/v1/mobile/interest.
+// Public endpoint — the mobile app's account request form. Applies the same
+// protections as SubmitInterestForm except step 1 (Turnstile), which native
+// apps cannot complete.
+func (h *Handler) SubmitMobileInterestForm(c *gin.Context) {
+	var req submitMobileInterestRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "all fields are required and must be valid"})
+		return
+	}
+	h.processInterestSubmission(c, req.Name, req.Email, req.PlanID, req.StorageType, req.UseCase, req.DepositOrderID)
+}
+
+// processInterestSubmission runs the post-captcha portion of an interest
+// submission: caps, dedupe, deposit validation/consumption, persistence, and
+// the async admin notification. Shared by the web and mobile endpoints.
+func (h *Handler) processInterestSubmission(c *gin.Context, name, email, planID, storageType, useCase, depositOrderID string) {
+	req := submitMobileInterestRequest{
+		Name:           name,
+		Email:          email,
+		PlanID:         planID,
+		StorageType:    storageType,
+		UseCase:        useCase,
+		DepositOrderID: depositOrderID,
 	}
 
 	ctx := c.Request.Context()

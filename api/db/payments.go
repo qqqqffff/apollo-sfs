@@ -13,24 +13,29 @@ import (
 )
 
 const paymentColumns = `id, username, paypal_order_id, paypal_capture_id,
-	amount_cents, currency, status, payment_method, created_at, captured_at`
+	amount_cents, currency, status, payment_method, created_at, captured_at, environment`
 
 // CreatePendingPayment inserts a "created" payment row immediately after
 // PayPal returns an order_id. The capture_id and captured_at are populated
 // later by MarkPaymentCaptured. Bypasses RLS — payments live outside the
 // per-user namespace and are reconciled by username FK.
 func (q *Queries) CreatePendingPayment(ctx context.Context, p *models.Payment) error {
+	env := p.Environment
+	if env == "" {
+		env = "live"
+	}
 	err := q.db.QueryRowContext(ctx, `
 		INSERT INTO payments (username, paypal_order_id, amount_cents,
-		                      currency, status, payment_method)
-		VALUES ($1, $2, $3, $4, 'created', $5)
+		                      currency, status, payment_method, environment)
+		VALUES ($1, $2, $3, $4, 'created', $5, $6)
 		RETURNING id, created_at
-	`, p.Username, p.PayPalOrderID, p.AmountCents, p.Currency, p.PaymentMethod,
+	`, p.Username, p.PayPalOrderID, p.AmountCents, p.Currency, p.PaymentMethod, env,
 	).Scan(&p.ID, &p.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("CreatePendingPayment: %w", err)
 	}
 	p.Status = "created"
+	p.Environment = env
 	return nil
 }
 
@@ -110,7 +115,7 @@ func (q *Queries) ListPaymentsForUser(ctx context.Context, username string) ([]m
 		if err := rows.Scan(
 			&p.ID, &p.Username, &p.PayPalOrderID, &captureID,
 			&p.AmountCents, &p.Currency, &p.Status, &p.PaymentMethod,
-			&p.CreatedAt, &capturedAt,
+			&p.CreatedAt, &capturedAt, &p.Environment,
 		); err != nil {
 			return nil, fmt.Errorf("ListPaymentsForUser scan: %w", err)
 		}
@@ -133,7 +138,7 @@ func scanPayment(row *sql.Row) (*models.Payment, error) {
 	if err := row.Scan(
 		&p.ID, &p.Username, &p.PayPalOrderID, &captureID,
 		&p.AmountCents, &p.Currency, &p.Status, &p.PaymentMethod,
-		&p.CreatedAt, &capturedAt,
+		&p.CreatedAt, &capturedAt, &p.Environment,
 	); err != nil {
 		return nil, err
 	}

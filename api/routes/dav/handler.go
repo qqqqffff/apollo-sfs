@@ -266,7 +266,20 @@ func (h *Handler) propfind(c *gin.Context, link *models.FileServerLink) {
 		if len(segments) > 0 {
 			name = segments[len(segments)-1]
 		}
-		writeCollectionResponse(&buf, hrefFor(link.Token, segments, true), name, link.CreatedAt)
+		// Quota properties (RFC 4331) are only meaningful at the mount root —
+		// clients like Windows Explorer and Finder query them there to show
+		// drive capacity/free space. Without them, clients fall back to
+		// reporting the underlying volume's raw size instead of this specific
+		// drive's capacity and the user's usage on it.
+		var quota *quotaInfo
+		if len(segments) == 0 {
+			quota, err = h.driveQuota(c, link)
+			if err != nil {
+				c.String(http.StatusInternalServerError, "server error")
+				return
+			}
+		}
+		writeCollectionResponse(&buf, hrefFor(link.Token, segments, true), name, link.CreatedAt, quota)
 		if depth != "0" {
 			folders, err := q.ListFolderChildren(c.Request.Context(), link.UserID, folderID)
 			if err != nil {
@@ -274,9 +287,9 @@ func (h *Handler) propfind(c *gin.Context, link *models.FileServerLink) {
 				return
 			}
 			for _, f := range folders {
-				writeCollectionResponse(&buf, hrefFor(link.Token, append(segments, f.Name), true), f.Name, f.UpdatedAt)
+				writeCollectionResponse(&buf, hrefFor(link.Token, append(segments, f.Name), true), f.Name, f.UpdatedAt, nil)
 			}
-			files, err := q.ListFilesByFolderOnServer(c.Request.Context(), link.UserID, folderID, link.ServerID)
+			files, err := q.ListFilesByFolderOnDrive(c.Request.Context(), link.UserID, folderID, link.DriveID)
 			if err != nil {
 				c.String(http.StatusInternalServerError, "server error")
 				return
@@ -304,7 +317,30 @@ func (h *Handler) propfind(c *gin.Context, link *models.FileServerLink) {
 	c.String(http.StatusMultiStatus, buf.String())
 }
 
-func writeCollectionResponse(buf *bytes.Buffer, href, name string, modified time.Time) {
+// quotaInfo carries RFC 4331 quota properties for the mount root.
+type quotaInfo struct {
+	usedBytes      int64
+	availableBytes int64
+}
+
+// driveQuota reports link.DriveID's physical capacity and the user's own
+// bytes stored on it — the same per-drive figures shown on the storage page
+// (GetUserDrives / "my-servers"), so a fast-tier mount and a standard-tier
+// mount on the same server correctly report different capacities instead of
+// both echoing one account-wide number.
+func (h *Handler) driveQuota(c *gin.Context, link *models.FileServerLink) (*quotaInfo, error) {
+	capacityBytes, usedBytes, err := h.pool.GetDriveCapacityAndUsage(c.Request.Context(), link.DriveID, link.UserID)
+	if err != nil {
+		return nil, err
+	}
+	available := capacityBytes - usedBytes
+	if available < 0 {
+		available = 0
+	}
+	return &quotaInfo{usedBytes: usedBytes, availableBytes: available}, nil
+}
+
+func writeCollectionResponse(buf *bytes.Buffer, href, name string, modified time.Time, quota *quotaInfo) {
 	buf.WriteString(`<D:response><D:href>`)
 	xmlEscape(buf, href)
 	buf.WriteString(`</D:href><D:propstat><D:prop>`)
@@ -315,6 +351,10 @@ func writeCollectionResponse(buf *bytes.Buffer, href, name string, modified time
 	buf.WriteString(`<D:getlastmodified>`)
 	buf.WriteString(modified.UTC().Format(http.TimeFormat))
 	buf.WriteString(`</D:getlastmodified>`)
+	if quota != nil {
+		fmt.Fprintf(buf, `<D:quota-used-bytes>%d</D:quota-used-bytes>`, quota.usedBytes)
+		fmt.Fprintf(buf, `<D:quota-available-bytes>%d</D:quota-available-bytes>`, quota.availableBytes)
+	}
 	buf.WriteString(`</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>`)
 }
 
@@ -340,7 +380,7 @@ func xmlEscape(buf *bytes.Buffer, s string) {
 	_ = xml.EscapeText(buf, []byte(s))
 }
 
-// lookupFile resolves segments to a file on the link's server. Returns
+// lookupFile resolves segments to a file on the link's drive. Returns
 // (nil, true) when the path cleanly does not exist; (nil, false) when a
 // response has already been written.
 func (h *Handler) lookupFile(c *gin.Context, q *db.Queries, link *models.FileServerLink, segments []string) (*models.File, bool) {
@@ -355,17 +395,9 @@ func (h *Handler) lookupFile(c *gin.Context, q *db.Queries, link *models.FileSer
 	if err != nil {
 		return nil, true
 	}
-	// Server scoping: the mount only exposes files stored on the link's server.
-	if file.DriveID == nil {
-		return nil, true
-	}
-	onServer, err := h.pool.DriveBelongsToServer(c.Request.Context(), *file.DriveID, link.ServerID)
-	if err != nil {
-		c.String(http.StatusInternalServerError, "server error")
-		c.Abort()
-		return nil, false
-	}
-	if !onServer {
+	// Drive scoping: the mount only exposes files stored on the link's drive
+	// (not other drives/tiers on the same server).
+	if file.DriveID == nil || *file.DriveID != link.DriveID {
 		return nil, true
 	}
 	return file, true
@@ -460,19 +492,10 @@ func (h *Handler) upload(c *gin.Context, link *models.FileServerLink, user *mode
 	}
 	// PUT replaces an existing file (standard WebDAV semantics), but only when
 	// the existing file is manageable through this mount — i.e. stored on the
-	// link's server. Same-named files on other servers stay untouchable.
+	// link's drive. Same-named files on other drives/tiers stay untouchable.
 	var existing *models.File
 	if found, err := q.FindFileByFolderAndName(c.Request.Context(), link.UserID, folderID, leaf); err == nil && found != nil {
-		onServer := false
-		if found.DriveID != nil {
-			onServer, err = h.pool.DriveBelongsToServer(c.Request.Context(), *found.DriveID, link.ServerID)
-			if err != nil {
-				_ = tx.Rollback()
-				c.String(http.StatusInternalServerError, "server error")
-				return
-			}
-		}
-		if !onServer {
+		if found.DriveID == nil || *found.DriveID != link.DriveID {
 			_ = tx.Rollback()
 			c.String(http.StatusForbidden, "a file with this name exists on a different storage server")
 			return

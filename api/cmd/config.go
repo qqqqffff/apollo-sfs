@@ -31,13 +31,23 @@ type Config struct {
 	CookieSecure bool
 
 	PostfixInternalHost string
-	MailFrom          string
-	MailDomain        string
+	MailFrom            string
+	MailDomain          string
 
 	AppBaseURL string // public-facing base URL, e.g. "https://files.example.com"
 
 	KeyEncryptionKey         string
 	QuotaWarningThresholdPct int
+
+	// AI recognition sidecar (premium face/pet/object indexing). Empty
+	// RecognitionURL disables the feature: endpoints return 503 and the
+	// background worker never starts.
+	RecognitionURL           string
+	RecognitionToken         string
+	RecognitionConcurrency   int
+	RecognitionMaxKeyframes  int
+	RecognitionFaceThreshold float64
+	RecognitionPetThreshold  float64
 	DiskStatsPath            string
 	DiskStatsDriveLabel      string
 
@@ -55,23 +65,18 @@ type Config struct {
 	// work without a new env var.
 	PresignSecret string
 
-	// BackendTestURL is the internal URL of the api-tests sidecar container.
-	// e.g. "http://api-tests:9228/run-tests". Preferred over AppDir in Docker.
-	BackendTestURL string
+	// TestRunnerURL is the internal URL of the unified test-runner sidecar
+	// container (e.g. "http://test-runner:9228/run-tests"). One container runs
+	// the backend, frontend (Jest + Playwright), mobile, and recognition test
+	// suites and returns a combined report — replacing what used to be separate
+	// api-tests/frontend-tests/mobile-tests sidecars. Preferred over AppDir.
+	TestRunnerURL string
 
 	// AppDir is the absolute path to the api/ source directory on the host.
-	// Used for local dev when BackendTestURL is unset (needs Go toolchain + source).
+	// Local-dev fallback for JUST the backend suite when TestRunnerURL is unset
+	// (needs Go toolchain + source) — the other suites need the sidecar's
+	// toolchains and report disabled without it.
 	AppDir string
-
-	// FrontendTestURL is the internal URL of the frontend-tests sidecar container.
-	// e.g. "http://frontend-tests:9229/run-tests"
-	// Leave empty to disable the Jest unit test runner.
-	FrontendTestURL string
-
-	// FrontendE2EURL is the internal URL of the Playwright E2E sidecar endpoint.
-	// e.g. "http://frontend-tests:9229/run-e2e"
-	// Leave empty to disable the E2E test runner.
-	FrontendE2EURL string
 
 	// ── Premium tier + SFS API key + PayPal ─────────────────────────────────
 	// SFSAPIKeyPepper is mixed into the argon2id hash of API key secrets so
@@ -80,15 +85,37 @@ type Config struct {
 
 	// PayPalClientID / Secret / WebhookID are the credentials of the PayPal
 	// application that processes one-time premium purchases. Configured via
-	// docs/paypal_setup.md.
+	// docs/paypal_setup.md. Always used at PayPal's live base URL — the
+	// primary/live client has no sandbox mode; use PayPalSandbox* below
+	// (via the admin-only session toggle) for testing.
 	PayPalClientID     string
 	PayPalClientSecret string
 	PayPalWebhookID    string
-	PayPalEnvironment  string // "sandbox" | "live"
 
-	// PremiumTierPriceCents is the one-time charge for the premium tier.
-	PremiumTierPriceCents int
-	PremiumTierCurrency   string // ISO 4217, e.g. "USD"
+	// PayPalSandboxClientID / Secret / WebhookID configure a second, always-
+	// sandbox PayPal client used only when an admin's session-scoped "sandbox
+	// payments" toggle (profile page) is on. Empty disables sandbox testing
+	// regardless of the toggle.
+	PayPalSandboxClientID     string
+	PayPalSandboxClientSecret string
+	PayPalSandboxWebhookID    string
+
+	// PremiumMonthlyPriceCents / PremiumAnnualPriceCents are the recurring
+	// premium plan prices, for display only — the actual charge amount is
+	// whatever each PayPal Plan (below) was configured with in the dashboard;
+	// keep these in sync with that when changing pricing.
+	PremiumMonthlyPriceCents int
+	PremiumAnnualPriceCents  int
+	PremiumTierCurrency      string // ISO 4217, e.g. "USD"
+
+	// PayPalPlanIDMonthly / PayPalPlanIDAnnual are the live PayPal Billing Plan
+	// ids created per docs/paypal_setup.md. PayPalSandboxPlanID* are their
+	// sandbox-app counterparts, used when the admin sandbox-payments toggle is
+	// on (mirrors the PayPalSandboxClientID pattern above).
+	PayPalPlanIDMonthly        string
+	PayPalPlanIDAnnual         string
+	PayPalSandboxPlanIDMonthly string
+	PayPalSandboxPlanIDAnnual  string
 
 	// ── Inbound email (SendGrid Inbound Parse) ──────────────────────────────
 	// EmailStoragePath is the absolute directory inbound emails are written to,
@@ -111,12 +138,16 @@ type Config struct {
 
 func loadConfig() Config {
 	quotaPct, _ := strconv.Atoi(getEnv("QUOTA_WARNING_THRESHOLD_PERCENT", "80"))
-	premiumPrice, _ := strconv.Atoi(getEnv("PREMIUM_TIER_PRICE_CENTS", "999"))
+	recognitionConcurrency, _ := strconv.Atoi(getEnv("RECOGNITION_CONCURRENCY", "2"))
+	recognitionMaxKeyframes, _ := strconv.Atoi(getEnv("RECOGNITION_MAX_KEYFRAMES", "20"))
+	recognitionFaceThreshold, _ := strconv.ParseFloat(getEnv("RECOGNITION_FACE_THRESHOLD", "0.50"), 64)
+	recognitionPetThreshold, _ := strconv.ParseFloat(getEnv("RECOGNITION_PET_THRESHOLD", "0.88"), 64)
+	premiumMonthlyPrice, _ := strconv.Atoi(getEnv("PREMIUM_MONTHLY_PRICE_CENTS", "100"))
+	premiumAnnualPrice, _ := strconv.Atoi(getEnv("PREMIUM_ANNUAL_PRICE_CENTS", "1000"))
 
-	paypalEnv          := getEnv("PAYPAL_ENV", "sandbox")
-	paypalClientID     := getEnv("PAYPAL_CLIENT_ID", "")
+	paypalClientID := getEnv("PAYPAL_CLIENT_ID", "")
 	paypalClientSecret := getEnv("PAYPAL_CLIENT_SECRET", "")
-	paypalWebhookID    := getEnv("PAYPAL_WEBHOOK_ID", "")
+	paypalWebhookID := getEnv("PAYPAL_WEBHOOK_ID", "")
 
 	return Config{
 		Port: getEnv("PORT", "8080"),
@@ -145,13 +176,20 @@ func loadConfig() Config {
 		CookieSecure: os.Getenv("COOKIE_SECURE") == "true",
 
 		PostfixInternalHost: requireEnv("POSTFIX_INTERNAL_HOST"),
-		MailFrom:          requireEnv("MAIL_FROM"),
-		MailDomain:        requireEnv("MAIL_DOMAIN"),
+		MailFrom:            requireEnv("MAIL_FROM"),
+		MailDomain:          requireEnv("MAIL_DOMAIN"),
 
 		AppBaseURL: requireEnv("APP_BASE_URL"),
 
 		KeyEncryptionKey:         requireEnv("KEY_ENCRYPTION_KEY"),
 		QuotaWarningThresholdPct: quotaPct,
+
+		RecognitionURL:           getEnv("RECOGNITION_URL", ""),
+		RecognitionToken:         getEnv("RECOGNITION_TOKEN", ""),
+		RecognitionConcurrency:   recognitionConcurrency,
+		RecognitionMaxKeyframes:  recognitionMaxKeyframes,
+		RecognitionFaceThreshold: recognitionFaceThreshold,
+		RecognitionPetThreshold:  recognitionPetThreshold,
 		DiskStatsPath:            getEnv("DISK_STATS_PATH", "/mnt/data"),
 		DiskStatsDriveLabel:      getEnv("DISK_STATS_DRIVE_LABEL", ""),
 
@@ -162,18 +200,25 @@ func loadConfig() Config {
 
 		PresignSecret: getEnvOrKey("PRESIGN_SECRET", "SESSION_KEY"),
 
-		BackendTestURL:  getEnv("BACKEND_TEST_URL", ""),
-		AppDir:          getEnv("APP_DIR", ""),
-		FrontendTestURL: getEnv("FRONTEND_TEST_URL", ""),
-		FrontendE2EURL:  getEnv("FRONTEND_E2E_URL", ""),
+		TestRunnerURL: getEnv("TEST_RUNNER_URL", ""),
+		AppDir:        getEnv("APP_DIR", ""),
 
-		SFSAPIKeyPepper:       requireEnv("SFS_API_KEY_PEPPER"),
-		PayPalClientID:        paypalClientID,
-		PayPalClientSecret:    paypalClientSecret,
-		PayPalWebhookID:       paypalWebhookID,
-		PayPalEnvironment:     paypalEnv,
-		PremiumTierPriceCents: premiumPrice,
-		PremiumTierCurrency:   getEnv("PREMIUM_TIER_CURRENCY", "USD"),
+		SFSAPIKeyPepper:           requireEnv("SFS_API_KEY_PEPPER"),
+		PayPalClientID:            paypalClientID,
+		PayPalClientSecret:        paypalClientSecret,
+		PayPalWebhookID:           paypalWebhookID,
+		PayPalSandboxClientID:     getEnv("PAYPAL_SANDBOX_CLIENT_ID", ""),
+		PayPalSandboxClientSecret: getEnv("PAYPAL_SANDBOX_CLIENT_SECRET", ""),
+		PayPalSandboxWebhookID:    getEnv("PAYPAL_SANDBOX_WEBHOOK_ID", ""),
+
+		PremiumMonthlyPriceCents: premiumMonthlyPrice,
+		PremiumAnnualPriceCents:  premiumAnnualPrice,
+		PremiumTierCurrency:      getEnv("PREMIUM_TIER_CURRENCY", "USD"),
+
+		PayPalPlanIDMonthly:        getEnv("PAYPAL_PLAN_ID_MONTHLY", ""),
+		PayPalPlanIDAnnual:         getEnv("PAYPAL_PLAN_ID_ANNUAL", ""),
+		PayPalSandboxPlanIDMonthly: getEnv("PAYPAL_SANDBOX_PLAN_ID_MONTHLY", ""),
+		PayPalSandboxPlanIDAnnual:  getEnv("PAYPAL_SANDBOX_PLAN_ID_ANNUAL", ""),
 
 		EmailStoragePath:      getEnv("EMAIL_STORAGE_PATH", "/home/app/service-worker-email"),
 		SendgridWebhookSecret: getEnv("SENDGRID_WEBHOOK_SECRET", ""),

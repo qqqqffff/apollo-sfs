@@ -1,4 +1,5 @@
 import { get, post } from './client'
+import type { StorageAllocationChangeDetails } from '../types/api'
 
 export type StorageType = 'nvme' | 'hdd'
 
@@ -56,14 +57,35 @@ export function formatCents(cents: number): string {
 
 // ── PayPal config ──────────────────────────────────────────────────────────────
 
+export interface PremiumPlanOption {
+  plan: 'monthly' | 'annual'
+  price_cents: number
+}
+
 export interface BillingConfig {
   paypal_client_id: string
   currency: string
   environment: 'sandbox' | 'live'
+  premium_plans: PremiumPlanOption[]
 }
 
 export function getBillingConfig() {
   return get<BillingConfig>('/billing/config')
+}
+
+// Browser-safe client token for the PayPal JS SDK v6 (the Apple Pay button).
+// Minted and cached server-side (POST /v1/oauth2/token with
+// response_type=client_token); domain-bound and SDK-init-only, so safe in the
+// browser by design. Environment follows the admin sandbox-payments toggle,
+// matching getBillingConfig().
+export interface PayPalClientTokenResult {
+  client_token: string
+  expires_in: number
+  environment: 'sandbox' | 'live'
+}
+
+export function getPayPalClientToken() {
+  return get<PayPalClientTokenResult>('/billing/client-token')
 }
 
 // ── Direct storage purchases (server-side create + capture) ───────────────────
@@ -78,11 +100,32 @@ export function createStorageOrder(planId: string, storageType: StorageType, ser
     plan_id: planId,
     storage_type: storageType,
     server_id: serverId,
+    // Tells the backend to build a browser-navigable return/cancel URL
+    // (rather than the mobile app's apollosfs:// deep link) for the
+    // redirect-based PayPal wallet checkout — see PayPalWalletRedirectButton.
+    platform: 'web',
   })
 }
 
 export function captureStorageOrder(orderId: string) {
   return post<{ new_quota_bytes: number }>(`/billing/storage/order/${orderId}/capture`)
+}
+
+// Direct storage purchase via Google Pay: created + captured server-side in one
+// call, then the quota is applied. Only valid for in-capacity direct purchases
+// (not the 50%-deposit expansion path or custom requests).
+export function chargeStorageGooglePay(
+  planId: string,
+  storageType: StorageType,
+  serverId: string,
+  googlePayToken: string,
+) {
+  return post<{ new_quota_bytes: number }>('/billing/storage/google-pay', {
+    plan_id: planId,
+    storage_type: storageType,
+    server_id: serverId,
+    google_pay_token: googlePayToken,
+  })
 }
 
 // ── Expansion requests (50% deposit; server-side create + capture) ────────────
@@ -104,6 +147,8 @@ export function createExpansionOrder(
     plan_id: planId,
     storage_type: storageType,
     server_id: serverId,
+    // See createStorageOrder's platform comment above.
+    platform: 'web',
     ...(customBytes ? { custom_bytes: customBytes } : {}),
   })
 }
@@ -204,11 +249,14 @@ export interface ExpansionRequest {
   completed_at: string | null
   cancellation_reason: string | null
   paypal_capture_id: string | null
-  // Latest invoice summary (admin listing, custom requests only).
+  // Latest invoice summary (custom requests only).
   invoice_number?: string
   invoice_status?: string
   invoice_sent_at?: string
   invoice_accept_due_at?: string
+  // Set only when the invoice was created with a review link — lets the
+  // owning user's orders page link straight to /invoice/:token in-app.
+  invoice_review_token?: string
 }
 
 export async function listMyExpansionRequests(): Promise<ExpansionRequest[]> {
@@ -230,10 +278,16 @@ export interface UserOrder {
   created_at: string
   captured_at: string | null
   refunded_at: string | null
+  // Set once the order's local quota/premium grant has been undone via the
+  // admin "Revert allocation" action or the 7-day sandbox auto-revert loop.
+  allocation_reverted_at: string | null
   plan_id?: string
   storage_type?: string
   bytes_added?: number
   server_name?: string
+  // Which PayPal instance this order was created against — 'sandbox' means it
+  // came from an admin's sandbox-payments toggle, not a real purchase.
+  environment: 'sandbox' | 'live'
 }
 
 export async function listMyOrders(): Promise<UserOrder[]> {
@@ -245,6 +299,9 @@ export async function listMyOrders(): Promise<UserOrder[]> {
 
 export type NotificationKind =
   | 'capacity_provisioned' | 'payment_required' | 'action_pending' | 'share_received'
+  | 'subscription_cancelled' | 'quota_changed' | 'email_backup_completed' | 'backup_stale'
+  // Admin-only categories (empty for non-admin users).
+  | 'invitation_accepted' | 'order_received' | 'email_received' | 'alarm_triggered'
 
 export interface AppNotification {
   id: string
@@ -253,6 +310,9 @@ export interface AppNotification {
   body: string
   link: string
   created_at: string
+  // Structured before/after breakdown — only set for quota_changed, rendered
+  // behind a "Breakdown" expand button.
+  details?: StorageAllocationChangeDetails
 }
 
 export async function listNotifications(): Promise<AppNotification[]> {
@@ -260,11 +320,25 @@ export async function listNotifications(): Promise<AppNotification[]> {
   return res.items ?? []
 }
 
+export async function dismissNotifications(ids: string[]): Promise<void> {
+  await post('/me/notifications/dismiss', { ids })
+}
+
+// dismissNotificationCategory dismisses every notification currently in the
+// given category (matching the bell's category headers, e.g. "Emails",
+// case-insensitively) — resolved and persisted server-side, so it also
+// clears any matching item the client hasn't fetched yet.
+export async function dismissNotificationCategory(category: string): Promise<void> {
+  await post(`/me/notifications/dismiss?category=${encodeURIComponent(category)}`)
+}
+
 // ── Pay-remaining (after admin marks the capacity expanded) ───────────────────
 
 export function createPayRemainingOrder(requestId: string) {
+  // platform=web query param (this endpoint takes no JSON body) — see
+  // createStorageOrder's platform comment above.
   return post<{ order_id: string; approval_url: string; remaining_cents: number }>(
-    `/billing/storage/expansion/${requestId}/pay-remaining/order`,
+    `/billing/storage/expansion/${requestId}/pay-remaining/order?platform=web`,
   )
 }
 

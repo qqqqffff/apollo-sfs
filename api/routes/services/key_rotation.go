@@ -150,14 +150,13 @@ func (s *KeyRotationService) RotateMasterKey(ctx context.Context) error {
 	log.Printf("key rotation: starting %s → %s", activeVer, newVer)
 	start := time.Now()
 
-	// ── Step 1: Create and activate new master key. ──────────────────────────
-	if err := s.enc.CreateAndActivateMasterKey(ctx, newVer); err != nil {
+	// ── Step 1 & 2: Retire old key and activate new key atomically. ─────────
+	// Both happen in a single DB transaction (see RetireAndCreateMasterKey):
+	// master_keys_one_active_idx permits only one active row at a time, so the
+	// old key must flip to "retiring" before the new row can be inserted as
+	// "active".
+	if err := s.enc.CreateAndActivateMasterKey(ctx, activeVer, newVer); err != nil {
 		return fmt.Errorf("rotate: create new key: %w", err)
-	}
-
-	// ── Step 2: Mark old key as retiring. ───────────────────────────────────
-	if err := s.queries.RetireMasterKey(ctx, activeVer, time.Now().UTC()); err != nil {
-		return fmt.Errorf("rotate: retire old key: %w", err)
 	}
 	log.Printf("key rotation: old key %s → retiring; new key %s → active", activeVer, newVer)
 

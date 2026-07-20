@@ -88,10 +88,35 @@ type stubQuerier struct {
 	depositOrderErr     error
 	consumeOrderFail    bool
 	consumeOrderErr     error
+	dismissedIDs        map[string]bool
+	dismissedIDsErr     error
+	dismissErr          error
+	dismissedCalls      [][]string
+	expansionRequests   []models.ServerExpansionRequest
+	activeSub           *models.PremiumSubscription
+	activeSubErr        error
+	// Admin storage allocation editor
+	drive                 *models.Drive
+	driveErr              error
+	server                *models.Server
+	serverErr             error
+	driveAvailBytes       int64
+	driveAvailErr         error
+	storageAllocations    []db.UserStorageAllocation
+	storageAllocationsErr error
+	saveAllocationsTotal  int64
+	saveAllocationsErr    error
+	quotaChangeNotifErr   error
+	recentQuotaChanges    []db.QuotaChangeNotification
+	recentQuotaChangesErr error
+	createFeedbackErr     error
 }
 
 func (s *stubQuerier) GetUserByUsername(_ context.Context, _ string) (*models.User, error) {
 	return s.user, s.userErr
+}
+func (s *stubQuerier) GetActiveSubscriptionForUser(_ context.Context, _ string) (*models.PremiumSubscription, error) {
+	return s.activeSub, s.activeSubErr
 }
 func (s *stubQuerier) GetActiveBan(_ context.Context, _ string) (*models.UserBan, error) {
 	return s.activeBan, s.activeBanErr
@@ -116,7 +141,7 @@ func (s *stubQuerier) CountActiveExpansionRequests(_ context.Context, _ string) 
 	return 0, nil
 }
 func (s *stubQuerier) ListUserExpansionRequests(_ context.Context, _ string) ([]models.ServerExpansionRequest, error) {
-	return nil, nil
+	return s.expansionRequests, nil
 }
 func (s *stubQuerier) GetLatestExpansionInvoice(_ context.Context, _ uuid.UUID) (*models.ExpansionInvoice, error) {
 	return nil, nil
@@ -124,11 +149,78 @@ func (s *stubQuerier) GetLatestExpansionInvoice(_ context.Context, _ uuid.UUID) 
 func (s *stubQuerier) ListSharesForRecipient(_ context.Context, _ string) ([]models.Share, error) {
 	return nil, nil
 }
+func (s *stubQuerier) ListRecentAdminCancelledSubscriptionsForUser(_ context.Context, _ string, _ time.Time) ([]models.PremiumSubscription, error) {
+	return nil, nil
+}
+func (s *stubQuerier) ListRecentlyAcceptedInvitations(_ context.Context, _ time.Time) ([]models.Invitation, error) {
+	return nil, nil
+}
+func (s *stubQuerier) ListRecentCapturedOrders(_ context.Context, _ time.Time, _ int) ([]db.AdminOrder, error) {
+	return nil, nil
+}
+func (s *stubQuerier) ListRecentUnreadInboundEmails(_ context.Context, _ time.Time, _ int) ([]models.InboundEmail, error) {
+	return nil, nil
+}
+func (s *stubQuerier) ListRecentlyFiredAlarmSubscriptions(_ context.Context, _ time.Time) ([]models.AlarmSubscription, error) {
+	return nil, nil
+}
+func (s *stubQuerier) ListDismissedNotificationIDs(_ context.Context, _ string) (map[string]bool, error) {
+	if s.dismissedIDsErr != nil {
+		return nil, s.dismissedIDsErr
+	}
+	if s.dismissedIDs == nil {
+		return map[string]bool{}, nil
+	}
+	return s.dismissedIDs, nil
+}
+func (s *stubQuerier) DismissNotifications(_ context.Context, _ string, ids []string) error {
+	if s.dismissErr != nil {
+		return s.dismissErr
+	}
+	s.dismissedCalls = append(s.dismissedCalls, ids)
+	return nil
+}
+func (s *stubQuerier) CreatePasswordChangeCode(_ context.Context, _, _ string, _ time.Time) error {
+	return nil
+}
+func (s *stubQuerier) ConsumePasswordChangeCode(_ context.Context, _, _ string) (bool, error) {
+	return true, nil
+}
 func (s *stubQuerier) GetUserStorageBreakdown(_ context.Context, _ string) (db.UserStorageBreakdown, error) {
 	return db.UserStorageBreakdown{}, nil
 }
 func (s *stubQuerier) GetUserStorageAllocations(_ context.Context, _, _ string) ([]db.UserStorageAllocation, error) {
+	return s.storageAllocations, s.storageAllocationsErr
+}
+func (s *stubQuerier) GetDrive(_ context.Context, _ uuid.UUID) (*models.Drive, error) {
+	return s.drive, s.driveErr
+}
+func (s *stubQuerier) GetServer(_ context.Context, _ uuid.UUID) (*models.Server, error) {
+	return s.server, s.serverErr
+}
+func (s *stubQuerier) GetDriveAvailableBytes(_ context.Context, _ uuid.UUID) (int64, error) {
+	return s.driveAvailBytes, s.driveAvailErr
+}
+func (s *stubQuerier) SaveUserDriveAllocations(_ context.Context, _ string, _ []db.SaveAllocationsParams) (int64, error) {
+	return s.saveAllocationsTotal, s.saveAllocationsErr
+}
+func (s *stubQuerier) InsertQuotaChangeNotification(_ context.Context, _ db.InsertQuotaChangeNotificationParams) error {
+	return s.quotaChangeNotifErr
+}
+func (s *stubQuerier) ListRecentQuotaChangeNotificationsForUser(_ context.Context, _ string, _ time.Time) ([]db.QuotaChangeNotification, error) {
+	return s.recentQuotaChanges, s.recentQuotaChangesErr
+}
+func (s *stubQuerier) ListRecentEmailBackupRunsForUser(_ context.Context, _ string, _ time.Time) ([]models.EmailBackupRun, error) {
 	return nil, nil
+}
+func (s *stubQuerier) GetLastGoogleBackupSync(_ context.Context, _ uuid.UUID) (*time.Time, error) {
+	return nil, nil
+}
+func (s *stubQuerier) GetLastEmailBackupSync(_ context.Context, _ string) (*time.Time, error) {
+	return nil, nil
+}
+func (s *stubQuerier) SetBackupStaleNotify(_ context.Context, _ string, enabled bool) (*models.UserPreferences, error) {
+	return &models.UserPreferences{BackupStaleNotify: enabled, ShowStorageButtons: true, StoragePromptEnabled: true}, nil
 }
 func (s *stubQuerier) AutoPardonExpiredSuspension(_ context.Context, _ string) error { return nil }
 func (s *stubQuerier) AddBannedIP(_ context.Context, _, _ string) error              { return nil }
@@ -192,6 +284,9 @@ func (s *stubQuerier) SearchFoldersByUser(_ context.Context, _ uuid.UUID, _ stri
 func (s *stubQuerier) SearchFilesByUser(_ context.Context, _ uuid.UUID, _ string, _ db.PageInput) (*db.PageResult[models.File], error) {
 	return &db.PageResult[models.File]{}, nil
 }
+func (s *stubQuerier) SearchRecognitionGroupsByUser(_ context.Context, _ uuid.UUID, _ string, _ db.PageInput) (*db.PageResult[db.RecognitionGroupSearchHit], error) {
+	return &db.PageResult[db.RecognitionGroupSearchHit]{Items: []db.RecognitionGroupSearchHit{}}, nil
+}
 func (s *stubQuerier) InsertAuditLog(_ context.Context, _ db.AuditInput) error { return nil }
 func (s *stubQuerier) ListAuditLogsForUser(_ context.Context, _ string, _ db.PageInput) (*db.PageResult[models.AuditLog], error) {
 	return &db.PageResult[models.AuditLog]{Items: []models.AuditLog{}}, nil
@@ -216,6 +311,21 @@ func (s *stubQuerier) DeltaSyncDeleted(_ context.Context, _ uuid.UUID, _ time.Ti
 }
 func (s *stubQuerier) FindFileByHash(_ context.Context, _ uuid.UUID, _ string) (*models.File, error) {
 	return nil, nil
+}
+func (s *stubQuerier) CreateFeedback(_ context.Context, userID uuid.UUID, username, category, message string) (*models.Feedback, error) {
+	if s.createFeedbackErr != nil {
+		return nil, s.createFeedbackErr
+	}
+	return &models.Feedback{
+		ID:        uuid.New(),
+		UserID:    userID,
+		Username:  username,
+		Category:  category,
+		Message:   message,
+		Status:    "new",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}, nil
 }
 
 // ── Stub InviteService (routes package) ───────────────────────────────────────
@@ -255,6 +365,11 @@ type stubAdminQuerier struct {
 	alarmSubs       []models.AlarmSubscription
 	alarmSubsErr    error
 	subscriptionErr error
+	// feedback review fields
+	feedback             []models.Feedback
+	feedbackErr          error
+	updateFeedbackErr    error
+	setFeedbackAccessErr error
 }
 
 func (s *stubAdminQuerier) ListUsers(_ context.Context, _ db.PageInput) (*db.PageResult[models.User], error) {
@@ -264,11 +379,24 @@ func (s *stubAdminQuerier) ListUsers(_ context.Context, _ db.PageInput) (*db.Pag
 	}
 	return &db.PageResult[models.User]{Items: items}, nil
 }
+func (s *stubAdminQuerier) ListAdminUsers(_ context.Context, _ db.ListUsersFilter, _, _ int) ([]models.User, int, error) {
+	if s.userErr != nil {
+		return nil, 0, s.userErr
+	}
+	items := s.users
+	if items == nil {
+		items = []models.User{}
+	}
+	return items, len(items), nil
+}
 func (s *stubAdminQuerier) GetUserByUsername(_ context.Context, _ string) (*models.User, error) {
 	return s.user, s.userErr
 }
 func (s *stubAdminQuerier) UpdateUserQuota(_ context.Context, _ string, _ int64) error {
 	return s.updateQuotaErr
+}
+func (s *stubAdminQuerier) SetUserFeedbackAccess(_ context.Context, _ string, _ bool) error {
+	return s.setFeedbackAccessErr
 }
 func (s *stubAdminQuerier) GetUserDrive(_ context.Context, _ string) (*models.UserDriveAllocation, error) {
 	return s.userDrive, s.userDriveErr
@@ -294,6 +422,32 @@ func (s *stubAdminQuerier) ListUserBans(_ context.Context, _ bool, _ db.PageInpu
 }
 func (s *stubAdminQuerier) GetDriveSummaries(_ context.Context) ([]models.DriveSummary, error) {
 	return []models.DriveSummary{}, nil
+}
+func (s *stubAdminQuerier) ListPricingServers(_ context.Context) ([]db.PricingServer, error) {
+	return []db.PricingServer{}, nil
+}
+func (s *stubAdminQuerier) ListPricingItems(_ context.Context, _ uuid.UUID) ([]models.PricingItem, error) {
+	return []models.PricingItem{}, nil
+}
+func (s *stubAdminQuerier) GetPricingItem(_ context.Context, _ uuid.UUID) (*models.PricingItem, error) {
+	return nil, nil
+}
+func (s *stubAdminQuerier) CreatePricingItem(_ context.Context, _ db.CreatePricingItemParams) (*models.PricingItem, error) {
+	return &models.PricingItem{ID: uuid.New()}, nil
+}
+func (s *stubAdminQuerier) UpdatePricingItem(_ context.Context, _ uuid.UUID, _ int64, _, _ int) (*models.PricingItem, error) {
+	return nil, nil
+}
+func (s *stubAdminQuerier) DeletePricingItem(_ context.Context, _ uuid.UUID) error { return nil }
+func (s *stubAdminQuerier) ListActivePricingDiscounts(_ context.Context, _ uuid.UUID) ([]models.PricingDiscount, error) {
+	return []models.PricingDiscount{}, nil
+}
+func (s *stubAdminQuerier) CreatePricingDiscount(_ context.Context, _ *models.PricingDiscount) error {
+	return nil
+}
+func (s *stubAdminQuerier) DeletePricingDiscount(_ context.Context, _ uuid.UUID) error { return nil }
+func (s *stubAdminQuerier) ListDiscountRecipients(_ context.Context, _ string, _ uuid.UUID, _ string, _ bool) ([]string, error) {
+	return nil, nil
 }
 func (s *stubAdminQuerier) GetMaxAvailableQuota(_ context.Context) (int64, error) { return 0, nil }
 func (s *stubAdminQuerier) CountServersByState(_ context.Context, _ string) (int, error) {
@@ -428,6 +582,19 @@ func (s *stubAdminQuerier) MarkInterestSubmissionProvisioned(_ context.Context, 
 }
 func (s *stubAdminQuerier) DenyInterestSubmission(_ context.Context, _ uuid.UUID, _ string) error {
 	return s.denyErr
+}
+func (s *stubAdminQuerier) ListFeedback(_ context.Context, _ string, _ db.PageInput) (*db.PageResult[models.Feedback], error) {
+	items := s.feedback
+	if items == nil {
+		items = []models.Feedback{}
+	}
+	return &db.PageResult[models.Feedback]{Items: items}, s.feedbackErr
+}
+func (s *stubAdminQuerier) UpdateFeedbackStatus(_ context.Context, id uuid.UUID, status string) (*models.Feedback, error) {
+	if s.updateFeedbackErr != nil {
+		return nil, s.updateFeedbackErr
+	}
+	return &models.Feedback{ID: id, Status: status}, nil
 }
 
 // ── Stub AdminInviteService ───────────────────────────────────────────────────
@@ -621,17 +788,17 @@ func newFolderHandler(folderSvc routes.FolderServicer) *routes.Handler {
 
 // newAdminHandler builds an admin.Handler with only querier and invite service set.
 func newAdminHandler(q admin.AdminQuerier, inv admin.AdminInviteService) *admin.Handler {
-	return admin.NewHandler(q, inv, nil, nil, nil, nil, nil, "", "", "", "", "", "", nil)
+	return admin.NewHandler(q, inv, nil, nil, nil, nil, nil, "", "", "", "", nil)
 }
 
 // newMetricsAdminHandler builds an admin.Handler wired with the given metrics stub.
 func newMetricsAdminHandler(q admin.AdminQuerier, m admin.MetricsServicer) *admin.Handler {
-	return admin.NewHandler(q, &stubAdminInviteService{}, m, nil, nil, nil, nil, "", "", "", "", "", "", nil)
+	return admin.NewHandler(q, &stubAdminInviteService{}, m, nil, nil, nil, nil, "", "", "", "", nil)
 }
 
 // newAdminHandlerWithFiles builds an admin.Handler wired with the given file service stub.
 func newAdminHandlerWithFiles(q admin.AdminQuerier, fileSvc routes.FileServicer) *admin.Handler {
-	return admin.NewHandler(q, &stubAdminInviteService{}, nil, nil, fileSvc, nil, nil, "", "", "", "", "", "", nil)
+	return admin.NewHandler(q, &stubAdminInviteService{}, nil, nil, fileSvc, nil, nil, "", "", "", "", nil)
 }
 
 // ── Stub MetricsService ───────────────────────────────────────────────────────
@@ -649,6 +816,10 @@ type stubMetricsService struct {
 	nodeDisksErr     error
 	nodeDiskTemps    []models.NodeDiskTempSnapshot
 	nodeDiskTempsErr error
+	driveIO          []models.DriveIOSnapshot
+	driveIOErr       error
+	nodeDiskIO       []models.NodeDiskIOSnapshot
+	nodeDiskIOErr    error
 	nodeStates       []models.NodeFrame
 }
 
@@ -684,10 +855,16 @@ func (s *stubMetricsService) GetNodeDisks(_ context.Context, _ uuid.UUID) ([]mod
 func (s *stubMetricsService) GetNodeDiskTempHistoryByHours(_ context.Context, _ uuid.UUID, _ int) ([]models.NodeDiskTempSnapshot, error) {
 	return s.nodeDiskTemps, s.nodeDiskTempsErr
 }
+func (s *stubMetricsService) GetDriveIOHistoryByHours(_ context.Context, _ uuid.UUID, _ int) ([]models.DriveIOSnapshot, error) {
+	return s.driveIO, s.driveIOErr
+}
+func (s *stubMetricsService) GetNodeDiskIOHistoryByHours(_ context.Context, _ uuid.UUID, _ int) ([]models.NodeDiskIOSnapshot, error) {
+	return s.nodeDiskIO, s.nodeDiskIOErr
+}
 func (s *stubMetricsService) NodeStates(_ context.Context) ([]models.NodeFrame, error) {
 	return s.nodeStates, nil
 }
-func (s *stubMetricsService) Hub() *services.Hub             { return nil }
+func (s *stubMetricsService) Hub() *services.Hub { return nil }
 
 // ── Stub FavServicer ──────────────────────────────────────────────────────────
 

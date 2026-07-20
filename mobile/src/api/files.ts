@@ -28,6 +28,8 @@ export interface ApiFolder {
   parent_id: string | null;
   name: string;
   kind: 'regular' | 'media';
+  // Premium AI face/pet/object indexing toggle (media collections only).
+  ai_recognition_enabled?: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -72,7 +74,7 @@ export async function uploadFile(
   return res.data;
 }
 
-function arrayBufferToBase64(buf: ArrayBuffer): string {
+export function arrayBufferToBase64(buf: ArrayBuffer): string {
   const bytes = new Uint8Array(buf);
   const chunks: string[] = [];
   for (let i = 0; i < bytes.length; i += 4096) {
@@ -141,6 +143,11 @@ export async function deleteFolder(folderID: string): Promise<void> {
 
 export interface UserPreferences {
   media_autoupload_folder_id: string | null;
+  // Show the "+" add-storage buttons on the client home page and upload modal.
+  show_storage_buttons?: boolean;
+  // Auto-open the storage upgrade modal when an upload would push usage past
+  // 75% of quota or exceed it.
+  storage_prompt_enabled?: boolean;
 }
 
 export async function getPreferences(): Promise<UserPreferences> {

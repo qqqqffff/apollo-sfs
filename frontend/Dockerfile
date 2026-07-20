@@ -8,6 +8,14 @@ COPY package.json package-lock.json ./
 RUN npm ci
 
 COPY . .
+
+# Build-time frontend configuration. Vite inlines VITE_* env vars into the
+# bundle, so these must be present at `npm run build` time, not at runtime.
+# The value comes from the root .env via deploy.sh (--build-arg); an empty
+# value just disables the Microsoft option in the email backup dialog.
+ARG VITE_MS_CLIENT_ID=""
+ENV VITE_MS_CLIENT_ID=$VITE_MS_CLIENT_ID
+
 RUN npm run build
 
 # ── Stage 2: Runtime ──────────────────────────────────────────────────────────

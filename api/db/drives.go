@@ -282,13 +282,16 @@ func (q *Queries) AutoSyncDriveCapacities(ctx context.Context, capacityBytes int
 	return nil
 }
 
-// SyncAllDriveCapacities updates capacity_bytes for ALL drives unconditionally.
-// Used at startup to ensure the stored capacity always reflects the actual disk size.
-func (q *Queries) SyncAllDriveCapacities(ctx context.Context, capacityBytes int64) error {
+// SyncDriveCapacitiesByType updates capacity_bytes for every active drive of
+// the given tier ("nvme" or "hdd"). Used at startup to refresh capacity from a
+// node-local disk stat — that stat only ever describes the tier physically
+// mounted on the node the caller is running on, so it must never be applied
+// across tiers (a node-local reading can't describe a drive on another node).
+func (q *Queries) SyncDriveCapacitiesByType(ctx context.Context, driveType string, capacityBytes int64) error {
 	_, err := q.db.ExecContext(ctx,
-		`UPDATE drives SET capacity_bytes = $1`, capacityBytes)
+		`UPDATE drives SET capacity_bytes = $1 WHERE drive_type = $2`, capacityBytes, driveType)
 	if err != nil {
-		return fmt.Errorf("SyncAllDriveCapacities: %w", err)
+		return fmt.Errorf("SyncDriveCapacitiesByType: %w", err)
 	}
 	return nil
 }
@@ -296,15 +299,15 @@ func (q *Queries) SyncAllDriveCapacities(ctx context.Context, capacityBytes int6
 // ── Capacity queries ──────────────────────────────────────────────────────────
 
 // GetDriveAvailableBytes returns the unallocated capacity on a drive:
-// capacity_bytes − SUM(storage_quota_bytes) for all users on this drive.
-// The result is the maximum additional quota that can be allocated here.
+// capacity_bytes − SUM(quota_bytes) of every user_drive_allocations row on
+// this drive. The result is the maximum additional quota that can be
+// allocated here.
 func (q *Queries) GetDriveAvailableBytes(ctx context.Context, driveID uuid.UUID) (int64, error) {
 	var avail int64
 	err := q.db.QueryRowContext(ctx, `
-		SELECT d.capacity_bytes - COALESCE(SUM(u.storage_quota_bytes), 0)
+		SELECT d.capacity_bytes - COALESCE(SUM(uda.quota_bytes), 0)
 		FROM drives d
 		LEFT JOIN user_drive_allocations uda ON uda.drive_id = d.id
-		LEFT JOIN users u ON u.username = uda.user_id
 		WHERE d.id = $1
 		GROUP BY d.capacity_bytes
 	`, driveID).Scan(&avail)
@@ -326,11 +329,10 @@ func (q *Queries) SelectDriveForQuota(ctx context.Context, quotaBytes int64) (*m
 		FROM drives d
 		JOIN servers s ON s.id = d.server_id
 		LEFT JOIN user_drive_allocations uda ON uda.drive_id = d.id
-		LEFT JOIN users u ON u.username = uda.user_id
 		WHERE d.is_active = true AND s.is_active = true
 		GROUP BY d.id
-		HAVING d.capacity_bytes - COALESCE(SUM(u.storage_quota_bytes), 0) >= $1
-		ORDER BY (d.capacity_bytes - COALESCE(SUM(u.storage_quota_bytes), 0)) ASC
+		HAVING d.capacity_bytes - COALESCE(SUM(uda.quota_bytes), 0) >= $1
+		ORDER BY (d.capacity_bytes - COALESCE(SUM(uda.quota_bytes), 0)) ASC
 		LIMIT 1
 	`, quotaBytes)
 	d, err := scanDrive(row)
@@ -352,9 +354,8 @@ func (q *Queries) GetMaxAvailableQuota(ctx context.Context) (int64, error) {
 		FROM drives d
 		JOIN servers s ON s.id = d.server_id
 		LEFT JOIN (
-			SELECT uda.drive_id, SUM(u.storage_quota_bytes) AS allocated
+			SELECT uda.drive_id, SUM(uda.quota_bytes) AS allocated
 			FROM user_drive_allocations uda
-			JOIN users u ON u.username = uda.user_id
 			GROUP BY uda.drive_id
 		) sub ON sub.drive_id = d.id
 		WHERE d.is_active = true AND s.is_active = true
@@ -375,7 +376,7 @@ func (q *Queries) GetUserDrive(ctx context.Context, username string) (*models.Us
 	var a models.UserDriveAllocation
 	err := q.db.QueryRowContext(ctx, `
 		SELECT
-			uda.user_id, uda.drive_id, uda.is_primary, uda.allocated_at,
+			uda.user_id, uda.drive_id, uda.is_primary, uda.quota_bytes, uda.allocated_at,
 			d.id, d.server_id, d.node_id, d.label, d.capacity_bytes, d.minio_bucket, d.drive_type, d.is_active, d.created_at,
 			s.id, s.name, s.state, s.minio_endpoint, s.minio_use_ssl,
 			s.minio_access_key_enc, s.minio_access_key_nonce,
@@ -390,7 +391,7 @@ func (q *Queries) GetUserDrive(ctx context.Context, username string) (*models.Us
 		ORDER BY uda.is_primary DESC, uda.allocated_at ASC
 		LIMIT 1
 	`, username).Scan(
-		&a.UserID, &a.DriveID, &a.IsPrimary, &a.AllocatedAt,
+		&a.UserID, &a.DriveID, &a.IsPrimary, &a.QuotaBytes, &a.AllocatedAt,
 		&a.Drive.ID, &a.Drive.ServerID, &a.Drive.NodeID, &a.Drive.Label, &a.Drive.CapacityBytes,
 		&a.Drive.MinioBucket, &a.Drive.DriveType, &a.Drive.IsActive, &a.Drive.CreatedAt,
 		&a.Server.ID, &a.Server.Name, &a.Server.State, &a.Server.MinioEndpoint,
@@ -459,6 +460,7 @@ type UserDriveInfo struct {
 	CapacityBytes  int64
 	DriveUsedBytes int64 // sum across all users on the drive
 	UserUsedBytes  int64 // this user's files on the drive
+	QuotaBytes     int64 // this user's own per-drive quota allocation
 	IsPrimary      bool
 	DriveIsActive  bool
 }
@@ -477,6 +479,7 @@ func (q *Queries) GetUserDrives(ctx context.Context, username, userID string) ([
 			d.capacity_bytes,
 			COALESCE(du.bytes, 0) AS drive_used,
 			COALESCE(uu.bytes, 0) AS user_used,
+			uda.quota_bytes,
 			uda.is_primary, d.is_active
 		FROM user_drive_allocations uda
 		JOIN drives d ON d.id = uda.drive_id
@@ -497,7 +500,7 @@ func (q *Queries) GetUserDrives(ctx context.Context, username, userID string) ([
 		if err := rows.Scan(
 			&d.DriveID, &d.ServerID, &d.ServerName, &d.ServerState, &d.ServerIsActive,
 			&d.DriveLabel, &d.DriveType, &d.CapacityBytes,
-			&d.DriveUsedBytes, &d.UserUsedBytes, &d.IsPrimary, &d.DriveIsActive,
+			&d.DriveUsedBytes, &d.UserUsedBytes, &d.QuotaBytes, &d.IsPrimary, &d.DriveIsActive,
 		); err != nil {
 			return nil, fmt.Errorf("GetUserDrives scan: %w", err)
 		}
@@ -519,6 +522,7 @@ type UserStorageAllocation struct {
 	DriveLabel    string
 	DriveType     string // "nvme" | "hdd"
 	CapacityBytes int64
+	QuotaBytes    int64 // this user's own per-drive quota allocation
 	UserUsedBytes int64 // this user's files on the drive
 	IsPrimary     bool
 }
@@ -533,6 +537,7 @@ func (q *Queries) GetUserStorageAllocations(ctx context.Context, username, userI
 			s.id, s.name, s.state,
 			d.node_id, COALESCE(n.hostname, ''),
 			d.id, d.label, d.drive_type, d.capacity_bytes,
+			uda.quota_bytes,
 			COALESCE(uu.bytes, 0) AS user_used,
 			uda.is_primary
 		FROM user_drive_allocations uda
@@ -558,7 +563,7 @@ func (q *Queries) GetUserStorageAllocations(ctx context.Context, username, userI
 			&a.ServerID, &a.ServerName, &a.ServerState,
 			&a.NodeID, &a.NodeHostname,
 			&a.DriveID, &a.DriveLabel, &a.DriveType, &a.CapacityBytes,
-			&a.UserUsedBytes, &a.IsPrimary,
+			&a.QuotaBytes, &a.UserUsedBytes, &a.IsPrimary,
 		); err != nil {
 			return nil, fmt.Errorf("GetUserStorageAllocations scan: %w", err)
 		}
@@ -567,10 +572,12 @@ func (q *Queries) GetUserStorageAllocations(ctx context.Context, username, userI
 	return out, rows.Err()
 }
 
-// AllocateUserToDrive sets a user's PRIMARY drive (used at registration and when
-// switching the primary). It clears any existing primary first, then upserts the
+// AllocateUserToDrive sets a user's PRIMARY drive (used at registration),
+// stamping quotaBytes as this allocation's own per-drive quota slice — at
+// registration time it's the user's whole initial quota, since this is their
+// only allocation. It clears any existing primary first, then upserts the
 // target as primary, all in one transaction to satisfy the one-primary index.
-func (q *Queries) AllocateUserToDrive(ctx context.Context, username string, driveID uuid.UUID) error {
+func (q *Queries) AllocateUserToDrive(ctx context.Context, username string, driveID uuid.UUID, quotaBytes int64) error {
 	tx, err := q.pool.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("AllocateUserToDrive: begin: %w", err)
@@ -584,10 +591,10 @@ func (q *Queries) AllocateUserToDrive(ctx context.Context, username string, driv
 		return fmt.Errorf("AllocateUserToDrive: clear primary: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO user_drive_allocations (user_id, drive_id, is_primary)
-		VALUES ($1, $2, true)
-		ON CONFLICT (user_id, drive_id) DO UPDATE SET is_primary = true, allocated_at = NOW()
-	`, username, driveID); err != nil {
+		INSERT INTO user_drive_allocations (user_id, drive_id, is_primary, quota_bytes)
+		VALUES ($1, $2, true, $3)
+		ON CONFLICT (user_id, drive_id) DO UPDATE SET is_primary = true, allocated_at = NOW(), quota_bytes = $3
+	`, username, driveID, quotaBytes); err != nil {
 		return fmt.Errorf("AllocateUserToDrive: upsert: %w", err)
 	}
 	return tx.Commit()
@@ -646,7 +653,7 @@ func (q *Queries) GetDriveSummaries(ctx context.Context) ([]models.DriveSummary,
 			d.label,
 			d.drive_type,
 			d.capacity_bytes, d.minio_bucket,
-			COALESCE(SUM(u.storage_quota_bytes), 0) AS allocated_quota_bytes,
+			COALESCE(SUM(uda.quota_bytes), 0)       AS allocated_quota_bytes,
 			COALESCE(SUM(u.storage_used_bytes), 0)  AS used_bytes,
 			d.is_active, s.is_active
 		FROM drives d
@@ -679,4 +686,80 @@ func (q *Queries) GetDriveSummaries(ctx context.Context) ([]models.DriveSummary,
 		out = append(out, ds)
 	}
 	return out, rows.Err()
+}
+
+// SaveAllocationsParams is one drive's desired end-state quota, as validated
+// by the caller (AdminUpdateUserStorageAllocations).
+type SaveAllocationsParams struct {
+	DriveID    uuid.UUID
+	QuotaBytes int64
+}
+
+// SaveUserDriveAllocations atomically replaces username's full set of drive
+// allocations with want: any existing allocation not present in want is
+// deleted, everything in want is upserted, primary is reassigned if the old
+// primary was removed (largest surviving quota_bytes wins, ties broken by
+// earliest allocated_at), and users.storage_quota_bytes is recomputed as the
+// new sum. All business-rule validation (capacity headroom, used-bytes
+// floor, "at least one allocation must remain") is the caller's
+// responsibility — this method trusts its input and only handles the
+// mechanical replace + primary-reassignment + aggregate-recompute. want must
+// be non-empty (the caller must enforce this).
+func (q *Queries) SaveUserDriveAllocations(ctx context.Context, username string, want []SaveAllocationsParams) (int64, error) {
+	tx, err := q.pool.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("SaveUserDriveAllocations: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	keepIDs := make([]uuid.UUID, len(want))
+	for i, w := range want {
+		keepIDs[i] = w.DriveID
+	}
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM user_drive_allocations
+		WHERE user_id = $1 AND NOT (drive_id = ANY($2::uuid[]))
+	`, username, pq.Array(keepIDs)); err != nil {
+		return 0, fmt.Errorf("SaveUserDriveAllocations: delete: %w", err)
+	}
+
+	for _, w := range want {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO user_drive_allocations (user_id, drive_id, quota_bytes, is_primary)
+			VALUES ($1, $2, $3, false)
+			ON CONFLICT (user_id, drive_id) DO UPDATE SET quota_bytes = EXCLUDED.quota_bytes
+		`, username, w.DriveID, w.QuotaBytes); err != nil {
+			return 0, fmt.Errorf("SaveUserDriveAllocations: upsert %s: %w", w.DriveID, err)
+		}
+	}
+
+	// Ensure exactly one primary: only fires when no surviving row is already
+	// primary (the old primary was just removed, or this is the user's very
+	// first allocation ever).
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE user_drive_allocations SET is_primary = true
+		WHERE user_id = $1
+		  AND NOT EXISTS (SELECT 1 FROM user_drive_allocations WHERE user_id = $1 AND is_primary)
+		  AND drive_id = (
+		      SELECT drive_id FROM user_drive_allocations
+		      WHERE user_id = $1
+		      ORDER BY quota_bytes DESC, allocated_at ASC
+		      LIMIT 1
+		  )
+	`, username); err != nil {
+		return 0, fmt.Errorf("SaveUserDriveAllocations: reassign primary: %w", err)
+	}
+
+	var total int64
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE(SUM(quota_bytes), 0) FROM user_drive_allocations WHERE user_id = $1
+	`, username).Scan(&total); err != nil {
+		return 0, fmt.Errorf("SaveUserDriveAllocations: sum: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE users SET storage_quota_bytes = $2 WHERE username = $1`, username, total,
+	); err != nil {
+		return 0, fmt.Errorf("SaveUserDriveAllocations: update aggregate: %w", err)
+	}
+	return total, tx.Commit()
 }

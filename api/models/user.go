@@ -18,7 +18,18 @@ type User struct {
 	IsAdmin           bool       `json:"is_admin" db:"is_admin"`
 	IsPremium         bool       `json:"is_premium" db:"is_premium"`
 	PremiumGrantedAt  *time.Time `json:"premium_granted_at" db:"premium_granted_at"`
+	// FeedbackAccessEnabled gates submission of the profile-page feedback form.
+	// Disabled by default; admins grant it per-user from the admin Feedback →
+	// Access tab.
+	FeedbackAccessEnabled bool `json:"feedback_access_enabled" db:"feedback_access_enabled"`
 	// ActiveBan is populated by the admin ListUsers query via a lateral join.
 	// It is nil when the user has no active ban or suspension.
 	ActiveBan *UserBan `json:"active_ban,omitempty"`
+	// PremiumSubscribed is true when the user has an active or suspended
+	// premium_subscriptions row of their own — as opposed to IsPremium, which
+	// is also true for every admin regardless of whether they ever subscribed
+	// (see middleware.RequireAuth's isAdmin-implies-isPremium override).
+	// Populated by ListUsers (lateral join) and Me (dedicated query);
+	// zero-value false everywhere else.
+	PremiumSubscribed bool `json:"premium_subscribed"`
 }

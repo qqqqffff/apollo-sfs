@@ -2,6 +2,7 @@ import { createFileRoute, useNavigate } from '@tanstack/react-router'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { MdBlock, MdLockClock, MdHome } from 'react-icons/md'
 import { logout } from '../api/auth'
+import { meQueryOptions } from '../api/me'
 import { AppIcon } from '../components/AppIcon'
 import { VIOLATION_CODES } from '../types/api'
 import type { AccountRestriction } from '../types/api'
@@ -28,6 +29,10 @@ function RouteComponent() {
     mutationFn: logout,
     onSettled: () => {
       sessionStorage.removeItem('apollo_restriction')
+      // Flip the shared `me` query synchronously before clearing the cache —
+      // see the comment in __root.tsx's session-expired handler for why
+      // clear() alone can leave `isAuthenticated` observers stale.
+      queryClient.setQueryData(meQueryOptions.queryKey, null)
       queryClient.clear()
       navigate({ to: '/login', search: { social_error: undefined, link_provider: undefined, link_email: undefined, link_username: undefined } })
     },

@@ -49,6 +49,8 @@ Files in `db/` are numbered and applied in order during initial container creati
 | `33_shares.sql` | `shares` | User-to-user file/folder shares (email-bound link tokens) |
 | `34_expansion_invoices.sql` | `expansion_invoices` | Invoices for custom capacity expansion requests |
 | `35_file_server_links.sql` | `file_server_links`, `file_server_link_locations` | Premium WebDAV mount links + enhanced-security location ledger |
+| `36_recognition.sql` | `recognition_jobs`, `recognition_detections`, `recognition_groups`, `recognition_group_members` | Premium AI recognition: durable indexing queue, per-file detections (embeddings as BYTEA, quota-counted encrypted crops), per-collection groups + memberships (RLS on all but the queue) |
+| `37_feedback.sql` | `feedback` | User feedback submitted from the profile page (category + free-text message), triaged by admins on the admin feedback page (`new` → `reviewed`/`archived`) |
 
 ## Migrations
 
@@ -75,7 +77,7 @@ To add a migration:
 
 ## Row-Level Security
 
-RLS is enabled on `files`, `folders`, `api_keys`, `api_key_scopes`, and `math_game_scores`. Before executing any query against those tables, the API calls:
+RLS is enabled on `files`, `folders`, `api_keys`, `api_key_scopes`, `math_game_scores`, `recognition_detections`, `recognition_groups`, and `recognition_group_members` (`recognition_jobs` deliberately has none — the background worker is its only consumer, mirroring `email_queue`). Before executing any query against those tables, the API calls:
 
 ```go
 db.Queries.ForUser(userID)

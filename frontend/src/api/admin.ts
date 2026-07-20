@@ -1,5 +1,5 @@
 import { del, get, patch, post, put } from './client'
-import type { AuditLog, BannedIP, FavoriteList, FolderContents, Invitation, InterestSubmission, InterestFormSettings, PageResult, ServerExpansionRequest, User, UserBan } from '../types/api'
+import type { AuditLog, BannedIP, Feedback, FeedbackStatus, FavoriteList, FolderContents, Invitation, InterestSubmission, InterestFormSettings, PageResult, ServerExpansionRequest, User, UserBan } from '../types/api'
 
 // ── Admin user file browsing ───────────────────────────────────────────────────
 
@@ -54,6 +54,7 @@ export interface AdminUserStorageAllocation {
   drive_label: string
   drive_type: 'nvme' | 'hdd'
   capacity_bytes: number
+  quota_bytes: number // this user's own slice of the drive, admin-editable
   used_bytes: number
   is_primary: boolean
 }
@@ -71,6 +72,28 @@ export function getAdminUserStorage(username: string) {
   return get<AdminUserStorage>(`/admin/users/${encodeURIComponent(username)}/storage`)
 }
 
+export interface StorageAllocationInput {
+  drive_id: string
+  quota_bytes: number
+}
+
+export interface StorageAllocationsViolation {
+  drive_id: string
+  code: 'used_exceeds_quota' | 'insufficient_capacity' | 'removal_blocked'
+  used_bytes?: number
+  requested_quota_bytes?: number
+  max_bytes?: number
+  drive_label?: string
+}
+
+// updateUserStorageAllocations saves the full desired set of a user's drive
+// allocations in one atomic request — see AdminUpdateUserStorageAllocations in
+// api/routes/admin_browse.go. A 409 response body's `violations` array uses
+// StorageAllocationsViolation's shape.
+export function updateUserStorageAllocations(username: string, body: { allocations: StorageAllocationInput[]; reason?: string }) {
+  return put<AdminUserStorage>(`/admin/users/${encodeURIComponent(username)}/storage/allocations`, body)
+}
+
 // ── Users ──────────────────────────────────────────────────────────────────────
 
 export function listUsers(cursor?: string, limit?: number) {
@@ -79,6 +102,42 @@ export function listUsers(cursor?: string, limit?: number) {
   if (limit) params.set('limit', String(limit))
   const qs = params.size ? `?${params}` : ''
   return get<PageResult<User>>(`/admin/users${qs}`)
+}
+
+export type UserRoleFilter = 'admin' | 'premium' | 'user'
+export type UserSortKey = 'username' | 'email' | 'role' | 'created_at' | 'last_seen_at'
+export type SortDir = 'asc' | 'desc'
+
+export type StorageTier = 'nvme' | 'hdd'
+
+export interface SearchUsersFilter {
+  search?: string
+  role?: UserRoleFilter
+  sort?: UserSortKey
+  dir?: SortDir
+  server_id?: string
+  tiers?: StorageTier[]
+  page?: number
+  page_size?: number
+}
+
+// searchAdminUsers backs the admin Users table: server-side search, role
+// filter, server/tier filter, column sort, and offset pagination — see
+// api/routes/admin/users.go SearchUsers. Distinct from
+// listUsers/adminUsersInfiniteQueryOptions above, which cursor-page through
+// every user unfiltered (used by the alarm subscription user picker).
+export function searchAdminUsers(filter: SearchUsersFilter = {}) {
+  const params = new URLSearchParams()
+  if (filter.search)    params.set('search',    filter.search)
+  if (filter.role)      params.set('role',      filter.role)
+  if (filter.sort)      params.set('sort',      filter.sort)
+  if (filter.dir)       params.set('dir',       filter.dir)
+  if (filter.server_id) params.set('server_id', filter.server_id)
+  if (filter.tiers)     for (const t of filter.tiers) params.append('tier', t)
+  if (filter.page)      params.set('page',      String(filter.page))
+  if (filter.page_size) params.set('page_size', String(filter.page_size))
+  const qs = params.toString()
+  return get<OffsetPage<User>>(`/admin/users/search${qs ? '?' + qs : ''}`)
 }
 
 export function getUser(username: string) {
@@ -91,6 +150,13 @@ export function updateUserQuota(username: string, quota_bytes: number) {
 
 export function updateUsername(username: string, newUsername: string) {
   return patch<{ message: string }>(`/admin/users/${username}/username`, { new_username: newUsername })
+}
+
+export function updateUserFeedbackAccess(username: string, enabled: boolean) {
+  return patch<{ message: string; feedback_access_enabled: boolean }>(
+    `/admin/users/${encodeURIComponent(username)}/feedback-access`,
+    { enabled },
+  )
 }
 
 // ── Invitations ────────────────────────────────────────────────────────────────
@@ -151,7 +217,9 @@ export interface MetricsSnapshot {
 }
 
 // DriveFrame is one drive's live figures within a node, as reported by that
-// node's agent and resolved to its registered drive_id.
+// node's agent and resolved to its registered drive_id. read_bytes/write_bytes
+// are cumulative I/O counters (like network_bytes_sent/recv) — diff consecutive
+// frames for a bytes/second rate.
 export interface DriveFrame {
   drive_id: string
   label: string
@@ -160,6 +228,8 @@ export interface DriveFrame {
   total_bytes: number
   used_bytes: number
   free_bytes: number
+  read_bytes: number
+  write_bytes: number
 }
 
 // NodeFrame is one node's latest hardware state within a MetricsFrame. online is
@@ -184,7 +254,9 @@ export interface NodeFrame {
 }
 
 // DiskFrame is one physical disk's live figures within a node, resolved to its
-// node_disks row (disk_id) so per-disk history can be fetched.
+// node_disks row (disk_id) so per-disk history can be fetched. read_bytes/
+// write_bytes are cumulative I/O counters — diff consecutive frames for a
+// bytes/second rate.
 export interface DiskFrame {
   disk_id: string
   label: string
@@ -193,6 +265,8 @@ export interface DiskFrame {
   total_bytes: number
   used_bytes: number
   free_bytes: number
+  read_bytes: number
+  write_bytes: number
 }
 
 // MetricsFrame is the per-tick WebSocket payload: a cluster snapshot plus a
@@ -220,6 +294,26 @@ export interface DriveTempSnapshot {
   id: string
   drive_id: string
   temp_celsius: number
+  sampled_at: string
+}
+
+// Per-drive read/write I/O history (downsampled), backing the drive-speed
+// carousel graph. read_bytes/write_bytes are cumulative counters — diff
+// adjacent points for bytes/second, same as network_bytes_sent/recv.
+export interface DriveIOSnapshot {
+  id: string
+  drive_id: string
+  read_bytes: number
+  write_bytes: number
+  sampled_at: string
+}
+
+// Per-physical-disk read/write I/O history (downsampled).
+export interface NodeDiskIOSnapshot {
+  id: string
+  disk_id: string
+  read_bytes: number
+  write_bytes: number
   sampled_at: string
 }
 
@@ -267,6 +361,14 @@ export function getNodeDisks(nodeId: string) {
 
 export function getNodeDiskTempsHistory(diskId: string, hours: number) {
   return get<NodeDiskTempSnapshot[]>(`/admin/system/disks/${diskId}/temps/history?hours=${hours}`)
+}
+
+export function getDriveIOHistory(driveId: string, hours: number) {
+  return get<DriveIOSnapshot[]>(`/admin/system/drives/${driveId}/io/history?hours=${hours}`)
+}
+
+export function getNodeDiskIOHistory(diskId: string, hours: number) {
+  return get<NodeDiskIOSnapshot[]>(`/admin/system/disks/${diskId}/io/history?hours=${hours}`)
 }
 
 export async function pingServer(): Promise<number> {
@@ -427,6 +529,21 @@ export function listUserBans(status: BanStatus, cursor?: string, limit?: number)
   return get<PageResult<UserBan>>(`/admin/bans?${params}`)
 }
 
+// ── Feedback review ────────────────────────────────────────────────────────────
+
+export function listFeedback(status?: FeedbackStatus, cursor?: string, limit?: number) {
+  const params = new URLSearchParams()
+  if (status) params.set('status', status)
+  if (cursor) params.set('cursor', cursor)
+  if (limit) params.set('limit', String(limit))
+  const qs = params.toString()
+  return get<PageResult<Feedback>>(`/admin/feedback${qs ? `?${qs}` : ''}`)
+}
+
+export function updateFeedbackStatus(id: string, status: FeedbackStatus) {
+  return patch<Feedback>(`/admin/feedback/${id}/status`, { status })
+}
+
 export const adminUserBansInfiniteQueryOptions = {
   queryKey: ['admin', 'bans'] as const,
   queryFn: ({ pageParam }: { pageParam: string | undefined }) =>
@@ -513,6 +630,8 @@ export interface TestRunResponse {
   backend: TestSuiteEntry
   frontend: TestSuiteEntry
   frontend_e2e: TestSuiteEntry
+  mobile: TestSuiteEntry
+  recognition: TestSuiteEntry
 }
 
 export function runTests() {
@@ -735,10 +854,17 @@ export interface AdminOrder {
   captured_at: string | null
   refund_id: string | null
   refunded_at: string | null
+  // Set once the order's local quota/premium grant has been undone via the
+  // "Revert allocation" action or the 7-day sandbox auto-revert loop —
+  // independent of refunded_at (no PayPal call is made).
+  allocation_reverted_at: string | null
   plan_id?: string
   storage_type?: string
   bytes_added?: number
   server_name?: string
+  // Which PayPal instance this order was created against — 'sandbox' orders
+  // came from an admin's sandbox-payments toggle, not a real customer.
+  environment: 'sandbox' | 'live'
 }
 
 export function listAdminOrders(opts: { search?: string; sort?: string; page?: number; page_size?: number } = {}) {
@@ -751,6 +877,69 @@ export function listAdminOrders(opts: { search?: string; sort?: string; page?: n
   return get<OffsetPage<AdminOrder>>(`/admin/orders${qs ? '?' + qs : ''}`)
 }
 
+// ── Premium subscriptions (admin, all users) ────────────────────────────────────
+
+export interface AdminSubscription {
+  id: string
+  username: string
+  plan: 'monthly' | 'annual'
+  status: 'approval_pending' | 'active' | 'suspended' | 'cancelled' | 'expired'
+  amount_cents: number
+  currency: string
+  payment_method: string
+  reference: string
+  invoice_number: string
+  created_at: string
+  current_period_end: string | null
+  cancelled_at: string | null
+  // Which PayPal instance this subscription was created against — 'sandbox'
+  // subscriptions came from an admin's sandbox-payments toggle.
+  environment: 'sandbox' | 'live'
+  // Set only by the admin "Cancel" action's prorated refund — null for
+  // subscriptions ended via the user's own self-service cancel (no refund)
+  // or a sandbox "Revert" (no PayPal call at all).
+  refund_id: string | null
+  refund_amount_cents: number | null
+  refunded_at: string | null
+  // Set only by the admin "Cancel" action — the required reason it was
+  // given, also surfaced to the user in their notification bar.
+  cancellation_reason: string | null
+}
+
+export function listAdminSubscriptions(opts: { search?: string; sort?: string; page?: number; page_size?: number } = {}) {
+  const params = new URLSearchParams()
+  if (opts.search)    params.set('search',    opts.search)
+  if (opts.sort)      params.set('sort',      opts.sort)
+  if (opts.page)      params.set('page',      String(opts.page))
+  if (opts.page_size) params.set('page_size', String(opts.page_size))
+  const qs = params.toString()
+  return get<OffsetPage<AdminSubscription>>(`/admin/subscriptions${qs ? '?' + qs : ''}`)
+}
+
 export function refundAdminOrder(type: 'premium' | 'storage', id: string) {
   return post<{ refund_id: string }>(`/admin/orders/${type}/${id}/refund`, {})
+}
+
+// Cancels an active/suspended subscription on PayPal's side and refunds the
+// prorated remainder of its current billing period — stronger than the
+// subscriber's own self-service cancel (which stops billing but refunds
+// nothing). Works for both live and sandbox subscriptions. reason is
+// required — it's shown to the cancelled user in their notification bar
+// alongside the refund amount.
+export function cancelAdminSubscription(id: string, reason: string) {
+  return post<{ refund_id: string | null; refund_amount_cents: number }>(`/admin/subscriptions/${id}/cancel`, { reason })
+}
+
+// Reverts a sandbox subscription's local premium grant without a PayPal call
+// — the recurring counterpart to revertAdminOrderAllocation. Only available
+// for sandbox subscriptions; live subscriptions must use cancelAdminSubscription.
+export function revertAdminSubscriptionAllocation(id: string) {
+  return post<{ ok: boolean }>(`/admin/subscriptions/${id}/revert-allocation`, {})
+}
+
+// Reverts the local quota/premium grant of a captured sandbox order without
+// a PayPal refund. Separate from refundAdminOrder — see RevertAllocation
+// in api/routes/orders/handler.go for why the two stay independent.
+export function revertAdminOrderAllocation(type: 'premium' | 'storage', id: string) {
+  return post<{ ok: boolean }>(`/admin/orders/${type}/${id}/revert-allocation`, {})
 }

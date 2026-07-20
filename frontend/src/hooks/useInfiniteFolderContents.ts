@@ -3,7 +3,7 @@ import { useInfiniteQuery } from '@tanstack/react-query'
 import { listRoot, getFolder } from '../api/folders'
 import { adminListUserRoot, adminGetUserFolder } from '../api/admin'
 import { searchContent } from '../api/search'
-import type { Folder, File, FolderContents } from '../types/api'
+import type { Folder, File, FolderContents, RecognitionGroupSearchHit, SearchResults } from '../types/api'
 
 // Opaque page param tracking independent cursor state for the two sub-lists.
 interface PageParam {
@@ -33,7 +33,11 @@ function fetchPage(folderId: string | 'root', search: string, param: PageParam, 
       ? adminListUserRoot(asUsername, p)
       : adminGetUserFolder(asUsername, folderId, p)
   }
-  if (search) return searchContent(search, p)
+  if (search) {
+    // Recognition-group matches only accompany the first page.
+    const firstPage = !param.folderCursor && !param.fileCursor
+    return searchContent(search, { ...p, groupLimit: firstPage ? undefined : 0 })
+  }
   return folderId === 'root' ? listRoot(p) : getFolder(folderId, p)
 }
 
@@ -50,6 +54,9 @@ export interface InfiniteFolderContents {
   folder: Folder | null
   folders: Folder[]
   files: File[]
+  // Labeled AI-recognition groups matching a search (premium only; empty for
+  // plain folder listings).
+  recognitionGroups: RecognitionGroupSearchHit[]
   isLoading: boolean
   error: Error | null
   hasNextPage: boolean
@@ -89,6 +96,7 @@ export function useInfiniteFolderContents(
     folder: data?.pages[0]?.folder ?? null,
     folders: data?.pages.flatMap((p) => p.subfolders.items) ?? [],
     files: data?.pages.flatMap((p) => p.files.items) ?? [],
+    recognitionGroups: (data?.pages[0] as SearchResults | undefined)?.recognition_groups?.items ?? [],
     isLoading: query.isLoading,
     error: query.error,
     hasNextPage: query.hasNextPage ?? false,

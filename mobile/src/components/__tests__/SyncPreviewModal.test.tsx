@@ -20,6 +20,18 @@ function item(id: string, sizeBytes: number, date: Date): PreviewItem {
 const NOW = new Date('2026-06-11T12:00:00Z');
 const YESTERDAY = new Date('2026-06-10T12:00:00Z');
 
+// dayLabel() in SyncPreviewModal compares item timestamps against the real
+// wall clock (`new Date()`) to decide "Today" vs "Yesterday" vs a full date.
+// Freeze the clock at NOW so those fixtures always land on "Today"/"Yesterday"
+// regardless of when the test suite actually runs.
+beforeAll(() => {
+  jest.useFakeTimers({ now: NOW });
+});
+
+afterAll(() => {
+  jest.useRealTimers();
+});
+
 // Three items: 2 from today, 1 from yesterday. Total = 3.5 MB.
 const THREE_ITEMS: PreviewItem[] = [
   item('a', 1 * MB, NOW),
@@ -101,7 +113,7 @@ describe('quota warning', () => {
       usedBytes: 7 * MB,
       quotaBytes: 10 * MB,
     });
-    expect(getByText(/exceed 75%/i)).toBeTruthy();
+    expect(getByText(/exceeds your 75% cap/i)).toBeTruthy();
   });
 
   it('shows Override button in warning strip', () => {
@@ -121,7 +133,7 @@ describe('quota warning', () => {
       quotaBytes: 10 * MB,
     });
     fireEvent.press(getByText('Override'));
-    expect(queryByText(/exceed 75%/i)).toBeNull();
+    expect(queryByText(/exceeds your 75% cap/i)).toBeNull();
   });
 
   it('hides Override button once override is active', () => {
@@ -134,17 +146,20 @@ describe('quota warning', () => {
     expect(queryByText('Override')).toBeNull();
   });
 
-  it('keeps warning when projected exceeds even the full quota', () => {
-    // usedBytes=9.5MB + 1.8MB items → 11.3MB > 10MB → still over after override
+  it('shows the over-quota upgrade banner (not the 75% cap warning) once usage exceeds the full quota', () => {
+    // usedBytes=9.5MB + 1.8MB items → 11.3MB > 10MB full quota. Once the hard
+    // quota itself is exceeded, the upgrade banner takes over from the 75%
+    // cap warning — overriding the soft cap can't fix being over quota.
     const { getByText, queryByText } = renderModal({
       items: OVER_CAP_ITEMS,
       usedBytes: 9.5 * MB,
       quotaBytes: 10 * MB,
     });
-    expect(getByText(/exceed 75%/i)).toBeTruthy();
+    expect(getByText(/get more storage/i)).toBeTruthy();
+    expect(queryByText(/exceeds your 75% cap/i)).toBeNull();
     fireEvent.press(getByText('Override'));
-    // Now cap is 100%, still over → different warning message
-    expect(queryByText(/full quota/i)).toBeTruthy();
+    // Overriding the soft cap doesn't change anything once truly over quota.
+    expect(getByText(/get more storage/i)).toBeTruthy();
   });
 });
 
@@ -162,13 +177,16 @@ describe('Start Sync button', () => {
     expect(getByText('No photos selected')).toBeTruthy();
   });
 
-  it('shows "Over quota" label when over cap', () => {
+  it('shows "Over limit" label when over the 75% cap but under the full quota', () => {
+    // usedBytes=7MB + 1.8MB items → 8.8MB, over the 7.5MB (75%) cap but under
+    // the 10MB quota — isOverQuota is false, so this is the "Over limit" label,
+    // not "Over quota" (that only applies once the full quota is exceeded).
     const { getByText } = renderModal({
       items: OVER_CAP_ITEMS,
       usedBytes: 7 * MB,
       quotaBytes: 10 * MB,
     });
-    expect(getByText('Over quota — reduce selection')).toBeTruthy();
+    expect(getByText('Over limit — adjust slider or reduce selection')).toBeTruthy();
   });
 
   it('calls onConfirm with all items when pressed while under cap', () => {
@@ -184,7 +202,7 @@ describe('Start Sync button', () => {
       usedBytes: 7 * MB,
       quotaBytes: 10 * MB,
     });
-    fireEvent.press(getByText('Over quota — reduce selection'));
+    fireEvent.press(getByText('Over limit — adjust slider or reduce selection'));
     expect(onConfirm).not.toHaveBeenCalled();
   });
 
@@ -255,32 +273,53 @@ describe('All / None header button', () => {
   });
 });
 
-// ── Date-group Select / Deselect ──────────────────────────────────────────────
+// ── Date-group double-tap toggle ──────────────────────────────────────────────
+// Section headers no longer have separate Select/Deselect buttons — double-
+// tapping the header (within 350ms, per handleSectionHeaderPress) toggles the
+// whole group's selection instead.
 
 describe('date group toggle', () => {
-  it('renders a Deselect button for each date group', () => {
-    const { getAllByText } = renderModal();
-    // Two date groups (today + yesterday) each with a Deselect button
-    expect(getAllByText('Deselect')).toHaveLength(2);
+  it('renders a selection count for each date group', () => {
+    const { getByText } = renderModal();
+    // Today = items a + b (both selected), Yesterday = item c (selected)
+    expect(getByText('2/2')).toBeTruthy();
+    expect(getByText('1/1')).toBeTruthy();
   });
 
-  it('deselects all items in a group', () => {
-    const { getAllByText, getByText } = renderModal();
-    // Press Deselect on the first group (Today = items a + b)
-    fireEvent.press(getAllByText('Deselect')[0]);
+  it('deselects all items in a group on double-tap', () => {
+    const { getByText } = renderModal();
+    // "Today" also appears in the horizontally-scrollable date-nav pills, so
+    // target the section header via its count text ("2/2"), which is unique
+    // to it — pressing bubbles up to the header's Pressable, same as pressing
+    // a row's filename bubbles up to its TouchableOpacity elsewhere in this file.
+    const header = getByText('2/2');
+    fireEvent.press(header); // baseline tap
+    fireEvent.press(header); // within the double-tap window → toggles the group off
     expect(getByText('1 of 3 photos')).toBeTruthy();
   });
 
-  it('shows Select button after group is deselected', () => {
-    const { getAllByText } = renderModal();
-    fireEvent.press(getAllByText('Deselect')[0]);
-    expect(getAllByText('Select').length).toBeGreaterThanOrEqual(1);
+  it('shows a "double-tap to select all" hint after a group is deselected', () => {
+    const { getByText, getAllByText } = renderModal();
+    // "Today" also appears in the horizontally-scrollable date-nav pills, so
+    // target the section header via its count text ("2/2"), which is unique
+    // to it — pressing bubbles up to the header's Pressable, same as pressing
+    // a row's filename bubbles up to its TouchableOpacity elsewhere in this file.
+    const header = getByText('2/2');
+    fireEvent.press(header);
+    fireEvent.press(header);
+    expect(getAllByText(/double-tap to select all/i).length).toBeGreaterThanOrEqual(1);
   });
 
-  it('reselects all items in a group', () => {
-    const { getAllByText, getByText } = renderModal();
-    fireEvent.press(getAllByText('Deselect')[0]);
-    fireEvent.press(getAllByText('Select')[0]);
+  it('reselects all items in a group after a second double-tap', () => {
+    const { getByText } = renderModal();
+    // "Today" also appears in the horizontally-scrollable date-nav pills, so
+    // target the section header via its count text ("2/2"), which is unique
+    // to it — pressing bubbles up to the header's Pressable, same as pressing
+    // a row's filename bubbles up to its TouchableOpacity elsewhere in this file.
+    const header = getByText('2/2');
+    fireEvent.press(header); // baseline tap
+    fireEvent.press(header); // toggles the group off
+    fireEvent.press(header); // toggles it back on
     expect(getByText('3 of 3 photos')).toBeTruthy();
   });
 });
@@ -295,10 +334,11 @@ describe('sort mode', () => {
   });
 
   it('shows section headers in date mode', () => {
-    // TODAY and YESTERDAY groups should produce section headers
+    // "Today"/"Yesterday" appear both in the date-nav pills and the section
+    // headers themselves — just confirm each label is present at all.
     const { getAllByText } = renderModal();
-    // Each date section has a Deselect button, verifying sections exist
-    expect(getAllByText('Deselect')).toHaveLength(2);
+    expect(getAllByText('Today').length).toBeGreaterThanOrEqual(1);
+    expect(getAllByText('Yesterday').length).toBeGreaterThanOrEqual(1);
   });
 
   it('renders all items in size mode', () => {
@@ -311,10 +351,10 @@ describe('sort mode', () => {
   });
 
   it('hides date section headers in size mode', () => {
-    const { queryAllByText, getByText } = renderModal();
+    const { queryByText, getByText } = renderModal();
     fireEvent.press(getByText('Size'));
-    // No Deselect buttons (those only appear in date section headers)
-    expect(queryAllByText('Deselect')).toHaveLength(0);
+    expect(queryByText('Today')).toBeNull();
+    expect(queryByText('Yesterday')).toBeNull();
   });
 });
 

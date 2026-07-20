@@ -15,9 +15,11 @@ type StorageInfo struct {
 }
 
 // StorageInspector reads buckets and capacity from a MinIO instance via its
-// admin API. It is an interface so the sync handler can be tested with a fake.
+// admin API, and can provision buckets on it. It is an interface so the sync
+// handler can be tested with a fake.
 type StorageInspector interface {
 	Inspect(ctx context.Context, endpoint, accessKey, secretKey string, useSSL bool) (StorageInfo, error)
+	EnsureBucket(ctx context.Context, endpoint, accessKey, secretKey string, useSSL bool, bucket string) error
 }
 
 // minioStorageInspector is the production StorageInspector backed by the MinIO
@@ -62,4 +64,14 @@ func (minioStorageInspector) Inspect(ctx context.Context, endpoint, accessKey, s
 	}
 
 	return StorageInfo{Buckets: buckets, TotalBytes: total}, nil
+}
+
+// EnsureBucket creates the named bucket on the given MinIO instance if it does
+// not already exist.
+func (minioStorageInspector) EnsureBucket(ctx context.Context, endpoint, accessKey, secretKey string, useSSL bool, bucket string) error {
+	client, err := NewMinIOClient(endpoint, accessKey, secretKey, useSSL)
+	if err != nil {
+		return fmt.Errorf("minio admin: client %s: %w", endpoint, err)
+	}
+	return EnsureBucket(ctx, client, bucket)
 }

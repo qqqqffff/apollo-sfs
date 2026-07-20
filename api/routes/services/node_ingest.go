@@ -75,17 +75,26 @@ func (s *NodeIngestService) UpdateNodeMetrics(ctx context.Context, p *models.Nod
 			CapacityBytes: dp.TotalBytes,
 			UsedBytes:     dp.UsedBytes,
 			FreeBytes:     dp.FreeBytes,
+			ReadBytes:     dp.ReadBytes,
+			WriteBytes:    dp.WriteBytes,
 			TempCelsius:   dp.TempCelsius,
 		})
 		if err != nil {
 			log.Printf("node-ingest: upsert node disk %q: %v", dp.Label, err)
-		} else if dp.TempCelsius != nil {
-			if err := s.queries.InsertNodeDiskTemp(ctx, disk.ID, *dp.TempCelsius, now); err != nil {
-				log.Printf("node-ingest: insert node disk temp: %v", err)
+		} else {
+			if dp.TempCelsius != nil {
+				if err := s.queries.InsertNodeDiskTemp(ctx, disk.ID, *dp.TempCelsius, now); err != nil {
+					log.Printf("node-ingest: insert node disk temp: %v", err)
+				}
+			}
+			// Read/write counters are always present (unlike temperature, which is
+			// nullable when no sensor is accessible), so this is unconditional.
+			if err := s.queries.InsertNodeDiskIO(ctx, disk.ID, dp.ReadBytes, dp.WriteBytes, now); err != nil {
+				log.Printf("node-ingest: insert node disk io: %v", err)
 			}
 		}
 
-		// Logical-drive temperature: only disks whose label backs a registered
+		// Logical-drive telemetry: only disks whose label backs a registered
 		// drive on this node carry a drive_id for the infrastructure view.
 		sum, ok := byLabel[dp.Label]
 		if !ok {
@@ -95,6 +104,9 @@ func (s *NodeIngestService) UpdateNodeMetrics(ctx context.Context, p *models.Nod
 			if err := s.queries.InsertDriveTemp(ctx, sum.DriveID, *dp.TempCelsius, now); err != nil {
 				log.Printf("node-ingest: insert drive temp: %v", err)
 			}
+		}
+		if err := s.queries.InsertDriveIO(ctx, sum.DriveID, dp.ReadBytes, dp.WriteBytes, now); err != nil {
+			log.Printf("node-ingest: insert drive io: %v", err)
 		}
 	}
 

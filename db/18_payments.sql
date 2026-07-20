@@ -12,13 +12,17 @@ CREATE TABLE payments (
     amount_cents       INTEGER     NOT NULL,
     currency           TEXT        NOT NULL,
     status             TEXT        NOT NULL CHECK (status IN ('created', 'approved', 'captured', 'refunded', 'failed')),
-    payment_method     TEXT        NOT NULL CHECK (payment_method IN ('apple_pay', 'card')),
+    payment_method     TEXT        NOT NULL CHECK (payment_method IN ('apple_pay', 'card', 'paypal')),
     created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     captured_at        TIMESTAMPTZ,
     -- Admin refunds (90-day window from capture).
     refund_id          TEXT,
     refunded_at        TIMESTAMPTZ,
-    raw_webhook        JSONB
+    raw_webhook        JSONB,
+    -- Which PayPal environment this order was created against (admin sandbox
+    -- payments toggle). Stamped at creation so later captures/refunds always
+    -- use the matching client.
+    environment        TEXT        NOT NULL DEFAULT 'live' CHECK (environment IN ('sandbox', 'live'))
 );
 
 CREATE INDEX payments_username_idx        ON payments (username);

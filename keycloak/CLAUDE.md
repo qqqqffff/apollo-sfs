@@ -1,6 +1,6 @@
 # Keycloak
 
-Keycloak 26.0.7 is the OpenID Connect identity provider for Apollo SFS. It handles all authentication: password login, social login (Google, Apple), brute-force protection, token issuance, and user federation.
+Keycloak 26.0.7 is the OpenID Connect identity provider for Apollo SFS. It handles all authentication: password login, social login (Google, Apple, Microsoft), brute-force protection, token issuance, and user federation.
 
 Keycloak runs as a Docker service on the manager node (standard tier) with its own dedicated PostgreSQL database (`db-keycloak`).
 
@@ -64,6 +64,12 @@ Assign roles via the Keycloak admin console or the Admin REST API.
 - OAuth 2.0 Client ID and Secret from Google Cloud Console
 - Redirect URI: `https://auth.apollo-sfs.com/realms/apollo-sfs-realm/broker/google/endpoint`
 - Email is mapped to Keycloak's email attribute; first-time login creates a linked account
+
+**Microsoft**
+- Built-in Keycloak social provider (alias must be `microsoft`)
+- Azure AD app registration (multitenant + personal accounts) — client ID and secret from the Azure Portal
+- Redirect URI (Web platform): `https://auth.apollo-sfs.com/realms/apollo-sfs-realm/broker/microsoft/endpoint`
+- Setup steps: `keycloak/KC_setup.md` §4 — done entirely via the admin console, no restart needed
 
 ### SMTP
 

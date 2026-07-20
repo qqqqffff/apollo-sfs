@@ -1,11 +1,33 @@
 import { post, get } from './client'
 
+export interface PublicPremiumPlanOption {
+  plan: 'monthly' | 'annual'
+  price_cents: number
+}
+
 export interface PublicConfig {
   turnstile_site_key: string
+  // Public PayPal config for the hosted card fields SDK on the (unauthenticated)
+  // interest and register pages. Always the live client id.
+  paypal_client_id?: string
+  paypal_currency?: string
+  paypal_environment?: string
+  // Recurring premium plan prices — shown on the register page's inline
+  // premium subscribe flow.
+  premium_plans?: PublicPremiumPlanOption[]
 }
 
 export function getPublicConfig() {
   return get<PublicConfig>('/config')
+}
+
+// Unauthenticated counterpart of getPayPalClientToken (api/billing.ts) for the
+// public interest page's Apple Pay button — always the live client, like
+// getPublicConfig above.
+export function getPublicPayPalClientToken() {
+  return get<{ client_token: string; expires_in: number; environment: 'sandbox' | 'live' }>(
+    '/config/paypal-client-token',
+  )
 }
 
 export type StorageType = 'nvme' | 'hdd'
@@ -36,14 +58,6 @@ export function createInterestDepositOrder(planId: string, storageType: StorageT
 
 export function captureInterestDepositOrder(orderId: string) {
   return post<{ capture_id: string; status: string }>(`/interest/deposit/orders/${orderId}/capture`)
-}
-
-export function validateApplePayMerchantForDeposit(validationURL: string) {
-  return post<object>('/interest/deposit/apple-pay/validate', { validation_url: validationURL })
-}
-
-export function createApplePayInterestDeposit(planId: string, storageType: StorageType, paymentToken: string) {
-  return post<{ order_id: string }>('/interest/deposit/orders/apple-pay', { plan_id: planId, storage_type: storageType, payment_token: paymentToken })
 }
 
 export function createGooglePayInterestDeposit(planId: string, storageType: StorageType, paymentToken: string) {

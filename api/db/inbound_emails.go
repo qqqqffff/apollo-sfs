@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -24,6 +25,34 @@ func scanInboundEmail(rows *sql.Rows) (*models.InboundEmail, error) {
 		e.MessageID = &messageID.String
 	}
 	return &e, nil
+}
+
+// ListRecentUnreadInboundEmails returns unread inbound emails received since
+// the given time, newest first. Backs the admin notification bell's
+// "email received" category.
+func (q *Queries) ListRecentUnreadInboundEmails(ctx context.Context, since time.Time, limit int) ([]models.InboundEmail, error) {
+	rows, err := q.db.QueryContext(ctx, `
+		SELECT id, worker_name, message_id, from_addr, to_addr,
+		       subject, file_path, has_attachments, read, received_at
+		FROM inbound_emails
+		WHERE read = false AND received_at >= $1
+		ORDER BY received_at DESC
+		LIMIT $2
+	`, since, limit)
+	if err != nil {
+		return nil, fmt.Errorf("ListRecentUnreadInboundEmails: %w", err)
+	}
+	defer rows.Close()
+
+	var emails []models.InboundEmail
+	for rows.Next() {
+		e, err := scanInboundEmail(rows)
+		if err != nil {
+			return nil, fmt.Errorf("ListRecentUnreadInboundEmails scan: %w", err)
+		}
+		emails = append(emails, *e)
+	}
+	return emails, rows.Err()
 }
 
 // InsertInboundEmail persists an index row for a received email. The full

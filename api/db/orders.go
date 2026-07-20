@@ -26,8 +26,17 @@ type AdminOrder struct {
 	CapturedAt    *time.Time `json:"captured_at"`
 	RefundID      *string    `json:"refund_id"`
 	RefundedAt    *time.Time `json:"refunded_at"`
+	// AllocationRevertedAt is set when the local quota/premium grant was
+	// undone (admin "Revert allocation" button or the 7-day auto-revert
+	// loop) without a PayPal refund — sandbox orders only. Independent of
+	// RefundedAt.
+	AllocationRevertedAt *time.Time `json:"allocation_reverted_at"`
 	// PayPalCaptureID backs the refund action (never rendered).
 	PayPalCaptureID *string `json:"-"`
+	// Environment is which PayPal instance ("sandbox" | "live") this order was
+	// created against, so refunds route to the matching client and the UI can
+	// flag sandbox test orders as distinct from real revenue.
+	Environment string `json:"environment"`
 
 	// Storage order details (zero-valued for premium payments).
 	PlanID      string `json:"plan_id,omitempty"`
@@ -44,7 +53,7 @@ const adminOrdersBase = `
 	       p.amount_cents::bigint AS amount_cents, p.currency, p.payment_method,
 	       p.paypal_order_id AS reference,
 	       'ORD-' || to_char(p.created_at, 'YYMMDD') || '-' || upper(left(replace(p.id::text,'-',''), 6)) AS invoice_number,
-	       p.created_at, p.captured_at, p.refund_id, p.refunded_at, p.paypal_capture_id,
+	       p.created_at, p.captured_at, p.refund_id, p.refunded_at, p.allocation_reverted_at, p.paypal_capture_id, p.environment,
 	       '' AS plan_id, '' AS storage_type, 0::bigint AS bytes_added, '' AS server_name
 	FROM payments p
 	UNION ALL
@@ -52,7 +61,7 @@ const adminOrdersBase = `
 	       o.amount_cents::bigint, o.currency, o.payment_method,
 	       o.paypal_order_id,
 	       'ORD-' || to_char(o.created_at, 'YYMMDD') || '-' || upper(left(replace(o.id::text,'-',''), 6)),
-	       o.created_at, o.captured_at, o.refund_id, o.refunded_at, o.paypal_capture_id,
+	       o.created_at, o.captured_at, o.refund_id, o.refunded_at, o.allocation_reverted_at, o.paypal_capture_id, o.environment,
 	       o.plan_id, o.storage_type, o.bytes_added, COALESCE(srv.name, '')
 	FROM storage_orders o
 	LEFT JOIN servers srv ON srv.id = o.server_id`
@@ -103,13 +112,13 @@ func (q *Queries) ListAdminOrders(ctx context.Context, search, sort string, limi
 	var out []AdminOrder
 	for rows.Next() {
 		var o AdminOrder
-		var capturedAt, refundedAt sql.NullTime
+		var capturedAt, refundedAt, allocationRevertedAt sql.NullTime
 		var refundID, captureID sql.NullString
 		if err := rows.Scan(
 			&o.ID, &o.Type, &o.Username, &o.Status,
 			&o.AmountCents, &o.Currency, &o.PaymentMethod,
 			&o.Reference, &o.InvoiceNumber,
-			&o.CreatedAt, &capturedAt, &refundID, &refundedAt, &captureID,
+			&o.CreatedAt, &capturedAt, &refundID, &refundedAt, &allocationRevertedAt, &captureID, &o.Environment,
 			&o.PlanID, &o.StorageType, &o.BytesAdded, &o.ServerName,
 		); err != nil {
 			return nil, 0, fmt.Errorf("ListAdminOrders scan: %w", err)
@@ -121,6 +130,10 @@ func (q *Queries) ListAdminOrders(ctx context.Context, search, sort string, limi
 		if refundedAt.Valid {
 			t := refundedAt.Time
 			o.RefundedAt = &t
+		}
+		if allocationRevertedAt.Valid {
+			t := allocationRevertedAt.Time
+			o.AllocationRevertedAt = &t
 		}
 		if refundID.Valid {
 			s := refundID.String
@@ -153,13 +166,13 @@ func (q *Queries) ListUserOrders(ctx context.Context, username string) ([]AdminO
 	var out []AdminOrder
 	for rows.Next() {
 		var o AdminOrder
-		var capturedAt, refundedAt sql.NullTime
+		var capturedAt, refundedAt, allocationRevertedAt sql.NullTime
 		var refundID, captureID sql.NullString
 		if err := rows.Scan(
 			&o.ID, &o.Type, &o.Username, &o.Status,
 			&o.AmountCents, &o.Currency, &o.PaymentMethod,
 			&o.Reference, &o.InvoiceNumber,
-			&o.CreatedAt, &capturedAt, &refundID, &refundedAt, &captureID,
+			&o.CreatedAt, &capturedAt, &refundID, &refundedAt, &allocationRevertedAt, &captureID, &o.Environment,
 			&o.PlanID, &o.StorageType, &o.BytesAdded, &o.ServerName,
 		); err != nil {
 			return nil, fmt.Errorf("ListUserOrders scan: %w", err)
@@ -171,6 +184,65 @@ func (q *Queries) ListUserOrders(ctx context.Context, username string) ([]AdminO
 		if refundedAt.Valid {
 			t := refundedAt.Time
 			o.RefundedAt = &t
+		}
+		if allocationRevertedAt.Valid {
+			t := allocationRevertedAt.Time
+			o.AllocationRevertedAt = &t
+		}
+		if refundID.Valid {
+			s := refundID.String
+			o.RefundID = &s
+		}
+		if captureID.Valid {
+			s := captureID.String
+			o.PayPalCaptureID = &s
+		}
+		out = append(out, o)
+	}
+	return out, rows.Err()
+}
+
+// ListRecentCapturedOrders returns orders (premium + storage) captured since
+// the given time, newest first. Backs the admin notification bell's
+// "order received" category.
+func (q *Queries) ListRecentCapturedOrders(ctx context.Context, since time.Time, limit int) ([]AdminOrder, error) {
+	query := fmt.Sprintf(`
+		SELECT * FROM (%s) ord
+		WHERE ord.captured_at IS NOT NULL AND ord.captured_at >= $1
+		ORDER BY ord.captured_at DESC
+		LIMIT $2
+	`, adminOrdersBase)
+	rows, err := q.db.QueryContext(ctx, query, since, limit)
+	if err != nil {
+		return nil, fmt.Errorf("ListRecentCapturedOrders: %w", err)
+	}
+	defer rows.Close()
+
+	var out []AdminOrder
+	for rows.Next() {
+		var o AdminOrder
+		var capturedAt, refundedAt, allocationRevertedAt sql.NullTime
+		var refundID, captureID sql.NullString
+		if err := rows.Scan(
+			&o.ID, &o.Type, &o.Username, &o.Status,
+			&o.AmountCents, &o.Currency, &o.PaymentMethod,
+			&o.Reference, &o.InvoiceNumber,
+			&o.CreatedAt, &capturedAt, &refundID, &refundedAt, &allocationRevertedAt, &captureID, &o.Environment,
+			&o.PlanID, &o.StorageType, &o.BytesAdded, &o.ServerName,
+		); err != nil {
+			return nil, fmt.Errorf("ListRecentCapturedOrders scan: %w", err)
+		}
+		if capturedAt.Valid {
+			t := capturedAt.Time
+			o.CapturedAt = &t
+		}
+		if refundedAt.Valid {
+			t := refundedAt.Time
+			o.RefundedAt = &t
+		}
+		if allocationRevertedAt.Valid {
+			t := allocationRevertedAt.Time
+			o.AllocationRevertedAt = &t
 		}
 		if refundID.Valid {
 			s := refundID.String
@@ -197,13 +269,13 @@ func (q *Queries) GetAdminOrder(ctx context.Context, orderType string, id uuid.U
 		return nil, rows.Err()
 	}
 	var o AdminOrder
-	var capturedAt, refundedAt sql.NullTime
+	var capturedAt, refundedAt, allocationRevertedAt sql.NullTime
 	var refundID, captureID sql.NullString
 	if err := rows.Scan(
 		&o.ID, &o.Type, &o.Username, &o.Status,
 		&o.AmountCents, &o.Currency, &o.PaymentMethod,
 		&o.Reference, &o.InvoiceNumber,
-		&o.CreatedAt, &capturedAt, &refundID, &refundedAt, &captureID,
+		&o.CreatedAt, &capturedAt, &refundID, &refundedAt, &allocationRevertedAt, &captureID, &o.Environment,
 		&o.PlanID, &o.StorageType, &o.BytesAdded, &o.ServerName,
 	); err != nil {
 		return nil, fmt.Errorf("GetAdminOrder scan: %w", err)
@@ -215,6 +287,10 @@ func (q *Queries) GetAdminOrder(ctx context.Context, orderType string, id uuid.U
 	if refundedAt.Valid {
 		t := refundedAt.Time
 		o.RefundedAt = &t
+	}
+	if allocationRevertedAt.Valid {
+		t := allocationRevertedAt.Time
+		o.AllocationRevertedAt = &t
 	}
 	if refundID.Valid {
 		s := refundID.String
@@ -259,14 +335,222 @@ func (q *Queries) MarkStorageOrderRefunded(ctx context.Context, id uuid.UUID, re
 	return n > 0, nil
 }
 
-// RevokePremium clears the premium flag after a premium payment refund.
-func (q *Queries) RevokePremium(ctx context.Context, username string) error {
-	_, err := q.db.ExecContext(ctx, `
-		UPDATE users SET is_premium = FALSE, premium_granted_at = NULL
-		WHERE username = $1
-	`, username)
+// MarkPaymentAllocationReverted records that a captured sandbox premium
+// payment's granted premium access was undone (admin "Revert allocation"
+// button or the 7-day auto-revert loop) without a PayPal refund — the order
+// stays 'captured' for accounting. Returns false when the payment is not a
+// captured, unreverted sandbox order (idempotent no-op on repeat calls).
+func (q *Queries) MarkPaymentAllocationReverted(ctx context.Context, id uuid.UUID) (bool, error) {
+	res, err := q.db.ExecContext(ctx, `
+		UPDATE payments
+		SET allocation_reverted_at = NOW()
+		WHERE id = $1 AND status = 'captured' AND environment = 'sandbox' AND allocation_reverted_at IS NULL
+	`, id)
 	if err != nil {
-		return fmt.Errorf("RevokePremium: %w", err)
+		return false, fmt.Errorf("MarkPaymentAllocationReverted: %w", err)
 	}
-	return nil
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// MarkStorageOrderAllocationReverted is MarkPaymentAllocationReverted for a
+// storage add-on order.
+func (q *Queries) MarkStorageOrderAllocationReverted(ctx context.Context, id uuid.UUID) (bool, error) {
+	res, err := q.db.ExecContext(ctx, `
+		UPDATE storage_orders
+		SET allocation_reverted_at = NOW()
+		WHERE id = $1 AND status = 'captured' AND environment = 'sandbox' AND allocation_reverted_at IS NULL
+	`, id)
+	if err != nil {
+		return false, fmt.Errorf("MarkStorageOrderAllocationReverted: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// ListSandboxOrdersDueForAutoRevert returns captured sandbox orders (premium +
+// storage) whose allocation hasn't been reverted yet and were captured at or
+// before cutoff. Backs the 7-day auto-revert background loop.
+func (q *Queries) ListSandboxOrdersDueForAutoRevert(ctx context.Context, cutoff time.Time) ([]AdminOrder, error) {
+	query := fmt.Sprintf(`
+		SELECT * FROM (%s) ord
+		WHERE ord.environment = 'sandbox' AND ord.status = 'captured'
+		  AND ord.allocation_reverted_at IS NULL
+		  AND ord.captured_at IS NOT NULL AND ord.captured_at <= $1
+		ORDER BY ord.captured_at ASC
+	`, adminOrdersBase)
+	rows, err := q.db.QueryContext(ctx, query, cutoff)
+	if err != nil {
+		return nil, fmt.Errorf("ListSandboxOrdersDueForAutoRevert: %w", err)
+	}
+	defer rows.Close()
+
+	var out []AdminOrder
+	for rows.Next() {
+		var o AdminOrder
+		var capturedAt, refundedAt, allocationRevertedAt sql.NullTime
+		var refundID, captureID sql.NullString
+		if err := rows.Scan(
+			&o.ID, &o.Type, &o.Username, &o.Status,
+			&o.AmountCents, &o.Currency, &o.PaymentMethod,
+			&o.Reference, &o.InvoiceNumber,
+			&o.CreatedAt, &capturedAt, &refundID, &refundedAt, &allocationRevertedAt, &captureID, &o.Environment,
+			&o.PlanID, &o.StorageType, &o.BytesAdded, &o.ServerName,
+		); err != nil {
+			return nil, fmt.Errorf("ListSandboxOrdersDueForAutoRevert scan: %w", err)
+		}
+		if capturedAt.Valid {
+			t := capturedAt.Time
+			o.CapturedAt = &t
+		}
+		if refundedAt.Valid {
+			t := refundedAt.Time
+			o.RefundedAt = &t
+		}
+		if allocationRevertedAt.Valid {
+			t := allocationRevertedAt.Time
+			o.AllocationRevertedAt = &t
+		}
+		if refundID.Valid {
+			s := refundID.String
+			o.RefundID = &s
+		}
+		if captureID.Valid {
+			s := captureID.String
+			o.PayPalCaptureID = &s
+		}
+		out = append(out, o)
+	}
+	return out, rows.Err()
+}
+
+// AdminSubscription is one row on the admin Orders page's Subscriptions tab —
+// shaped like AdminOrder (same amount/currency/payment_method/reference/
+// invoice_number/environment fields, mirroring the storage/premium orders
+// tab) plus the subscription-specific CurrentPeriodEnd, which the frontend
+// reads as "next payment date" while active.
+type AdminSubscription struct {
+	ID               uuid.UUID  `json:"id"`
+	Username         string     `json:"username"`
+	Plan             string     `json:"plan"`
+	Status           string     `json:"status"`
+	AmountCents      int64      `json:"amount_cents"`
+	Currency         string     `json:"currency"`
+	PaymentMethod    string     `json:"payment_method"`
+	Reference        string     `json:"reference"`      // PayPal subscription id
+	InvoiceNumber    string     `json:"invoice_number"` // SUB-<yymmdd>-<id prefix>
+	CreatedAt        time.Time  `json:"created_at"`
+	CurrentPeriodEnd *time.Time `json:"current_period_end"`
+	CancelledAt      *time.Time `json:"cancelled_at"`
+	Environment      string     `json:"environment"`
+	// RefundID/RefundAmountCents/RefundedAt are set only by an admin's
+	// prorated Cancel action (see orders.Handler.CancelSubscription) — nil
+	// otherwise, including for subscriptions ended via the ordinary
+	// user-initiated cancel (no refund) or a sandbox Revert (no PayPal call
+	// at all).
+	RefundID          *string    `json:"refund_id"`
+	RefundAmountCents *int64     `json:"refund_amount_cents"`
+	RefundedAt        *time.Time `json:"refunded_at"`
+	// CancellationReason is set only by the admin Cancel action below.
+	CancellationReason *string `json:"cancellation_reason"`
+}
+
+// adminSubscriptionsBase mirrors adminOrdersBase's shape/invoice-number
+// derivation for premium_subscriptions rows (SUB- prefix instead of ORD-, so
+// the two are visually distinguishable in search results).
+const adminSubscriptionsBase = `
+	SELECT ps.id, ps.username, ps.plan, ps.status,
+	       ps.amount_cents::bigint AS amount_cents, ps.currency, ps.payment_method,
+	       ps.paypal_subscription_id AS reference,
+	       'SUB-' || to_char(ps.created_at, 'YYMMDD') || '-' || upper(left(replace(ps.id::text,'-',''), 6)) AS invoice_number,
+	       ps.created_at, ps.current_period_end, ps.cancelled_at, ps.environment,
+	       ps.refund_id, ps.refund_amount_cents::bigint AS refund_amount_cents, ps.refunded_at,
+	       ps.cancellation_reason
+	FROM premium_subscriptions ps`
+
+// ListAdminSubscriptions returns a searched, sorted, offset-paginated page of
+// premium subscriptions (all users) plus the total row count — backs the
+// admin Orders page's Subscriptions tab. sort: "date" (newest first,
+// default) or "amount" (largest first).
+func (q *Queries) ListAdminSubscriptions(ctx context.Context, search, sort string, limit, offset int) ([]AdminSubscription, int, error) {
+	limit = clampLimit(limit)
+	if offset < 0 {
+		offset = 0
+	}
+
+	where := ""
+	args := []any{}
+	if search != "" {
+		args = append(args, "%"+search+"%")
+		where = `WHERE sub.username ILIKE $1 OR sub.reference ILIKE $1
+		         OR sub.invoice_number ILIKE $1 OR sub.status ILIKE $1
+		         OR sub.payment_method ILIKE $1`
+	}
+
+	var total int
+	countQuery := fmt.Sprintf(`SELECT COUNT(*) FROM (%s) sub %s`, adminSubscriptionsBase, where)
+	if err := q.db.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("ListAdminSubscriptions count: %w", err)
+	}
+
+	orderBy := "sub.created_at DESC"
+	if sort == "amount" {
+		orderBy = "sub.amount_cents DESC, sub.created_at DESC"
+	}
+
+	args = append(args, limit, offset)
+	query := fmt.Sprintf(`
+		SELECT * FROM (%s) sub
+		%s
+		ORDER BY %s
+		LIMIT $%d OFFSET $%d
+	`, adminSubscriptionsBase, where, orderBy, len(args)-1, len(args))
+
+	rows, err := q.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("ListAdminSubscriptions: %w", err)
+	}
+	defer rows.Close()
+
+	var out []AdminSubscription
+	for rows.Next() {
+		var s AdminSubscription
+		var periodEnd, cancelledAt, refundedAt sql.NullTime
+		var refundID, cancellationReason sql.NullString
+		var refundAmountCents sql.NullInt64
+		if err := rows.Scan(
+			&s.ID, &s.Username, &s.Plan, &s.Status,
+			&s.AmountCents, &s.Currency, &s.PaymentMethod,
+			&s.Reference, &s.InvoiceNumber,
+			&s.CreatedAt, &periodEnd, &cancelledAt, &s.Environment,
+			&refundID, &refundAmountCents, &refundedAt,
+			&cancellationReason,
+		); err != nil {
+			return nil, 0, fmt.Errorf("ListAdminSubscriptions scan: %w", err)
+		}
+		if periodEnd.Valid {
+			t := periodEnd.Time
+			s.CurrentPeriodEnd = &t
+		}
+		if cancelledAt.Valid {
+			t := cancelledAt.Time
+			s.CancelledAt = &t
+		}
+		if refundID.Valid {
+			s.RefundID = &refundID.String
+		}
+		if refundAmountCents.Valid {
+			v := refundAmountCents.Int64
+			s.RefundAmountCents = &v
+		}
+		if refundedAt.Valid {
+			t := refundedAt.Time
+			s.RefundedAt = &t
+		}
+		if cancellationReason.Valid {
+			s.CancellationReason = &cancellationReason.String
+		}
+		out = append(out, s)
+	}
+	return out, total, rows.Err()
 }

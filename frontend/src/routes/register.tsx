@@ -1,10 +1,52 @@
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { MdCloud, MdRocketLaunch } from 'react-icons/md'
+import { PayPalScriptProvider, PayPalButtons } from '@paypal/react-paypal-js'
+import { MdCloud, MdRocketLaunch, MdCheckCircle } from 'react-icons/md'
 import { register, validateInviteToken } from '../api/auth'
 import { ApiError } from '../api/client'
+import { publicConfigQueryOptions } from '../api/interest'
+import { createPremiumSubscription, confirmPremiumSubscription, type PremiumPlan } from '../api/payments'
 import { TermsOfServiceModal } from '../components/TermsOfServiceModal'
+import { PremiumPlanSelector } from '../components/PremiumPlanSelector'
+
+// This inline checkout deliberately keeps the popup-based <PayPalButtons>
+// (rather than PayPalWalletRedirectButton/PayPalSubscribeButton's redirect
+// flow) because it runs on the registration wizard's "plan" step, before the
+// SPA has done its Keycloak login — only the backend session cookie exists
+// at this point (see the comment below). A redirect would land back on
+// /premium, which sits behind the _auth layout's Keycloak gate and would
+// bounce the user to a login wall instead of showing the confirmation.
+// Known trade-off: this one instance keeps the Chrome-iOS popup bug (see
+// PayPalWalletRedirectButton) until it gets its own return route.
+function InlinePayPalSubscribeButton({
+  clientId, createSubscription, onApprove, onError, onCancel, disabled,
+}: {
+  clientId: string
+  createSubscription: () => Promise<string>
+  onApprove: (subscriptionId: string) => Promise<void> | void
+  onError: (message: string) => void
+  onCancel?: () => void
+  disabled?: boolean
+}) {
+  return (
+    <div className={disabled ? 'opacity-50 pointer-events-none' : ''}>
+      <PayPalScriptProvider options={{ clientId, intent: 'subscription', vault: true, components: 'buttons' }}>
+        <PayPalButtons
+          disabled={disabled}
+          style={{ layout: 'vertical', shape: 'rect', label: 'subscribe' }}
+          createSubscription={() => createSubscription()}
+          onApprove={async (data) => { if (data.subscriptionID) await onApprove(data.subscriptionID) }}
+          onError={(err) => onError(err instanceof Error ? err.message : 'Subscription failed')}
+          onCancel={onCancel}
+        />
+      </PayPalScriptProvider>
+      <p className="text-[11px] text-gray-400 text-center m-0 mt-2">
+        Payments are processed securely by PayPal.
+      </p>
+    </div>
+  )
+}
 
 interface RegisterParams {
   token: string
@@ -32,6 +74,7 @@ function RouteComponent() {
     enabled: !!token,
     retry: false,
   })
+  const { data: config } = useQuery(publicConfigQueryOptions)
 
   const [username, setUsername] = useState('')
   const [email, setEmail] = useState('')
@@ -40,6 +83,43 @@ function RouteComponent() {
   const [showTerms, setShowTerms] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [step, setStep] = useState<'form' | 'plan'>('form')
+
+  // Inline premium checkout on the plan step. Registration auto-logs-in (sets
+  // the session cookie), so the protected /payments endpoints work here even
+  // though the SPA hasn't done its Keycloak login yet.
+  const [showPremiumPay, setShowPremiumPay] = useState(false)
+  const [premiumPlan, setPremiumPlan] = useState<PremiumPlan>('monthly')
+  const [payError, setPayError] = useState<string | null>(null)
+  const [paying, setPaying] = useState(false)
+  const [paid, setPaid] = useState(false)
+
+  const premiumPlans = config?.premium_plans ?? []
+  const selectedPriceCents = premiumPlans.find((p) => p.plan === premiumPlan)?.price_cents ?? 0
+  const premiumPriceLabel = selectedPriceCents ? `$${(selectedPriceCents / 100).toFixed(2)}` : ''
+
+  async function handleCreatePremiumSubscription(): Promise<string> {
+    setPayError(null)
+    try {
+      const { subscription_id } = await createPremiumSubscription(premiumPlan)
+      return subscription_id
+    } catch (err) {
+      setPayError(err instanceof ApiError ? err.message : 'Could not start checkout')
+      throw err
+    }
+  }
+
+  async function handlePremiumApprove(subscriptionId: string) {
+    setPaying(true)
+    setPayError(null)
+    try {
+      await confirmPremiumSubscription(subscriptionId)
+      setPaid(true)
+    } catch (err) {
+      setPayError(err instanceof ApiError ? err.message : 'Subscription could not be confirmed — please try again.')
+    } finally {
+      setPaying(false)
+    }
+  }
 
   const mutation = useMutation({
     mutationFn: () => register(username, email, password, token),
@@ -63,8 +143,31 @@ function RouteComponent() {
   }
 
   if (step === 'plan') {
+    const goToLogin = () => navigate({ to: '/login', search: { social_error: undefined, link_provider: undefined, link_email: undefined, link_username: undefined } })
+
+    if (paid) {
+      return (
+        <div className="min-h-screen bg-gray-50 flex items-center justify-center px-4">
+          <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-10 max-w-md w-full text-center">
+            <MdCheckCircle className="text-5xl text-green-500 mx-auto mb-3" />
+            <h1 className="text-xl font-semibold text-gray-900 m-0">Premium unlocked.</h1>
+            <p className="text-sm text-gray-500 mt-2">
+              Your payment went through and Premium is active on your account. Log in to start
+              using the SFS API and create per-directory API keys.
+            </p>
+            <button
+              onClick={goToLogin}
+              className="mt-6 px-5 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium cursor-pointer transition-colors"
+            >
+              Go to login
+            </button>
+          </div>
+        </div>
+      )
+    }
+
     return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center px-4">
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center px-4 py-12">
         <div className="w-full max-w-2xl flex flex-col gap-6">
           <div className="text-center">
             <h1 className="text-2xl font-semibold text-gray-900 m-0">Welcome aboard.</h1>
@@ -72,7 +175,7 @@ function RouteComponent() {
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <button
-              onClick={() => navigate({ to: '/login', search: { social_error: undefined, link_provider: undefined, link_email: undefined, link_username: undefined } })}
+              onClick={goToLogin}
               className="flex flex-col items-start gap-3 p-6 rounded-xl border border-gray-200 bg-white hover:border-blue-300 hover:shadow-sm cursor-pointer transition-all text-left"
             >
               <MdCloud className="text-3xl text-blue-400" />
@@ -83,17 +186,47 @@ function RouteComponent() {
               <span className="text-xs font-medium text-gray-400 mt-auto">→ Go to login</span>
             </button>
             <button
-              onClick={() => navigate({ to: '/login', search: { redirect: '/premium' } as never })}
-              className="flex flex-col items-start gap-3 p-6 rounded-xl border-2 border-amber-300 bg-amber-50 hover:border-amber-400 hover:shadow-sm cursor-pointer transition-all text-left"
+              onClick={() => setShowPremiumPay(true)}
+              className={`flex flex-col items-start gap-3 p-6 rounded-xl border-2 hover:shadow-sm cursor-pointer transition-all text-left ${
+                showPremiumPay ? 'border-amber-400 bg-amber-50' : 'border-amber-300 bg-amber-50 hover:border-amber-400'
+              }`}
             >
               <MdRocketLaunch className="text-3xl text-amber-500" />
               <div>
-                <h2 className="text-base font-semibold text-gray-900 m-0">Upgrade to Premium</h2>
-                <p className="text-sm text-gray-500 m-0 mt-1">Adds the SFS S3-compatible API and per-directory API keys. One-time payment.</p>
+                <h2 className="text-base font-semibold text-gray-900 m-0">
+                  Upgrade to Premium{premiumPriceLabel ? ` — ${premiumPriceLabel}` : ''}
+                </h2>
+                <p className="text-sm text-gray-500 m-0 mt-1">Adds the SFS S3-compatible API and per-directory API keys. Recurring subscription, cancel anytime.</p>
               </div>
-              <span className="text-xs font-medium text-amber-600 mt-auto">→ Log in and upgrade</span>
+              <span className="text-xs font-medium text-amber-600 mt-auto">
+                {showPremiumPay ? '↓ Pay below' : '→ Pay now'}
+              </span>
             </button>
           </div>
+
+          {/* Inline premium checkout: plan selector + PayPal subscribe button.
+              Same flow/styling as the premium upgrade modal. */}
+          {showPremiumPay && (
+            config?.paypal_client_id ? (
+              <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6 flex flex-col gap-3 max-w-md w-full mx-auto">
+                <h3 className="text-sm font-semibold text-gray-900 m-0">
+                  Subscribe to Premium{premiumPriceLabel ? ` — ${premiumPriceLabel}` : ''}
+                </h3>
+                {payError && <p className="text-sm text-red-500 m-0">{payError}</p>}
+                <PremiumPlanSelector plans={premiumPlans} selected={premiumPlan} onSelect={setPremiumPlan} disabled={paying} />
+                <InlinePayPalSubscribeButton
+                  clientId={config.paypal_client_id}
+                  createSubscription={handleCreatePremiumSubscription}
+                  onApprove={handlePremiumApprove}
+                  onError={(msg) => setPayError(msg)}
+                  onCancel={() => setPayError(null)}
+                  disabled={paying}
+                />
+              </div>
+            ) : (
+              <p className="text-sm text-red-500 text-center m-0">Payments are not configured.</p>
+            )
+          )}
         </div>
       </div>
     )

@@ -191,16 +191,74 @@ func (q *Queries) PruneOldDriveTemps(ctx context.Context, before time.Time) erro
 	return nil
 }
 
+// ── Drive I/O snapshots ─────────────────────────────────────────────────────────
+
+// InsertDriveIO persists one drive read/write cumulative-counter reading.
+func (q *Queries) InsertDriveIO(ctx context.Context, driveID uuid.UUID, readBytes, writeBytes int64, sampledAt time.Time) error {
+	_, err := q.db.ExecContext(ctx, `
+		INSERT INTO drive_io_snapshots (id, drive_id, read_bytes, write_bytes, sampled_at)
+		VALUES (gen_random_uuid(), $1, $2, $3, $4)
+	`, driveID, readBytes, writeBytes, sampledAt)
+	if err != nil {
+		return fmt.Errorf("InsertDriveIO: %w", err)
+	}
+	return nil
+}
+
+// ListDriveIOByHours returns at most maxPoints evenly-distributed read/write
+// readings for one drive from the past hours hours, ordered oldest-first.
+// Mirrors ListDriveTempsByHours.
+func (q *Queries) ListDriveIOByHours(ctx context.Context, driveID uuid.UUID, hours, maxPoints int) ([]models.DriveIOSnapshot, error) {
+	cutoff := time.Now().UTC().Add(-time.Duration(hours) * time.Hour)
+
+	rows, err := q.db.QueryContext(ctx, `
+		SELECT DISTINCT ON (bucket)
+			id, drive_id, read_bytes, write_bytes, sampled_at
+		FROM (
+			SELECT
+				id, drive_id, read_bytes, write_bytes, sampled_at,
+				NTILE($1) OVER (ORDER BY sampled_at ASC) AS bucket
+			FROM drive_io_snapshots
+			WHERE drive_id = $2 AND sampled_at >= $3
+		) sub
+		ORDER BY bucket, sampled_at ASC
+	`, maxPoints, driveID, cutoff)
+	if err != nil {
+		return nil, fmt.Errorf("ListDriveIOByHours: %w", err)
+	}
+	defer rows.Close()
+
+	var snaps []models.DriveIOSnapshot
+	for rows.Next() {
+		var s models.DriveIOSnapshot
+		if err := rows.Scan(&s.ID, &s.DriveID, &s.ReadBytes, &s.WriteBytes, &s.SampledAt); err != nil {
+			return nil, fmt.Errorf("ListDriveIOByHours scan: %w", err)
+		}
+		snaps = append(snaps, s)
+	}
+	return snaps, rows.Err()
+}
+
+// PruneOldDriveIO deletes drive I/O readings sampled before the given time.
+func (q *Queries) PruneOldDriveIO(ctx context.Context, before time.Time) error {
+	_, err := q.db.ExecContext(ctx,
+		`DELETE FROM drive_io_snapshots WHERE sampled_at < $1`, before)
+	if err != nil {
+		return fmt.Errorf("PruneOldDriveIO: %w", err)
+	}
+	return nil
+}
+
 // ── Physical disks ─────────────────────────────────────────────────────────────
 
 const nodeDiskColumns = `
-	id, node_id, label, device, capacity_bytes, used_bytes, free_bytes, temp_celsius, last_seen_at, created_at`
+	id, node_id, label, device, capacity_bytes, used_bytes, free_bytes, read_bytes, write_bytes, temp_celsius, last_seen_at, created_at`
 
 func scanNodeDiskRow(rows *sql.Rows) (*models.NodeDisk, error) {
 	var d models.NodeDisk
 	var temp sql.NullFloat64
 	if err := rows.Scan(&d.ID, &d.NodeID, &d.Label, &d.Device,
-		&d.CapacityBytes, &d.UsedBytes, &d.FreeBytes, &temp,
+		&d.CapacityBytes, &d.UsedBytes, &d.FreeBytes, &d.ReadBytes, &d.WriteBytes, &temp,
 		&d.LastSeenAt, &d.CreatedAt); err != nil {
 		return nil, err
 	}
@@ -218,6 +276,8 @@ type UpsertNodeDiskParams struct {
 	CapacityBytes int64
 	UsedBytes     int64
 	FreeBytes     int64
+	ReadBytes     int64
+	WriteBytes    int64
 	TempCelsius   *float64
 }
 
@@ -226,17 +286,19 @@ type UpsertNodeDiskParams struct {
 func (q *Queries) UpsertNodeDisk(ctx context.Context, p UpsertNodeDiskParams) (*models.NodeDisk, error) {
 	rows, err := q.db.QueryContext(ctx, `
 		INSERT INTO node_disks
-			(node_id, label, device, capacity_bytes, used_bytes, free_bytes, temp_celsius, last_seen_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+			(node_id, label, device, capacity_bytes, used_bytes, free_bytes, read_bytes, write_bytes, temp_celsius, last_seen_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
 		ON CONFLICT (node_id, label) DO UPDATE SET
 			device         = EXCLUDED.device,
 			capacity_bytes = EXCLUDED.capacity_bytes,
 			used_bytes     = EXCLUDED.used_bytes,
 			free_bytes     = EXCLUDED.free_bytes,
+			read_bytes     = EXCLUDED.read_bytes,
+			write_bytes    = EXCLUDED.write_bytes,
 			temp_celsius   = EXCLUDED.temp_celsius,
 			last_seen_at   = NOW()
 		RETURNING`+nodeDiskColumns,
-		p.NodeID, p.Label, p.Device, p.CapacityBytes, p.UsedBytes, p.FreeBytes, p.TempCelsius,
+		p.NodeID, p.Label, p.Device, p.CapacityBytes, p.UsedBytes, p.FreeBytes, p.ReadBytes, p.WriteBytes, p.TempCelsius,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("UpsertNodeDisk: %w", err)
@@ -346,6 +408,63 @@ func (q *Queries) PruneOldNodeDiskTemps(ctx context.Context, before time.Time) e
 		`DELETE FROM node_disk_temp_snapshots WHERE sampled_at < $1`, before)
 	if err != nil {
 		return fmt.Errorf("PruneOldNodeDiskTemps: %w", err)
+	}
+	return nil
+}
+
+// InsertNodeDiskIO persists one physical-disk read/write cumulative-counter
+// reading.
+func (q *Queries) InsertNodeDiskIO(ctx context.Context, diskID uuid.UUID, readBytes, writeBytes int64, sampledAt time.Time) error {
+	_, err := q.db.ExecContext(ctx, `
+		INSERT INTO node_disk_io_snapshots (id, disk_id, read_bytes, write_bytes, sampled_at)
+		VALUES (gen_random_uuid(), $1, $2, $3, $4)
+	`, diskID, readBytes, writeBytes, sampledAt)
+	if err != nil {
+		return fmt.Errorf("InsertNodeDiskIO: %w", err)
+	}
+	return nil
+}
+
+// ListNodeDiskIOByHours returns at most maxPoints evenly-distributed read/write
+// readings for one physical disk from the past hours hours, oldest-first.
+// Mirrors ListNodeDiskTempsByHours.
+func (q *Queries) ListNodeDiskIOByHours(ctx context.Context, diskID uuid.UUID, hours, maxPoints int) ([]models.NodeDiskIOSnapshot, error) {
+	cutoff := time.Now().UTC().Add(-time.Duration(hours) * time.Hour)
+
+	rows, err := q.db.QueryContext(ctx, `
+		SELECT DISTINCT ON (bucket)
+			id, disk_id, read_bytes, write_bytes, sampled_at
+		FROM (
+			SELECT
+				id, disk_id, read_bytes, write_bytes, sampled_at,
+				NTILE($1) OVER (ORDER BY sampled_at ASC) AS bucket
+			FROM node_disk_io_snapshots
+			WHERE disk_id = $2 AND sampled_at >= $3
+		) sub
+		ORDER BY bucket, sampled_at ASC
+	`, maxPoints, diskID, cutoff)
+	if err != nil {
+		return nil, fmt.Errorf("ListNodeDiskIOByHours: %w", err)
+	}
+	defer rows.Close()
+
+	var snaps []models.NodeDiskIOSnapshot
+	for rows.Next() {
+		var s models.NodeDiskIOSnapshot
+		if err := rows.Scan(&s.ID, &s.DiskID, &s.ReadBytes, &s.WriteBytes, &s.SampledAt); err != nil {
+			return nil, fmt.Errorf("ListNodeDiskIOByHours scan: %w", err)
+		}
+		snaps = append(snaps, s)
+	}
+	return snaps, rows.Err()
+}
+
+// PruneOldNodeDiskIO deletes physical-disk I/O readings sampled before the given time.
+func (q *Queries) PruneOldNodeDiskIO(ctx context.Context, before time.Time) error {
+	_, err := q.db.ExecContext(ctx,
+		`DELETE FROM node_disk_io_snapshots WHERE sampled_at < $1`, before)
+	if err != nil {
+		return fmt.Errorf("PruneOldNodeDiskIO: %w", err)
 	}
 	return nil
 }

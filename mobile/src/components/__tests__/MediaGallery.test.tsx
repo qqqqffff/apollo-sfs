@@ -72,19 +72,24 @@ beforeEach(() => {
 
 describe('rendering', () => {
   it('renders a section header for each date group', async () => {
-    // All files are from June 2026 — should produce a single "June 2026" section
-    const { findByText } = renderGallery();
-    await findByText(/june 2026/i);
+    // All files are from June 2026 — should produce a single "June 2026" section.
+    // The title also appears in the date-nav pill bar, so there are two matches.
+    const { findAllByText } = renderGallery();
+    expect((await findAllByText(/june 2026/i)).length).toBe(2);
   });
 
   it('renders one section per distinct month', async () => {
+    // makeFile's default taken_at pads the id into an hour (`id.padStart(2, '0')`),
+    // which only produces a valid time for numeric ids — 'a'/'b' need an explicit
+    // override. Noon UTC (not midnight) avoids the date shifting to the previous
+    // day in timezones behind UTC when buildSections groups by local month.
     const mixed: ApiFile[] = [
-      makeFile('a'),
-      { ...makeFile('b'), taken_at: '2026-05-01T00:00:00Z', created_at: '2026-05-01T00:00:00Z', updated_at: '2026-05-01T00:00:00Z' },
+      makeFile('a', '2026-06-01T12:00:00Z'),
+      { ...makeFile('b'), taken_at: '2026-05-01T12:00:00Z', created_at: '2026-05-01T12:00:00Z', updated_at: '2026-05-01T12:00:00Z' },
     ];
-    const { findByText } = renderGallery({ files: mixed });
-    await findByText(/june 2026/i);
-    await findByText(/may 2026/i);
+    const { findAllByText } = renderGallery({ files: mixed });
+    await findAllByText(/june 2026/i);
+    await findAllByText(/may 2026/i);
   });
 
   it('renders no sections when files list is empty', async () => {
@@ -138,7 +143,12 @@ describe('select mode', () => {
     const screen = renderGallery();
     await enterSelectMode(screen);
     await screen.findByText(/1 selected/);
-    fireEvent.press(screen.getByText('Cancel'));
+    // The select bar's Cancel button is icon-only (no "Cancel" text) — it's
+    // the first of the bar's 5 touchables (Cancel + Download/Favorite/Move/Delete),
+    // i.e. the 5th from the end of the whole-screen touchable list.
+    const { TouchableOpacity } = require('react-native');
+    const allTouchables = screen.UNSAFE_getAllByType(TouchableOpacity);
+    fireEvent.press(allTouchables[allTouchables.length - 5]);
     await waitFor(() => expect(screen.queryByText(/selected/)).toBeNull());
   });
 
@@ -150,21 +160,33 @@ describe('select mode', () => {
     await screen.findByText(/2 selected/);
   });
 
-  it('tapping a selected tile deselects it', async () => {
+  it('tapping a selected tile deselects it and exits select mode when none remain', async () => {
+    // selectedIds.size reaching 0 hides the select bar entirely (isSelectMode
+    // is false) rather than showing a "0 selected" state.
     const screen = renderGallery();
     const tiles = await enterSelectMode(screen);
     await screen.findByText(/1 selected/);
-    fireEvent.press(tiles[0]); // deselect the one we long-pressed
-    await screen.findByText(/0 selected/);
+    // Tile.handlePress swallows the press immediately following a long-press
+    // on the SAME tile (it's the trailing press event from that one physical
+    // gesture) — the first press here is that swallowed one; the second is a
+    // genuine new tap that actually deselects.
+    fireEvent.press(tiles[0]);
+    fireEvent.press(tiles[0]);
+    await waitFor(() => expect(screen.queryByText(/selected/)).toBeNull());
   });
 
-  it('toolbar shows Favorite, Move, and Delete buttons', async () => {
+  it('toolbar shows Cancel, Download, Favorite, Move, and Delete buttons', async () => {
     const screen = renderGallery();
     await enterSelectMode(screen);
     await screen.findByText(/1 selected/);
-    // These icons are mocked as null, but their parent TouchableOpacities exist.
-    // We verify the toolbar rendered by checking the cancel button and count exist.
-    expect(screen.getByText('Cancel')).toBeTruthy();
+    const { TouchableOpacity } = require('react-native');
+    const allTouchables = screen.UNSAFE_getAllByType(TouchableOpacity);
+    // Last 5 touchables are the select bar: Cancel + Download/Favorite/Move/Delete.
+    const toolbarTouchables = allTouchables.slice(-5);
+    expect(toolbarTouchables).toHaveLength(5);
+    // Confirm the first one really is Cancel by exercising it.
+    fireEvent.press(toolbarTouchables[0]);
+    await waitFor(() => expect(screen.queryByText(/selected/)).toBeNull());
   });
 
   it('Delete button shows confirmation Alert', async () => {
@@ -173,14 +195,11 @@ describe('select mode', () => {
     const tiles = await enterSelectMode(screen);
     await screen.findByText(/1 selected/);
 
-    // The select toolbar has 4 touchables: Cancel, Favorite, Move, Delete
+    // The select toolbar has 5 touchables: Cancel, Download, Favorite, Move, Delete.
     const { TouchableOpacity } = require('react-native');
     const allTouchables = screen.UNSAFE_getAllByType(TouchableOpacity);
-    // Toolbar is absolutely positioned at bottom; Delete is the last toolbar button
-    // Find Cancel first, then get siblings
-    const cancelBtn = screen.getByText('Cancel');
-    // Trigger delete — it's the last action button in the toolbar
-    const toolbarTouchables = allTouchables.slice(-4); // last 4: cancel + 3 actions
+    // Trigger delete — it's the last action button in the toolbar.
+    const toolbarTouchables = allTouchables.slice(-4); // last 4: download, favorite, move, delete
     fireEvent.press(toolbarTouchables[toolbarTouchables.length - 1]);
 
     await waitFor(() => expect(alertSpy).toHaveBeenCalled());
@@ -246,6 +265,13 @@ describe('columns prop', () => {
 });
 
 // ── Single-file toolbar actions ───────────────────────────────────────────────
+// onFavorite/onDelete are props of the (unexported) Tile component itself —
+// they never land on its outer TouchableOpacity's own props, so they can't be
+// invoked directly through it. The only way to reach them is the real UI flow:
+// pressing a tile opens its per-tile toolbar (Download, Favorite, Delete, Info,
+// in that order), which is nested inside that same tile's TouchableOpacity, so
+// it appears right after it in traversal order. Files sort by taken_at
+// descending, so the first tile in the grid is file '3' (03:00), not '1'.
 
 describe('single file actions (via prop callbacks)', () => {
   function getTiles(screen: ReturnType<typeof renderGallery>) {
@@ -259,9 +285,12 @@ describe('single file actions (via prop callbacks)', () => {
     const screen = renderGallery();
     await waitFor(() => expect(downloadFile).toHaveBeenCalled());
     const tiles = getTiles(screen);
-    // Invoke onFavorite directly on the first tile's props
-    await tiles[0].props.onFavorite?.();
-    expect(favoriteFile).toHaveBeenCalledWith('1');
+    fireEvent.press(tiles[0]); // opens the per-tile toolbar for file '3'
+    const { TouchableOpacity } = require('react-native');
+    // date-nav pill, tile, download, [favorite]
+    const favoriteBtn = screen.UNSAFE_getAllByType(TouchableOpacity)[3];
+    fireEvent.press(favoriteBtn);
+    expect(favoriteFile).toHaveBeenCalledWith('3');
   });
 
   it('calls deleteFile and removes file when tile onDelete fires and confirmed', async () => {
@@ -276,10 +305,14 @@ describe('single file actions (via prop callbacks)', () => {
     const screen = renderGallery({ onDeleteFile });
     await waitFor(() => expect(downloadFile).toHaveBeenCalled());
     const tiles = getTiles(screen);
-    await tiles[0].props.onDelete?.();
+    fireEvent.press(tiles[0]); // opens the per-tile toolbar for file '3'
+    const { TouchableOpacity } = require('react-native');
+    // date-nav pill, tile, download, favorite, [delete]
+    const deleteBtn = screen.UNSAFE_getAllByType(TouchableOpacity)[4];
+    fireEvent.press(deleteBtn);
 
-    await waitFor(() => expect(deleteFile).toHaveBeenCalledWith('1'));
-    await waitFor(() => expect(onDeleteFile).toHaveBeenCalledWith('1'));
+    await waitFor(() => expect(deleteFile).toHaveBeenCalledWith('3'));
+    await waitFor(() => expect(onDeleteFile).toHaveBeenCalledWith('3'));
     alertSpy.mockRestore();
   });
 
@@ -294,7 +327,10 @@ describe('single file actions (via prop callbacks)', () => {
     const screen = renderGallery();
     await waitFor(() => expect(downloadFile).toHaveBeenCalled());
     const tiles = getTiles(screen);
-    await tiles[0].props.onDelete?.();
+    fireEvent.press(tiles[0]);
+    const { TouchableOpacity } = require('react-native');
+    const deleteBtn = screen.UNSAFE_getAllByType(TouchableOpacity)[4];
+    fireEvent.press(deleteBtn);
     expect(deleteFile).not.toHaveBeenCalled();
     alertSpy.mockRestore();
   });

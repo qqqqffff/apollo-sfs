@@ -142,6 +142,17 @@ export default function LoginScreen({ navigation }: { navigation: any }) {
         </TouchableOpacity>
       </View>
 
+      {/* Account request — same form + refundable deposit flow as the web
+          /interest page (Apollo SFS is invite-only). */}
+      <View style={styles.footer}>
+        <Text style={styles.footerText}>
+          Don't have an account?{' '}
+          <Text style={styles.footerLink} onPress={() => navigation.navigate('AccountRequest')}>
+            Request access
+          </Text>
+        </Text>
+      </View>
+
     </KeyboardAvoidingView>
   );
 }

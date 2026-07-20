@@ -9,15 +9,20 @@
 -- rows is rejected (no implicit "everything").
 
 CREATE TABLE api_keys (
-    id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    username      TEXT        NOT NULL REFERENCES users (username) ON DELETE CASCADE,
-    name          TEXT        NOT NULL,
-    key_prefix    TEXT        NOT NULL UNIQUE,
-    key_hash      TEXT        NOT NULL,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    last_used_at  TIMESTAMPTZ,
-    expires_at    TIMESTAMPTZ,
-    revoked_at    TIMESTAMPTZ
+    id                 UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    username           TEXT        NOT NULL REFERENCES users (username) ON DELETE CASCADE,
+    name               TEXT        NOT NULL,
+    key_prefix         TEXT        NOT NULL UNIQUE,
+    key_hash           TEXT        NOT NULL,
+    -- Requests/minute this key is allowed to make against the SFS API,
+    -- enforced in-process (routes/middleware/apikey.go). Owner-settable up
+    -- to the global ceiling of 1000/min.
+    rate_limit_per_min INTEGER     NOT NULL DEFAULT 300
+                                    CHECK (rate_limit_per_min BETWEEN 1 AND 1000),
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_used_at       TIMESTAMPTZ,
+    expires_at         TIMESTAMPTZ,
+    revoked_at         TIMESTAMPTZ
 );
 
 CREATE INDEX api_keys_username_idx ON api_keys (username);

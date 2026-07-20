@@ -7,32 +7,17 @@ import {
   submitInterestForm,
   createInterestDepositOrder,
   captureInterestDepositOrder,
-  validateApplePayMerchantForDeposit,
-  createApplePayInterestDeposit,
-  createGooglePayInterestDeposit,
+  getPublicPayPalClientToken,
   publicConfigQueryOptions,
   type StorageType,
 } from '../api/interest'
 import { ApiError } from '../api/client'
+import { HostedCardFields } from '../components/HostedCardFields'
+import { PayPalCheckoutOptions, CheckoutBackButton } from '../components/PayPalCheckoutOptions'
 
 export const Route = createFileRoute('/interest')({
   component: RouteComponent,
 })
-
-const APPLE_PAY_MERCHANT_ID = 'merchant.com.apollosfs'
-const PAYPAL_MERCHANT_ID = 'HH4449WYNCH5C'
-
-const GOOGLE_PAY_ALLOWED_METHODS = [{
-  type: 'CARD',
-  parameters: {
-    allowedAuthMethods: ['PAN_ONLY', 'CRYPTOGRAM_3DS'],
-    allowedCardNetworks: ['AMEX', 'DISCOVER', 'MASTERCARD', 'VISA'],
-  },
-  tokenizationSpecification: {
-    type: 'PAYMENT_GATEWAY',
-    parameters: { gateway: 'paypal', gatewayMerchantId: PAYPAL_MERCHANT_ID },
-  },
-}]
 
 interface Plan {
   id: string
@@ -58,7 +43,21 @@ function depositDisplay(plan: Plan, storageType: StorageType) {
   return `$${depositAmt(plan, storageType)}`
 }
 
-type FormStep = 'form' | 'pending' | 'awaiting' | 'verifying' | 'submitted'
+type FormStep = 'form' | 'pending' | 'submitted'
+
+// Persisted across the full-page redirect to PayPal and back — the deposit
+// order row (api/routes/interest_deposit.go) only has plan_id/storage_type,
+// not name/email/use_case, so those need to survive client-side.
+// captcha_token is deliberately excluded: Turnstile tokens are short-lived
+// and are re-collected once the shopper is back.
+interface SavedInterestState {
+  name: string
+  email: string
+  storageType: StorageType
+  selectedPlanId: string
+  useCase: string
+}
+const INTEREST_RESUME_KEY = 'apollo-sfs:interest-resume'
 
 function RequiredStar() {
   return <span className="text-red-500 ml-0.5" aria-hidden="true">*</span>
@@ -75,43 +74,58 @@ function RouteComponent() {
   const [captchaToken, setCaptchaToken] = useState<string | null>(null)
   const [step, setStep] = useState<FormStep>('form')
   const [error, setError] = useState<string | null>(null)
-  const [pendingOrderId, setPendingOrderId] = useState<string | null>(null)
-  const [canApplePay, setCanApplePay] = useState(false)
-  const [canGooglePay, setCanGooglePay] = useState(false)
+  const [showCardForm, setShowCardForm] = useState(false)
+  const [resumeOrderId, setResumeOrderId] = useState<string | null>(null)
   const turnstileRef = useRef<TurnstileInstance>(null)
+  const resumeTriggered = useRef(false)
 
   const selectedPlan = PLANS.find((p) => p.id === selectedPlanId) ?? null
 
-  // Detect Apple Pay (Safari / WebKit only)
-  useEffect(() => {
-    const ApplePaySession = (window as any).ApplePaySession
-    if (ApplePaySession?.canMakePayments) {
-      try { setCanApplePay(ApplePaySession.canMakePayments(APPLE_PAY_MERCHANT_ID)) }
-      catch { /* not available */ }
-    }
-  }, [])
+  const captchaRequired = !!config?.turnstile_site_key
 
-  // Load Google Pay JS and detect availability
+  // Landed back here after a full-page redirect to PayPal (see
+  // handleGetApprovalUrl / PayPalWalletRedirectButton) — restore the fields
+  // that only ever lived client-side and, once the shopper solves a fresh
+  // Turnstile challenge, finish the request automatically.
   useEffect(() => {
-    if ((window as any).google?.payments?.api) {
-      checkGooglePay()
+    const params = new URLSearchParams(window.location.search)
+    const token = params.get('token')
+    const cancelled = params.get('cancelled')
+    if (!token && !cancelled) return
+    window.history.replaceState(null, '', window.location.pathname)
+    if (cancelled) {
+      sessionStorage.removeItem(INTEREST_RESUME_KEY)
       return
     }
-    const script = document.createElement('script')
-    script.src = 'https://pay.google.com/gp/p/js/pay.js'
-    script.async = true
-    script.onload = () => checkGooglePay()
-    document.head.appendChild(script)
-
-    function checkGooglePay() {
-      try {
-        const client = new (window as any).google.payments.api.PaymentsClient({ environment: 'PRODUCTION' })
-        client.isReadyToPay({ apiVersion: 2, apiVersionMinor: 0, allowedPaymentMethods: GOOGLE_PAY_ALLOWED_METHODS })
-          .then((res: { result: boolean }) => setCanGooglePay(res.result))
-          .catch(() => {})
-      } catch { /* not available */ }
+    const raw = sessionStorage.getItem(INTEREST_RESUME_KEY)
+    sessionStorage.removeItem(INTEREST_RESUME_KEY)
+    if (!raw) {
+      // An order id came back but we have nothing to resume with (e.g.
+      // sessionStorage was cleared) — the deposit may have gone through, but
+      // submitting the request needs name/email/use_case, which only ever
+      // lived client-side, so there's nothing safe to auto-complete.
+      setError(`Your payment may have gone through, but we couldn't recover your request. Please contact support with this reference: ${token}`)
+      return
     }
+    const saved = JSON.parse(raw) as SavedInterestState
+    setName(saved.name)
+    setEmail(saved.email)
+    setStorageType(saved.storageType)
+    setSelectedPlanId(saved.selectedPlanId)
+    setUseCase(saved.useCase)
+    setResumeOrderId(token)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  useEffect(() => {
+    if (!config || !resumeOrderId || resumeTriggered.current) return
+    if (captchaRequired && !captchaToken) return
+    resumeTriggered.current = true
+    const orderId = resumeOrderId
+    setResumeOrderId(null)
+    handleDepositApprove(orderId)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [config, resumeOrderId, captchaRequired, captchaToken])
 
   const submitMutation = useMutation({
     mutationFn: (depositOrderId: string) => {
@@ -136,107 +150,82 @@ function RouteComponent() {
     },
   })
 
-  function validateForm(): boolean {
-    if (captchaRequired && !captchaToken) { setError('Please complete the security check.'); return false }
-    if (!selectedPlanId) { setError('Please select a storage plan.'); return false }
-    return true
+  // Returns the specific reason the form isn't ready to submit, or null when
+  // it is. Callers below both display this message directly and thread it
+  // into the Error they throw, so the button components' generic onError
+  // handler (which just does setError(msg)) re-sets the SAME message instead
+  // of clobbering it with an unrelated one.
+  function validationError(): string | null {
+    if (captchaRequired && !captchaToken) return 'Please complete the security check.'
+    if (!selectedPlanId) return 'Please select a storage plan.'
+    return null
   }
 
-  // ── PayPal / Card ────────────────────────────────────────────────────────────
+  // ── PayPal wallet button + Google Pay (inline; same order create/capture
+  // pattern as the storage and premium upgrade checkouts) ───────────────────
 
-  async function handleRedirectPay(method: 'paypal' | 'card') {
-    if (!validateForm()) return
+  async function handleCreateOrder(): Promise<string> {
     setError(null)
+    const invalid = validationError()
+    if (invalid) { setError(invalid); throw new Error(invalid) }
+    try {
+      const { order_id } = await createInterestDepositOrder(selectedPlanId!, storageType, 'paypal')
+      return order_id
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not start checkout')
+      throw err
+    }
+  }
+
+  // For the "PayPal" wallet button, which redirects the browser to PayPal's
+  // approval page rather than using createOrder+onApprove's popup (see
+  // PayPalWalletRedirectButton) — persists the fields the deposit order can't
+  // hold server-side so they survive the round trip (see SavedInterestState).
+  async function handleGetApprovalUrl(): Promise<string> {
+    setError(null)
+    const invalid = validationError()
+    if (invalid) { setError(invalid); throw new Error(invalid) }
+    try {
+      const { approve_url } = await createInterestDepositOrder(selectedPlanId!, storageType, 'paypal')
+      const saved: SavedInterestState = { name, email, storageType, selectedPlanId: selectedPlanId!, useCase }
+      sessionStorage.setItem(INTEREST_RESUME_KEY, JSON.stringify(saved))
+      return approve_url
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not start checkout')
+      throw err
+    }
+  }
+
+  async function handleDepositApprove(orderId: string) {
     setStep('pending')
     try {
-      const { order_id, approve_url } = await createInterestDepositOrder(selectedPlanId!, storageType, method)
-      setPendingOrderId(order_id)
-      window.open(approve_url, '_blank', 'noopener,noreferrer')
-      setStep('awaiting')
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not start payment — please try again.')
-      setStep('form')
-    }
-  }
-
-  async function handleVerifyDeposit() {
-    if (!pendingOrderId) return
-    setStep('verifying')
-    try {
-      await captureInterestDepositOrder(pendingOrderId)
-      submitMutation.mutate(pendingOrderId)
+      await captureInterestDepositOrder(orderId)
+      submitMutation.mutate(orderId)
     } catch {
-      setError('Payment not found. If you completed checkout, please try again.')
-      setStep('awaiting')
-    }
-  }
-
-  // ── Apple Pay ────────────────────────────────────────────────────────────────
-
-  function handleApplePay(e: React.MouseEvent) {
-    e.preventDefault()
-    if (!validateForm() || !selectedPlan) return
-    setError(null)
-    const ApplePaySession = (window as any).ApplePaySession
-    const amount = depositAmt(selectedPlan, storageType)
-    const session = new ApplePaySession(3, {
-      countryCode: 'US',
-      currencyCode: 'USD',
-      supportedNetworks: ['visa', 'masterCard', 'amex', 'discover'],
-      merchantCapabilities: ['supports3DS'],
-      total: { label: 'Apollo SFS Storage Deposit', amount },
-    })
-    session.onvalidatemerchant = async (event: any) => {
-      try {
-        const merchantSession = await validateApplePayMerchantForDeposit(event.validationURL)
-        session.completeMerchantValidation(merchantSession)
-      } catch {
-        session.abort()
-        setError('Apple Pay merchant validation failed.')
-      }
-    }
-    session.onpaymentauthorized = async (event: any) => {
-      try {
-        setStep('pending')
-        const token = JSON.stringify(event.payment.token)
-        const { order_id } = await createApplePayInterestDeposit(selectedPlanId!, storageType, token)
-        session.completePayment(ApplePaySession.STATUS_SUCCESS)
-        submitMutation.mutate(order_id)
-      } catch {
-        session.completePayment(ApplePaySession.STATUS_FAILURE)
-        setError('Apple Pay payment failed — please try another method.')
-        setStep('form')
-      }
-    }
-    session.oncancel = () => setStep('form')
-    session.begin()
-  }
-
-  // ── Google Pay ───────────────────────────────────────────────────────────────
-
-  async function handleGooglePay(e: React.MouseEvent) {
-    e.preventDefault()
-    if (!validateForm() || !selectedPlan) return
-    setError(null)
-    const amount = depositAmt(selectedPlan, storageType)
-    try {
-      const client = new (window as any).google.payments.api.PaymentsClient({ environment: 'PRODUCTION' })
-      const paymentData = await client.loadPaymentData({
-        apiVersion: 2,
-        apiVersionMinor: 0,
-        allowedPaymentMethods: GOOGLE_PAY_ALLOWED_METHODS,
-        merchantInfo: { merchantName: 'Apollo SFS' },
-        transactionInfo: { totalPriceStatus: 'FINAL', totalPrice: amount, currencyCode: 'USD', countryCode: 'US' },
-      })
-      setStep('pending')
-      const token = paymentData.paymentMethodData.tokenizationData.token
-      const { order_id } = await createGooglePayInterestDeposit(selectedPlanId!, storageType, token)
-      submitMutation.mutate(order_id)
-    } catch (err: any) {
-      if (err?.statusCode !== 'CANCELED') {
-        setError('Google Pay payment failed — please try another method.')
-      }
+      setError('Payment could not be completed — please try again.')
       setStep('form')
+    }
+  }
+
+  function handleChooseCard() {
+    const invalid = validationError()
+    if (invalid) { setError(invalid); return }
+    setError(null)
+    setShowCardForm(true)
+  }
+
+  // ── Hosted card fields (PCI-compliant inline entry) ───────────────────────────
+
+  async function createCardOrder(): Promise<string> {
+    setError(null)
+    const invalid = validationError()
+    if (invalid) { setError(invalid); throw new Error(invalid) }
+    try {
+      const { order_id } = await createInterestDepositOrder(selectedPlanId!, storageType, 'card')
+      return order_id
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not start checkout')
+      throw err
     }
   }
 
@@ -262,187 +251,20 @@ function RouteComponent() {
     )
   }
 
-  // ── PayPal / Card awaiting ────────────────────────────────────────────────────
+  // ── Resuming after a PayPal redirect (see the useEffects above) ─────────────
 
-  if (step === 'awaiting' || step === 'verifying') {
+  if (resumeOrderId) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center px-4">
-        <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-8 max-w-md w-full">
-          <h2 className="text-lg font-semibold text-gray-900 mb-1">Complete your deposit</h2>
-          <p className="text-sm text-gray-500 mb-6">
-            Payment opened in a new tab. Complete the{' '}
-            {selectedPlan ? depositDisplay(selectedPlan, storageType) : ''} deposit there, then
-            return here to confirm.
+        <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-10 max-w-md w-full text-center">
+          <h2 className="text-lg font-semibold text-gray-900 mb-2">Finishing up…</h2>
+          <p className="text-sm text-gray-500 mb-4">
+            Your payment was received.{' '}
+            {captchaRequired ? 'Complete the security check below to finish submitting your request.' : 'Submitting your request…'}
           </p>
           {error && <p className="text-sm text-red-500 mb-4">{error}</p>}
-          <button
-            type="button"
-            onClick={handleVerifyDeposit}
-            disabled={step === 'verifying'}
-            className="w-full px-4 py-2.5 text-sm font-medium bg-blue-600 hover:bg-blue-700 text-white rounded-lg disabled:opacity-50 transition-colors cursor-pointer mb-3"
-          >
-            {step === 'verifying' ? 'Verifying…' : "I've completed payment"}
-          </button>
-          <button
-            type="button"
-            onClick={() => { setStep('form'); setError(null) }}
-            disabled={step === 'verifying'}
-            className="w-full px-4 py-2.5 text-sm font-medium text-gray-500 hover:text-gray-700 rounded-lg disabled:opacity-50 transition-colors cursor-pointer"
-          >
-            Cancel
-          </button>
-        </div>
-      </div>
-    )
-  }
-
-  // ── Main form ─────────────────────────────────────────────────────────────────
-
-  const captchaRequired = !!config?.turnstile_site_key
-  // Buttons are disabled only until a plan is selected; captcha errors surface inline
-  const formReady = !!selectedPlanId
-  const isPending = step === 'pending'
-
-  return (
-    <div className="min-h-screen bg-gray-50 flex items-center justify-center px-4 py-12">
-      <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-8 max-w-lg w-full">
-        <h1 className="text-xl font-semibold text-gray-900 mb-1">Request access</h1>
-        <p className="text-sm text-gray-500 mb-1">
-          Apollo SFS is currently invite-only. Fill out this form and pay a refundable 50%
-          deposit to reserve your spot.
-        </p>
-        <p className="text-xs text-gray-400 mb-6">
-          Fields marked <span className="text-red-500">*</span> are required.
-        </p>
-
-        <div className="flex flex-col gap-5">
-          {/* Name */}
-          <div className="flex flex-col gap-1">
-            <label htmlFor="name" className="text-sm font-medium text-gray-700">
-              Full name<RequiredStar />
-            </label>
-            <input
-              id="name"
-              type="text"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              required
-              minLength={1}
-              maxLength={120}
-              placeholder="Jane Smith"
-              className="border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-            />
-          </div>
-
-          {/* Email */}
-          <div className="flex flex-col gap-1">
-            <label htmlFor="email" className="text-sm font-medium text-gray-700">
-              Email address<RequiredStar />
-            </label>
-            <input
-              id="email"
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              required
-              maxLength={254}
-              placeholder="jane@example.com"
-              className="border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-            />
-          </div>
-
-          {/* Storage type toggle */}
-          <div className="flex flex-col gap-2">
-            <span className="text-sm font-medium text-gray-700">Storage type</span>
-            <div className="grid grid-cols-2 gap-2">
-              {(['nvme', 'hdd'] as StorageType[]).map((t) => (
-                <button
-                  key={t}
-                  type="button"
-                  onClick={() => setStorageType(t)}
-                  className={`flex flex-col items-start px-4 py-3 rounded-xl border-2 transition-colors cursor-pointer text-left ${
-                    storageType === t
-                      ? 'border-blue-600 bg-blue-50'
-                      : 'border-gray-200 bg-white hover:border-gray-300'
-                  }`}
-                >
-                  <span className={`text-sm font-semibold ${storageType === t ? 'text-blue-700' : 'text-gray-800'}`}>
-                    {t === 'nvme' ? 'Fast' : 'Standard'}
-                  </span>
-                  <span className={`text-xs ${storageType === t ? 'text-blue-500' : 'text-gray-400'}`}>
-                    {t === 'nvme' ? 'NVMe SSD' : 'HDD'}
-                  </span>
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Plan cards */}
-          <div className="flex flex-col gap-2">
-            <span className="text-sm font-medium text-gray-700">
-              Storage plan<RequiredStar />
-            </span>
-            {PLANS.map((plan) => {
-              const sel = selectedPlanId === plan.id
-              return (
-                <button
-                  key={plan.id}
-                  type="button"
-                  onClick={() => setSelectedPlanId(plan.id)}
-                  className={`flex items-center justify-between px-4 py-3 rounded-xl border-2 transition-colors cursor-pointer text-left ${
-                    sel
-                      ? 'border-blue-600 bg-blue-50'
-                      : 'border-gray-200 bg-white hover:border-gray-300'
-                  }`}
-                >
-                  <span className={`text-sm font-semibold ${sel ? 'text-blue-700' : 'text-gray-800'}`}>
-                    {plan.label}
-                  </span>
-                  <div className="flex items-center gap-3">
-                    <span className={`text-sm font-semibold ${sel ? 'text-blue-600' : 'text-gray-500'}`}>
-                      {plan.price[storageType]}
-                    </span>
-                    <div className={`w-4 h-4 rounded-full border-2 flex items-center justify-center ${
-                      sel ? 'border-blue-600' : 'border-gray-300'
-                    }`}>
-                      {sel && <div className="w-2 h-2 rounded-full bg-blue-600" />}
-                    </div>
-                  </div>
-                </button>
-              )
-            })}
-          </div>
-
-          {/* Deposit notice */}
-          {selectedPlan && (
-            <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 text-sm text-amber-800">
-              A <span className="font-semibold">{depositDisplay(selectedPlan, storageType)} refundable deposit (50%)</span> is
-              required to reserve your spot. It will be returned automatically if your request is
-              denied or expires.
-            </div>
-          )}
-
-          {/* Use case */}
-          <div className="flex flex-col gap-1">
-            <label htmlFor="use-case" className="text-sm font-medium text-gray-700">
-              Reason / use case<RequiredStar />
-            </label>
-            <textarea
-              id="use-case"
-              value={useCase}
-              onChange={(e) => setUseCase(e.target.value)}
-              required
-              minLength={1}
-              maxLength={2000}
-              rows={4}
-              placeholder="Briefly describe how you'd use Apollo SFS…"
-              className="border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none"
-            />
-          </div>
-
-          {/* Cloudflare Turnstile */}
-          {config?.turnstile_site_key && (
-            <div>
+          {captchaRequired && config?.turnstile_site_key && (
+            <div className="flex justify-center">
               <Turnstile
                 ref={turnstileRef}
                 siteKey={config.turnstile_site_key}
@@ -452,76 +274,232 @@ function RouteComponent() {
               />
             </div>
           )}
-
-          {error && <p className="text-sm text-red-500">{error}</p>}
-
-          {/* Payment buttons */}
-          <div className="flex flex-col gap-2">
-            {canApplePay && (
-              <button
-                type="button"
-                onClick={handleApplePay}
-                disabled={!formReady || isPending}
-                className="w-full flex items-center justify-center gap-2 px-4 py-3 text-sm font-semibold bg-black hover:bg-gray-900 text-white rounded-xl disabled:opacity-50 transition-colors cursor-pointer"
-              >
-                {isPending ? 'Processing…' : (
-                  <> Pay{selectedPlan ? ` ${depositDisplay(selectedPlan, storageType)}` : ''}</>
-                )}
-              </button>
-            )}
-
-            {canGooglePay && (
-              <button
-                type="button"
-                onClick={handleGooglePay}
-                disabled={!formReady || isPending}
-                className="w-full flex items-center justify-center gap-2 px-4 py-3 text-sm font-semibold bg-white hover:bg-gray-50 text-gray-800 border border-gray-300 rounded-xl disabled:opacity-50 transition-colors cursor-pointer"
-              >
-                <svg viewBox="0 0 41 17" className="h-4 fill-current" aria-hidden="true">
-                  <path d="M19.526 2.635v4.083h2.518c.6 0 1.096-.202 1.488-.605.403-.402.605-.882.605-1.437 0-.544-.202-1.018-.605-1.422-.392-.413-.888-.62-1.488-.62h-2.518zm0 5.52v4.736h-1.504V1.198h3.99c1.013 0 1.873.337 2.582 1.012.72.675 1.08 1.497 1.08 2.466 0 .991-.36 1.819-1.08 2.482-.697.652-1.559.978-2.583.978h-2.485zm7.668 2.287c0 .676.239 1.234.718 1.673.48.44 1.057.659 1.732.659.937 0 1.71-.352 2.32-1.056l.928.603c-.773 1.09-1.905 1.635-3.396 1.635-1.208 0-2.179-.39-2.914-1.172-.724-.78-1.086-1.763-1.086-2.948 0-1.17.362-2.146 1.086-2.927.735-.792 1.683-1.188 2.846-1.188 1.185 0 2.12.433 2.805 1.3.697.854 1.045 1.92 1.045 3.199l-.016.222h-5.068zm3.556-1.173c-.056-.658-.29-1.177-.7-1.557-.41-.38-.924-.57-1.544-.57-.62 0-1.145.19-1.576.57-.43.38-.682.9-.756 1.557h4.576zm-13.78 7.738h1.518l-5.555-14.96H11.44L5.872 16.994h1.518l1.483-4.013h5.68l1.419 4.013zm-5.695-5.47 2.262-6.11 2.262 6.11H11.275zm-8.96-8.52v3.58h2.327c.627 0 1.15-.214 1.568-.643.43-.44.645-.976.645-1.609 0-.62-.215-1.147-.645-1.581-.418-.43-.941-.644-1.568-.644H2.315V2.52H.8v14.474h1.515v-7.5h2.327c1.078 0 1.99-.378 2.735-1.133.745-.756 1.118-1.674 1.118-2.754 0-1.079-.373-1.997-1.118-2.753C6.632 2.1 5.72 1.722 4.642 1.722H2.315z" />
-                </svg>
-                {isPending ? 'Processing…' : `Pay${selectedPlan ? ` ${depositDisplay(selectedPlan, storageType)}` : ''}`}
-              </button>
-            )}
-
-            <button
-              type="button"
-              onClick={() => handleRedirectPay('card')}
-              disabled={!formReady || isPending}
-              className="w-full flex items-center justify-center gap-2 px-4 py-3 text-sm font-semibold bg-white hover:bg-gray-50 text-gray-800 border border-gray-300 rounded-xl disabled:opacity-50 transition-colors cursor-pointer"
-            >
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <rect x="1" y="4" width="22" height="16" rx="2" ry="2" />
-                <line x1="1" y1="10" x2="23" y2="10" />
-              </svg>
-              {isPending
-                ? 'Processing…'
-                : `Pay by Card${selectedPlan ? ` — ${depositDisplay(selectedPlan, storageType)}` : ''}`}
-            </button>
-
-            <button
-              type="button"
-              onClick={() => handleRedirectPay('paypal')}
-              disabled={!formReady || isPending}
-              aria-label="PayPal"
-              className="w-full flex items-center justify-center gap-2 px-4 py-3 text-sm font-semibold bg-[#003087] hover:bg-[#002070] text-white rounded-xl disabled:opacity-50 transition-colors cursor-pointer"
-            >
-              <span className="font-light text-[#009cde] tracking-wide">Pay</span>
-              <span className="font-black text-[#009cde] tracking-wide -ml-1.5">Pal</span>
-              {selectedPlan && (
-                <span className="text-white/90 ml-1">
-                  — {depositDisplay(selectedPlan, storageType)}
-                </span>
-              )}
-            </button>
-
-            {!formReady && !error && (
-              <p className="text-xs text-gray-400 text-center">
-                Select a plan to enable payment.
-              </p>
-            )}
-          </div>
         </div>
+      </div>
+    )
+  }
+
+  // ── Main form ─────────────────────────────────────────────────────────────────
+
+  // Buttons are disabled only until a plan is selected; captcha errors surface inline
+  const formReady = !!selectedPlanId
+  const isPending = step === 'pending'
+
+  return (
+    <div className="min-h-screen bg-gray-50 flex items-center justify-center px-4 py-12">
+      <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-8 max-w-lg w-full">
+        {showCardForm ? (
+          <>
+            <CheckoutBackButton onClick={() => { setShowCardForm(false); setError(null) }} disabled={isPending} />
+
+            {selectedPlan && (
+              <div className="border border-gray-200 rounded-xl px-4 py-3 flex items-center justify-between mt-4">
+                <span className="text-sm font-medium text-gray-800">{selectedPlan.label} deposit</span>
+                <span className="text-sm font-semibold text-gray-800">{depositDisplay(selectedPlan, storageType)}</span>
+              </div>
+            )}
+
+            {error && <p className="text-sm text-red-500 mt-4">{error}</p>}
+
+            {config?.paypal_client_id && (
+              <div className="mt-4">
+                <HostedCardFields
+                  clientId={config.paypal_client_id}
+                  currency={config.paypal_currency || 'USD'}
+                  createOrder={createCardOrder}
+                  onApprove={handleDepositApprove}
+                  onError={(msg) => setError(msg)}
+                  disabled={isPending}
+                  submitLabel={`Pay by Card${selectedPlan ? ` — ${depositDisplay(selectedPlan, storageType)}` : ''}`}
+                />
+              </div>
+            )}
+            <p className="text-[11px] text-gray-400 text-center m-0 mt-3">
+              Payments are processed securely by PayPal. Card details are entered directly into
+              PayPal and never touch our servers.
+            </p>
+          </>
+        ) : (
+          <>
+            <h1 className="text-xl font-semibold text-gray-900 mb-1">Request access</h1>
+            <p className="text-sm text-gray-500 mb-1">
+              Apollo SFS is currently invite-only. Fill out this form and pay a refundable 50%
+              deposit to reserve your spot.
+            </p>
+            <p className="text-xs text-gray-400 mb-6">
+              Fields marked <span className="text-red-500">*</span> are required.
+            </p>
+
+            <div className="flex flex-col gap-5">
+              {/* Name */}
+              <div className="flex flex-col gap-1">
+                <label htmlFor="name" className="text-sm font-medium text-gray-700">
+                  Full name<RequiredStar />
+                </label>
+                <input
+                  id="name"
+                  type="text"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  required
+                  minLength={1}
+                  maxLength={120}
+                  placeholder="Jane Smith"
+                  className="border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                />
+              </div>
+
+              {/* Email */}
+              <div className="flex flex-col gap-1">
+                <label htmlFor="email" className="text-sm font-medium text-gray-700">
+                  Email address<RequiredStar />
+                </label>
+                <input
+                  id="email"
+                  type="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  required
+                  maxLength={254}
+                  placeholder="jane@example.com"
+                  className="border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                />
+              </div>
+
+              {/* Storage type toggle */}
+              <div className="flex flex-col gap-2">
+                <span className="text-sm font-medium text-gray-700">Storage type</span>
+                <div className="grid grid-cols-2 gap-2">
+                  {(['nvme', 'hdd'] as StorageType[]).map((t) => (
+                    <button
+                      key={t}
+                      type="button"
+                      onClick={() => setStorageType(t)}
+                      className={`flex flex-col items-start px-4 py-3 rounded-xl border-2 transition-colors cursor-pointer text-left ${
+                        storageType === t
+                          ? 'border-blue-600 bg-blue-50'
+                          : 'border-gray-200 bg-white hover:border-gray-300'
+                      }`}
+                    >
+                      <span className={`text-sm font-semibold ${storageType === t ? 'text-blue-700' : 'text-gray-800'}`}>
+                        {t === 'nvme' ? 'Fast' : 'Standard'}
+                      </span>
+                      <span className={`text-xs ${storageType === t ? 'text-blue-500' : 'text-gray-400'}`}>
+                        {t === 'nvme' ? 'NVMe SSD' : 'HDD'}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Plan cards */}
+              <div className="flex flex-col gap-2">
+                <span className="text-sm font-medium text-gray-700">
+                  Storage plan<RequiredStar />
+                </span>
+                {PLANS.map((plan) => {
+                  const sel = selectedPlanId === plan.id
+                  return (
+                    <button
+                      key={plan.id}
+                      type="button"
+                      onClick={() => setSelectedPlanId(plan.id)}
+                      className={`flex items-center justify-between px-4 py-3 rounded-xl border-2 transition-colors cursor-pointer text-left ${
+                        sel
+                          ? 'border-blue-600 bg-blue-50'
+                          : 'border-gray-200 bg-white hover:border-gray-300'
+                      }`}
+                    >
+                      <span className={`text-sm font-semibold ${sel ? 'text-blue-700' : 'text-gray-800'}`}>
+                        {plan.label}
+                      </span>
+                      <div className="flex items-center gap-3">
+                        <span className={`text-sm font-semibold ${sel ? 'text-blue-600' : 'text-gray-500'}`}>
+                          {plan.price[storageType]}
+                        </span>
+                        <div className={`w-4 h-4 rounded-full border-2 flex items-center justify-center ${
+                          sel ? 'border-blue-600' : 'border-gray-300'
+                        }`}>
+                          {sel && <div className="w-2 h-2 rounded-full bg-blue-600" />}
+                        </div>
+                      </div>
+                    </button>
+                  )
+                })}
+                <p className="text-xs text-gray-400 m-0 mt-1">
+                  Not sure how much you'll need? Additional capacity can be purchased once your account is provisioned.
+                </p>
+              </div>
+
+              {/* Deposit notice */}
+              {selectedPlan && (
+                <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 text-sm text-amber-800">
+                  A <span className="font-semibold">{depositDisplay(selectedPlan, storageType)} refundable deposit (50%)</span> is
+                  required to reserve your spot. It will be returned automatically if your request is
+                  denied or expires.
+                </div>
+              )}
+
+              {/* Use case */}
+              <div className="flex flex-col gap-1">
+                <label htmlFor="use-case" className="text-sm font-medium text-gray-700">
+                  Reason / use case<RequiredStar />
+                </label>
+                <textarea
+                  id="use-case"
+                  value={useCase}
+                  onChange={(e) => setUseCase(e.target.value)}
+                  required
+                  minLength={1}
+                  maxLength={2000}
+                  rows={4}
+                  placeholder="Briefly describe how you'd use Apollo SFS…"
+                  className="border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none"
+                />
+              </div>
+
+              {/* Cloudflare Turnstile */}
+              {config?.turnstile_site_key && (
+                <div>
+                  <Turnstile
+                    ref={turnstileRef}
+                    siteKey={config.turnstile_site_key}
+                    onSuccess={(token) => setCaptchaToken(token)}
+                    onExpire={() => setCaptchaToken(null)}
+                    onError={() => setCaptchaToken(null)}
+                  />
+                </div>
+              )}
+
+              {error && <p className="text-sm text-red-500">{error}</p>}
+
+              {/* Payment buttons */}
+              <div className="flex flex-col gap-2">
+                {config?.paypal_client_id && (
+                  <PayPalCheckoutOptions
+                    clientId={config.paypal_client_id}
+                    currency={config.paypal_currency || 'USD'}
+                    environment={config.paypal_environment === 'sandbox' ? 'sandbox' : 'live'}
+                    getClientToken={async () => (await getPublicPayPalClientToken()).client_token}
+                    amount={() => (selectedPlan ? depositAmt(selectedPlan, storageType) : '0.00')}
+                    createOrder={handleCreateOrder}
+                    getApprovalUrl={handleGetApprovalUrl}
+                    onApprove={handleDepositApprove}
+                    onError={(msg) => setError(msg)}
+                    canPay={formReady && !isPending}
+                    onChooseCard={handleChooseCard}
+                  />
+                )}
+
+                {!formReady && !error && (
+                  <p className="text-xs text-gray-400 text-center">
+                    Select a plan to enable payment.
+                  </p>
+                )}
+              </div>
+            </div>
+          </>
+        )}
       </div>
     </div>
   )

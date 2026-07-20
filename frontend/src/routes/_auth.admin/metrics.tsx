@@ -1,12 +1,15 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { MdComputer, MdStorage } from 'react-icons/md'
 import {
   alarmSubscriptionsQueryOptions,
   deleteAlarmSubscription,
   driveStatsQueryOptions,
+  getDriveIOHistory,
   getDriveTempsHistory,
   getMetricsHistoryByHours,
+  getNodeDiskIOHistory,
   getNodeDiskTempsHistory,
   getNodeMetricsHistory,
   infrastructureQueryOptions,
@@ -23,6 +26,7 @@ import type { AlarmType, DiskFrame, DriveFrame, DriveStat, DriveSummary, Metrics
 import { useMetricsStream } from '../../hooks/useMetricsStream'
 import { LineGraph } from '../../components/LineGraph'
 import type { LinePoint } from '../../components/LineGraph'
+import { StorageDonut } from '../../components/StorageDonut'
 import { AlarmConfig } from '../../components/AlarmConfig'
 import { useNotification } from '../../context/NotificationContext'
 
@@ -45,11 +49,12 @@ type ServerGroup = {
 type HourWindow = 1 | 12 | 24 | 48 | 72
 const HOUR_OPTIONS: HourWindow[] = [1, 12, 24, 48, 72]
 
-// Per-node metrics (cpu, memory, traffic, drive_temp) graph the selected node;
-// cluster metrics (users, disk, speed, ping, loss) are cluster-wide (manager uplink).
-type MetricKey = 'total_users' | 'active_users' | 'disk' | 'memory' | 'traffic' | 'speed' | 'ping' | 'loss' | 'cpu' | 'drive_temp' | 'disk_temp'
+// Per-node metrics (cpu, memory, traffic, drive_temp, drive_io) graph the
+// selected node; cluster metrics (users, disk, speed, ping, loss) are
+// cluster-wide (manager uplink).
+type MetricKey = 'total_users' | 'active_users' | 'disk' | 'memory' | 'traffic' | 'speed' | 'ping' | 'loss' | 'cpu' | 'drive_temp' | 'disk_temp' | 'drive_io' | 'disk_io'
 
-const NODE_METRICS: ReadonlySet<MetricKey> = new Set<MetricKey>(['cpu', 'memory', 'traffic', 'drive_temp', 'disk_temp'])
+const NODE_METRICS: ReadonlySet<MetricKey> = new Set<MetricKey>(['cpu', 'memory', 'traffic', 'drive_temp', 'disk_temp', 'drive_io', 'disk_io'])
 
 const METRIC_LABELS: Record<MetricKey, string> = {
   total_users:  'Total users',
@@ -63,6 +68,8 @@ const METRIC_LABELS: Record<MetricKey, string> = {
   cpu:          'CPU utilization',
   drive_temp:   'Drive temperature',
   disk_temp:    'Disk temperature',
+  drive_io:     'Drive speed',
+  disk_io:      'Disk speed',
 }
 
 function formatTempY(v: number): string {
@@ -105,6 +112,7 @@ function RouteComponent() {
   const [hours, setHours] = useState<HourWindow>(12)
   const [selectedMetric, setSelectedMetric] = useState<MetricKey>('traffic')
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
+  const [selectedServerId, setSelectedServerId] = useState<string | null>(null)
   const [driveIdx, setDriveIdx] = useState(0)
   const [diskIdx, setDiskIdx] = useState(0)
 
@@ -150,16 +158,37 @@ function RouteComponent() {
   }
   const servers = Array.from(serverMap.values())
 
+  // Default (and re-validate) the server dropdown to the first known server.
+  useEffect(() => {
+    if (servers.length === 0) return
+    if (!selectedServerId || !servers.some(s => s.serverId === selectedServerId)) {
+      setSelectedServerId(servers[0].serverId)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [servers.map(s => s.serverId).join(','), selectedServerId])
+
+  // ── Overall storage split — fast (NVMe) vs standard (HDD) capacity + allocation,
+  // combined across every synced server (not scoped to the dropdown above).
+  const fastDrives = drives.filter(d => d.drive_type === 'nvme')
+  const standardDrives = drives.filter(d => d.drive_type === 'hdd')
+  const sumBytes = (ds: DriveSummary[], key: 'capacity_bytes' | 'allocated_quota_bytes') =>
+    ds.reduce((s, d) => s + d[key], 0)
+  const fastTier = { capacityBytes: sumBytes(fastDrives, 'capacity_bytes'), allocatedBytes: sumBytes(fastDrives, 'allocated_quota_bytes') }
+  const standardTier = { capacityBytes: sumBytes(standardDrives, 'capacity_bytes'), allocatedBytes: sumBytes(standardDrives, 'allocated_quota_bytes') }
+
   // ── Node selection (drives the per-node hardware + traffic cards) ──────────────
   const latestFrame = frames[frames.length - 1]
   const liveNodes: NodeFrame[] = latestFrame?.nodes ?? []
   // Live frame per node — overlays real-time disk capacity/temp/online onto the
   // infra tree's physical-disk rows.
   const liveNodeById = new Map(liveNodes.map(n => [n.node_id, n]))
-  // Tabs come from registered nodes so a node with no live data still appears;
-  // fall back to the live stream before infrastructure has loaded.
+  // Tabs come from registered nodes (scoped to the selected server) so a node with
+  // no live data still appears; fall back to the live stream before infrastructure
+  // has loaded (unscoped — NodeFrame carries no server_id).
   const nodeTabs = nodes.length
-    ? nodes.map(n => ({ id: n.node_id, hostname: n.hostname, role: n.role as string }))
+    ? nodes
+        .filter(n => !selectedServerId || n.server_id === selectedServerId)
+        .map(n => ({ id: n.node_id, hostname: n.hostname, role: n.role as string }))
     : liveNodes.map(n => ({ id: n.node_id, hostname: n.hostname, role: n.role }))
   useEffect(() => {
     if (nodeTabs.length === 0) return
@@ -263,6 +292,23 @@ function RouteComponent() {
     retry: 1,
   })
 
+  // ── Per-drive / per-physical-disk I/O history (carousel) — cumulative
+  // read/write counters, diffed into a bytes/second rate below.
+  const { data: driveIOHistory } = useQuery({
+    queryKey: ['admin', 'drive-io', selectedDriveId, hours],
+    queryFn: () => getDriveIOHistory(selectedDriveId!, hours),
+    staleTime: 60_000,
+    enabled: !!selectedDriveId && hours > 1 && !inactive,
+    retry: 1,
+  })
+  const { data: diskIOHistory } = useQuery({
+    queryKey: ['admin', 'disk-io', selectedDiskId, hours],
+    queryFn: () => getNodeDiskIOHistory(selectedDiskId!, hours),
+    staleTime: 60_000,
+    enabled: !!selectedDiskId && hours > 1 && !inactive,
+    retry: 1,
+  })
+
   const { pingMs: clientPingMs, packetLossPercent: clientPacketLoss, history: clientPingHistory } = useServerPing(inactive)
 
   // Cluster snapshots / frames within the last hour, for live series.
@@ -327,6 +373,36 @@ function RouteComponent() {
     }
   }
 
+  // Live read/write I/O rate per physical disk / logical drive (last two
+  // frames), keyed by id — the same cumulative-counter-diff approach as the
+  // network traffic rate above. Backs the drive-speed carousel card.
+  const ioRateByDiskId = new Map<string, { readBps: number; writeBps: number }>()
+  const ioRateByDriveId = new Map<string, { readBps: number; writeBps: number }>()
+  if (frames.length >= 2) {
+    const prevN = nodeIn(frames[frames.length - 2]); const currN = nodeIn(frames[frames.length - 1])
+    const dtMs = tMs(frames[frames.length - 1].cluster.sampled_at) - tMs(frames[frames.length - 2].cluster.sampled_at)
+    if (prevN && currN && dtMs > 0) {
+      const prevDiskById = new Map(prevN.disks.map(d => [d.disk_id, d]))
+      for (const d of currN.disks) {
+        const p = prevDiskById.get(d.disk_id)
+        if (!p) continue
+        ioRateByDiskId.set(d.disk_id, {
+          readBps: Math.max(0, ((d.read_bytes - p.read_bytes) / dtMs) * 1000),
+          writeBps: Math.max(0, ((d.write_bytes - p.write_bytes) / dtMs) * 1000),
+        })
+      }
+      const prevDriveById = new Map(prevN.drives.map(d => [d.drive_id, d]))
+      for (const d of currN.drives) {
+        const p = prevDriveById.get(d.drive_id)
+        if (!p) continue
+        ioRateByDriveId.set(d.drive_id, {
+          readBps: Math.max(0, ((d.read_bytes - p.read_bytes) / dtMs) * 1000),
+          writeBps: Math.max(0, ((d.write_bytes - p.write_bytes) / dtMs) * 1000),
+        })
+      }
+    }
+  }
+
   // ── Drive temperature (selected node's selected drive) ──
   const wsDriveTempPoints: LinePoint[] = selectedDriveId
     ? recentFrames.flatMap(f => {
@@ -346,6 +422,33 @@ function RouteComponent() {
     : []
   const histDiskTempPoints: LinePoint[] = (diskTempHistory ?? []).map(s => ({ x: tMs(s.sampled_at), y: s.temp_celsius }))
   const diskTempPoints = hours === 1 ? wsDiskTempPoints : histDiskTempPoints
+
+  // ── Drive I/O (selected node's selected drive) — read+write bytes/sec,
+  // derived by diffing consecutive cumulative-counter samples (live frames for
+  // the 1hr view, persisted history rows otherwise), same technique as network
+  // traffic above. ──
+  const wsDriveIOSamples = selectedDriveId
+    ? recentFrames.flatMap(f => {
+        const d = nodeIn(f)?.drives.find(dr => dr.drive_id === selectedDriveId)
+        return d ? [{ read_bytes: d.read_bytes, write_bytes: d.write_bytes, sampled_at: f.cluster.sampled_at }] : []
+      })
+    : []
+  const { read: wsDriveReadPoints, write: wsDriveWritePoints } = diffIORate(wsDriveIOSamples, s => tMs(s.sampled_at))
+  const { read: histDriveReadPoints, write: histDriveWritePoints } = diffIORate(driveIOHistory ?? [], s => tMs(s.sampled_at))
+  const driveReadPoints = hours === 1 ? wsDriveReadPoints : histDriveReadPoints
+  const driveWritePoints = hours === 1 ? wsDriveWritePoints : histDriveWritePoints
+
+  // ── Physical-disk I/O (selected node's selected disk) ──
+  const wsDiskIOSamples = selectedDiskId
+    ? recentFrames.flatMap(f => {
+        const d = nodeIn(f)?.disks?.find(dk => dk.disk_id === selectedDiskId)
+        return d ? [{ read_bytes: d.read_bytes, write_bytes: d.write_bytes, sampled_at: f.cluster.sampled_at }] : []
+      })
+    : []
+  const { read: wsDiskReadPoints, write: wsDiskWritePoints } = diffIORate(wsDiskIOSamples, s => tMs(s.sampled_at))
+  const { read: histDiskReadPoints, write: histDiskWritePoints } = diffIORate(diskIOHistory ?? [], s => tMs(s.sampled_at))
+  const diskReadPoints = hours === 1 ? wsDiskReadPoints : histDiskReadPoints
+  const diskWritePoints = hours === 1 ? wsDiskWritePoints : histDiskWritePoints
 
   // ── Cluster-level series: ping, loss, speed, users, disk ──
   const wsPingPoints: LinePoint[] = recentSnaps
@@ -466,6 +569,18 @@ function RouteComponent() {
       <div className="flex items-center justify-between mb-6">
         <div className="flex items-center gap-3">
           <h2 className="text-lg font-semibold text-gray-900 m-0">System Metrics</h2>
+          {servers.length > 0 && (
+            <select
+              value={selectedServerId ?? ''}
+              onChange={(e) => setSelectedServerId(e.target.value || null)}
+              aria-label="Select server"
+              className="text-xs border border-gray-200 rounded-md px-2 py-1 bg-white text-gray-600 cursor-pointer focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              {servers.map(s => (
+                <option key={s.serverId} value={s.serverId}>{s.name}</option>
+              ))}
+            </select>
+          )}
           <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${
             inactive ? 'bg-gray-100 text-gray-500' :
             connected ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-600'
@@ -510,6 +625,14 @@ function RouteComponent() {
         </div>
       </div>
 
+      {/* ── Overall server storage — fast vs standard capacity + allocation ── */}
+      <section className="mb-8">
+        <h3 className="text-sm font-semibold text-gray-600 m-0 mb-3">Server storage</h3>
+        <div className="bg-white border border-gray-200 rounded-xl px-6 py-4">
+          <StorageDonut fast={fastTier} standard={standardTier} />
+        </div>
+      </section>
+
       {latest && (
         <>
           {/* ── Node hardware (per selected node) ─────────────────────────── */}
@@ -543,6 +666,30 @@ function RouteComponent() {
                   drives only when no disks are reported (non-pooled deployments). */}
               <DriveCapacityCard items={nodeDisks.length ? nodeDisks : nodeDrives} />
               {nodeDisks.length > 0 ? (
+                <DiskUsageCarousel disks={nodeDisks} index={safeDiskIdx} onIndex={setDiskIdx} />
+              ) : (
+                <DriveUsageCarousel drives={nodeDrives} index={safeDriveIdx} onIndex={setDriveIdx} />
+              )}
+              {nodeDisks.length > 0 ? (
+                <DiskSpeedCarousel
+                  disks={nodeDisks}
+                  rates={ioRateByDiskId}
+                  index={safeDiskIdx}
+                  onIndex={setDiskIdx}
+                  selected={selectedMetric === 'disk_io'}
+                  onClick={() => setSelectedMetric('disk_io')}
+                />
+              ) : (
+                <DriveSpeedCarousel
+                  drives={nodeDrives}
+                  rates={ioRateByDriveId}
+                  index={safeDriveIdx}
+                  onIndex={setDriveIdx}
+                  selected={selectedMetric === 'drive_io'}
+                  onClick={() => setSelectedMetric('drive_io')}
+                />
+              )}
+              {nodeDisks.length > 0 ? (
                 <DiskTempCarousel
                   disks={nodeDisks}
                   index={safeDiskIdx}
@@ -571,9 +718,9 @@ function RouteComponent() {
             )}
           </section>
 
-          {/* ── Node network (traffic per node, uplink shared) ────────────── */}
+          {/* ── Server network (traffic per node, uplink shared) ──────────── */}
           <section className="mb-8">
-            <h3 className="text-sm font-semibold text-gray-600 m-0 mb-3">Node network</h3>
+            <h3 className="text-sm font-semibold text-gray-600 m-0 mb-3">Server network</h3>
             <div className="grid grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-3">
               <NetworkTrafficCard
                 sent={netSentRate ?? '—'}
@@ -632,6 +779,8 @@ function RouteComponent() {
             {NODE_METRICS.has(selectedMetric) && selectedNode ? ` · ${selectedNode.hostname}` : ''}
             {selectedMetric === 'drive_temp' && selectedDrive ? ` · ${selectedDrive.label}` : ''}
             {selectedMetric === 'disk_temp' && selectedDisk ? ` · ${selectedDisk.label}` : ''}
+            {selectedMetric === 'drive_io' && selectedDrive ? ` · ${selectedDrive.label}` : ''}
+            {selectedMetric === 'disk_io' && selectedDisk ? ` · ${selectedDisk.label}` : ''}
             {' '}over time
           </h3>
           <div className="flex gap-1">
@@ -702,6 +851,30 @@ function RouteComponent() {
           {selectedMetric === 'disk_temp' && (
             <LineGraph points={diskTempPoints} width={graphW} height={200} color="#06b6d4" formatY={formatTempY} formatX={formatGraphX} />
           )}
+          {selectedMetric === 'drive_io' && (
+            <div className="flex flex-col gap-4">
+              <div>
+                <div className="text-xs text-gray-400 mb-2">↓ Read</div>
+                <LineGraph points={driveReadPoints} width={graphW} height={160} color="#10b981" formatY={formatBytesPerSec} formatX={formatGraphX} />
+              </div>
+              <div>
+                <div className="text-xs text-gray-400 mb-2">↑ Write</div>
+                <LineGraph points={driveWritePoints} width={graphW} height={160} color="#3b82f6" formatY={formatBytesPerSec} formatX={formatGraphX} />
+              </div>
+            </div>
+          )}
+          {selectedMetric === 'disk_io' && (
+            <div className="flex flex-col gap-4">
+              <div>
+                <div className="text-xs text-gray-400 mb-2">↓ Read</div>
+                <LineGraph points={diskReadPoints} width={graphW} height={160} color="#10b981" formatY={formatBytesPerSec} formatX={formatGraphX} />
+              </div>
+              <div>
+                <div className="text-xs text-gray-400 mb-2">↑ Write</div>
+                <LineGraph points={diskWritePoints} width={graphW} height={160} color="#3b82f6" formatY={formatBytesPerSec} formatX={formatGraphX} />
+              </div>
+            </div>
+          )}
         </div>
       </section>
 
@@ -739,6 +912,8 @@ function RouteComponent() {
               <TestSuiteRow label="Backend" entry={testResult.backend} />
               <TestSuiteRow label="Frontend" entry={testResult.frontend} />
               <TestSuiteRow label="Frontend E2E" entry={testResult.frontend_e2e} />
+              <TestSuiteRow label="Mobile" entry={testResult.mobile} />
+              <TestSuiteRow label="Recognition" entry={testResult.recognition} />
               <button
                 onClick={() => setTestOutputOpen(o => !o)}
                 className="text-xs text-gray-400 hover:text-gray-700 cursor-pointer bg-transparent border-0 text-left w-fit"
@@ -755,6 +930,12 @@ function RouteComponent() {
                   )}
                   {testResult.frontend_e2e.enabled && testResult.frontend_e2e.result && (
                     <OutputBlock label="Frontend E2E" output={testResult.frontend_e2e.result.output} />
+                  )}
+                  {testResult.mobile.enabled && testResult.mobile.result && (
+                    <OutputBlock label="Mobile" output={testResult.mobile.result.output} />
+                  )}
+                  {testResult.recognition.enabled && testResult.recognition.result && (
+                    <OutputBlock label="Recognition" output={testResult.recognition.result.output} />
                   )}
                 </div>
               )}
@@ -1081,6 +1262,12 @@ function tempColor(c: number): string {
   return 'text-emerald-600'
 }
 
+// roleBadgeIcon differentiates managers (compute/control-plane node) from workers
+// (storage-only node, e.g. the fast-tier Pi) in the node selector.
+function roleBadgeIcon(role: string) {
+  return role === 'manager' ? <MdComputer aria-hidden /> : <MdStorage aria-hidden />
+}
+
 // NodeTabs is the per-node selector that drives the hardware + traffic cards.
 function NodeTabs({ tabs, selectedId, onSelect }: {
   tabs: { id: string; hostname: string; role: string }[]
@@ -1095,12 +1282,13 @@ function NodeTabs({ tabs, selectedId, onSelect }: {
           key={t.id}
           onClick={() => onSelect(t.id)}
           title={t.role}
-          className={`px-2.5 py-1 text-xs rounded-md border cursor-pointer transition-colors ${
+          className={`flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-md border cursor-pointer transition-colors ${
             t.id === selectedId
               ? 'bg-blue-600 text-white border-blue-600'
               : 'bg-white text-gray-600 border-gray-200 hover:border-gray-400'
           }`}
         >
+          {roleBadgeIcon(t.role)}
           {t.hostname}
         </button>
       ))}
@@ -1161,6 +1349,203 @@ function DriveCapacityCard({ items }: { items: { total_bytes: number; used_bytes
             {pct.toFixed(1)}% of {fmtCapacity(total)} · {items.length} disk{items.length !== 1 ? 's' : ''}
           </div>
         </>
+      )}
+    </div>
+  )
+}
+
+// DiskUsageCarousel pages through the selected node's physical disks, one
+// usage bar per slide — a per-disk complement to DriveCapacityCard's node-wide
+// aggregate. Shares its index with DiskTempCarousel so paging either one keeps
+// both showing the same disk.
+function DiskUsageCarousel({ disks, index, onIndex }: {
+  disks: DiskFrame[]
+  index: number
+  onIndex: (i: number) => void
+}) {
+  const has = disks.length > 0
+  const d = has ? disks[Math.min(index, disks.length - 1)] : undefined
+  const pct = d && d.total_bytes > 0 ? (d.used_bytes / d.total_bytes) * 100 : 0
+  const step = (delta: number, e: React.MouseEvent) => {
+    e.stopPropagation()
+    if (!has) return
+    onIndex((index + delta + disks.length) % disks.length)
+  }
+  return (
+    <div className="bg-white border border-gray-200 rounded-xl px-4 py-3">
+      <div className="flex items-center justify-between mb-2">
+        <div className="text-xs text-gray-400">Disk usage</div>
+        {disks.length > 1 && (
+          <div className="flex items-center gap-1">
+            <button onClick={(e) => step(-1, e)} className="text-xs text-gray-400 hover:text-gray-700 cursor-pointer bg-transparent border-0 px-1" title="Previous disk usage">‹</button>
+            <span className="text-xs text-gray-400 tabular-nums">{index + 1}/{disks.length}</span>
+            <button onClick={(e) => step(1, e)} className="text-xs text-gray-400 hover:text-gray-700 cursor-pointer bg-transparent border-0 px-1" title="Next disk usage">›</button>
+          </div>
+        )}
+      </div>
+      {d ? (
+        <>
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-xs text-gray-600 font-medium truncate" title={d.device || d.label}>{d.label}</span>
+            <span className="text-lg font-semibold tabular-nums shrink-0 text-gray-900">{pct.toFixed(1)}%</span>
+          </div>
+          <div className="h-1.5 bg-gray-100 rounded-full mt-1.5 overflow-hidden">
+            <div className={`h-full rounded-full ${pct >= 90 ? 'bg-red-500' : pct >= 75 ? 'bg-amber-500' : 'bg-emerald-500'}`} style={{ width: `${Math.min(pct, 100)}%` }} />
+          </div>
+          <div className="text-xs text-gray-400 mt-0.5">{fmtCapacity(d.used_bytes)} / {fmtCapacity(d.total_bytes)}</div>
+        </>
+      ) : (
+        <div className="text-sm font-semibold text-gray-400">no live data</div>
+      )}
+    </div>
+  )
+}
+
+// DriveUsageCarousel is DiskUsageCarousel's fallback for non-pooled deployments
+// with no physical-disk reporting — pages through logical drives instead.
+function DriveUsageCarousel({ drives, index, onIndex }: {
+  drives: DriveFrame[]
+  index: number
+  onIndex: (i: number) => void
+}) {
+  const has = drives.length > 0
+  const d = has ? drives[Math.min(index, drives.length - 1)] : undefined
+  const pct = d && d.total_bytes > 0 ? (d.used_bytes / d.total_bytes) * 100 : 0
+  const step = (delta: number, e: React.MouseEvent) => {
+    e.stopPropagation()
+    if (!has) return
+    onIndex((index + delta + drives.length) % drives.length)
+  }
+  return (
+    <div className="bg-white border border-gray-200 rounded-xl px-4 py-3">
+      <div className="flex items-center justify-between mb-2">
+        <div className="text-xs text-gray-400">Disk usage</div>
+        {drives.length > 1 && (
+          <div className="flex items-center gap-1">
+            <button onClick={(e) => step(-1, e)} className="text-xs text-gray-400 hover:text-gray-700 cursor-pointer bg-transparent border-0 px-1" title="Previous drive usage">‹</button>
+            <span className="text-xs text-gray-400 tabular-nums">{index + 1}/{drives.length}</span>
+            <button onClick={(e) => step(1, e)} className="text-xs text-gray-400 hover:text-gray-700 cursor-pointer bg-transparent border-0 px-1" title="Next drive usage">›</button>
+          </div>
+        )}
+      </div>
+      {d ? (
+        <>
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-xs text-gray-600 font-medium truncate" title={d.label}>{d.label}</span>
+            <span className="text-lg font-semibold tabular-nums shrink-0 text-gray-900">{pct.toFixed(1)}%</span>
+          </div>
+          <div className="h-1.5 bg-gray-100 rounded-full mt-1.5 overflow-hidden">
+            <div className={`h-full rounded-full ${pct >= 90 ? 'bg-red-500' : pct >= 75 ? 'bg-amber-500' : 'bg-emerald-500'}`} style={{ width: `${Math.min(pct, 100)}%` }} />
+          </div>
+          <div className="text-xs text-gray-400 mt-0.5">{fmtCapacity(d.used_bytes)} / {fmtCapacity(d.total_bytes)} · {d.drive_type === 'nvme' ? 'Fast' : 'Standard'}</div>
+        </>
+      ) : (
+        <div className="text-sm font-semibold text-gray-400">no live data</div>
+      )}
+    </div>
+  )
+}
+
+// DiskSpeedCarousel pages through the selected node's physical disks, one
+// read+write throughput reading per slide — the live rate comes from
+// ioRateByDiskId (derived by the page from consecutive live frames, the same
+// way network traffic rate is computed); clicking it (like DiskTempCarousel)
+// selects the "over time" graph below, backed by node_disk_io_snapshots
+// history. Shares its index with DiskUsageCarousel/DiskTempCarousel so paging
+// any one keeps them in sync.
+function DiskSpeedCarousel({ disks, rates, index, onIndex, selected, onClick }: {
+  disks: DiskFrame[]
+  rates: Map<string, { readBps: number; writeBps: number }>
+  index: number
+  onIndex: (i: number) => void
+  selected?: boolean
+  onClick?: () => void
+}) {
+  const has = disks.length > 0
+  const d = has ? disks[Math.min(index, disks.length - 1)] : undefined
+  const pct = d && d.total_bytes > 0 ? (d.used_bytes / d.total_bytes) * 100 : 0
+  const rate = d ? rates.get(d.disk_id) : undefined
+  const bps = rate ? rate.readBps + rate.writeBps : null
+  const step = (delta: number, e: React.MouseEvent) => {
+    e.stopPropagation()
+    if (!has) return
+    onIndex((index + delta + disks.length) % disks.length)
+  }
+  return (
+    <div
+      className={`bg-white border rounded-xl px-4 py-3 cursor-pointer transition-colors ${selected ? 'border-blue-500 ring-1 ring-blue-500' : 'border-gray-200 hover:border-gray-300'}`}
+      onClick={onClick}
+    >
+      <div className="flex items-center justify-between mb-2">
+        <div className="text-xs text-gray-400">Disk speed</div>
+        {disks.length > 1 && (
+          <div className="flex items-center gap-1">
+            <button onClick={(e) => step(-1, e)} className="text-xs text-gray-400 hover:text-gray-700 cursor-pointer bg-transparent border-0 px-1" title="Previous disk speed">‹</button>
+            <span className="text-xs text-gray-400 tabular-nums">{index + 1}/{disks.length}</span>
+            <button onClick={(e) => step(1, e)} className="text-xs text-gray-400 hover:text-gray-700 cursor-pointer bg-transparent border-0 px-1" title="Next disk speed">›</button>
+          </div>
+        )}
+      </div>
+      {d ? (
+        <>
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-xs text-gray-600 font-medium truncate" title={d.device || d.label}>{d.label}</span>
+            <span className="text-lg font-semibold tabular-nums shrink-0 text-gray-900">{bps != null ? formatBytesPerSec(bps) : '—'}</span>
+          </div>
+          <div className="text-xs text-gray-400 mt-0.5">{pct.toFixed(1)}% used</div>
+        </>
+      ) : (
+        <div className="text-sm font-semibold text-gray-400">no live data</div>
+      )}
+    </div>
+  )
+}
+
+// DriveSpeedCarousel is DiskSpeedCarousel's fallback for non-pooled deployments
+// with no physical-disk reporting — pages through logical drives instead.
+function DriveSpeedCarousel({ drives, rates, index, onIndex, selected, onClick }: {
+  drives: DriveFrame[]
+  rates: Map<string, { readBps: number; writeBps: number }>
+  index: number
+  onIndex: (i: number) => void
+  selected?: boolean
+  onClick?: () => void
+}) {
+  const has = drives.length > 0
+  const d = has ? drives[Math.min(index, drives.length - 1)] : undefined
+  const pct = d && d.total_bytes > 0 ? (d.used_bytes / d.total_bytes) * 100 : 0
+  const rate = d ? rates.get(d.drive_id) : undefined
+  const bps = rate ? rate.readBps + rate.writeBps : null
+  const step = (delta: number, e: React.MouseEvent) => {
+    e.stopPropagation()
+    if (!has) return
+    onIndex((index + delta + drives.length) % drives.length)
+  }
+  return (
+    <div
+      className={`bg-white border rounded-xl px-4 py-3 cursor-pointer transition-colors ${selected ? 'border-blue-500 ring-1 ring-blue-500' : 'border-gray-200 hover:border-gray-300'}`}
+      onClick={onClick}
+    >
+      <div className="flex items-center justify-between mb-2">
+        <div className="text-xs text-gray-400">Drive speed</div>
+        {drives.length > 1 && (
+          <div className="flex items-center gap-1">
+            <button onClick={(e) => step(-1, e)} className="text-xs text-gray-400 hover:text-gray-700 cursor-pointer bg-transparent border-0 px-1" title="Previous drive speed">‹</button>
+            <span className="text-xs text-gray-400 tabular-nums">{index + 1}/{drives.length}</span>
+            <button onClick={(e) => step(1, e)} className="text-xs text-gray-400 hover:text-gray-700 cursor-pointer bg-transparent border-0 px-1" title="Next drive speed">›</button>
+          </div>
+        )}
+      </div>
+      {d ? (
+        <>
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-xs text-gray-600 font-medium truncate" title={d.label}>{d.label}</span>
+            <span className="text-lg font-semibold tabular-nums shrink-0 text-gray-900">{bps != null ? formatBytesPerSec(bps) : '—'}</span>
+          </div>
+          <div className="text-xs text-gray-400 mt-0.5">{pct.toFixed(1)}% used</div>
+        </>
+      ) : (
+        <div className="text-sm font-semibold text-gray-400">no live data</div>
       )}
     </div>
   )
@@ -1436,6 +1821,30 @@ function formatBytesPerSec(bps: number): string {
   if (bps >= MB) return `${(bps / MB).toFixed(1)} MB/s`
   if (bps >= KB) return `${(bps / KB).toFixed(1)} KB/s`
   return `${bps.toFixed(0)} B/s`
+}
+
+// diffIORate turns a time-ordered series of cumulative (read_bytes,
+// write_bytes) samples into read/write bytes-per-second point series — the
+// same cumulative-counter-diff technique used for network traffic, applied
+// here to both live WS frames and persisted history rows. Pairs with a
+// non-positive time delta or a counter reset (negative rate) are dropped.
+function diffIORate<T extends { read_bytes: number; write_bytes: number }>(
+  samples: T[],
+  tsOf: (s: T) => number,
+): { read: LinePoint[]; write: LinePoint[] } {
+  const read: LinePoint[] = []
+  const write: LinePoint[] = []
+  for (let i = 1; i < samples.length; i++) {
+    const prev = samples[i - 1]; const curr = samples[i]
+    const dtMs = tsOf(curr) - tsOf(prev)
+    if (dtMs <= 0) continue
+    const readBps = ((curr.read_bytes - prev.read_bytes) / dtMs) * 1000
+    const writeBps = ((curr.write_bytes - prev.write_bytes) / dtMs) * 1000
+    if (readBps < 0 || writeBps < 0) continue
+    read.push({ x: tsOf(curr), y: readBps })
+    write.push({ x: tsOf(curr), y: writeBps })
+  }
+  return { read, write }
 }
 
 function fmtCapacity(bytes: number): string {

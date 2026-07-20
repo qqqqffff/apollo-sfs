@@ -154,7 +154,9 @@ npm test                  # Jest unit tests
 npm run test -- --watch   # Watch mode
 ```
 
-`jest.setup.ts` mocks native modules that require a device/simulator (camera roll, encrypted storage, SQLite).
+The full cross-service suite (this suite plus backend/frontend/recognition) runs via the unified `test-runner` Swarm service (`docker-stack.yml`) — Swarm-only, no `docker-compose.yml` equivalent (deprecated, see root `CLAUDE.md`). Normally triggered from the admin metrics page's "Run tests" button; see `test-runner/CLAUDE.md` to trigger it manually.
+
+`jest.setup.ts` mocks native modules that require a device/simulator (camera roll, encrypted storage, SQLite). There's no mobile E2E suite yet — that would need Detox/Appium plus a simulator/emulator, which the test-runner sidecar (`test-runner/`, repo root) doesn't set up (it only runs the JS-side Jest suite here).
 
 ## Key Configuration (`src/config.ts`)
 

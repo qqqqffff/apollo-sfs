@@ -9,14 +9,28 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 
 	"apollo-sfs.com/api/routes/services"
 )
 
 const speedTestBlobBytes = 32 * 1024 * 1024 // 32 MB — enough to saturate most links without OOM on a Pi
 
-// SpeedTestResult is the outcome of one upload+download probe against MinIO.
+// Cloudflare's public speed-test endpoints (the same ones speed.cloudflare.com
+// itself uses) — unauthenticated, free, and built exactly for measuring a
+// server's throughput to the internet. __down streams back the requested byte
+// count; __up accepts and discards any POST body.
+const (
+	speedTestDownloadURL = "https://speed.cloudflare.com/__down?bytes=%d"
+	speedTestUploadURL   = "https://speed.cloudflare.com/__up"
+)
+
+// speedTestHTTPClient bounds each probe so a stalled connection can't hang the
+// 30-minute loop or a synchronous admin request indefinitely.
+var speedTestHTTPClient = &http.Client{Timeout: 60 * time.Second}
+
+// SpeedTestResult is the outcome of one upload+download probe against the
+// public internet (Cloudflare), independent of MinIO/local storage — this
+// measures the server's WAN link, not intra-cluster throughput.
 type SpeedTestResult struct {
 	UploadMbps   float64   `json:"upload_mbps"`
 	DownloadMbps float64   `json:"download_mbps"`
@@ -77,10 +91,6 @@ func (h *Handler) TriggerSpeedTest(c *gin.Context) {
 	}
 
 	result := h.runSpeedTest(ctx)
-	if result == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "no active storage configured"})
-		return
-	}
 
 	h.speedTestMu.Lock()
 	h.latestSpeedTest = result
@@ -115,9 +125,6 @@ func (h *Handler) LatestSpeedTestResult() *services.SpeedTestResultSnapshot {
 // The probe is skipped when current network traffic exceeds 50 % of the last
 // measured capacity — the loop retries on the next tick rather than waiting.
 func (h *Handler) SpeedTestLoop(ctx context.Context) {
-	if h.registry == nil {
-		return
-	}
 	tick := time.NewTicker(30 * time.Minute)
 	defer tick.Stop()
 	for {
@@ -131,11 +138,9 @@ func (h *Handler) SpeedTestLoop(ctx context.Context) {
 			if h.speedTestRunning.CompareAndSwap(false, true) {
 				result := h.runSpeedTest(ctx)
 				h.speedTestRunning.Store(false)
-				if result != nil {
-					h.speedTestMu.Lock()
-					h.latestSpeedTest = result
-					h.speedTestMu.Unlock()
-				}
+				h.speedTestMu.Lock()
+				h.latestSpeedTest = result
+				h.speedTestMu.Unlock()
 			}
 		}
 	}
@@ -181,64 +186,74 @@ func (h *Handler) isNetworkTrafficHigh(ctx context.Context) bool {
 	return currentMbps > capacityMbps*0.5
 }
 
-// runSpeedTest performs one upload+download cycle against the first active
-// MinIO drive and returns timing results. Returns nil if no storage is
-// available (registry or queries not configured).
+// runSpeedTest performs one upload+download cycle against Cloudflare's public
+// speed-test endpoints and returns timing results. This has no dependency on
+// MinIO/storage being configured — it measures the server's actual internet
+// uplink/downlink, not throughput to a local/internal service, so it always
+// runs (never returns nil); any failure is reported via SpeedTestResult.Error.
 func (h *Handler) runSpeedTest(ctx context.Context) *SpeedTestResult {
-	if h.registry == nil || h.queries == nil {
-		return nil
-	}
-
-	drives, err := h.queries.GetDriveSummaries(ctx)
+	uploadMbps, err := probeUploadMbps(ctx)
 	if err != nil {
-		return &SpeedTestResult{Error: fmt.Sprintf("list drives: %v", err), TestedAt: time.Now()}
-	}
-
-	var svc *services.MinIOService
-	for _, d := range drives {
-		if !d.DriveIsActive || !d.ServerIsActive {
-			continue
-		}
-		client, ok := h.registry.ClientForDrive(d.ServerID, d.NodeID, d.NodeHasMinIO)
-		if !ok {
-			continue
-		}
-		svc = services.NewMinIOService(client, d.MinioBucket)
-		break
-	}
-	if svc == nil {
-		return &SpeedTestResult{Error: "no active storage target found", TestedAt: time.Now()}
-	}
-
-	key := "_speed-probe/" + uuid.NewString()
-	defer svc.RemoveObject(context.Background(), key) //nolint:errcheck
-
-	blob := make([]byte, speedTestBlobBytes)
-
-	// ── Upload ────────────────────────────────────────────────────────────────
-	uploadStart := time.Now()
-	if err := svc.PutObject(ctx, key, bytes.NewReader(blob), speedTestBlobBytes, "application/octet-stream"); err != nil {
 		return &SpeedTestResult{Error: fmt.Sprintf("upload: %v", err), TestedAt: time.Now()}
 	}
-	uploadMbps := float64(speedTestBlobBytes) / time.Since(uploadStart).Seconds() / (1024 * 1024)
 
-	// ── Download ──────────────────────────────────────────────────────────────
-	downloadStart := time.Now()
-	rc, err := svc.GetObject(ctx, key)
+	downloadMbps, downloadBytes, err := probeDownloadMbps(ctx)
 	if err != nil {
 		return &SpeedTestResult{Error: fmt.Sprintf("download: %v", err), TestedAt: time.Now()}
 	}
-	_, copyErr := io.Copy(io.Discard, rc)
-	rc.Close()
-	if copyErr != nil {
-		return &SpeedTestResult{Error: fmt.Sprintf("download read: %v", copyErr), TestedAt: time.Now()}
-	}
-	downloadMbps := float64(speedTestBlobBytes) / time.Since(downloadStart).Seconds() / (1024 * 1024)
 
 	return &SpeedTestResult{
 		UploadMbps:   uploadMbps,
 		DownloadMbps: downloadMbps,
-		SizeBytes:    speedTestBlobBytes,
+		SizeBytes:    downloadBytes,
 		TestedAt:     time.Now(),
 	}
+}
+
+// probeUploadMbps POSTs a throwaway blob to Cloudflare's speed-test upload
+// endpoint (it discards the body) and times the round trip.
+func probeUploadMbps(ctx context.Context) (float64, error) {
+	blob := make([]byte, speedTestBlobBytes)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, speedTestUploadURL, bytes.NewReader(blob))
+	if err != nil {
+		return 0, fmt.Errorf("build request: %w", err)
+	}
+	req.ContentLength = speedTestBlobBytes
+
+	start := time.Now()
+	resp, err := speedTestHTTPClient.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body) //nolint:errcheck
+	if resp.StatusCode >= 400 {
+		return 0, fmt.Errorf("cloudflare speed test returned %s", resp.Status)
+	}
+	return float64(speedTestBlobBytes) / time.Since(start).Seconds() / (1024 * 1024), nil
+}
+
+// probeDownloadMbps GETs a fixed-size blob from Cloudflare's speed-test
+// download endpoint and times how long it takes to stream in fully.
+func probeDownloadMbps(ctx context.Context) (mbps float64, bytesRead int64, err error) {
+	url := fmt.Sprintf(speedTestDownloadURL, speedTestBlobBytes)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return 0, 0, fmt.Errorf("build request: %w", err)
+	}
+
+	start := time.Now()
+	resp, err := speedTestHTTPClient.Do(req)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return 0, 0, fmt.Errorf("cloudflare speed test returned %s", resp.Status)
+	}
+	n, err := io.Copy(io.Discard, resp.Body)
+	if err != nil {
+		return 0, 0, err
+	}
+	return float64(n) / time.Since(start).Seconds() / (1024 * 1024), n, nil
 }

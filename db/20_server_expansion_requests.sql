@@ -62,7 +62,11 @@ CREATE TABLE server_expansion_requests (
     -- 7 days before the revert, 1 day before the revert).
     reminders_sent       SMALLINT    NOT NULL DEFAULT 0,
     refund_id            TEXT,
-    cancellation_reason  TEXT
+    cancellation_reason  TEXT,
+    -- Which PayPal environment this request's orders were created against
+    -- (admin sandbox payments toggle). Stamped at creation so later captures
+    -- (pay-remaining) and refunds always use the matching client.
+    environment          TEXT        NOT NULL DEFAULT 'live' CHECK (environment IN ('sandbox', 'live'))
 );
 
 CREATE UNIQUE INDEX ser_paypal_capture_id_uidx

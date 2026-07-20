@@ -1,6 +1,7 @@
 package models
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/google/uuid"
@@ -14,5 +15,10 @@ type AuditLog struct {
 	ResourceType   *string    `json:"resource_type,omitempty"`
 	ResourceID     *uuid.UUID `json:"resource_id,omitempty"`
 	ResourceName   *string    `json:"resource_name,omitempty"`
-	CreatedAt      time.Time  `json:"created_at"`
+	// Details is a generic, action-specific structured payload (e.g. the
+	// storage allocation editor's before/after breakdown + reason — see
+	// StorageAllocationChangeDetails). Raw passthrough since audit_logs
+	// covers many action types; nil for every action that predates it.
+	Details   json.RawMessage `json:"details,omitempty"`
+	CreatedAt time.Time       `json:"created_at"`
 }

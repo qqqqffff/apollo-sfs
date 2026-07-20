@@ -14,11 +14,15 @@ import (
 type Querier interface {
 	GetUserByUsername(ctx context.Context, username string) (*models.User, error)
 	GetServer(ctx context.Context, id uuid.UUID) (*models.Server, error)
-	GetServerCapacity(ctx context.Context, serverID uuid.UUID) (*db.ServerCapacity, error)
+	GetServerCapacity(ctx context.Context, serverID uuid.UUID, driveType string) (*db.ServerCapacity, error)
 	GetUserDrive(ctx context.Context, username string) (*models.UserDriveAllocation, error)
 	GetDriveAvailableBytes(ctx context.Context, driveID uuid.UUID) (int64, error)
-	AddUserQuota(ctx context.Context, username string, bytesAdded int64) (int64, error)
+	AddUserQuotaAndAllocation(ctx context.Context, username string, driveID *uuid.UUID, bytesAdded int64) (int64, error)
 	ListAdminEmails(ctx context.Context) ([]string, error)
+
+	// Admin-managed pricing (see billing.PricingQuerier).
+	GetPricingItem(ctx context.Context, id uuid.UUID) (*models.PricingItem, error)
+	ListActivePricingDiscounts(ctx context.Context, serverID uuid.UUID) ([]models.PricingDiscount, error)
 
 	CreateExpansionRequest(ctx context.Context, p db.CreateExpansionRequestParams) (*models.ServerExpansionRequest, error)
 	GetExpansionRequestByID(ctx context.Context, id uuid.UUID) (*models.ServerExpansionRequest, error)

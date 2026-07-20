@@ -59,9 +59,34 @@ func (h *Handler) Search(c *gin.Context) {
 		}
 	}
 
-	c.JSON(http.StatusOK, services.FolderContents{
-		Folder:     nil,
-		Subfolders: subfolders,
-		Files:      files,
+	// Premium/admin users additionally get labeled AI-recognition groups.
+	// The key is additive and omitted otherwise, so older clients are
+	// unaffected. group_limit=0 skips the list like the other two.
+	var groups *db.PageResult[db.RecognitionGroupSearchHit]
+	groupPage := parsePage(c, "group")
+	if h.recognition != nil && h.recognition.Available() && !groupPage.Skip {
+		if user, err := h.queries.GetUserByUsername(c.Request.Context(), c.GetString("username")); err == nil && (user.IsPremium || user.IsAdmin) {
+			groups, err = h.queries.SearchRecognitionGroupsByUser(c.Request.Context(), userID, q, groupPage)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "search failed"})
+				return
+			}
+		}
+	}
+
+	c.JSON(http.StatusOK, searchResponse{
+		FolderContents: services.FolderContents{
+			Folder:     nil,
+			Subfolders: subfolders,
+			Files:      files,
+		},
+		RecognitionGroups: groups,
 	})
+}
+
+// searchResponse extends the classic folders+files search payload with an
+// optional labeled-recognition-groups list for premium users.
+type searchResponse struct {
+	services.FolderContents
+	RecognitionGroups *db.PageResult[db.RecognitionGroupSearchHit] `json:"recognition_groups,omitempty"`
 }

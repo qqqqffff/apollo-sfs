@@ -21,15 +21,24 @@ jest.mock('../../api/interest', () => ({
   submitInterestForm: jest.fn(),
   createInterestDepositOrder: jest.fn(),
   captureInterestDepositOrder: jest.fn(),
-  validateApplePayMerchantForDeposit: jest.fn(),
-  createApplePayInterestDeposit: jest.fn(),
   createGooglePayInterestDeposit: jest.fn(),
+  getPublicPayPalClientToken: jest.fn().mockResolvedValue({ client_token: 'test-client-token' }),
 }))
 
 jest.mock('../../api/client', () => ({
   ApiError: class ApiError extends Error {
     status: number
     constructor(msg: string, status = 400) { super(msg); this.status = status }
+  },
+}))
+
+// Stub the hosted card fields (+ its embedded PayPal Google Pay button) — they
+// render PayPal-hosted iframes and load the PayPal/Google Pay SDKs, none of
+// which work in jsdom. A marker lets us assert the section is wired up.
+jest.mock('../../components/HostedCardFields', () => ({
+  HostedCardFields: () => {
+    const R = require('react')
+    return R.createElement('div', { 'data-testid': 'hosted-card-fields' })
   },
 }))
 
@@ -71,6 +80,7 @@ describe('Interest / request-access page (/interest)', () => {
     mockCreateDepositOrder.mockReset()
     mockCaptureDepositOrder.mockReset()
     window.open = jest.fn()
+    sessionStorage.clear()
   })
 
   test('renders the Request access heading', () => {
@@ -121,17 +131,16 @@ describe('Interest / request-access page (/interest)', () => {
   })
 
   test('payment buttons are disabled when no plan is selected', () => {
-    renderPage(null)
-    // PayPal and Card buttons exist but are disabled without a plan + captcha
-    const paypalBtn = screen.getByRole('button', { name: /paypal/i })
-    const cardBtn = screen.getByRole('button', { name: /pay by card/i })
-    expect(paypalBtn).toBeDisabled()
-    expect(cardBtn).toBeDisabled()
+    // The PayPal wallet button only renders once the public config carries a
+    // PayPal client id (see the paypal_client_id gate in interest.tsx) — it
+    // then exists but is disabled without a plan + captcha.
+    renderPage({ paypal_client_id: 'test-client' })
+    expect(screen.getByRole('button', { name: /paypal/i })).toBeDisabled()
   })
 
   test('shows captcha error when PayPal clicked without captcha token', async () => {
     // Turnstile is required (site key present) but not completed → inline error
-    renderPage({ turnstile_site_key: 'key123' })
+    renderPage({ turnstile_site_key: 'key123', paypal_client_id: 'test-client' })
     fireEvent.click(screen.getByRole('button', { name: /64 gb/i }))
     // Button is now enabled (plan selected); captcha not yet done
     await act(async () => {
@@ -145,20 +154,19 @@ describe('Interest / request-access page (/interest)', () => {
     expect(screen.getByTestId('turnstile')).toBeInTheDocument()
   })
 
-  test('selecting a plan and completing captcha enables the payment buttons', () => {
-    renderPage({ turnstile_site_key: 'key123' })
+  test('selecting a plan and completing captcha enables the PayPal button', () => {
+    renderPage({ turnstile_site_key: 'key123', paypal_client_id: 'test-client' })
     // 256 GB NVMe = $80 → deposit $40.00
     fireEvent.click(screen.getByRole('button', { name: /256 gb/i }))
     fireEvent.click(screen.getByTestId('turnstile'))
     expect(screen.getByRole('button', { name: /paypal/i })).not.toBeDisabled()
-    expect(screen.getByRole('button', { name: /pay by card/i })).not.toBeDisabled()
     // Deposit amount visible (50% of $80 = $40)
     expect(screen.getByText(/\$40\.00 refundable deposit/i)).toBeInTheDocument()
   })
 
   test('clicking PayPal button calls createInterestDepositOrder with paypal method', async () => {
     mockCreateDepositOrder.mockResolvedValue({ order_id: 'ord-1', approve_url: 'https://paypal.example' })
-    renderPage({ turnstile_site_key: 'key123' })
+    renderPage({ turnstile_site_key: 'key123', paypal_client_id: 'test-client' })
     fireEvent.click(screen.getByRole('button', { name: /256 gb/i }))
     fireEvent.click(screen.getByTestId('turnstile'))
     await act(async () => {
@@ -167,37 +175,54 @@ describe('Interest / request-access page (/interest)', () => {
     expect(mockCreateDepositOrder).toHaveBeenCalledWith('256gb', 'nvme', 'paypal')
   })
 
-  test('clicking Pay by Card calls createInterestDepositOrder with card method', async () => {
-    mockCreateDepositOrder.mockResolvedValue({ order_id: 'ord-2', approve_url: 'https://card.example' })
-    renderPage({ turnstile_site_key: 'key123' })
+  test('renders the hosted card fields section only when PayPal is configured', () => {
+    // Without a client id, PayPalCheckoutOptions — and its "Pay with card"
+    // entry point — doesn't render at all, so the card form can never be reached.
+    const { unmount } = renderPage({ turnstile_site_key: 'key123' })
+    fireEvent.click(screen.getByRole('button', { name: /128 gb/i }))
+    expect(screen.queryByRole('button', { name: /pay with card/i })).not.toBeInTheDocument()
+    expect(screen.queryByTestId('hosted-card-fields')).not.toBeInTheDocument()
+    unmount()
+    // …and shown once the public config carries a PayPal client id, a plan is
+    // selected, captcha is completed, and "Pay with card" is chosen.
+    renderPage({ turnstile_site_key: 'key123', paypal_client_id: 'test-client' })
     fireEvent.click(screen.getByRole('button', { name: /128 gb/i }))
     fireEvent.click(screen.getByTestId('turnstile'))
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: /pay by card/i }))
-    })
-    expect(mockCreateDepositOrder).toHaveBeenCalledWith('128gb', 'nvme', 'card')
+    fireEvent.click(screen.getByRole('button', { name: /pay with card/i }))
+    expect(screen.getByTestId('hosted-card-fields')).toBeInTheDocument()
   })
 
-  test('shows Processing… on payment buttons while deposit order is pending', () => {
+  test('disables the PayPal button while a deposit order is pending', () => {
     mockCreateDepositOrder.mockReturnValue(new Promise(() => {}))
-    renderPage({ turnstile_site_key: 'key123' })
+    renderPage({ turnstile_site_key: 'key123', paypal_client_id: 'test-client' })
     fireEvent.click(screen.getByRole('button', { name: /64 gb/i }))
     fireEvent.click(screen.getByTestId('turnstile'))
+    // Capture the button before clicking — while pending, PayPalWalletRedirectButton
+    // swaps its own label to "Redirecting…", so a later query by /paypal/i wouldn't
+    // match it anymore.
+    const button = screen.getByRole('button', { name: /paypal/i })
     act(() => {
-      fireEvent.click(screen.getByRole('button', { name: /paypal/i }))
+      fireEvent.click(button)
     })
-    expect(screen.getAllByText(/processing…/i).length).toBeGreaterThan(0)
+    expect(button).toBeDisabled()
   })
 
-  test('shows awaiting screen and opens URL after deposit order is created', async () => {
+  // The "PayPal" wallet button is a full-page redirect (PayPalWalletRedirectButton),
+  // not the old popup + "I've completed payment" confirmation step — that flow
+  // (and window.open) was replaced so third-party iOS browsers behave correctly
+  // (see the comment on PayPalWalletRedirectButton). The fields that can't be
+  // recovered from the deposit order after the redirect (name/email/use_case)
+  // are persisted to sessionStorage first so /interest can resume on return.
+  test('clicking PayPal creates the deposit order and persists resume state before redirecting', async () => {
     mockCreateDepositOrder.mockResolvedValue({ order_id: 'ord-1', approve_url: 'https://paypal.example' })
-    renderPage({ turnstile_site_key: 'key123' })
+    renderPage({ turnstile_site_key: 'key123', paypal_client_id: 'test-client' })
     fireEvent.click(screen.getByRole('button', { name: /128 gb/i }))
     fireEvent.click(screen.getByTestId('turnstile'))
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: /paypal/i }))
     })
-    expect(window.open).toHaveBeenCalledWith('https://paypal.example', '_blank', 'noopener,noreferrer')
-    expect(screen.getByRole('button', { name: /i've completed payment/i })).toBeInTheDocument()
+    expect(mockCreateDepositOrder).toHaveBeenCalledWith('128gb', 'nvme', 'paypal')
+    const saved = JSON.parse(sessionStorage.getItem('apollo-sfs:interest-resume') ?? 'null')
+    expect(saved).toMatchObject({ storageType: 'nvme', selectedPlanId: '128gb' })
   })
 })

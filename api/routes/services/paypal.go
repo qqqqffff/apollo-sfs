@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -29,11 +30,11 @@ const (
 
 // PayPalConfig is the dependency-injection bag for NewPayPalClient.
 type PayPalConfig struct {
-	Environment   string // "sandbox" or "live"
-	ClientID      string
-	ClientSecret  string
-	WebhookID     string
-	HTTPTimeout   time.Duration
+	Environment  string // "sandbox" or "live"
+	ClientID     string
+	ClientSecret string
+	WebhookID    string
+	HTTPTimeout  time.Duration
 }
 
 // PayPalClient is a tiny wrapper around the PayPal Orders v2 + Webhooks
@@ -47,6 +48,33 @@ type PayPalClient struct {
 	tokenMu sync.Mutex
 	token   string
 	expires time.Time
+
+	// Browser-safe client token cache (JS SDK v6 init) — separate from the
+	// bearer token above; see BrowserSafeClientToken.
+	clientTokenMu      sync.Mutex
+	clientToken        string
+	clientTokenExpires time.Time
+	clientTokenDomains string
+}
+
+// PayPalClients bundles the live and (optional) sandbox PayPalClient
+// instances. Handlers select between them per request via For, based on
+// whether the acting admin's session-scoped "sandbox payments" toggle is on.
+type PayPalClients struct {
+	Live    *PayPalClient
+	Sandbox *PayPalClient
+}
+
+// For returns the client for the given environment ("sandbox" | "live").
+// Deliberately does NOT fall back to Live when Sandbox is nil — callers keep
+// their existing nil-check ("payments not configured") so a toggled-on admin
+// without sandbox credentials configured gets a clear error instead of being
+// silently charged on the live account.
+func (p PayPalClients) For(env string) *PayPalClient {
+	if env == PayPalEnvSandbox {
+		return p.Sandbox
+	}
+	return p.Live
 }
 
 // NewPayPalClient constructs a PayPalClient. Returns nil when ClientID or
@@ -107,6 +135,59 @@ func (p *PayPalClient) bearer(ctx context.Context) (string, error) {
 	return p.token, nil
 }
 
+// BrowserSafeClientToken mints (and caches) a browser-safe client token used
+// to initialise the PayPal JS SDK v6 on the web frontend
+// (paypal.createInstance({ clientToken }) — the Apple Pay integration
+// standard, https://developer.paypal.com/apple-pay/integrate). Unlike
+// bearer()'s access token, this token is domain-bound and safe to hand to the
+// browser: PayPal issues it for response_type=client_token and it can only
+// initialise the SDK, not call the REST API. Returns the token plus the
+// seconds it remains valid.
+func (p *PayPalClient) BrowserSafeClientToken(ctx context.Context, domains []string) (string, int, error) {
+	key := strings.Join(domains, ",")
+	p.clientTokenMu.Lock()
+	defer p.clientTokenMu.Unlock()
+	if p.clientToken != "" && p.clientTokenDomains == key && time.Now().Add(60*time.Second).Before(p.clientTokenExpires) {
+		return p.clientToken, int(time.Until(p.clientTokenExpires).Seconds()), nil
+	}
+
+	// Per the v6 SDK docs the domains[] value is a single comma-separated
+	// list, not a repeated form field.
+	form := "grant_type=client_credentials&response_type=client_token&intent=sdk_init"
+	if key != "" {
+		form += "&domains[]=" + url.QueryEscape(key)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/v1/oauth2/token", strings.NewReader(form))
+	if err != nil {
+		return "", 0, err
+	}
+	req.SetBasicAuth(p.cfg.ClientID, p.cfg.ClientSecret)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := p.http.Do(req)
+	if err != nil {
+		return "", 0, fmt.Errorf("paypal client token: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return "", 0, fmt.Errorf("paypal client token: %s: %s", resp.Status, string(b))
+	}
+	var tr struct {
+		AccessToken string `json:"access_token"`
+		ExpiresIn   int    `json:"expires_in"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&tr); err != nil {
+		return "", 0, err
+	}
+	if tr.AccessToken == "" {
+		return "", 0, errors.New("paypal client token: empty access_token in response")
+	}
+	p.clientToken = tr.AccessToken
+	p.clientTokenExpires = time.Now().Add(time.Duration(tr.ExpiresIn) * time.Second)
+	p.clientTokenDomains = key
+	return p.clientToken, tr.ExpiresIn, nil
+}
+
 // ── Orders ────────────────────────────────────────────────────────────────────
 
 // CreateOrderInput is the parameter set for CreateOrder.
@@ -159,8 +240,8 @@ func (p *PayPalClient) CreateOrder(ctx context.Context, in CreateOrderInput) (*C
 		},
 		"payment_source": ps,
 		"application_context": map[string]any{
-			"return_url": in.ReturnURL,
-			"cancel_url": in.CancelURL,
+			"return_url":  in.ReturnURL,
+			"cancel_url":  in.CancelURL,
 			"user_action": "PAY_NOW",
 		},
 	}
@@ -325,12 +406,22 @@ func (p *PayPalClient) doAuthed(ctx context.Context, method, path string, body i
 	return resp, nil
 }
 
-// ── Storage add-on orders ─────────────────────────────────────────────────────
+// ── Wallet orders (no payment_source restriction) ────────────────────────────
 
-// CreateStorageWalletOrder creates a PayPal wallet order for a storage add-on
-// and returns the order ID + approval URL. The mobile app opens the URL, waits
+// isWebURL reports whether u is an http(s) URL — the only schemes PayPal's
+// REST Orders API accepts for application_context return/cancel URLs.
+func isWebURL(u string) bool {
+	return strings.HasPrefix(u, "http://") || strings.HasPrefix(u, "https://")
+}
+
+// CreateWalletOrder creates a PayPal order with no payment_source set, and
+// returns the order ID + approval URL. Leaving payment_source unset lets the
+// buyer complete via the PayPal wallet button, Google Pay, or hosted card
+// fields against the SAME order — unlike CreateOrder, which locks the order
+// to a single funding source chosen up front. Used for storage add-ons and
+// the premium checkout modal. The mobile app opens the approval URL, waits
 // for the user to approve in the browser, then calls CaptureOrder.
-func (p *PayPalClient) CreateStorageWalletOrder(ctx context.Context, amountCents int, currency, returnURL, cancelURL string) (*CreateOrderResult, error) {
+func (p *PayPalClient) CreateWalletOrder(ctx context.Context, amountCents int, currency, returnURL, cancelURL string) (*CreateOrderResult, error) {
 	if amountCents <= 0 {
 		return nil, errors.New("paypal: amount must be > 0")
 	}
@@ -338,6 +429,18 @@ func (p *PayPalClient) CreateStorageWalletOrder(ctx context.Context, amountCents
 		currency = "USD"
 	}
 	value := fmt.Sprintf("%d.%02d", amountCents/100, amountCents%100)
+	// PayPal's REST Orders API rejects application_context return/cancel URLs
+	// that use a non-web scheme (e.g. the mobile app's apollosfs:// deep links),
+	// failing order creation for the web JS-SDK button flow — where these URLs
+	// are never used anyway (the SDK approves in-context, no browser redirect).
+	// Include them only when they are http(s); otherwise omit them.
+	appCtx := map[string]any{"user_action": "PAY_NOW"}
+	if isWebURL(returnURL) {
+		appCtx["return_url"] = returnURL
+	}
+	if isWebURL(cancelURL) {
+		appCtx["cancel_url"] = cancelURL
+	}
 	payload := map[string]any{
 		"intent": "CAPTURE",
 		"purchase_units": []any{
@@ -348,11 +451,7 @@ func (p *PayPalClient) CreateStorageWalletOrder(ctx context.Context, amountCents
 				},
 			},
 		},
-		"application_context": map[string]any{
-			"return_url":  returnURL,
-			"cancel_url":  cancelURL,
-			"user_action": "PAY_NOW",
-		},
+		"application_context": appCtx,
 	}
 	body, _ := json.Marshal(payload)
 	resp, err := p.doAuthed(ctx, http.MethodPost, "/v2/checkout/orders", bytes.NewReader(body), nil)
@@ -362,7 +461,7 @@ func (p *PayPalClient) CreateStorageWalletOrder(ctx context.Context, amountCents
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusCreated {
 		b, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("paypal create storage wallet order: %s: %s", resp.Status, string(b))
+		return nil, fmt.Errorf("paypal create wallet order: %s: %s", resp.Status, string(b))
 	}
 	var out struct {
 		ID    string `json:"id"`
@@ -522,8 +621,8 @@ func (p *PayPalClient) directOrder(ctx context.Context, amountCents int, currenc
 		return nil, fmt.Errorf("paypal direct charge: %s: %s", resp.Status, string(raw))
 	}
 	var parsed struct {
-		ID     string `json:"id"`
-		Status string `json:"status"`
+		ID            string `json:"id"`
+		Status        string `json:"status"`
 		PurchaseUnits []struct {
 			Payments struct {
 				Captures []struct {
@@ -590,7 +689,9 @@ func (p *PayPalClient) RefundCapture(ctx context.Context, captureID string, amou
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
-		var ppErr struct{ Message string `json:"message"` }
+		var ppErr struct {
+			Message string `json:"message"`
+		}
 		if jerr := json.Unmarshal(raw, &ppErr); jerr == nil && ppErr.Message != "" {
 			return nil, fmt.Errorf("paypal refund: %s", ppErr.Message)
 		}
@@ -604,6 +705,234 @@ func (p *PayPalClient) RefundCapture(ctx context.Context, captureID string, amou
 		return nil, fmt.Errorf("paypal refund decode: %w", err)
 	}
 	return &RefundResult{RefundID: parsed.ID, Status: parsed.Status}, nil
+}
+
+// ── Subscriptions ─────────────────────────────────────────────────────────────
+
+// CreateSubscriptionInput is the parameter set for CreateSubscription.
+type CreateSubscriptionInput struct {
+	PlanID    string
+	ReturnURL string
+	CancelURL string
+}
+
+// CreateSubscriptionResult is the relevant subset of PayPal's create
+// subscription response. ApproveURL is what the frontend redirects the
+// shopper to in order to approve the subscription on PayPal's hosted page.
+type CreateSubscriptionResult struct {
+	SubscriptionID string
+	ApproveURL     string
+}
+
+// CreateSubscription issues a v1 Billing Subscriptions create call. Approving
+// the subscription does not by itself grant premium — that happens when the
+// BILLING.SUBSCRIPTION.ACTIVATED webhook (or the post-redirect confirm
+// endpoint, as a latency shortcut) reports status ACTIVE.
+func (p *PayPalClient) CreateSubscription(ctx context.Context, in CreateSubscriptionInput) (*CreateSubscriptionResult, error) {
+	if in.PlanID == "" {
+		return nil, errors.New("paypal: plan_id required")
+	}
+	payload := map[string]any{
+		"plan_id": in.PlanID,
+		"application_context": map[string]any{
+			"return_url":  in.ReturnURL,
+			"cancel_url":  in.CancelURL,
+			"user_action": "SUBSCRIBE_NOW",
+		},
+	}
+	body, _ := json.Marshal(payload)
+	resp, err := p.doAuthed(ctx, http.MethodPost, "/v1/billing/subscriptions", bytes.NewReader(body), nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusCreated {
+		return nil, fmt.Errorf("paypal create subscription: %s: %s", resp.Status, string(raw))
+	}
+	var out struct {
+		ID    string `json:"id"`
+		Links []struct {
+			Href string `json:"href"`
+			Rel  string `json:"rel"`
+		} `json:"links"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, err
+	}
+	approve := ""
+	for _, l := range out.Links {
+		if l.Rel == "approve" {
+			approve = l.Href
+			break
+		}
+	}
+	return &CreateSubscriptionResult{SubscriptionID: out.ID, ApproveURL: approve}, nil
+}
+
+// SubscriptionDetails is the relevant subset of PayPal's get-subscription
+// response, used both by the post-redirect confirm endpoint and the
+// reconciliation loop's missed-webhook safety net.
+type SubscriptionDetails struct {
+	ID              string
+	Status          string // APPROVAL_PENDING|APPROVED|ACTIVE|SUSPENDED|CANCELLED|EXPIRED
+	PlanID          string
+	NextBillingTime *time.Time
+}
+
+// GetSubscription fetches a subscription's current status and billing info.
+func (p *PayPalClient) GetSubscription(ctx context.Context, subscriptionID string) (*SubscriptionDetails, error) {
+	resp, err := p.doAuthed(ctx, http.MethodGet, "/v1/billing/subscriptions/"+subscriptionID, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("paypal get subscription: %s: %s", resp.Status, string(raw))
+	}
+	var out struct {
+		ID          string `json:"id"`
+		Status      string `json:"status"`
+		PlanID      string `json:"plan_id"`
+		BillingInfo struct {
+			NextBillingTime *time.Time `json:"next_billing_time"`
+		} `json:"billing_info"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("paypal get subscription decode: %w", err)
+	}
+	return &SubscriptionDetails{
+		ID:              out.ID,
+		Status:          out.Status,
+		PlanID:          out.PlanID,
+		NextBillingTime: out.BillingInfo.NextBillingTime,
+	}, nil
+}
+
+// CancelSubscription cancels an active or suspended subscription on PayPal's
+// side. Idempotent from the caller's perspective: PayPal returns 422 for an
+// already-cancelled subscription, which is treated as success here since the
+// desired end state (not billing again) already holds.
+func (p *PayPalClient) CancelSubscription(ctx context.Context, subscriptionID, reason string) error {
+	payload := map[string]any{"reason": reason}
+	body, _ := json.Marshal(payload)
+	resp, err := p.doAuthed(ctx, http.MethodPost, "/v1/billing/subscriptions/"+subscriptionID+"/cancel", bytes.NewReader(body), nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusUnprocessableEntity {
+		return nil
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	return fmt.Errorf("paypal cancel subscription: %s: %s", resp.Status, string(raw))
+}
+
+// SubscriptionTransaction is one billing-cycle payment record for a
+// subscription, as returned by ListSubscriptionTransactions.
+type SubscriptionTransaction struct {
+	ID          string // sale/transaction id — refundable via RefundSale
+	Status      string // e.g. "COMPLETED", "PENDING", "DECLINED"
+	AmountCents int
+	Currency    string
+	Time        time.Time
+}
+
+// ListSubscriptionTransactions lists a subscription's billing transactions in
+// [start, end] (PayPal requires both bounds). Used to locate the sale behind
+// the subscription's current billing period when an admin cancellation needs
+// to issue a prorated refund — PayPal Subscriptions v1 has no "give me the
+// last charge" endpoint, only this range query.
+func (p *PayPalClient) ListSubscriptionTransactions(ctx context.Context, subscriptionID string, start, end time.Time) ([]SubscriptionTransaction, error) {
+	path := fmt.Sprintf("/v1/billing/subscriptions/%s/transactions?start_time=%s&end_time=%s",
+		subscriptionID,
+		strings.ReplaceAll(start.UTC().Format(time.RFC3339), "+", "%2B"),
+		strings.ReplaceAll(end.UTC().Format(time.RFC3339), "+", "%2B"))
+	resp, err := p.doAuthed(ctx, http.MethodGet, path, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("paypal list subscription transactions: %s: %s", resp.Status, string(raw))
+	}
+	var out struct {
+		Transactions []struct {
+			ID                  string `json:"id"`
+			Status              string `json:"status"`
+			AmountWithBreakdown struct {
+				GrossAmount struct {
+					CurrencyCode string `json:"currency_code"`
+					Value        string `json:"value"`
+				} `json:"gross_amount"`
+			} `json:"amount_with_breakdown"`
+			Time time.Time `json:"time"`
+		} `json:"transactions"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("paypal list subscription transactions decode: %w", err)
+	}
+	txs := make([]SubscriptionTransaction, 0, len(out.Transactions))
+	for _, t := range out.Transactions {
+		cents, err := parseAmountCents(t.AmountWithBreakdown.GrossAmount.Value)
+		if err != nil {
+			continue
+		}
+		txs = append(txs, SubscriptionTransaction{
+			ID:          t.ID,
+			Status:      t.Status,
+			AmountCents: cents,
+			Currency:    t.AmountWithBreakdown.GrossAmount.CurrencyCode,
+			Time:        t.Time,
+		})
+	}
+	return txs, nil
+}
+
+// RefundSale issues a partial or full refund against a subscription billing
+// charge. Subscription payments are "sale" transactions, not Orders v2
+// captures, so they're refunded through the legacy Payments v1 API
+// (/v1/payments/sale/{id}/refund) rather than RefundCapture's v2 endpoint.
+// amountCents <= 0 refunds the sale in full.
+func (p *PayPalClient) RefundSale(ctx context.Context, saleID string, amountCents int, currency string) (*RefundResult, error) {
+	if currency == "" {
+		currency = "USD"
+	}
+	payload := map[string]any{}
+	if amountCents > 0 {
+		payload["amount"] = map[string]any{
+			"total":    fmt.Sprintf("%d.%02d", amountCents/100, amountCents%100),
+			"currency": currency,
+		}
+	}
+	body, _ := json.Marshal(payload)
+	resp, err := p.doAuthed(ctx, http.MethodPost,
+		fmt.Sprintf("/v1/payments/sale/%s/refund", saleID),
+		bytes.NewReader(body), nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		var ppErr struct {
+			Message string `json:"message"`
+		}
+		if jerr := json.Unmarshal(raw, &ppErr); jerr == nil && ppErr.Message != "" {
+			return nil, fmt.Errorf("paypal refund sale: %s", ppErr.Message)
+		}
+		return nil, fmt.Errorf("paypal refund sale: %s: %s", resp.Status, string(raw))
+	}
+	var parsed struct {
+		ID    string `json:"id"`
+		State string `json:"state"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return nil, fmt.Errorf("paypal refund sale decode: %w", err)
+	}
+	return &RefundResult{RefundID: parsed.ID, Status: parsed.State}, nil
 }
 
 // parseAmountCents parses a PayPal "12.34"-style decimal amount to cents.

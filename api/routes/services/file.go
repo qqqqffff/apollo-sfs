@@ -130,6 +130,10 @@ type FileService struct {
 	transcode    *TranscodeService
 	meta         *MetadataService
 	quotaWarnPct int
+	// recognition enqueues freshly uploaded media into AI-indexing-enabled
+	// collections. Optional (nil when the sidecar is not configured); wired
+	// via SetRecognitionEnqueuer to keep the dependency one-directional.
+	recognition RecognitionEnqueuer
 
 	userCacheMu sync.RWMutex
 	userCache   map[string]cachedUser
@@ -161,6 +165,21 @@ func NewFileService(q *db.Queries, registry *MinIORegistry, enc *EncryptionServi
 		raCache:      make(map[raKey]*raEntry),
 		raInflight:   make(map[raKey]struct{}),
 	}
+}
+
+// SetRecognitionEnqueuer installs the AI-recognition upload hook. nil is
+// tolerated (feature disabled).
+func (s *FileService) SetRecognitionEnqueuer(r RecognitionEnqueuer) {
+	s.recognition = r
+}
+
+// enqueueRecognitionAsync fires the AI-recognition hook for a stored media
+// file. Fire-and-forget: durability comes from the job row once inserted.
+func (s *FileService) enqueueRecognitionAsync(file *models.File, username, trigger string) {
+	if s.recognition == nil || file == nil {
+		return
+	}
+	go s.recognition.EnqueueFileIfEnabled(context.Background(), file, username, trigger)
 }
 
 // storageFor returns the MinIOService and driveID for the given user. Results
@@ -246,6 +265,10 @@ func (s *FileService) storageForFile(ctx context.Context, username string, file 
 // drive) and that drive is still usable, it wins outright. Otherwise the
 // user's primary drive wins when it has room; failing that, the owned drive
 // with the lowest physical used-percentage that can fit the file is used.
+// "Room" means both physical drive capacity and the user's own per-drive
+// quota_bytes allocation have headroom (see hasRoomForUpload) — a
+// multi-allocation user whose every drive is quota-exhausted gets
+// ErrDriveUnavailable rather than being routed anywhere.
 // Falls back to the user's primary allocation when no usage data is available.
 // userID is the Keycloak sub UUID (stored as files.user_id) used to compute per-user usage.
 func (s *FileService) resolveUploadDrive(ctx context.Context, username string, userID uuid.UUID, fileSize int64, folderDriveID *uuid.UUID) (*MinIOService, uuid.UUID, error) {
@@ -269,9 +292,8 @@ func (s *FileService) resolveUploadDrive(ctx context.Context, username string, u
 
 	driveID, ok := pickUploadDrive(drives, fileSize)
 	if !ok {
-		// Nothing has room — let the primary path run so the caller surfaces a
-		// normal quota/space error instead of a routing failure.
-		return s.storageFor(ctx, username)
+		// No owned drive has both physical room and per-user quota headroom.
+		return nil, uuid.Nil, ErrDriveUnavailable
 	}
 
 	svc, err := s.storageForDrive(ctx, driveID)
@@ -281,16 +303,25 @@ func (s *FileService) resolveUploadDrive(ctx context.Context, username string, u
 	return svc, driveID, nil
 }
 
+// hasRoomForUpload reports whether drive d can accept fileSize more bytes for
+// its own user: both the drive's physical capacity (shared across every user
+// on it) and this user's own per-drive quota_bytes allocation must have room.
+func hasRoomForUpload(d db.UserDriveInfo, fileSize int64) bool {
+	return d.CapacityBytes-d.DriveUsedBytes >= fileSize &&
+		d.QuotaBytes-d.UserUsedBytes >= fileSize
+}
+
 // pinnedDriveIfValid returns the folder-pinned drive when it's still usable:
-// active, has room, and still present in the user's current allocations (an
-// allocation can be revoked after the folder was created, e.g. a premium
-// downgrade). ok=false tells the caller to fall through to pickUploadDrive.
+// active, has room (physical and per-user quota), and still present in the
+// user's current allocations (an allocation can be revoked after the folder
+// was created, e.g. a premium downgrade). ok=false tells the caller to fall
+// through to pickUploadDrive.
 func pinnedDriveIfValid(drives []db.UserDriveInfo, folderDriveID *uuid.UUID, fileSize int64) (uuid.UUID, bool) {
 	if folderDriveID == nil {
 		return uuid.Nil, false
 	}
 	for _, d := range drives {
-		if d.DriveID == *folderDriveID && d.DriveIsActive && d.ServerIsActive && d.CapacityBytes-d.DriveUsedBytes >= fileSize {
+		if d.DriveID == *folderDriveID && d.DriveIsActive && d.ServerIsActive && hasRoomForUpload(d, fileSize) {
 			return d.DriveID, true
 		}
 	}
@@ -299,8 +330,10 @@ func pinnedDriveIfValid(drives []db.UserDriveInfo, folderDriveID *uuid.UUID, fil
 
 // pickUploadDrive selects the drive a new upload of fileSize bytes should land
 // on: the primary when it has room, otherwise the active owned drive with the
-// lowest physical used-percentage that can still fit the file. ok is false when
-// no owned drive has room. Pure function — no I/O — so it is unit-tested directly.
+// lowest physical used-percentage that can still fit the file. "Room" means
+// both physical capacity and this user's own per-drive quota_bytes allocation
+// have headroom. ok is false when no owned drive qualifies. Pure function —
+// no I/O — so it is unit-tested directly.
 func pickUploadDrive(drives []db.UserDriveInfo, fileSize int64) (uuid.UUID, bool) {
 	var bestID uuid.UUID
 	var bestPct float64
@@ -309,8 +342,8 @@ func pickUploadDrive(drives []db.UserDriveInfo, fileSize int64) (uuid.UUID, bool
 		if !d.DriveIsActive || !d.ServerIsActive {
 			continue
 		}
-		if d.CapacityBytes-d.DriveUsedBytes < fileSize {
-			continue // no room for this file
+		if !hasRoomForUpload(d, fileSize) {
+			continue
 		}
 		if d.IsPrimary {
 			return d.DriveID, true // primary wins outright when it fits
@@ -517,6 +550,9 @@ func (s *FileService) Upload(ctx context.Context, in UploadInput) (*models.File,
 	if strings.HasPrefix(mimeType, "video/") {
 		go s.extractTakenAtAsync(file, in.Username)
 	}
+
+	// 12. Enqueue AI recognition when the destination collection has it enabled.
+	s.enqueueRecognitionAsync(file, in.Username, "upload")
 
 	return file, nil
 }
@@ -751,6 +787,16 @@ func (s *FileService) Delete(ctx context.Context, fileID, userID uuid.UUID, user
 		}
 	}
 
+	// Best-effort: remove AI-recognition crop blobs (rows cascade with the
+	// file) and note their size so the quota refund below includes them.
+	var cropBytes int64
+	if crops, err := q.ListRecognitionCropsByFile(ctx, fileID); err == nil {
+		for _, c := range crops {
+			cropBytes += c.SizeBytes
+			_ = storage.RemoveObject(ctx, c.ObjectKey)
+		}
+	}
+
 	if err := storage.RemoveObject(ctx, file.MinIOObjectKey); err != nil {
 		return fmt.Errorf("delete: remove blob: %w", err)
 	}
@@ -761,7 +807,7 @@ func (s *FileService) Delete(ctx context.Context, fileID, userID uuid.UUID, user
 		return fmt.Errorf("delete: commit: %w", err)
 	}
 	// AddStorageUsed touches the users table (no RLS) — use the pool directly.
-	if err := s.queries.AddStorageUsed(ctx, username, -file.SizeBytes); err != nil {
+	if err := s.queries.AddStorageUsed(ctx, username, -(file.SizeBytes + cropBytes)); err != nil {
 		return fmt.Errorf("delete: update storage: %w", err)
 	}
 	return nil
@@ -1424,12 +1470,22 @@ func (s *FileService) FinalizeChunkedUpload(ctx context.Context, sess *UploadSes
 		go s.extractTakenAtAsync(file, sess.Username)
 	}
 
+	// Enqueue AI recognition when the destination collection has it enabled.
+	// (Chunked uploads bypass Upload, so the hook must fire here too.)
+	s.enqueueRecognitionAsync(file, sess.Username, "upload")
+
 	return file, nil
 }
 
 // ── Sentinel errors ───────────────────────────────────────────────────────────
 
 var ErrQuotaExceeded = errors.New("storage quota exceeded")
+
+// ErrDriveUnavailable is returned when the drive an upload must land on has
+// no room. Two triggers: a hard pin (RequireDriveID, or a folder/pinned drive)
+// that can't fit the file, and — since per-drive quota_bytes allocations were
+// introduced — resolveUploadDrive finding no owned drive with both physical
+// capacity and per-user quota headroom for a multi-allocation user.
 var ErrDriveUnavailable = errors.New("the required drive is unavailable or has no room")
 var ErrNotFound = errors.New("file not found")
 var ErrDuplicateName = errors.New("a file with that name already exists in this folder")

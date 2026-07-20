@@ -91,11 +91,17 @@ function loadGIS(): Promise<void> {
 }
 
 export async function requestGoogleAccessToken(): Promise<string> {
+  return requestGoogleAccessTokenForScopes(SCOPES)
+}
+
+// Generic GIS token request for an arbitrary scope string. Shared with the
+// email backup feature, which needs Gmail scopes instead of Drive/Photos.
+export async function requestGoogleAccessTokenForScopes(scopes: string): Promise<string> {
   await loadGIS()
   return new Promise((resolve, reject) => {
     const client = window.google!.accounts.oauth2.initTokenClient({
       client_id: GOOGLE_CLIENT_ID,
-      scope: SCOPES,
+      scope: scopes,
       callback: (r) => {
         if (r.error || !r.access_token) reject(new Error(r.error ?? 'No access token'))
         else resolve(r.access_token!)

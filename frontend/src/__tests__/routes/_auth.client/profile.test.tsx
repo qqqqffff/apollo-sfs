@@ -19,9 +19,20 @@ jest.mock('@tanstack/react-query', () => ({
 
 jest.mock('../../../api/me', () => ({
   meQueryOptions: { queryKey: ['me'], queryFn: jest.fn() },
-  changePassword: jest.fn(),
+  updateUsername: jest.fn(),
   preferencesQueryOptions: { queryKey: ['preferences'], queryFn: jest.fn() },
   updatePreferences: jest.fn(),
+  updateStorageUIPreferences: jest.fn(),
+  updateSandboxPayments: jest.fn(),
+  unlinkProvider: jest.fn(),
+}))
+
+jest.mock('../../../api/auth', () => ({
+  logout: jest.fn(),
+}))
+
+jest.mock('../../../context/NotificationContext', () => ({
+  useNotification: () => ({ notify: jest.fn() }),
 }))
 
 jest.mock('../../../api/folders', () => ({
@@ -44,6 +55,10 @@ const USER = {
   username: 'alice',
   email: 'alice@example.com',
   is_admin: false,
+  is_premium: false,
+  premium_granted_at: null,
+  sandbox_payments_enabled: false,
+  linked_providers: [] as string[],
   storage_used_bytes: 2 * GB,
   storage_quota_bytes: 10 * GB,
   created_at: '2024-01-01T00:00:00Z',
@@ -52,7 +67,15 @@ const USER = {
 
 function setup(user: typeof USER | null = USER, overrides: { isLoading?: boolean; isPending?: boolean } = {}) {
   const { isLoading = false, isPending = false } = overrides
-  mockQuery.mockReturnValue({ data: user, isLoading })
+  // The page fires several queries (me, storage breakdown/my-servers, expansion
+  // requests, preferences, file-server links). Branch by key so array-shaped
+  // queries (my-servers) get an array, not the user object.
+  mockQuery.mockImplementation((opts: { queryKey?: readonly unknown[] }) => {
+    const key = opts?.queryKey ?? []
+    if (key[0] === 'me') return { data: user, isLoading }
+    if (key[1] === 'my-servers') return { data: [] }
+    return { data: undefined }
+  })
   mockMutation.mockReturnValue({ mutate: jest.fn(), isPending })
   return render(<Page />)
 }
@@ -96,31 +119,19 @@ describe('Client Profile page', () => {
     expect(screen.getByText(/20\.0%\s*used/i)).toBeInTheDocument()
   })
 
-  test('renders change password form fields', () => {
+  test('shows a Change password button linking to the separate 2FA page', () => {
     setup()
-    expect(screen.getByText(/current password/i)).toBeInTheDocument()
-    expect(screen.getByText(/^new password$/i)).toBeInTheDocument()
-    expect(screen.getByText(/^confirm new password$/i)).toBeInTheDocument()
+    // The inline password form was replaced by a link to /client/change-password
+    // (which requires an emailed two-factor code).
+    expect(screen.getByRole('button', { name: /change password/i })).toBeInTheDocument()
+    expect(screen.getByText(/one-time code sent to your email/i)).toBeInTheDocument()
   })
 
-  test('Update password button is disabled with no input', () => {
+  test('allows editing the username inline', () => {
     setup()
-    expect(screen.getByRole('button', { name: /update password/i })).toBeDisabled()
-  })
-
-  test('shows password requirement checklist after focusing new-password field', () => {
-    setup()
-    const inputs = screen.getAllByDisplayValue('')
-    fireEvent.focus(inputs[1]) // new password field
-    expect(screen.getByText(/at least 8 characters/i)).toBeInTheDocument()
-    expect(screen.getByText(/one uppercase letter/i)).toBeInTheDocument()
-    expect(screen.getByText(/one number/i)).toBeInTheDocument()
-    expect(screen.getByText(/one symbol/i)).toBeInTheDocument()
-    expect(screen.getByText(/passwords match/i)).toBeInTheDocument()
-  })
-
-  test('shows Saving… label while pending', () => {
-    setup(USER, { isPending: true })
-    expect(screen.getByRole('button', { name: /saving/i })).toBeInTheDocument()
+    fireEvent.click(screen.getByTitle(/edit username/i))
+    // The current username becomes editable in a text input.
+    expect(screen.getByDisplayValue('alice')).toBeInTheDocument()
+    expect(screen.getByText(/signs you out/i)).toBeInTheDocument()
   })
 })

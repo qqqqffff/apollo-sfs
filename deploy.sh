@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # deploy.sh — build, tag, push, and deploy Apollo SFS's custom images
-# (frontend, api, node-agent) to the private registry and the Swarm stack.
+# (frontend, api, node-agent, recognition, test-runner) to the private
+# registry and the Swarm stack.
 #
 # WHY THIS EXISTS
 #   docker-stack.yml pins each custom image to its OWN tag variable
@@ -33,6 +34,13 @@
 
 set -euo pipefail
 
+# Associative arrays need bash >= 4; without this guard, older bash (e.g.
+# macOS's 3.2) dies mid-script with a confusing "unbound variable" error.
+if ((BASH_VERSINFO[0] < 4)); then
+  echo "deploy.sh requires bash >= 4 (this is ${BASH_VERSION}). Run it on the manager." >&2
+  exit 1
+fi
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_ROOT"
 
@@ -48,28 +56,43 @@ BUILDER_NAME="apollo-builder"
 # posts must match what node-metrics-ingest expects), so the two must always be
 # built/redeployed together. See BUNDLE below, which pulls it in whenever
 # node-agent is selected.
-ORDER=(frontend api node-agent)
+ORDER=(frontend api node-agent recognition test-runner)
 declare -A IMAGE_REPO=(
   [frontend]="apollo-sfs_frontend"
   [api]="apollo-sfs_api"
   [node-agent]="apollo-sfs-node-agent"
   [node-metrics-ingest]="apollo-sfs_node-metrics-ingest"
+  [recognition]="apollo-sfs_recognition"
+  [test-runner]="apollo-sfs_test-runner"
 )
 declare -A IMAGE_CONTEXT=(
   [frontend]="frontend/"
   [api]="api/"
   [node-agent]="api/"
   [node-metrics-ingest]="api/"
+  [recognition]="recognition/"
+  # Repo root — the Dockerfile needs api/, frontend/, mobile/, and
+  # recognition/ all in its build context simultaneously (see test-runner/CLAUDE.md).
+  [test-runner]="."
 )
 declare -A IMAGE_DOCKERFILE=(
   [node-agent]="api/Dockerfile.node-agent"
   [node-metrics-ingest]="api/Dockerfile.node-metrics-ingest"
+  [recognition]="recognition/Dockerfile"
+  [test-runner]="test-runner/Dockerfile"
 )
 declare -A IMAGE_PLATFORMS=(
   [frontend]="linux/amd64"
   [api]="linux/amd64,linux/arm64"
   [node-agent]="linux/amd64,linux/arm64"
   [node-metrics-ingest]="linux/amd64"
+  # amd64 only: runs pinned to the Ryzen manager (tier=standard). Build the
+  # CUDA variant (recognition/Dockerfile.cuda) manually when a GPU is added —
+  # see docs/ai_recognition_setup.md.
+  [recognition]="linux/amd64"
+  # amd64 only: pinned to the manager like recognition — heaviest CPU/RAM
+  # footprint of any image (Go + Node + Python toolchains, Playwright/Chromium).
+  [test-runner]="linux/amd64"
 )
 # Swarm service name(s) to query for "what tag is currently deployed" when a
 # service isn't rebuilt this run. node-agent runs as two services (fast/standard)
@@ -79,6 +102,8 @@ declare -A SWARM_SERVICES=(
   [api]="apollo-sfs_api"
   [node-agent]="apollo-sfs_node-agent-standard apollo-sfs_node-agent-fast"
   [node-metrics-ingest]="apollo-sfs_node-metrics-ingest"
+  [recognition]="apollo-sfs_recognition"
+  [test-runner]="apollo-sfs_test-runner"
 )
 # Services bundled with another: selecting the key also selects the value, so
 # they're always built/deployed together (see comment above ORDER).
@@ -144,7 +169,10 @@ run() {
 # OPTIONS) in place.
 declare -a OPTIONS=("migrate" "${ORDER[@]}")
 declare -a OPTION_LABELS=("Run DB migrations (db/apply-migrations.sh)" "${ORDER[@]}")
-declare -a SELECTED=(0 0 0 0)
+# One slot per option, all off — sized from OPTIONS so adding a service to
+# ORDER can't leave SELECTED short (set -u makes that an unbound-variable crash).
+declare -a SELECTED=()
+for _ in "${OPTIONS[@]}"; do SELECTED+=(0); done
 CURSOR=0
 
 select_services() {
@@ -213,13 +241,35 @@ set +a
 
 : "${REGISTRY:=$DEFAULT_REGISTRY}"
 : "${TAG:=$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || true)}"
-if [[ -z "$TAG" ]]; then
+# deploy-only never builds, so it needs no tag — every service redeploys on
+# whatever tag the swarm reports it's already running.
+if [[ -z "$TAG" && $DEPLOY_ONLY -ne 1 ]]; then
   echo "Could not determine a tag automatically (not a git repo?). Pass --tag." >&2
   exit 1
 fi
 if [[ -n "$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null || true)" ]]; then
   echo "Warning: working tree has uncommitted changes — the pushed image won't exactly match a commit." >&2
 fi
+
+# docker-stack.yml passes RECOGNITION_MEM_LIMIT straight into
+# deploy.resources.limits.memory. Docker's size parser silently accepts a
+# bare number as BYTES when no unit suffix is given, so e.g. "8" (meant as
+# 8G) becomes an 8-byte limit and fails deep inside `docker stack deploy`
+# with a cryptic "Must be at least 4MiB" — catch it here instead.
+check_mem_limit() {
+  local var="$1"
+  local val="${!var-}"
+  [[ -z "$val" ]] && return 0
+  if [[ "$val" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+    echo "$var=\"$val\" has no unit — Docker reads that as $val BYTES, not GB. Use e.g. \"${val}G\" or \"${val}g\" in .env." >&2
+    exit 1
+  fi
+  if ! [[ "$val" =~ ^[0-9]+(\.[0-9]+)?[bBkKmMgGtT][bB]?$ ]]; then
+    echo "$var=\"$val\" is not a valid Docker memory size (expected a number + unit, e.g. \"8G\")." >&2
+    exit 1
+  fi
+}
+check_mem_limit RECOGNITION_MEM_LIMIT
 
 # ── Choose which services to build + deploy ───────────────────────────────────
 SELECTED_SERVICES=()
@@ -356,6 +406,10 @@ if [[ ${#SELECTED_SERVICES[@]} -gt 0 ]]; then
     echo "── Building $svc -> $image_ref ($platforms) ──"
     build_args=(buildx build --platform "$platforms" -t "$image_ref")
     [[ -n "$dockerfile" ]] && build_args+=(-f "$dockerfile")
+    # Vite inlines VITE_* vars at build time, so the frontend image bakes them
+    # in from the root .env (sourced above). Empty is fine — it just disables
+    # the Microsoft option in the email backup dialog.
+    [[ "$svc" == "frontend" ]] && build_args+=(--build-arg "VITE_MS_CLIENT_ID=${VITE_MS_CLIENT_ID:-}")
     build_args+=("$context" --push)
     run docker "${build_args[@]}"
   done
@@ -367,6 +421,8 @@ export API_TAG="${RESOLVED_TAG[api]}"
 export FRONTEND_TAG="${RESOLVED_TAG[frontend]}"
 export NODE_AGENT_TAG="${RESOLVED_TAG[node-agent]}"
 export NODE_METRICS_INGEST_TAG="${RESOLVED_TAG[node-metrics-ingest]}"
+export RECOGNITION_TAG="${RESOLVED_TAG[recognition]}"
+export TEST_RUNNER_TAG="${RESOLVED_TAG[test-runner]}"
 
 echo "── Deploying $STACK_NAME ──"
 run docker stack deploy -c "$STACK_FILE" "$STACK_NAME"

@@ -16,8 +16,10 @@ import (
 type AdminQuerier interface {
 	// Users
 	ListUsers(ctx context.Context, in db.PageInput) (*db.PageResult[models.User], error)
+	ListAdminUsers(ctx context.Context, f db.ListUsersFilter, limit, offset int) ([]models.User, int, error)
 	GetUserByUsername(ctx context.Context, username string) (*models.User, error)
 	UpdateUserQuota(ctx context.Context, username string, quotaBytes int64) error
+	SetUserFeedbackAccess(ctx context.Context, username string, enabled bool) error
 	GetUserDrive(ctx context.Context, username string) (*models.UserDriveAllocation, error)
 	GetDriveAvailableBytes(ctx context.Context, driveID uuid.UUID) (int64, error)
 
@@ -73,6 +75,18 @@ type AdminQuerier interface {
 	UpsertAlarmSubscription(ctx context.Context, email, alarmType string, nodeID, driveID *uuid.UUID, threshold float64) (*models.AlarmSubscription, error)
 	DeleteAlarmSubscription(ctx context.Context, email, alarmType string, nodeID, driveID *uuid.UUID) error
 
+	// Product pricing (admin pricing page)
+	ListPricingServers(ctx context.Context) ([]db.PricingServer, error)
+	ListPricingItems(ctx context.Context, serverID uuid.UUID) ([]models.PricingItem, error)
+	GetPricingItem(ctx context.Context, id uuid.UUID) (*models.PricingItem, error)
+	CreatePricingItem(ctx context.Context, p db.CreatePricingItemParams) (*models.PricingItem, error)
+	UpdatePricingItem(ctx context.Context, id uuid.UUID, bytes int64, priceCents, sortOrder int) (*models.PricingItem, error)
+	DeletePricingItem(ctx context.Context, id uuid.UUID) error
+	ListActivePricingDiscounts(ctx context.Context, serverID uuid.UUID) ([]models.PricingDiscount, error)
+	CreatePricingDiscount(ctx context.Context, d *models.PricingDiscount) error
+	DeletePricingDiscount(ctx context.Context, id uuid.UUID) error
+	ListDiscountRecipients(ctx context.Context, group string, serverID uuid.UUID, storageType string, premiumOnly bool) ([]string, error)
+
 	// Interest form
 	ListInterestSubmissions(ctx context.Context, in db.PageInput) (*db.PageResult[models.InterestSubmission], error)
 	GetInterestFormSettings(ctx context.Context) (*models.InterestFormSettings, error)
@@ -80,6 +94,10 @@ type AdminQuerier interface {
 	GetInterestSubmissionByID(ctx context.Context, id uuid.UUID) (*models.InterestSubmission, error)
 	MarkInterestSubmissionProvisioned(ctx context.Context, id uuid.UUID, invitationID uuid.UUID) error
 	DenyInterestSubmission(ctx context.Context, id uuid.UUID, refundID string) error
+
+	// Feedback review
+	ListFeedback(ctx context.Context, status string, in db.PageInput) (*db.PageResult[models.Feedback], error)
+	UpdateFeedbackStatus(ctx context.Context, id uuid.UUID, status string) (*models.Feedback, error)
 }
 
 // AdminInviteService is the subset of *services.InviteService used by admin handlers.
@@ -103,6 +121,8 @@ type MetricsServicer interface {
 	GetDriveTempHistoryByHours(ctx context.Context, driveID uuid.UUID, hours int) ([]models.DriveTempSnapshot, error)
 	GetNodeDisks(ctx context.Context, nodeID uuid.UUID) ([]models.NodeDisk, error)
 	GetNodeDiskTempHistoryByHours(ctx context.Context, diskID uuid.UUID, hours int) ([]models.NodeDiskTempSnapshot, error)
+	GetDriveIOHistoryByHours(ctx context.Context, driveID uuid.UUID, hours int) ([]models.DriveIOSnapshot, error)
+	GetNodeDiskIOHistoryByHours(ctx context.Context, diskID uuid.UUID, hours int) ([]models.NodeDiskIOSnapshot, error)
 	NodeStates(ctx context.Context) ([]models.NodeFrame, error)
 	Hub() *services.Hub
 }

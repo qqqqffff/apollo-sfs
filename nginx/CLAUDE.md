@@ -11,10 +11,10 @@ Neither nginx nor fail2ban runs inside Docker — they run directly on the manag
 | Path | Purpose |
 |------|---------|
 | `/etc/nginx/nginx.conf` | Main config: rate-limit zones, gzip, log format, include paths |
-| `/etc/nginx/conf.d/apollo-sfs.conf` | HTTPS vhosts for `apollo-sfs.com` and `auth.apollo-sfs.com` |
+| `/etc/nginx/conf.d/apollo-sfs.conf` | HTTPS vhosts for `apollo-sfs.com`, `www.apollo-sfs.com`, and `auth.apollo-sfs.com` |
 | `/etc/nginx/conf.d/cloudflare-real-ip.conf` | Extracts real client IP from `CF-Connecting-IP` header |
 | `/etc/nginx/blocklist.d/auto-blocked.conf` | Auto-generated `deny <ip>;` rules written by fail2ban |
-| `/etc/nginx/well-known/` | Static files for Apple Universal Links and Android App Links |
+| `/etc/nginx/well-known/` | Static files for Apple Universal Links, Android App Links, and the (live) PayPal Apple Pay domain-association file |
 
 The repository's `nginx/` directory holds the source versions of these files. Deploy them to the host with:
 
@@ -29,9 +29,10 @@ sudo nginx -t && sudo systemctl reload nginx
 | Domain | Port | Proxies to |
 |--------|------|-----------|
 | `apollo-sfs.com` | 443 | Frontend `:3000` (static assets), API `:8080` (`/api/*`) |
+| `www.apollo-sfs.com` | 443 | Not app-facing — serves `/.well-known/` directly (same files as the apex) and 301s everything else to `apollo-sfs.com`. Exists solely because payment-processor domain verification (PayPal's Apple Pay check included) probes both the apex and the `www` variant of a registered domain. DNS: CNAME to `apollo-sfs.com` (tracks the ddns-managed apex IP, no separate DDNS entry). TLS: origin cert must cover it too. |
 | `auth.apollo-sfs.com` | 443 | Keycloak `:8180` |
 
-HTTP (port 80) redirects to HTTPS for both domains.
+HTTP (port 80) redirects to HTTPS for all three domains.
 
 ### TLS
 
@@ -53,6 +54,8 @@ Applied on both vhosts:
 ### GeoIP Filtering
 
 MaxMind GeoIP2 is loaded via the `ngx_http_geoip2_module`. Requests from non-US IPs receive `444 Connection Closed` with no response body. The GeoIP database must be updated periodically via `geoipupdate`.
+
+The gate is a `map $geoip2_country_code $geo_block {...}` in `nginx.conf`, checked with `if ($geo_block) { return 444; }` inside each app-facing `location` block (`nginx.conf`'s `CLAUDE.md`-adjacent comment has the rationale) — deliberately **not** at the server level, and deliberately **not** applied to `location /.well-known/` on either `apollo-sfs.com` or `www.apollo-sfs.com`. Payment-processor and mobile-linking domain-verification crawlers (PayPal/Apple/Google) that fetch files under `/.well-known/` aren't guaranteed to call from a US IP; blocking them there would silently break Apple Pay / Universal Links verification while looking like a client-side config problem.
 
 ### Rate Limiting
 
@@ -93,8 +96,13 @@ Served directly by nginx (not proxied to Docker) for mobile deep linking:
 
 - `GET /.well-known/apple-app-site-association` → iOS Universal Links
 - `GET /.well-known/assetlinks.json` → Android App Links
+- `GET /.well-known/microsoft-identity-association.json` → Microsoft domain association (Azure AD app verification for the email backup Microsoft sign-in)
 
-Source files: `/etc/nginx/well-known/` (copy from `nginx/well-known/` in this repo).
+Source files: `/etc/nginx/well-known/` (copy from `nginx/well-known/` in this repo). Note this directory is *not* covered by the `nginx/conf.d/*` deploy step below — copy it separately:
+
+```bash
+sudo cp -r nginx/well-known/.well-known /etc/nginx/well-known/
+```
 
 ---
 

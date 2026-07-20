@@ -27,12 +27,16 @@ import { Route as AuthSettingsApiKeysRouteImport } from './routes/_auth.settings
 import { Route as AuthInvoiceTokenRouteImport } from './routes/_auth.invoice.$token'
 import { Route as AuthClientProfileRouteImport } from './routes/_auth.client/profile'
 import { Route as AuthClientOrdersRouteImport } from './routes/_auth.client/orders'
+import { Route as AuthClientFeedbackRouteImport } from './routes/_auth.client/feedback'
 import { Route as AuthClientFavoritesRouteImport } from './routes/_auth.client/favorites'
+import { Route as AuthClientChangePasswordRouteImport } from './routes/_auth.client/change-password'
+import { Route as AuthCheckoutReturnRouteImport } from './routes/_auth.checkout.return'
 import { Route as AuthAdminUsersRouteImport } from './routes/_auth.admin/users'
+import { Route as AuthAdminRequestsRouteImport } from './routes/_auth.admin/requests'
+import { Route as AuthAdminPricingRouteImport } from './routes/_auth.admin/pricing'
 import { Route as AuthAdminOrdersRouteImport } from './routes/_auth.admin/orders'
 import { Route as AuthAdminMetricsRouteImport } from './routes/_auth.admin/metrics'
-import { Route as AuthAdminInvitationsRouteImport } from './routes/_auth.admin/invitations'
-import { Route as AuthAdminInterestRouteImport } from './routes/_auth.admin/interest'
+import { Route as AuthAdminFeedbackRouteImport } from './routes/_auth.admin/feedback'
 import { Route as AuthAdminEmailsRouteImport } from './routes/_auth.admin/emails'
 import { Route as AuthAdminBansRouteImport } from './routes/_auth.admin/bans'
 import { Route as AuthAdminBannedIpsRouteImport } from './routes/_auth.admin/banned-ips'
@@ -129,14 +133,40 @@ const AuthClientOrdersRoute = AuthClientOrdersRouteImport.update({
   path: '/client/orders',
   getParentRoute: () => AuthRoute,
 } as any)
+const AuthClientFeedbackRoute = AuthClientFeedbackRouteImport.update({
+  id: '/client/feedback',
+  path: '/client/feedback',
+  getParentRoute: () => AuthRoute,
+} as any)
 const AuthClientFavoritesRoute = AuthClientFavoritesRouteImport.update({
   id: '/client/favorites',
   path: '/client/favorites',
   getParentRoute: () => AuthRoute,
 } as any)
+const AuthClientChangePasswordRoute =
+  AuthClientChangePasswordRouteImport.update({
+    id: '/client/change-password',
+    path: '/client/change-password',
+    getParentRoute: () => AuthRoute,
+  } as any)
+const AuthCheckoutReturnRoute = AuthCheckoutReturnRouteImport.update({
+  id: '/checkout/return',
+  path: '/checkout/return',
+  getParentRoute: () => AuthRoute,
+} as any)
 const AuthAdminUsersRoute = AuthAdminUsersRouteImport.update({
   id: '/admin/users',
   path: '/admin/users',
+  getParentRoute: () => AuthRoute,
+} as any)
+const AuthAdminRequestsRoute = AuthAdminRequestsRouteImport.update({
+  id: '/admin/requests',
+  path: '/admin/requests',
+  getParentRoute: () => AuthRoute,
+} as any)
+const AuthAdminPricingRoute = AuthAdminPricingRouteImport.update({
+  id: '/admin/pricing',
+  path: '/admin/pricing',
   getParentRoute: () => AuthRoute,
 } as any)
 const AuthAdminOrdersRoute = AuthAdminOrdersRouteImport.update({
@@ -149,14 +179,9 @@ const AuthAdminMetricsRoute = AuthAdminMetricsRouteImport.update({
   path: '/admin/metrics',
   getParentRoute: () => AuthRoute,
 } as any)
-const AuthAdminInvitationsRoute = AuthAdminInvitationsRouteImport.update({
-  id: '/admin/invitations',
-  path: '/admin/invitations',
-  getParentRoute: () => AuthRoute,
-} as any)
-const AuthAdminInterestRoute = AuthAdminInterestRouteImport.update({
-  id: '/admin/interest',
-  path: '/admin/interest',
+const AuthAdminFeedbackRoute = AuthAdminFeedbackRouteImport.update({
+  id: '/admin/feedback',
+  path: '/admin/feedback',
   getParentRoute: () => AuthRoute,
 } as any)
 const AuthAdminEmailsRoute = AuthAdminEmailsRouteImport.update({
@@ -206,12 +231,16 @@ export interface FileRoutesByFullPath {
   '/admin/banned-ips': typeof AuthAdminBannedIpsRoute
   '/admin/bans': typeof AuthAdminBansRoute
   '/admin/emails': typeof AuthAdminEmailsRoute
-  '/admin/interest': typeof AuthAdminInterestRoute
-  '/admin/invitations': typeof AuthAdminInvitationsRoute
+  '/admin/feedback': typeof AuthAdminFeedbackRoute
   '/admin/metrics': typeof AuthAdminMetricsRoute
   '/admin/orders': typeof AuthAdminOrdersRoute
+  '/admin/pricing': typeof AuthAdminPricingRoute
+  '/admin/requests': typeof AuthAdminRequestsRoute
   '/admin/users': typeof AuthAdminUsersRoute
+  '/checkout/return': typeof AuthCheckoutReturnRoute
+  '/client/change-password': typeof AuthClientChangePasswordRoute
   '/client/favorites': typeof AuthClientFavoritesRoute
+  '/client/feedback': typeof AuthClientFeedbackRoute
   '/client/orders': typeof AuthClientOrdersRoute
   '/client/profile': typeof AuthClientProfileRoute
   '/invoice/$token': typeof AuthInvoiceTokenRoute
@@ -237,12 +266,16 @@ export interface FileRoutesByTo {
   '/admin/banned-ips': typeof AuthAdminBannedIpsRoute
   '/admin/bans': typeof AuthAdminBansRoute
   '/admin/emails': typeof AuthAdminEmailsRoute
-  '/admin/interest': typeof AuthAdminInterestRoute
-  '/admin/invitations': typeof AuthAdminInvitationsRoute
+  '/admin/feedback': typeof AuthAdminFeedbackRoute
   '/admin/metrics': typeof AuthAdminMetricsRoute
   '/admin/orders': typeof AuthAdminOrdersRoute
+  '/admin/pricing': typeof AuthAdminPricingRoute
+  '/admin/requests': typeof AuthAdminRequestsRoute
   '/admin/users': typeof AuthAdminUsersRoute
+  '/checkout/return': typeof AuthCheckoutReturnRoute
+  '/client/change-password': typeof AuthClientChangePasswordRoute
   '/client/favorites': typeof AuthClientFavoritesRoute
+  '/client/feedback': typeof AuthClientFeedbackRoute
   '/client/orders': typeof AuthClientOrdersRoute
   '/client/profile': typeof AuthClientProfileRoute
   '/invoice/$token': typeof AuthInvoiceTokenRoute
@@ -270,12 +303,16 @@ export interface FileRoutesById {
   '/_auth/admin/banned-ips': typeof AuthAdminBannedIpsRoute
   '/_auth/admin/bans': typeof AuthAdminBansRoute
   '/_auth/admin/emails': typeof AuthAdminEmailsRoute
-  '/_auth/admin/interest': typeof AuthAdminInterestRoute
-  '/_auth/admin/invitations': typeof AuthAdminInvitationsRoute
+  '/_auth/admin/feedback': typeof AuthAdminFeedbackRoute
   '/_auth/admin/metrics': typeof AuthAdminMetricsRoute
   '/_auth/admin/orders': typeof AuthAdminOrdersRoute
+  '/_auth/admin/pricing': typeof AuthAdminPricingRoute
+  '/_auth/admin/requests': typeof AuthAdminRequestsRoute
   '/_auth/admin/users': typeof AuthAdminUsersRoute
+  '/_auth/checkout/return': typeof AuthCheckoutReturnRoute
+  '/_auth/client/change-password': typeof AuthClientChangePasswordRoute
   '/_auth/client/favorites': typeof AuthClientFavoritesRoute
+  '/_auth/client/feedback': typeof AuthClientFeedbackRoute
   '/_auth/client/orders': typeof AuthClientOrdersRoute
   '/_auth/client/profile': typeof AuthClientProfileRoute
   '/_auth/invoice/$token': typeof AuthInvoiceTokenRoute
@@ -303,12 +340,16 @@ export interface FileRouteTypes {
     | '/admin/banned-ips'
     | '/admin/bans'
     | '/admin/emails'
-    | '/admin/interest'
-    | '/admin/invitations'
+    | '/admin/feedback'
     | '/admin/metrics'
     | '/admin/orders'
+    | '/admin/pricing'
+    | '/admin/requests'
     | '/admin/users'
+    | '/checkout/return'
+    | '/client/change-password'
     | '/client/favorites'
+    | '/client/feedback'
     | '/client/orders'
     | '/client/profile'
     | '/invoice/$token'
@@ -334,12 +375,16 @@ export interface FileRouteTypes {
     | '/admin/banned-ips'
     | '/admin/bans'
     | '/admin/emails'
-    | '/admin/interest'
-    | '/admin/invitations'
+    | '/admin/feedback'
     | '/admin/metrics'
     | '/admin/orders'
+    | '/admin/pricing'
+    | '/admin/requests'
     | '/admin/users'
+    | '/checkout/return'
+    | '/client/change-password'
     | '/client/favorites'
+    | '/client/feedback'
     | '/client/orders'
     | '/client/profile'
     | '/invoice/$token'
@@ -366,12 +411,16 @@ export interface FileRouteTypes {
     | '/_auth/admin/banned-ips'
     | '/_auth/admin/bans'
     | '/_auth/admin/emails'
-    | '/_auth/admin/interest'
-    | '/_auth/admin/invitations'
+    | '/_auth/admin/feedback'
     | '/_auth/admin/metrics'
     | '/_auth/admin/orders'
+    | '/_auth/admin/pricing'
+    | '/_auth/admin/requests'
     | '/_auth/admin/users'
+    | '/_auth/checkout/return'
+    | '/_auth/client/change-password'
     | '/_auth/client/favorites'
+    | '/_auth/client/feedback'
     | '/_auth/client/orders'
     | '/_auth/client/profile'
     | '/_auth/invoice/$token'
@@ -524,6 +573,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthClientOrdersRouteImport
       parentRoute: typeof AuthRoute
     }
+    '/_auth/client/feedback': {
+      id: '/_auth/client/feedback'
+      path: '/client/feedback'
+      fullPath: '/client/feedback'
+      preLoaderRoute: typeof AuthClientFeedbackRouteImport
+      parentRoute: typeof AuthRoute
+    }
     '/_auth/client/favorites': {
       id: '/_auth/client/favorites'
       path: '/client/favorites'
@@ -531,11 +587,39 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthClientFavoritesRouteImport
       parentRoute: typeof AuthRoute
     }
+    '/_auth/client/change-password': {
+      id: '/_auth/client/change-password'
+      path: '/client/change-password'
+      fullPath: '/client/change-password'
+      preLoaderRoute: typeof AuthClientChangePasswordRouteImport
+      parentRoute: typeof AuthRoute
+    }
+    '/_auth/checkout/return': {
+      id: '/_auth/checkout/return'
+      path: '/checkout/return'
+      fullPath: '/checkout/return'
+      preLoaderRoute: typeof AuthCheckoutReturnRouteImport
+      parentRoute: typeof AuthRoute
+    }
     '/_auth/admin/users': {
       id: '/_auth/admin/users'
       path: '/admin/users'
       fullPath: '/admin/users'
       preLoaderRoute: typeof AuthAdminUsersRouteImport
+      parentRoute: typeof AuthRoute
+    }
+    '/_auth/admin/requests': {
+      id: '/_auth/admin/requests'
+      path: '/admin/requests'
+      fullPath: '/admin/requests'
+      preLoaderRoute: typeof AuthAdminRequestsRouteImport
+      parentRoute: typeof AuthRoute
+    }
+    '/_auth/admin/pricing': {
+      id: '/_auth/admin/pricing'
+      path: '/admin/pricing'
+      fullPath: '/admin/pricing'
+      preLoaderRoute: typeof AuthAdminPricingRouteImport
       parentRoute: typeof AuthRoute
     }
     '/_auth/admin/orders': {
@@ -552,18 +636,11 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthAdminMetricsRouteImport
       parentRoute: typeof AuthRoute
     }
-    '/_auth/admin/invitations': {
-      id: '/_auth/admin/invitations'
-      path: '/admin/invitations'
-      fullPath: '/admin/invitations'
-      preLoaderRoute: typeof AuthAdminInvitationsRouteImport
-      parentRoute: typeof AuthRoute
-    }
-    '/_auth/admin/interest': {
-      id: '/_auth/admin/interest'
-      path: '/admin/interest'
-      fullPath: '/admin/interest'
-      preLoaderRoute: typeof AuthAdminInterestRouteImport
+    '/_auth/admin/feedback': {
+      id: '/_auth/admin/feedback'
+      path: '/admin/feedback'
+      fullPath: '/admin/feedback'
+      preLoaderRoute: typeof AuthAdminFeedbackRouteImport
       parentRoute: typeof AuthRoute
     }
     '/_auth/admin/emails': {
@@ -617,12 +694,16 @@ interface AuthRouteChildren {
   AuthAdminBannedIpsRoute: typeof AuthAdminBannedIpsRoute
   AuthAdminBansRoute: typeof AuthAdminBansRoute
   AuthAdminEmailsRoute: typeof AuthAdminEmailsRoute
-  AuthAdminInterestRoute: typeof AuthAdminInterestRoute
-  AuthAdminInvitationsRoute: typeof AuthAdminInvitationsRoute
+  AuthAdminFeedbackRoute: typeof AuthAdminFeedbackRoute
   AuthAdminMetricsRoute: typeof AuthAdminMetricsRoute
   AuthAdminOrdersRoute: typeof AuthAdminOrdersRoute
+  AuthAdminPricingRoute: typeof AuthAdminPricingRoute
+  AuthAdminRequestsRoute: typeof AuthAdminRequestsRoute
   AuthAdminUsersRoute: typeof AuthAdminUsersRoute
+  AuthCheckoutReturnRoute: typeof AuthCheckoutReturnRoute
+  AuthClientChangePasswordRoute: typeof AuthClientChangePasswordRoute
   AuthClientFavoritesRoute: typeof AuthClientFavoritesRoute
+  AuthClientFeedbackRoute: typeof AuthClientFeedbackRoute
   AuthClientOrdersRoute: typeof AuthClientOrdersRoute
   AuthClientProfileRoute: typeof AuthClientProfileRoute
   AuthInvoiceTokenRoute: typeof AuthInvoiceTokenRoute
@@ -639,12 +720,16 @@ const AuthRouteChildren: AuthRouteChildren = {
   AuthAdminBannedIpsRoute: AuthAdminBannedIpsRoute,
   AuthAdminBansRoute: AuthAdminBansRoute,
   AuthAdminEmailsRoute: AuthAdminEmailsRoute,
-  AuthAdminInterestRoute: AuthAdminInterestRoute,
-  AuthAdminInvitationsRoute: AuthAdminInvitationsRoute,
+  AuthAdminFeedbackRoute: AuthAdminFeedbackRoute,
   AuthAdminMetricsRoute: AuthAdminMetricsRoute,
   AuthAdminOrdersRoute: AuthAdminOrdersRoute,
+  AuthAdminPricingRoute: AuthAdminPricingRoute,
+  AuthAdminRequestsRoute: AuthAdminRequestsRoute,
   AuthAdminUsersRoute: AuthAdminUsersRoute,
+  AuthCheckoutReturnRoute: AuthCheckoutReturnRoute,
+  AuthClientChangePasswordRoute: AuthClientChangePasswordRoute,
   AuthClientFavoritesRoute: AuthClientFavoritesRoute,
+  AuthClientFeedbackRoute: AuthClientFeedbackRoute,
   AuthClientOrdersRoute: AuthClientOrdersRoute,
   AuthClientProfileRoute: AuthClientProfileRoute,
   AuthInvoiceTokenRoute: AuthInvoiceTokenRoute,

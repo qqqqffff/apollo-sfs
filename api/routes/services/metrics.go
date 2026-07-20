@@ -266,6 +266,20 @@ func (s *MetricsService) GetNodeDiskTempHistoryByHours(ctx context.Context, disk
 	return s.queries.ListNodeDiskTempsByHours(ctx, diskID, hours, 120)
 }
 
+// GetDriveIOHistoryByHours returns ~120 evenly-distributed read/write
+// cumulative-counter readings for one drive from the past hours hours,
+// oldest-first. Backs the drive-speed carousel graph.
+func (s *MetricsService) GetDriveIOHistoryByHours(ctx context.Context, driveID uuid.UUID, hours int) ([]models.DriveIOSnapshot, error) {
+	return s.queries.ListDriveIOByHours(ctx, driveID, hours, 120)
+}
+
+// GetNodeDiskIOHistoryByHours returns ~120 evenly-distributed read/write
+// cumulative-counter readings for one physical disk from the past hours hours,
+// oldest-first. Backs the per-disk speed history graph.
+func (s *MetricsService) GetNodeDiskIOHistoryByHours(ctx context.Context, diskID uuid.UUID, hours int) ([]models.NodeDiskIOSnapshot, error) {
+	return s.queries.ListNodeDiskIOByHours(ctx, diskID, hours, 120)
+}
+
 // ── Per-node hardware aggregation ──────────────────────────────────────────────
 // Ingestion (POST /internal/node-metrics) runs in a separate service
 // (cmd/node-metrics-ingest, services.NodeIngestService) so it can be deployed
@@ -327,6 +341,8 @@ func (s *MetricsService) NodeStates(ctx context.Context) ([]models.NodeFrame, er
 				TotalBytes:  d.CapacityBytes,
 				UsedBytes:   d.UsedBytes,
 				FreeBytes:   d.FreeBytes,
+				ReadBytes:   d.ReadBytes,
+				WriteBytes:  d.WriteBytes,
 			})
 		}
 
@@ -344,6 +360,8 @@ func (s *MetricsService) NodeStates(ctx context.Context) ([]models.NodeFrame, er
 				TotalBytes:  d.CapacityBytes,
 				UsedBytes:   d.UsedBytes,
 				FreeBytes:   d.FreeBytes,
+				ReadBytes:   d.ReadBytes,
+				WriteBytes:  d.WriteBytes,
 			})
 		}
 
@@ -439,6 +457,12 @@ func (s *MetricsService) runPruner(ctx context.Context) {
 			}
 			if err := s.queries.PruneOldNodeDiskTemps(ctx, cutoff); err != nil {
 				log.Printf("metrics: prune node disk temps: %v", err)
+			}
+			if err := s.queries.PruneOldDriveIO(ctx, cutoff); err != nil {
+				log.Printf("metrics: prune drive io: %v", err)
+			}
+			if err := s.queries.PruneOldNodeDiskIO(ctx, cutoff); err != nil {
+				log.Printf("metrics: prune node disk io: %v", err)
 			}
 		}
 	}

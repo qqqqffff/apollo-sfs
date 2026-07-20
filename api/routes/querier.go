@@ -16,16 +16,46 @@ import (
 type Querier interface {
 	// Me
 	GetUserByUsername(ctx context.Context, username string) (*models.User, error)
+	GetActiveSubscriptionForUser(ctx context.Context, username string) (*models.PremiumSubscription, error)
+
+	// Change-password two-factor codes
+	CreatePasswordChangeCode(ctx context.Context, username, code string, expiresAt time.Time) error
+	ConsumePasswordChangeCode(ctx context.Context, username, code string) (bool, error)
 
 	// Admin per-user storage view
 	GetUserStorageBreakdown(ctx context.Context, userID string) (db.UserStorageBreakdown, error)
 	GetUserStorageAllocations(ctx context.Context, username, userID string) ([]db.UserStorageAllocation, error)
 	CountActiveExpansionRequests(ctx context.Context, username string) (int, error)
 
+	// Admin storage allocation editor
+	GetDrive(ctx context.Context, id uuid.UUID) (*models.Drive, error)
+	GetServer(ctx context.Context, id uuid.UUID) (*models.Server, error)
+	GetDriveAvailableBytes(ctx context.Context, driveID uuid.UUID) (int64, error)
+	SaveUserDriveAllocations(ctx context.Context, username string, want []db.SaveAllocationsParams) (int64, error)
+	InsertQuotaChangeNotification(ctx context.Context, p db.InsertQuotaChangeNotificationParams) error
+
 	// Notification bell
 	ListUserExpansionRequests(ctx context.Context, username string) ([]models.ServerExpansionRequest, error)
 	GetLatestExpansionInvoice(ctx context.Context, requestID uuid.UUID) (*models.ExpansionInvoice, error)
 	ListSharesForRecipient(ctx context.Context, email string) ([]models.Share, error)
+	ListRecentAdminCancelledSubscriptionsForUser(ctx context.Context, username string, since time.Time) ([]models.PremiumSubscription, error)
+	ListRecentQuotaChangeNotificationsForUser(ctx context.Context, username string, since time.Time) ([]db.QuotaChangeNotification, error)
+	ListRecentEmailBackupRunsForUser(ctx context.Context, username string, since time.Time) ([]models.EmailBackupRun, error)
+
+	// Backup last-sync times (backup pages + opt-in stale-backup reminder)
+	GetLastGoogleBackupSync(ctx context.Context, userID uuid.UUID) (*time.Time, error)
+	GetLastEmailBackupSync(ctx context.Context, username string) (*time.Time, error)
+	SetBackupStaleNotify(ctx context.Context, userID string, enabled bool) (*models.UserPreferences, error)
+
+	// Notification bell — admin-only categories
+	ListRecentlyAcceptedInvitations(ctx context.Context, since time.Time) ([]models.Invitation, error)
+	ListRecentCapturedOrders(ctx context.Context, since time.Time, limit int) ([]db.AdminOrder, error)
+	ListRecentUnreadInboundEmails(ctx context.Context, since time.Time, limit int) ([]models.InboundEmail, error)
+	ListRecentlyFiredAlarmSubscriptions(ctx context.Context, since time.Time) ([]models.AlarmSubscription, error)
+
+	// Notification bell — dismissal
+	ListDismissedNotificationIDs(ctx context.Context, username string) (map[string]bool, error)
+	DismissNotifications(ctx context.Context, username string, ids []string) error
 
 	// User preferences
 	GetUserPreferences(ctx context.Context, userID string) (*models.UserPreferences, error)
@@ -40,6 +70,7 @@ type Querier interface {
 	// Search
 	SearchFoldersByUser(ctx context.Context, userID uuid.UUID, term string, in db.PageInput) (*db.PageResult[models.Folder], error)
 	SearchFilesByUser(ctx context.Context, userID uuid.UUID, term string, in db.PageInput) (*db.PageResult[models.File], error)
+	SearchRecognitionGroupsByUser(ctx context.Context, userID uuid.UUID, term string, in db.PageInput) (*db.PageResult[db.RecognitionGroupSearchHit], error)
 
 	// Interest form
 	GetInterestFormSettings(ctx context.Context) (*models.InterestFormSettings, error)
@@ -69,4 +100,7 @@ type Querier interface {
 	DeltaSyncFiles(ctx context.Context, userID uuid.UUID, since time.Time) ([]models.File, error)
 	DeltaSyncDeleted(ctx context.Context, userID uuid.UUID, since time.Time) ([]uuid.UUID, error)
 	FindFileByHash(ctx context.Context, userID uuid.UUID, hash string) (*models.File, error)
+
+	// Feedback (profile page submission; reviewed on the admin feedback page)
+	CreateFeedback(ctx context.Context, userID uuid.UUID, username, category, message string) (*models.Feedback, error)
 }

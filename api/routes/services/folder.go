@@ -145,7 +145,8 @@ func (s *FolderService) GetContents(
 
 // Create inserts a new folder owned by userID. If parentID is non-nil the
 // parent folder must exist and be owned by the same user.
-// kind is "regular" or "media"; an empty or unknown value defaults to regular.
+// kind is "regular", "media", or "email"; an empty or unknown value defaults
+// to regular.
 // A folder created beneath a media folder inherits the media kind so the whole
 // subtree behaves as a collection (its descendants are subcollections).
 // username is the preferred_username used to look up drive ownership (drive
@@ -172,7 +173,7 @@ func (s *FolderService) Create(
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	if kind != models.FolderKindMedia {
+	if kind != models.FolderKindMedia && kind != models.FolderKindEmail {
 		kind = models.FolderKindRegular
 	}
 

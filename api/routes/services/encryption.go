@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"apollo-sfs.com/api/db"
 	"apollo-sfs.com/api/models"
@@ -182,9 +183,11 @@ func (s *EncryptionService) DecryptFile(userKey, nonce, ciphertext []byte) ([]by
 }
 
 // CreateAndActivateMasterKey generates a new 256-bit master key, encrypts it
-// with the KEK, stores it in the DB as "active", and caches it in memory.
-// Called by the key rotation service to promote a new key before re-wrapping users.
-func (s *EncryptionService) CreateAndActivateMasterKey(ctx context.Context, version string) error {
+// with the KEK, retires oldVersion and stores the new key as "active" in the
+// DB (both in one transaction — see RetireAndCreateMasterKey), and caches the
+// new key in memory. Called by the key rotation service to promote a new key
+// before re-wrapping users.
+func (s *EncryptionService) CreateAndActivateMasterKey(ctx context.Context, oldVersion, version string) error {
 	masterKey := make([]byte, 32)
 	if _, err := io.ReadFull(rand.Reader, masterKey); err != nil {
 		return fmt.Errorf("create master key %q: generate: %w", version, err)
@@ -196,7 +199,7 @@ func (s *EncryptionService) CreateAndActivateMasterKey(ctx context.Context, vers
 		return fmt.Errorf("create master key %q: encrypt: %w", version, err)
 	}
 
-	if err := s.queries.CreateMasterKey(ctx, &models.MasterKey{
+	if err := s.queries.RetireAndCreateMasterKey(ctx, oldVersion, time.Now().UTC(), &models.MasterKey{
 		ID:                   version,
 		EncryptedKeyMaterial: encrypted,
 		KeyNonce:             nonce,
@@ -276,13 +279,28 @@ func (s *EncryptionService) bootstrapMasterKey(ctx context.Context) error {
 	}
 
 	const firstVersion = "v1"
-	if err := s.queries.CreateMasterKey(ctx, &models.MasterKey{
+	winner, insertedNew, err := s.queries.BootstrapMasterKey(ctx, &models.MasterKey{
 		ID:                   firstVersion,
 		EncryptedKeyMaterial: encrypted,
 		KeyNonce:             nonce,
 		Status:               models.MasterKeyStatusActive,
-	}); err != nil {
+	})
+	if err != nil {
+		zeroBytes(masterKey)
 		return fmt.Errorf("bootstrap master key: store: %w", err)
+	}
+
+	if !insertedNew {
+		// Another process won the race while we were waiting on the lock —
+		// our generated key was never stored; adopt the winner's instead.
+		zeroBytes(masterKey)
+		if err := s.cacheKey(winner.ID, winner.EncryptedKeyMaterial, winner.KeyNonce); err != nil {
+			return fmt.Errorf("bootstrap master key: decrypt concurrent winner %q: %w", winner.ID, err)
+		}
+		s.mu.Lock()
+		s.activeVer = winner.ID
+		s.mu.Unlock()
+		return nil
 	}
 
 	s.mu.Lock()

@@ -3,13 +3,14 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useRef, useState } from 'react'
 import {
   MdAddCircleOutline,
+  MdAlternateEmail,
   MdArrowBack,
   MdBolt,
+  MdAutoAwesome,
   MdCheck,
   MdCloudQueue,
   MdCloudUpload,
   MdClose,
-  MdCreateNewFolder,
   MdDeleteOutline,
   MdFolder,
   MdFolderOpen,
@@ -22,10 +23,10 @@ import {
   MdStorage,
   MdUploadFile,
   MdVisibility,
-  MdVpnKey,
 } from 'react-icons/md'
 import { createFolder, deleteFolder, moveFolder, requestDriveMigration } from '../../api/folders'
-import { deleteFile, downloadUrl, fileQueryOptions, moveFile } from '../../api/files'
+import { deleteFile, downloadUrl, fileQueryOptions, moveFile, previewUrl } from '../../api/files'
+import { detectionThumbUrl } from '../../api/recognition'
 import { meQueryOptions, preferencesQueryOptions, updatePreferences } from '../../api/me'
 import { listMyServers, resolveDrive, type MyServer } from '../../api/storage'
 import { infrastructureQueryOptions, type DriveSummary } from '../../api/admin'
@@ -39,6 +40,7 @@ import { StorageUpgradeModal, STORAGE_PROMPT_THRESHOLD } from '../../components/
 import { ShareModal } from '../../components/ShareModal'
 import { DeleteConfirmModal, readSkipDeleteCookie } from '../../components/DeleteConfirmModal'
 import { FolderBreadcrumb } from '../../components/FolderBreadcrumb'
+import { AccountBadges } from '../../components/GroupBadge'
 import { TierIcon } from '../../components/TierIcon'
 import { UploadToast } from '../../components/UploadToast'
 import { SortControls } from '../../components/SortControls'
@@ -51,6 +53,7 @@ import { useInfiniteFolderContents } from '../../hooks/useInfiniteFolderContents
 import { useFavorites } from '../../hooks/useFavorites'
 import { useDriveMigrationProgress } from '../../hooks/useDriveMigrationProgress'
 import { useImpersonation } from '../../context/ImpersonationContext'
+import { FilesLayout, FilesSidebarToggle, parseFilesAction, type FilesAction } from '../../components/FilesSidebar'
 import { GoogleServiceSelectModal } from '../../components/GoogleServiceSelectModal'
 import { GoogleBackupModal } from '../../components/GoogleBackupModal'
 import { GooglePhotosLoadingModal } from '../../components/GooglePhotosLoadingModal'
@@ -64,20 +67,42 @@ import {
   type BackupEntry,
   type GoogleBackupItem,
 } from '../../api/googleBackup'
+import { EmailProviderSelectModal } from '../../components/EmailProviderSelectModal'
+import { EmailBackupModal } from '../../components/EmailBackupModal'
+import { EmailBackupView } from '../../components/EmailBackupView'
+import {
+  getGmailUserEmail,
+  getMicrosoftUserEmail,
+  listProviderMessages,
+  requestGmailAccessToken,
+  requestMicrosoftAccessToken,
+  type EmailProvider,
+  type ProviderEmailItem,
+} from '../../api/emailProviders'
 
 export const Route = createFileRoute('/_auth/client/')({
-  validateSearch: (search: Record<string, unknown>) => ({
-    file: typeof search.file === 'string' ? search.file : undefined,
-    folder: typeof search.folder === 'string' ? search.folder : undefined,
-  }),
+  // All keys optional so navigations to /client elsewhere need not pass every
+  // one. Only keys with a concrete value are included.
+  validateSearch: (search: Record<string, unknown>): { file?: string; folder?: string; action?: FilesAction; recognitionGroup?: string } => {
+    const out: { file?: string; folder?: string; action?: FilesAction; recognitionGroup?: string } = {}
+    if (typeof search.file === 'string') out.file = search.file
+    if (typeof search.folder === 'string') out.folder = search.folder
+    if (typeof search.recognitionGroup === 'string') out.recognitionGroup = search.recognitionGroup
+    const action = parseFilesAction(search.action)
+    if (action) out.action = action
+    return out
+  },
   component: RouteComponent,
 })
 
 function RouteComponent() {
   const { file: fileId, folder: folderId } = useSearch({ from: '/_auth/client/' })
 
-  if (fileId) return <FileView fileId={fileId} />
-  return <FolderView folderId={folderId ?? 'root'} />
+  return (
+    <FilesLayout>
+      {fileId ? <FileView fileId={fileId} /> : <FolderView folderId={folderId ?? 'root'} />}
+    </FilesLayout>
+  )
 }
 
 // ── File view ─────────────────────────────────────────────────────────────────
@@ -133,8 +158,10 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
   const queryClient = useQueryClient()
   const { notify } = useNotification()
   const { data: user } = useQuery(meQueryOptions)
+  const { action: sidebarAction, recognitionGroup } = useSearch({ from: '/_auth/client/' })
   const { impersonatedUser } = useImpersonation()
   const readOnly = impersonatedUser !== null
+  const isPremium = user?.is_premium || user?.is_admin
   const fileRef = useRef<HTMLInputElement>(null)
   const [pendingFiles, setPendingFiles] = useState<globalThis.File[]>([])
   const [pendingDelete, setPendingDelete] = useState<{ type: 'file' | 'folder'; id: string; name: string } | null>(null)
@@ -187,10 +214,47 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
     driveIds: string[]
   } | null>(null)
 
+  // ── Email Backup state ─────────────────────────────────────────────────────
+  const [emailSelectOpen, setEmailSelectOpen] = useState(false)
+  const [emailLoading, setEmailLoading] = useState(false)
+  const [emailError, setEmailError] = useState<string | null>(null)
+  const [emailBackup, setEmailBackup] = useState<{
+    provider: EmailProvider
+    accessToken: string
+    accountEmail: string
+    items: ProviderEmailItem[]
+  } | null>(null)
+  const emailCancelRef = useRef<(() => void) | null>(null)
+
+  // Trigger the action requested from the side control panel (?action=…), then
+  // strip the param so refreshes/back-navigation don't re-trigger it. Waits for
+  // the user profile so premium gating is decided on real data.
+  useEffect(() => {
+    if (!sidebarAction || !user) return
+    navigate({
+      to: '/client',
+      search: { file: undefined, folder: folderId === 'root' ? undefined : folderId, action: undefined },
+      replace: true,
+    })
+    if (readOnly) return
+    if (sidebarAction === 'new-folder') startCreate('regular')
+    else if (sidebarAction === 'new-collection' && isPremium) startCreate('media')
+    else if (sidebarAction === 'google-backup' && isPremium && (user.linked_providers?.includes('google') ?? false)) {
+      setGoogleError(null)
+      setServiceSelectOpen(true)
+    }
+    else if (sidebarAction === 'email-backup' && isPremium) {
+      setEmailError(null)
+      setEmailSelectOpen(true)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sidebarAction, user])
+
   const {
     folder,
     folders: rawSubfolders,
     files: rawFiles,
+    recognitionGroups,
     isLoading,
     error,
     hasNextPage,
@@ -315,7 +379,6 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
   if (isLoading) return <p className="text-sm text-gray-500">Loading…</p>
   if (error) return <p className="text-sm text-red-500">Failed to load files.</p>
 
-  const isPremium = user?.is_premium || user?.is_admin
   const hasGoogleLinked = user?.linked_providers?.includes('google') ?? false
   const showGoogleBackup = !readOnly && isPremium && hasGoogleLinked
 
@@ -384,6 +447,71 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
     googleCancelRef.current?.()
   }
 
+  // ── Email Backup handlers ──────────────────────────────────────────────────
+
+  async function handleEmailProviderContinue(provider: EmailProvider) {
+    setEmailSelectOpen(false)
+    setEmailLoading(true)
+    setEmailError(null)
+
+    let cancelled = false
+    // Microsoft needs a popup pre-opened synchronously before any awaits —
+    // same constraint as the Google Photos picker tab.
+    let msPopup: Window | null = null
+    if (provider === 'microsoft') {
+      msPopup = window.open('about:blank', '_blank', 'width=480,height=640')
+    }
+    emailCancelRef.current = () => {
+      cancelled = true
+      msPopup?.close()
+    }
+
+    try {
+      const token = provider === 'gmail'
+        ? await requestGmailAccessToken()
+        : await requestMicrosoftAccessToken(msPopup)
+      if (cancelled) return
+
+      const accountEmail = provider === 'gmail'
+        ? await getGmailUserEmail(token)
+        : await getMicrosoftUserEmail(token)
+      if (cancelled) return
+      if (!accountEmail) {
+        setEmailError('Could not determine the signed-in email address.')
+        return
+      }
+
+      const items = await listProviderMessages(provider, token)
+      if (cancelled) return
+      if (items.length === 0) {
+        setEmailError('No emails were found in this account.')
+        return
+      }
+
+      setEmailBackup({ provider, accessToken: token, accountEmail, items })
+    } catch (e: any) {
+      if (cancelled) return
+      const msg: string = e?.message ?? ''
+      // Swallow silent dismissals (popup closed, user cancelled)
+      if (msg && !msg.toLowerCase().includes('popup_closed') && !msg.toLowerCase().includes('cancel')) {
+        setEmailError(msg)
+      }
+    } finally {
+      emailCancelRef.current = null
+      setEmailLoading(false)
+    }
+  }
+
+  function handleEmailBackupDone(backupFolderId: string | null) {
+    setEmailBackup(null)
+    queryClient.invalidateQueries({ queryKey: ['folders'] })
+    queryClient.invalidateQueries({ queryKey: ['me'] })
+    queryClient.invalidateQueries({ queryKey: ['email-backup'] })
+    if (backupFolderId) {
+      navigate({ to: '/client', search: { file: undefined, folder: backupFolderId } })
+    }
+  }
+
   function handleStartBackground(entries: BackupEntry[], token: string) {
     setGoogleBackupItems(null)
     const driveIds = entries.filter((e) => e.googleItem.source === 'drive').map((e) => e.googleItem.id)
@@ -425,11 +553,38 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
         folderId={folder.id}
         folder={folder}
         readOnly={readOnly}
+        initialRecognitionGroup={recognitionGroup}
         onBack={goBack}
         onOpenFolder={openFolder}
         onOpenFile={openFile}
       />
     )
+  }
+
+  // Email backup folders render as a mail viewer (sender sidebar, message
+  // list, reading pane) instead of the standard file/folder listing.
+  if (folder && folder.kind === 'email') {
+    if (!isPremium) {
+      return (
+        <div className="flex flex-col items-center justify-center py-16 gap-4 text-center">
+          <MdAlternateEmail className="text-6xl text-teal-300" />
+          <h2 className="text-lg font-semibold text-gray-900 m-0">Email Backups</h2>
+          <p className="text-sm text-gray-500 max-w-xs">
+            Email backups are a premium feature. Upgrade to browse your backed-up mail.
+          </p>
+          <a
+            href="/premium"
+            className="px-4 py-2 text-sm bg-amber-500 hover:bg-amber-600 text-white rounded-lg font-medium transition-colors"
+          >
+            Upgrade to Premium
+          </a>
+          <button onClick={goBack} className="text-sm text-gray-500 hover:text-gray-700 bg-transparent border-0 cursor-pointer">
+            Go back
+          </button>
+        </div>
+      )
+    }
+    return <EmailBackupView folder={folder} readOnly={readOnly} onBack={goBack} />
   }
 
   const subfolders = sortedFolders(rawSubfolders, sort)
@@ -440,7 +595,7 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
     folderId === 'root' ? null : (folder?.drive_id ?? null),
     myServers,
   )
-  const hasContent = rawSubfolders.length > 0 || rawFiles.length > 0
+  const hasContent = rawSubfolders.length > 0 || rawFiles.length > 0 || recognitionGroups.length > 0
   const noResults = search && !isLoading && !hasNextPage && !hasContent
   const viewingUser = impersonatedUser ?? user
 
@@ -456,51 +611,37 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
     <div>
       {folderId !== 'root' ? (
         <div className="mb-2">
-          <FolderBreadcrumb
-            folderId={folderId}
-            onNavigate={(id) => navigate({ to: '/client', search: { file: undefined, folder: id } })}
-          />
-          {folder && <h2 className="text-lg font-semibold text-gray-900 m-0">{folder.name}</h2>}
+          <div className="flex items-center gap-3">
+            <FilesSidebarToggle />
+            <FolderBreadcrumb
+              folderId={folderId}
+              onNavigate={(id) => navigate({ to: '/client', search: { file: undefined, folder: id } })}
+            />
+          </div>
+          {folder && (
+            <div className="flex items-center gap-1">
+              <h2 className="text-lg font-semibold text-gray-900 m-0">{folder.name}</h2>
+              {!readOnly && (
+                <DriveInfoButton folder={folder} servers={myServers} isAdmin={!!user?.is_admin} align="left" />
+              )}
+            </div>
+          )}
         </div>
       ) : (
         <div className="flex items-center gap-3 mb-5">
+          <FilesSidebarToggle />
           <h2 className="text-lg font-semibold text-gray-900 mt-0 mb-0">
             {readOnly ? `${impersonatedUser!.username}'s Files` : 'My Files'}
           </h2>
-          {user?.is_premium && !user?.is_admin && (
-            <span className="px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider bg-amber-100 text-amber-700 rounded">
-              Premium
-            </span>
+          <DriveInfoButton folder={null} servers={myServers} isAdmin={!!user?.is_admin} align="left" />
+          {(user?.is_premium || user?.is_admin) && (
+            <AccountBadges user={user} className="text-[10px]" />
           )}
         </div>
       )}
 
       {!readOnly && (
         <div className="flex gap-2 mb-4">
-          <button
-            onClick={() => startCreate('regular')}
-            disabled={creatingFolder}
-            className="inline-flex items-center gap-1.5 px-3 py-2 text-sm border border-gray-200 rounded-lg text-gray-700 hover:bg-gray-50 cursor-pointer transition-colors disabled:opacity-40"
-          >
-            <MdCreateNewFolder className="text-base text-gray-500" /> New folder
-          </button>
-          {isPremium && (
-            <button
-              onClick={() => startCreate('media')}
-              disabled={creatingFolder}
-              className="inline-flex items-center gap-1.5 px-3 py-2 text-sm border border-gray-200 rounded-lg text-gray-700 hover:bg-gray-50 cursor-pointer transition-colors disabled:opacity-40"
-            >
-              <MdPhotoLibrary className="text-base text-purple-400" /> New collection
-            </button>
-          )}
-          {isPremium && (
-            <button
-              onClick={() => navigate({ to: '/settings/api-keys' })}
-              className="inline-flex items-center gap-1.5 px-3 py-2 text-sm border border-gray-200 rounded-lg text-gray-700 hover:bg-gray-50 cursor-pointer transition-colors"
-            >
-              <MdVpnKey className="text-base text-gray-500" /> API Keys
-            </button>
-          )}
           <input
             ref={fileRef}
             type="file"
@@ -518,30 +659,14 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
           >
             <MdUploadFile className="text-base" /> Upload
           </button>
-          {showGoogleBackup && (
-            googleLoading ? (
-              <button
-                onClick={handleCancelGoogleLoading}
-                className="inline-flex items-center gap-1.5 px-3 py-2 text-sm bg-white hover:bg-red-50 text-gray-500 hover:text-red-600 rounded-lg font-medium cursor-pointer border border-gray-200 transition-colors"
-              >
-                <div className="w-3.5 h-3.5 border-2 border-gray-400 border-t-transparent rounded-full animate-spin" />
-                Cancel
-              </button>
-            ) : (
-              <button
-                onClick={() => { setGoogleError(null); setServiceSelectOpen(true) }}
-                disabled={!!bgBackupState?.running}
-                className="inline-flex items-center gap-1.5 px-3 py-2 text-sm bg-white hover:bg-gray-50 text-gray-700 rounded-lg font-medium cursor-pointer border border-gray-200 transition-colors disabled:opacity-50"
-              >
-                <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" aria-hidden="true">
-                  <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
-                  <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
-                  <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z" fill="#FBBC05"/>
-                  <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
-                </svg>
-                Google Backup
-              </button>
-            )
+          {showGoogleBackup && googleLoading && (
+            <button
+              onClick={handleCancelGoogleLoading}
+              className="inline-flex items-center gap-1.5 px-3 py-2 text-sm bg-white hover:bg-red-50 text-gray-500 hover:text-red-600 rounded-lg font-medium cursor-pointer border border-gray-200 transition-colors"
+            >
+              <div className="w-3.5 h-3.5 border-2 border-gray-400 border-t-transparent rounded-full animate-spin" />
+              Cancel Google Backup
+            </button>
           )}
         </div>
       )}
@@ -559,6 +684,14 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
         <div className="flex items-center gap-2 mb-3 px-3 py-2 bg-red-50 border border-red-200 rounded-lg text-xs text-red-600">
           <span className="flex-1">{googleError}</span>
           <button onClick={() => setGoogleError(null)} className="text-red-400 hover:text-red-600 cursor-pointer"><MdClose /></button>
+        </div>
+      )}
+
+      {/* Email Backup error */}
+      {emailError && (
+        <div className="flex items-center gap-2 mb-3 px-3 py-2 bg-red-50 border border-red-200 rounded-lg text-xs text-red-600">
+          <span className="flex-1">{emailError}</span>
+          <button onClick={() => setEmailError(null)} className="text-red-400 hover:text-red-600 cursor-pointer"><MdClose /></button>
         </div>
       )}
 
@@ -610,6 +743,42 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
         </p>
       )}
       {noResults && <p className="text-sm text-gray-400">No results for &ldquo;{search}&rdquo;.</p>}
+
+      {/* Labeled AI-recognition groups matching the search (premium). */}
+      {search && recognitionGroups.length > 0 && (
+        <section className="mb-5">
+          <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">People &amp; groups</h3>
+          <div className="flex flex-wrap gap-2">
+            {recognitionGroups.map((g) => (
+              <button
+                key={g.id}
+                onClick={() =>
+                  navigate({
+                    to: '/client',
+                    search: { file: undefined, folder: g.collection_id, recognitionGroup: g.id },
+                  })
+                }
+                className="inline-flex items-center gap-2 pl-1 pr-3 py-1 border border-gray-200 rounded-full hover:bg-gray-50 cursor-pointer transition-colors bg-white"
+                title={`${g.label} in ${g.collection_name}`}
+              >
+                <span className="w-7 h-7 rounded-full overflow-hidden bg-gray-100 flex items-center justify-center shrink-0">
+                  {g.kind !== 'object' && g.cover_detection_id ? (
+                    <img src={detectionThumbUrl(g.cover_detection_id)} alt="" className="w-full h-full object-cover" />
+                  ) : g.cover_file_id ? (
+                    <img src={previewUrl(g.cover_file_id)} alt="" className="w-full h-full object-cover" />
+                  ) : (
+                    <MdAutoAwesome className="text-amber-400 text-sm" />
+                  )}
+                </span>
+                <span className="text-sm text-gray-700">{g.label}</span>
+                <span className="text-[10px] text-gray-400">
+                  {g.file_count} · {g.collection_name}
+                </span>
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
 
       {hasContent && <SortControls sort={sort} onSort={onSort} />}
 
@@ -691,7 +860,9 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
                 >
                   {f.kind === 'media'
                     ? <MdPhotoLibrary className="text-purple-400 text-lg shrink-0" />
-                    : <MdFolder className="text-blue-400 text-lg shrink-0" />}
+                    : f.kind === 'email'
+                      ? <MdAlternateEmail className="text-teal-500 text-lg shrink-0" title="Email backup" />
+                      : <MdFolder className="text-blue-400 text-lg shrink-0" />}
                   <span className="truncate">{f.name}</span>
                 </button>
                 <span className="text-xs text-gray-400 shrink-0 hidden sm:inline">
@@ -826,6 +997,38 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
             queryClient.invalidateQueries({ queryKey: ['me'] })
           }}
           onStartBackground={handleStartBackground}
+        />
+      )}
+
+      {/* Email Backup — provider selection */}
+      {emailSelectOpen && (
+        <EmailProviderSelectModal
+          onCancel={() => setEmailSelectOpen(false)}
+          onContinue={handleEmailProviderContinue}
+        />
+      )}
+
+      {/* Email Backup — signing in / loading messages */}
+      {emailLoading && !emailBackup && (
+        <GooglePhotosLoadingModal
+          message="Loading your emails"
+          hint="Finish signing in to your email account in the popup, then come back here — your inbox loads automatically."
+          onCancel={() => emailCancelRef.current?.()}
+        />
+      )}
+
+      {/* Email Backup — picker + upload modal */}
+      {emailBackup && user && (
+        <EmailBackupModal
+          provider={emailBackup.provider}
+          accessToken={emailBackup.accessToken}
+          accountEmail={emailBackup.accountEmail}
+          items={emailBackup.items}
+          quotaBytes={user.storage_quota_bytes}
+          usedBytes={user.storage_used_bytes}
+          myServers={myServers}
+          onClose={() => setEmailBackup(null)}
+          onDone={handleEmailBackupDone}
         />
       )}
 
@@ -1059,11 +1262,17 @@ function ServerPicker({
 }
 
 // DriveInfoButton shows a folder's current tier/server (resolved against the
-// user's drives) and, on click, opens DriveChangePopover to change it.
-function DriveInfoButton({ folder, servers, isAdmin }: { folder: Folder; servers: MyServer[] | undefined; isAdmin: boolean }) {
+// user's drives) and, on click, opens a popover with the details. For a real
+// folder that's DriveChangePopover (also lets the user request a move); for
+// the virtual root (folder === null, e.g. the "My Files" header) there's
+// nothing to migrate, so it opens the read-only RootLocationPopover instead —
+// root uploads always use the dynamic-routing default (resolveDrive(null, …)).
+function DriveInfoButton({
+  folder, servers, isAdmin, align = 'right',
+}: { folder: Folder | null; servers: MyServer[] | undefined; isAdmin: boolean; align?: 'left' | 'right' }) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
-  const { drive, isPinned } = resolveDrive(folder.drive_id, servers)
+  const { drive, isPinned } = resolveDrive(folder?.drive_id ?? null, servers)
   const label = drive
     ? `${isPinned ? '' : 'Default — '}${tierLabel(drive.drive_type)} tier · ${drive.name}`
     : 'Default storage location'
@@ -1087,12 +1296,47 @@ function DriveInfoButton({ folder, servers, isAdmin }: { folder: Folder; servers
         <MdInfoOutline className="text-lg" />
       </button>
       {open && (
-        <DriveChangePopover
-          folder={folder}
-          servers={servers}
-          isAdmin={isAdmin}
-          onClose={() => setOpen(false)}
-        />
+        folder ? (
+          <DriveChangePopover
+            folder={folder}
+            servers={servers}
+            isAdmin={isAdmin}
+            align={align}
+            onClose={() => setOpen(false)}
+          />
+        ) : (
+          <RootLocationPopover drive={drive} isPinned={isPinned} align={align} onClose={() => setOpen(false)} />
+        )
+      )}
+    </div>
+  )
+}
+
+// RootLocationPopover is the read-only counterpart to DriveChangePopover for
+// the virtual root: there's no folder row to pin/migrate, so it just explains
+// where new root-level uploads land today.
+function RootLocationPopover({
+  drive, isPinned, align, onClose,
+}: { drive: MyServer | undefined; isPinned: boolean; align: 'left' | 'right'; onClose: () => void }) {
+  return (
+    <div className={`absolute ${align === 'left' ? 'left-0' : 'right-0'} top-full mt-1 w-64 bg-white rounded-lg border border-gray-200 shadow-lg z-50 p-3`}>
+      <div className="flex items-center justify-between gap-2 mb-2">
+        <span className="text-xs font-semibold text-gray-700">Storage location</span>
+        <button onClick={onClose} className="text-gray-400 hover:text-gray-600 cursor-pointer bg-transparent border-0 p-0.5">
+          <MdClose className="text-sm" />
+        </button>
+      </div>
+      {drive ? (
+        <>
+          <p className="text-xs text-gray-500 m-0 mb-1.5">
+            Files uploaded here use your {isPinned ? 'assigned' : 'primary'} drive by default:
+          </p>
+          <p className="text-xs font-semibold text-gray-800 m-0 flex items-center gap-1">
+            {drive.name} <TierIcon type={drive.drive_type} /> {tierLabel(drive.drive_type)} tier
+          </p>
+        </>
+      ) : (
+        <p className="text-xs text-gray-500 m-0">No storage server assigned yet.</p>
       )}
     </div>
   )
@@ -1106,8 +1350,8 @@ function DriveInfoButton({ folder, servers, isAdmin }: { folder: Folder; servers
 // (all servers/tiers, owned or not) to see the full control surface without
 // being able to actually fire a move.
 function DriveChangePopover({
-  folder, servers, isAdmin, onClose,
-}: { folder: Folder; servers: MyServer[] | undefined; isAdmin: boolean; onClose: () => void }) {
+  folder, servers, isAdmin, align = 'right', onClose,
+}: { folder: Folder; servers: MyServer[] | undefined; isAdmin: boolean; align?: 'left' | 'right'; onClose: () => void }) {
   const queryClient = useQueryClient()
   const { notify } = useNotification()
   const { eligibility, migration, progress, isActive } = useDriveMigrationProgress(folder.id, folder.name)
@@ -1167,7 +1411,7 @@ function DriveChangePopover({
   const canConfirm = hasChange && !atLimit && !migrateMutation.isPending && !previewMode
 
   return (
-    <div className="absolute right-0 top-full mt-1 w-72 bg-white rounded-lg border border-gray-200 shadow-lg z-50 p-3">
+    <div className={`absolute ${align === 'left' ? 'left-0' : 'right-0'} top-full mt-1 w-72 bg-white rounded-lg border border-gray-200 shadow-lg z-50 p-3`}>
       <div className="flex items-center justify-between gap-2 mb-3">
         <span className="text-xs text-gray-500 min-w-0 truncate">
           {current ? (

@@ -6,11 +6,12 @@ package dav
 // opaque octet-stream attachments (no previews) and are never executed
 // server-side — management verbs only touch metadata rows and MinIO blobs.
 //
-// All management operations stay scoped to the link's server: only files
-// stored on its drives can be deleted, moved, copied or overwritten. Folders
-// are part of the user's global tree, so folder renames/moves apply globally,
-// and a folder DELETE removes only the files visible through this mount —
-// folders that still hold out-of-scope files survive.
+// All management operations stay scoped to the link's drive: only files
+// stored on it can be deleted, moved, copied or overwritten — not other
+// drives/tiers on the same server. Folders are part of the user's global
+// tree, so folder renames/moves apply globally, and a folder DELETE removes
+// only the files visible through this mount — folders that still hold
+// out-of-scope files survive.
 
 import (
 	"bytes"
@@ -82,9 +83,9 @@ func overwriteAllowed(c *gin.Context) bool {
 // ── DELETE ────────────────────────────────────────────────────────────────────
 
 // remove deletes a file, or a folder subtree. For folders, every file on the
-// link's server inside the subtree is deleted; folders are then removed
+// link's drive inside the subtree is deleted; folders are then removed
 // bottom-up when empty. Folders still holding files that live on other
-// servers (invisible through this mount) are kept.
+// drives/tiers (invisible through this mount) are kept.
 func (h *Handler) remove(c *gin.Context, link *models.FileServerLink, user *models.User) {
 	segments, err := splitPath(c.Param("path"))
 	if err != nil {
@@ -181,7 +182,7 @@ func (h *Handler) remove(c *gin.Context, link *models.FileServerLink, user *mode
 
 // collectSubtree walks the folder subtree rooted at rootID (inclusive) in
 // DFS pre-order, returning the folder ids visited and the ids of every file
-// on the link's server inside it.
+// on the link's drive inside it.
 func (h *Handler) collectSubtree(c *gin.Context, q *db.Queries, link *models.FileServerLink, rootID uuid.UUID) ([]uuid.UUID, []uuid.UUID, error) {
 	var folders, files []uuid.UUID
 	stack := []uuid.UUID{rootID}
@@ -198,7 +199,7 @@ func (h *Handler) collectSubtree(c *gin.Context, q *db.Queries, link *models.Fil
 		for _, child := range children {
 			stack = append(stack, child.ID)
 		}
-		scoped, err := q.ListFilesByFolderOnServer(c.Request.Context(), link.UserID, &fid, link.ServerID)
+		scoped, err := q.ListFilesByFolderOnDrive(c.Request.Context(), link.UserID, &fid, link.DriveID)
 		if err != nil {
 			return nil, nil, fmt.Errorf("delete failed")
 		}
@@ -215,7 +216,7 @@ func (h *Handler) collectSubtree(c *gin.Context, q *db.Queries, link *models.Fil
 // ── MOVE ──────────────────────────────────────────────────────────────────────
 
 // move renames/relocates a file or folder within the mount. File moves are
-// scoped to the link's server; folder moves re-parent the folder in the
+// scoped to the link's drive; folder moves re-parent the folder in the
 // user's global tree (metadata only — no bytes are touched).
 func (h *Handler) move(c *gin.Context, link *models.FileServerLink, user *models.User) {
 	src, err := splitPath(c.Param("path"))
@@ -350,12 +351,8 @@ func (h *Handler) resolveFileDestination(c *gin.Context, q *db.Queries, link *mo
 		return nil, nil, http.StatusPreconditionFailed, "destination already exists"
 	}
 	// Overwriting deletes the destination — only allowed when it is
-	// manageable through this mount (stored on the link's server).
-	if existing.DriveID == nil {
-		return nil, nil, http.StatusForbidden, "destination belongs to a different storage server"
-	}
-	onServer, err := h.pool.DriveBelongsToServer(c.Request.Context(), *existing.DriveID, link.ServerID)
-	if err != nil || !onServer {
+	// manageable through this mount (stored on the link's drive).
+	if existing.DriveID == nil || *existing.DriveID != link.DriveID {
 		return nil, nil, http.StatusForbidden, "destination belongs to a different storage server"
 	}
 	return dstParent, existing, 0, ""

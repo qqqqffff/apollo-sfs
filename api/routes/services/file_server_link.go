@@ -38,9 +38,9 @@ const (
 
 // Sentinel errors mapped to HTTP statuses by the route handlers.
 var (
-	ErrLinkNotFound       = errors.New("file server link not found")
-	ErrLinkServerNotOwned = errors.New("you have no storage capacity on that server")
-	ErrLinkExists         = errors.New("a link already exists for that server")
+	ErrLinkNotFound      = errors.New("file server link not found")
+	ErrLinkDriveNotOwned = errors.New("you have no storage capacity on that drive")
+	ErrLinkExists        = errors.New("a link already exists for that drive")
 	ErrLinkBadCredentials = errors.New("invalid credentials")
 	ErrLinkNotPremium     = errors.New("premium membership required")
 	ErrLocationUnverified = errors.New("location verification required")
@@ -87,60 +87,72 @@ func (s *FileServerLinkService) info(l *models.FileServerLink) *FileServerLinkIn
 	return &FileServerLinkInfo{FileServerLink: *l, MountURL: s.MountURL(l.Token)}
 }
 
-// Create issues a mount link for the given server. The server must carry one
-// of the user's drive allocations (ErrLinkServerNotOwned otherwise). When a
-// link already exists for (user, server) the existing link is returned with
+// Create issues a mount link for the given drive (a single server + storage
+// tier). The user must hold an allocation on that exact drive
+// (ErrLinkDriveNotOwned otherwise) — a server exposing both fast and standard
+// tiers to the user requires two separate Create calls, one per drive. When a
+// link already exists for (user, drive) the existing link is returned with
 // created = false — the frontend shows it instead of minting a duplicate.
-func (s *FileServerLinkService) Create(ctx context.Context, userID uuid.UUID, username string, serverID uuid.UUID, enhancedSecurity bool) (info *FileServerLinkInfo, created bool, err error) {
+func (s *FileServerLinkService) Create(ctx context.Context, userID uuid.UUID, username string, driveID uuid.UUID, enhancedSecurity bool) (info *FileServerLinkInfo, created bool, err error) {
 	drives, err := s.queries.GetUserDrives(ctx, username, userID.String())
 	if err != nil {
 		return nil, false, fmt.Errorf("create link: %w", err)
 	}
-	var driveID uuid.UUID
+	var serverID uuid.UUID
+	var serverName, driveType string
 	found := false
 	for _, d := range drives {
-		if d.ServerID == serverID {
-			driveID = d.DriveID
+		if d.DriveID == driveID {
+			serverID = d.ServerID
+			serverName = d.ServerName
+			driveType = d.DriveType
 			found = true
-			if d.IsPrimary {
-				break
-			}
+			break
 		}
 	}
 	if !found {
-		return nil, false, ErrLinkServerNotOwned
+		return nil, false, ErrLinkDriveNotOwned
 	}
 
-	if existing, err := s.queries.GetFileServerLinkByServer(ctx, username, serverID); err == nil {
+	if existing, err := s.queries.GetFileServerLinkByDrive(ctx, username, driveID); err == nil {
 		return s.info(existing), false, nil
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return nil, false, fmt.Errorf("create link: lookup existing: %w", err)
 	}
 
-	token, err := generateURLToken()
-	if err != nil {
-		return nil, false, fmt.Errorf("create link: token: %w", err)
-	}
-	link, err := s.queries.CreateFileServerLink(ctx, &models.FileServerLink{
-		Token:            token,
-		Username:         username,
-		UserID:           userID,
-		ServerID:         serverID,
-		DriveID:          driveID,
-		EnhancedSecurity: enhancedSecurity,
-	})
-	if err != nil {
-		// Concurrent create for the same server: surface the winner.
-		var pqErr *pq.Error
-		if errors.As(err, &pqErr) && pqErr.Code == "23505" {
-			if existing, lookupErr := s.queries.GetFileServerLinkByServer(ctx, username, serverID); lookupErr == nil {
-				return s.info(existing), false, nil
-			}
-			return nil, false, ErrLinkExists
+	// The random suffix has 36^8 (~2.8e12) combinations, so a genuine token
+	// collision is vanishingly unlikely — but since the server+tier prefix is
+	// shared by every link on that drive, retry a few times with a fresh
+	// suffix rather than ever surfacing a spurious failure to the user.
+	const maxTokenAttempts = 5
+	for attempt := 0; attempt < maxTokenAttempts; attempt++ {
+		token, err := generateMountToken(serverName, driveType)
+		if err != nil {
+			return nil, false, fmt.Errorf("create link: token: %w", err)
 		}
-		return nil, false, err
+		link, err := s.queries.CreateFileServerLink(ctx, &models.FileServerLink{
+			Token:            token,
+			Username:         username,
+			UserID:           userID,
+			ServerID:         serverID,
+			DriveID:          driveID,
+			EnhancedSecurity: enhancedSecurity,
+		})
+		if err == nil {
+			return s.info(link), true, nil
+		}
+		var pqErr *pq.Error
+		if !errors.As(err, &pqErr) || pqErr.Code != "23505" {
+			return nil, false, err
+		}
+		// Unique violation: either a concurrent create won the (user, drive)
+		// race — surface its winner — or the random suffix collided, in which
+		// case retry with a fresh one.
+		if existing, lookupErr := s.queries.GetFileServerLinkByDrive(ctx, username, driveID); lookupErr == nil {
+			return s.info(existing), false, nil
+		}
 	}
-	return s.info(link), true, nil
+	return nil, false, fmt.Errorf("create link: could not generate a unique token after %d attempts", maxTokenAttempts)
 }
 
 // List returns all of the user's links with mount URLs, newest first.
@@ -319,11 +331,93 @@ func (s *FileServerLinkService) Touch(ctx context.Context, id uuid.UUID) {
 	}
 }
 
-// generateURLToken returns a 256-bit URL-safe random token.
+// generateURLToken returns a 256-bit URL-safe random token. Used for
+// location-verification links, which must stay opaque — unlike the mount
+// token below, this one is a real bearer secret.
 func generateURLToken() (string, error) {
 	b := make([]byte, 32)
 	if _, err := io.ReadFull(rand.Reader, b); err != nil {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+// mountTokenAlphabet is deliberately lowercase-alphanumeric only, so the
+// token reads cleanly wherever it's displayed (Explorer/Finder network
+// locations, mount commands) without case-sensitivity surprises.
+const mountTokenAlphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+
+// mountTokenSuffixLen is the length of the random tag appended to the
+// server/tier slug. 36^8 (~2.8e12) combinations is ample: the token isn't a
+// bearer secret on its own (every DAV request still requires the owner's
+// login credentials — see Authenticate), it just needs to not collide.
+const mountTokenSuffixLen = 8
+
+// generateMountToken builds a human-readable DAV mount token in the form
+// <server-slug>-<tier>-<8 random alphanumeric chars>, e.g. "attic-fast-a3k9zq2m"
+// for a server named "Attic". It's the path segment users see in
+// Explorer/Finder when they mount the drive, so it's built to read like a
+// name rather than an opaque blob. Uniqueness is enforced by the DB and
+// retried by the caller on collision.
+func generateMountToken(serverName, driveType string) (string, error) {
+	tier := "standard"
+	if driveType == "nvme" {
+		tier = "fast"
+	}
+	suffix, err := randomMountSuffix(mountTokenSuffixLen)
+	if err != nil {
+		return "", err
+	}
+	return slugifyServerName(serverName) + "-" + tier + "-" + suffix, nil
+}
+
+// randomMountSuffix returns n random characters from mountTokenAlphabet,
+// drawn via rejection sampling so every character is uniformly distributed
+// (a plain mod would bias low values since 256 isn't a multiple of 36).
+func randomMountSuffix(n int) (string, error) {
+	limit := 256 - (256 % len(mountTokenAlphabet))
+	out := make([]byte, n)
+	var buf [1]byte
+	for i := range out {
+		for {
+			if _, err := io.ReadFull(rand.Reader, buf[:]); err != nil {
+				return "", err
+			}
+			if int(buf[0]) < limit {
+				out[i] = mountTokenAlphabet[int(buf[0])%len(mountTokenAlphabet)]
+				break
+			}
+		}
+	}
+	return string(out), nil
+}
+
+// slugifyServerName lowercases name and keeps only [a-z0-9], collapsing
+// every other run of characters to a single hyphen, so it's always a safe
+// URL path segment regardless of what characters the server's display name
+// uses. Falls back to "server" if nothing alphanumeric survives.
+func slugifyServerName(name string) string {
+	const maxSlugLen = 32
+	var b strings.Builder
+	lastHyphen := true // suppresses a leading hyphen
+	for _, r := range strings.ToLower(name) {
+		switch {
+		case r >= 'a' && r <= 'z' || r >= '0' && r <= '9':
+			b.WriteRune(r)
+			lastHyphen = false
+		default:
+			if !lastHyphen {
+				b.WriteByte('-')
+				lastHyphen = true
+			}
+		}
+	}
+	slug := strings.TrimRight(b.String(), "-")
+	if len(slug) > maxSlugLen {
+		slug = strings.TrimRight(slug[:maxSlugLen], "-")
+	}
+	if slug == "" {
+		slug = "server"
+	}
+	return slug
 }

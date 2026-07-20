@@ -12,7 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// suiteResult holds the outcome of one test run — shared by backend and frontend.
+// suiteResult holds the outcome of one test run — shared by every suite.
 type suiteResult struct {
 	Passed     bool   `json:"passed"`
 	ExitCode   int    `json:"exit_code"`
@@ -33,40 +33,62 @@ type testRunResponse struct {
 	Backend     suiteEntry `json:"backend"`
 	Frontend    suiteEntry `json:"frontend"`
 	FrontendE2E suiteEntry `json:"frontend_e2e"`
+	Mobile      suiteEntry `json:"mobile"`
+	Recognition suiteEntry `json:"recognition"`
 }
+
+// runnerTimeout bounds the call to the unified test-runner sidecar. All five
+// suites run sequentially inside it (Go, Jest ×2, Playwright, pytest), so this
+// needs to be generous rather than the ~2min a single suite used to get.
+const runnerTimeout = 10 * time.Minute
 
 // RunTests handles POST /admin/system/tests.
 //
-// Backend suite      — runs `go test ./tests/... -count=1` in apiDir.
-//   Requires the Go toolchain to be available in PATH and the source tree to
-//   be present (dev / source-based deployments only).
+// Normal path — testRunnerURL is set: makes ONE call to the unified
+// test-runner sidecar (POST /run-tests), which runs the backend, frontend,
+// frontend E2E, mobile, and recognition suites in turn inside a single
+// container and returns a combined report. That container replaces separate
+// api-tests/frontend-tests/mobile-tests/recognition-tests sidecars — because
+// the frontend/mobile/recognition apps live in a separate container from the
+// API, they can't be exec'd directly, so the sidecar bridges the gap for all
+// four (the backend suite doesn't strictly need it, see below).
 //
-// Frontend suite     — calls the Jest sidecar at frontendTestURL (POST /run-tests).
-// Frontend E2E suite — calls the Playwright sidecar at frontendE2EURL (POST /run-e2e).
-//   Both sidecars run inside the frontend-tests Docker container on the internal
-//   bridge network. Because the React app lives in a separate container it cannot
-//   be exec'd directly — the sidecar bridges the gap.
+// Fallback path — testRunnerURL is unset: runs ONLY the backend suite via
+// direct exec in apiDir (requires the Go toolchain in PATH and the source
+// tree present — dev / source-based deployments only). The other four
+// suites can't run without the sidecar's toolchains, so they report disabled.
 //
 // Returns 503 when no suite is configured.
 // Returns 422 when at least one enabled suite fails.
 // Returns 200 when all enabled suites pass.
 func (h *Handler) RunTests(c *gin.Context) {
-	resp := testRunResponse{
-		Backend:     h.runBackend(c.Request.Context()),
-		Frontend:    h.runFrontend(c.Request.Context()),
-		FrontendE2E: h.runFrontendE2E(c.Request.Context()),
+	var resp testRunResponse
+
+	if h.testRunnerURL != "" {
+		result, err := h.callTestRunner(c.Request.Context())
+		if err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			return
+		}
+		resp = *result
+	} else {
+		resp.Backend = h.runBackendLocal(c.Request.Context())
 	}
 
-	if !resp.Backend.Enabled && !resp.Frontend.Enabled && !resp.FrontendE2E.Enabled {
+	anyEnabled := resp.Backend.Enabled || resp.Frontend.Enabled || resp.FrontendE2E.Enabled ||
+		resp.Mobile.Enabled || resp.Recognition.Enabled
+	if !anyEnabled {
 		c.JSON(http.StatusServiceUnavailable, gin.H{
-			"error": "no test suites are configured (set APP_DIR and/or FRONTEND_TEST_URL and/or FRONTEND_E2E_URL)",
+			"error": "no test suites are configured (set TEST_RUNNER_URL and/or APP_DIR)",
 		})
 		return
 	}
 
 	anyFailed := (resp.Backend.Enabled && resp.Backend.Result != nil && !resp.Backend.Result.Passed) ||
 		(resp.Frontend.Enabled && resp.Frontend.Result != nil && !resp.Frontend.Result.Passed) ||
-		(resp.FrontendE2E.Enabled && resp.FrontendE2E.Result != nil && !resp.FrontendE2E.Result.Passed)
+		(resp.FrontendE2E.Enabled && resp.FrontendE2E.Result != nil && !resp.FrontendE2E.Result.Passed) ||
+		(resp.Mobile.Enabled && resp.Mobile.Result != nil && !resp.Mobile.Result.Passed) ||
+		(resp.Recognition.Enabled && resp.Recognition.Result != nil && !resp.Recognition.Result.Passed)
 
 	status := http.StatusOK
 	if anyFailed {
@@ -75,16 +97,41 @@ func (h *Handler) RunTests(c *gin.Context) {
 	c.JSON(status, resp)
 }
 
-// runBackend runs the Go test suite and returns its entry.
-// Prefers the api-tests sidecar (backendTestURL) over direct exec (apiDir).
-func (h *Handler) runBackend(parent context.Context) suiteEntry {
-	if h.backendTestURL != "" {
-		return h.callSidecar(parent, h.backendTestURL, "")
+// callTestRunner posts to the unified test-runner sidecar and unmarshals its
+// combined report directly into a testRunResponse — the sidecar's JSON shape
+// mirrors this struct exactly, so no per-suite translation is needed.
+func (h *Handler) callTestRunner(parent context.Context) (*testRunResponse, error) {
+	ctx, cancel := context.WithTimeout(parent, runnerTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.testRunnerURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
 	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("call test runner: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	var result testRunResponse
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("parse test runner response: %w\n%s", err, body)
+	}
+
+	return &result, nil
+}
+
+// runBackendLocal runs the Go test suite via direct exec in apiDir — the
+// local-dev fallback used only when testRunnerURL is unset.
+func (h *Handler) runBackendLocal(parent context.Context) suiteEntry {
 	if h.apiDir == "" {
 		return suiteEntry{
 			Enabled: false,
-			Message: "backend tests disabled — BACKEND_TEST_URL and APP_DIR are not set",
+			Message: "backend tests disabled — TEST_RUNNER_URL and APP_DIR are not set",
 		}
 	}
 
@@ -116,52 +163,4 @@ func (h *Handler) runBackend(parent context.Context) suiteEntry {
 			DurationMs: elapsed,
 		},
 	}
-}
-
-// runFrontend calls the Jest sidecar container and returns its entry.
-func (h *Handler) runFrontend(parent context.Context) suiteEntry {
-	return h.callSidecar(parent, h.frontendTestURL, "frontend tests disabled — FRONTEND_TEST_URL is not set")
-}
-
-// runFrontendE2E calls the Playwright sidecar container and returns its entry.
-func (h *Handler) runFrontendE2E(parent context.Context) suiteEntry {
-	return h.callSidecar(parent, h.frontendE2EURL, "frontend E2E tests disabled — FRONTEND_E2E_URL is not set")
-}
-
-// callSidecar posts to url and unmarshals the suiteResult response.
-// Returns a disabled entry when url is empty.
-func (h *Handler) callSidecar(parent context.Context, url, disabledMsg string) suiteEntry {
-	if url == "" {
-		return suiteEntry{Enabled: false, Message: disabledMsg}
-	}
-
-	ctx, cancel := context.WithTimeout(parent, 120*time.Second)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
-	if err != nil {
-		return suiteEntry{Enabled: true, Result: errorResult(fmt.Sprintf("build request: %v", err))}
-	}
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return suiteEntry{Enabled: true, Result: errorResult(fmt.Sprintf("call sidecar: %v", err))}
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-
-	var result suiteResult
-	if err := json.Unmarshal(body, &result); err != nil {
-		return suiteEntry{
-			Enabled: true,
-			Result:  errorResult(fmt.Sprintf("parse sidecar response: %v\n%s", err, body)),
-		}
-	}
-
-	return suiteEntry{Enabled: true, Result: &result}
-}
-
-func errorResult(msg string) *suiteResult {
-	return &suiteResult{Passed: false, ExitCode: -1, Output: msg}
 }

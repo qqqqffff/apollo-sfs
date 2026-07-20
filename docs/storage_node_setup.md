@@ -92,6 +92,19 @@ sudo systemctl restart ssh
 Set a **static IP** (router DHCP reservation or on the box) — the port-forward and Swarm
 advertise address point here. Use the static IP for Swarm, not `.local`.
 
+Load the `drivetemp` kernel module so the HDD's temperature is exposed under
+`/sys/class/hwmon` — `node-agent` reads it from there (via the read-only `/sys` bind mount
+in `docker-stack.yml`); without it the standard tier's disk temperature never appears on
+the metrics page, no matter how the agent is configured:
+```bash
+sudo modprobe drivetemp
+echo drivetemp | sudo tee -a /etc/modules-load.d/drivetemp.conf   # persist across reboots
+ls /sys/block/sda/device/hwmon*/temp1_input   # sanity check — should list a file
+```
+NVMe temperature (fast tier, Part 5) needs no equivalent step — `CONFIG_NVME_HWMON` is
+built into current Debian/Raspberry Pi OS kernels, so `/sys/class/nvme/nvme0/hwmon*/`
+appears automatically once the drive is attached.
+
 ### 0.4 Set up the 8TB HDD as one XFS blob volume
 Reconnect the HDD if you disconnected it. **Confirm device identity before wiping —
 destructive.**
@@ -426,5 +439,17 @@ curl -fsS -X POST https://files.<domain>/api/v1/admin/system/sync -H "Cookie: <a
 - Admin → **metrics** → pick the Pi node: the **Physical disks** card lists `nvme-01`
   *and* `nvme-02` with independent fill bars + temperatures; click one to graph its
   temperature history. Upload to fast and to standard to confirm routing.
+  - If either drive's temperature shows `—`, the disk's `drivetemp`/NVMe hwmon device
+    isn't registered yet (or the `drivetemp` module from 0.3 isn't loaded) — `node-agent`
+    doesn't guess a fixed sysfs path depth, it matches each hwmon device's `device`
+    symlink back to the exact disk, so this is a kernel/module issue, not an agent
+    misconfiguration. Check:
+    ```bash
+    readlink -f /sys/class/block/sda/device        # the HDD's own device path
+    for h in /sys/class/hwmon/hwmon*; do echo "$h -> $(readlink -f "$h/device")"; done
+    ```
+    One `hwmonN -> device` line should match the HDD's device path exactly and sit next
+    to a `temp1_input` file. If none do, `drivetemp` hasn't bound to that disk — re-check
+    `lsmod | grep drivetemp` and `dmesg | grep -i drivetemp`.
 - `docker service logs apollo-sfs_node-agent --tail 20` on each node — pushes succeeding,
   no `NODE_AGENT_TOKEN is required` fatal.

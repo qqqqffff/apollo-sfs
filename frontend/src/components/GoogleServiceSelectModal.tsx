@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { MdCloud, MdPhotoLibrary } from 'react-icons/md'
 import { HiOutlineServer } from 'react-icons/hi'
+import { LastSyncNote } from './LastSyncNote'
 
 export interface GoogleServiceSelection {
   photos: boolean
@@ -92,6 +93,8 @@ export function GoogleServiceSelectModal({ onCancel, onContinue }: Props) {
             </button>
           ))}
         </div>
+
+        <LastSyncNote kind="google" />
 
         {!canContinue && (
           <p className="text-xs text-red-500 -mt-1">Select at least one service to continue.</p>

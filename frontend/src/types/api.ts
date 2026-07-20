@@ -8,8 +8,29 @@ export interface User {
   is_admin: boolean
   is_premium: boolean
   premium_granted_at: string | null
+  // True when the user has an active/suspended premium subscription of their
+  // own — distinct from is_premium, which is also true for every admin
+  // regardless of whether they ever subscribed. Lets the UI show a separate
+  // Premium badge alongside Admin only when an admin actually subscribed, and
+  // gates the real upgrade flow's visibility.
+  premium_subscribed: boolean
+  // Present only when premium_subscribed is true.
+  premium_environment?: 'sandbox' | 'live'
+  premium_plan?: 'monthly' | 'annual'
+  premium_current_period_end?: string | null
   active_ban?: UserBan | null
   linked_providers: string[]
+  // Admin's session-scoped sandbox-payments toggle (resets on logout/session
+  // expiry — never persisted). Always false for non-admins.
+  sandbox_payments_enabled: boolean
+  // Admin's session-scoped storage-expansion-override toggle (resets on
+  // logout/session expiry — never persisted). Always false for non-admins.
+  // When true, the Add Storage modal always routes purchases through the
+  // capacity expansion request flow instead of a direct buy.
+  expansion_override_enabled: boolean
+  // Gates the profile-page feedback form — disabled by default; admins grant
+  // it per-user from the admin Feedback → Access tab.
+  feedback_access_enabled: boolean
 }
 
 export type APIKeyOperation = 'read' | 'write' | 'delete' | 'list'
@@ -25,6 +46,8 @@ export interface APIKey {
   username: string
   name: string
   key_prefix: string
+  // Requests/minute this key is allowed to make against the SFS API.
+  rate_limit_per_min: number
   created_at: string
   last_used_at: string | null
   expires_at: string | null
@@ -32,6 +55,16 @@ export interface APIKey {
   scopes?: APIKeyScope[]
   matching_operations?: APIKeyOperation[]
 }
+
+// Global ceiling no key's rate limit may exceed — mirrors
+// services.MaxRateLimitPerMin on the backend.
+export const API_KEY_MAX_RATE_LIMIT_PER_MIN = 1000
+export const API_KEY_DEFAULT_RATE_LIMIT_PER_MIN = 300
+
+// Longest expiry a key can be given (10 years) — mirrors the backend's
+// binding max on ttl_days and services.MaxAPIKeyTTL. A ttl_days of 0 (no
+// expiry) is unaffected by this cap.
+export const API_KEY_MAX_TTL_DAYS = 3650
 
 export interface IssuedAPIKey {
   raw_key: string
@@ -66,7 +99,7 @@ export interface MathGameScore {
   created_at: string
 }
 
-export type FolderKind = 'regular' | 'media'
+export type FolderKind = 'regular' | 'media' | 'email'
 
 export interface Folder {
   id: string
@@ -80,6 +113,9 @@ export interface Folder {
   // Optional pin to a specific drive for this folder's direct uploads. Null
   // means dynamic primary-first/least-full routing (today's default behavior).
   drive_id: string | null
+  // Premium AI face/pet/object indexing toggle. Only meaningful for media
+  // collections.
+  ai_recognition_enabled: boolean
   created_at: string
   updated_at: string
 }
@@ -119,6 +155,9 @@ export interface UserPreferences {
   // Auto-open the storage upgrade modal when an upload would push usage past
   // 75% of quota or exceed it.
   storage_prompt_enabled: boolean
+  // Warn in the notification bell when the most recent Google or email backup
+  // is more than 30 days old. Premium-only; default false.
+  backup_stale_notify: boolean
   created_at: string
   updated_at: string
 }
@@ -135,6 +174,68 @@ export interface FolderContents {
 export interface PageResult<T> {
   items: T[]
   next_token: string
+}
+
+// ── AI recognition (premium) ────────────────────────────────────────────────
+
+export type RecognitionKind = 'face' | 'pet' | 'object'
+
+export interface RecognitionJobCounts {
+  pending: number
+  processing: number
+  done: number
+  failed: number
+  skipped: number
+}
+
+export interface RecognitionGroupCounts {
+  face: number
+  pet: number
+  object: number
+}
+
+export interface RecognitionStatus {
+  enabled: boolean
+  service_available: boolean
+  counts: RecognitionJobCounts
+  groups: RecognitionGroupCounts
+  // Encrypted crop bytes this collection's indexing stores against the
+  // user's quota (shown as the storage note in the groups modal).
+  storage_bytes: number
+}
+
+export interface RecognitionGroup {
+  id: string
+  user_id: string
+  collection_id: string
+  kind: RecognitionKind
+  class_label?: string
+  auto_label: string
+  user_label?: string
+  member_count: number
+  cover_detection_id?: string
+  file_count: number
+  cover_file_id?: string
+  created_at: string
+  updated_at: string
+}
+
+export interface RecognitionGroupSearchHit {
+  id: string
+  collection_id: string
+  collection_name: string
+  kind: RecognitionKind
+  class_label?: string
+  label: string
+  file_count: number
+  cover_detection_id?: string
+  cover_file_id?: string
+}
+
+// SearchResults is the /search payload: the classic folders+files lists plus
+// labeled recognition groups for premium users (key absent otherwise).
+export interface SearchResults extends FolderContents {
+  recognition_groups?: PageResult<RecognitionGroupSearchHit>
 }
 
 export interface Invitation {
@@ -218,6 +319,22 @@ export interface BannedIP {
   city: string
 }
 
+export interface QuotaAllocationSnapshot {
+  drive_id: string
+  server_name: string
+  drive_type: 'nvme' | 'hdd'
+  quota_bytes: number
+}
+
+// StorageAllocationChangeDetails is the structured before/after breakdown for
+// a "storage_allocations_updated" audit entry / quota_changed notification —
+// rendered behind a "Breakdown" expand button by AllocationChangeBreakdown.
+export interface StorageAllocationChangeDetails {
+  reason?: string
+  before: QuotaAllocationSnapshot[]
+  after: QuotaAllocationSnapshot[]
+}
+
 export interface AuditLog {
   id: string
   target_username: string
@@ -226,6 +343,7 @@ export interface AuditLog {
   resource_type: string | null
   resource_id: string | null
   resource_name: string | null
+  details?: StorageAllocationChangeDetails
   created_at: string
 }
 
@@ -291,6 +409,26 @@ export interface ServerExpansionRequest {
   invoice_status?: string
   invoice_sent_at?: string
   invoice_accept_due_at?: string
+}
+
+export type FeedbackCategory = 'bug' | 'feature' | 'general'
+export type FeedbackStatus = 'new' | 'reviewed' | 'archived'
+
+export interface Feedback {
+  id: string
+  user_id: string
+  username: string
+  category: FeedbackCategory
+  message: string
+  status: FeedbackStatus
+  created_at: string
+  updated_at: string
+}
+
+export const FEEDBACK_CATEGORIES: Record<FeedbackCategory, string> = {
+  bug:     'Bug report',
+  feature: 'Feature request',
+  general: 'General feedback',
 }
 
 export const VIOLATION_CODES: Record<string, string> = {

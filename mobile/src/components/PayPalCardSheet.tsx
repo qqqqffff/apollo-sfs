@@ -15,12 +15,16 @@ interface Props {
   amount: string;   // e.g. "30.00"
   currency: string; // ISO 4217, e.g. "USD"
   label: string;
+  // When set, the hosted fields pay against this server-created PayPal order
+  // instead of creating one client-side — required by flows whose capture
+  // endpoint validates a server-side order row (e.g. the interest deposit).
+  orderId?: string;
   onSuccess: (orderId: string) => void;
   onError: (message: string) => void;
   onCancel: () => void;
 }
 
-function buildHtml(clientId: string, amount: string, currency: string, label: string): string {
+function buildHtml(clientId: string, amount: string, currency: string, label: string, serverOrderId?: string): string {
   const safeLabel = label.replace(/</g, '&lt;').replace(/>/g, '&gt;');
   return `<!DOCTYPE html>
 <html>
@@ -83,6 +87,7 @@ function buildHtml(clientId: string, amount: string, currency: string, label: st
     (function() {
       var AMOUNT = ${JSON.stringify(amount)};
       var CURRENCY = ${JSON.stringify(currency)};
+      var SERVER_ORDER_ID = ${JSON.stringify(serverOrderId ?? null)};
 
       function post(msg) { window.ReactNativeWebView.postMessage(JSON.stringify(msg)); }
 
@@ -125,6 +130,10 @@ function buildHtml(clientId: string, amount: string, currency: string, label: st
 
       paypal.HostedFields.render({
         createOrder: function(data, actions) {
+          if (SERVER_ORDER_ID) {
+            post({ type: 'LOG', message: 'createOrder — using server-created order ' + SERVER_ORDER_ID });
+            return Promise.resolve(SERVER_ORDER_ID);
+          }
           post({ type: 'LOG', message: 'createOrder called — creating PayPal order client-side' });
           return actions.order.create({
             intent: 'CAPTURE',
@@ -195,7 +204,7 @@ function buildHtml(clientId: string, amount: string, currency: string, label: st
 
 // Renders inline — no Modal wrapper. Mount this inside the parent modal's View
 // when the card form should be visible; unmount or hide it otherwise.
-export default function PayPalCardSheet({ amount, currency, label, onSuccess, onError, onCancel }: Props) {
+export default function PayPalCardSheet({ amount, currency, label, orderId, onSuccess, onError, onCancel }: Props) {
   const webViewRef = useRef<WebView>(null);
 
   const handleMessage = (event: WebViewMessageEvent) => {
@@ -226,7 +235,7 @@ export default function PayPalCardSheet({ amount, currency, label, onSuccess, on
 
       <WebView
         ref={webViewRef}
-        source={{ html: buildHtml(PAYPAL_CLIENT_ID, amount, currency, label), baseUrl: 'https://apollo-sfs.com' }}
+        source={{ html: buildHtml(PAYPAL_CLIENT_ID, amount, currency, label, orderId), baseUrl: 'https://apollo-sfs.com' }}
         onMessage={handleMessage}
         startInLoadingState
         renderLoading={() => (

@@ -1,6 +1,7 @@
 package routes
 
 import (
+	"context"
 	"errors"
 	"net/http"
 
@@ -119,6 +120,16 @@ func (h *Handler) CopyFileToCollection(c *gin.Context) {
 		writeCollectionItemError(c, err)
 		return
 	}
+
+	// Copying into a recognition-enabled collection queues the file for AI
+	// indexing (fire-and-forget; durable once the job row exists).
+	if h.recognition != nil && h.files != nil {
+		username := c.GetString("username")
+		if file, err := h.files.GetMetadata(c.Request.Context(), fileID, userID); err == nil {
+			go h.recognition.EnqueueFileIfEnabled(context.Background(), file, username, "copy")
+		}
+	}
+
 	c.JSON(http.StatusCreated, gin.H{"message": "added to collection"})
 }
 

@@ -1,11 +1,14 @@
-import { get, post, del } from './client'
+import { get, post, patch, del } from './client'
 import type { APIKey, APIKeyScope, IssuedAPIKey } from '../types/api'
 
 export interface CreateAPIKeyInput {
   name: string
   scopes: APIKeyScope[]
   ttl_days?: number
+  rate_limit_per_min?: number
 }
+
+export type UpdateAPIKeyInput = CreateAPIKeyInput
 
 // listAPIKeys returns the current user's keys. Passing `path` populates
 // matching_operations per key — used by the share-directory modal so the
@@ -17,6 +20,12 @@ export function listAPIKeys(path?: string): Promise<{ items: APIKey[] }> {
 
 export function createAPIKey(input: CreateAPIKeyInput): Promise<IssuedAPIKey> {
   return post<IssuedAPIKey>('/me/api-keys', input)
+}
+
+// updateAPIKey fully replaces name, scopes, expiry, and rate limit on an
+// existing key. The key prefix/secret never change.
+export function updateAPIKey(id: string, input: UpdateAPIKeyInput): Promise<APIKey> {
+  return patch<APIKey>('/me/api-keys/' + id, input)
 }
 
 export function revokeAPIKey(id: string): Promise<void> {

@@ -1,17 +1,20 @@
 -- Premium file-server mount links (WebDAV).
--- A link lets its owner mount one storage server as a network drive via
+-- A link lets its owner mount one drive — a single server + storage tier
+-- (fast/NVMe or standard/HDD) — as a network drive via
 -- https://<app>/dav/<token> with full file management (upload, download,
 -- delete, move, copy). The DAV handler serves every file as an opaque
 -- attachment (no previews), and nothing is ever executed server-side.
 --
--- Exactly one link may exist per (user, server) — enforced by the unique
--- index below. Deleting a link (or losing premium) hard-DELETEs the row,
--- which immediately kills the mount: every DAV request re-resolves the
--- token against this table.
+-- Exactly one link may exist per (user, drive) — enforced by the unique
+-- index below. A server that exposes both tiers to a user therefore yields
+-- two independently mountable links, one per drive. Deleting a link (or
+-- losing premium) hard-DELETEs the row, which immediately kills the mount:
+-- every DAV request re-resolves the token against this table.
 --
--- drive_id records the user's allocated drive on the server at creation
--- time; uploads through the mount are pinned to it and the mount only
--- exposes files stored on the link's server.
+-- drive_id pins the mount to the user's allocated drive at creation time;
+-- uploads through the mount are pinned to it and the mount only exposes
+-- files stored on that exact drive (not other drives/tiers on the same
+-- server).
 
 CREATE TABLE IF NOT EXISTS file_server_links (
     id                UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -30,9 +33,10 @@ CREATE TABLE IF NOT EXISTS file_server_links (
     last_used_at      TIMESTAMPTZ
 );
 
--- One link per server per user.
-CREATE UNIQUE INDEX IF NOT EXISTS file_server_links_user_server_unique
-    ON file_server_links (username, server_id);
+-- One link per drive per user (a server exposing two tiers to a user yields
+-- two links, one per drive).
+CREATE UNIQUE INDEX IF NOT EXISTS file_server_links_user_drive_unique
+    ON file_server_links (username, drive_id);
 CREATE INDEX IF NOT EXISTS file_server_links_username_idx
     ON file_server_links (username);
 

@@ -1,6 +1,6 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { MdFolder, MdInsertDriveFile, MdStar } from 'react-icons/md'
+import { MdAlternateEmail, MdFolder, MdInsertDriveFile, MdStar } from 'react-icons/md'
 import { favoritesQueryOptions, unfavoriteFile, unfavoriteFolder } from '../../api/favorites'
 import { adminGetUserFavorites } from '../../api/admin'
 import { canPreview, FilePreviewModal } from '../../components/FilePreviewModal'
@@ -8,12 +8,21 @@ import { useState } from 'react'
 import type { File as ApiFile } from '../../types/api'
 import { useNotification } from '../../context/NotificationContext'
 import { useImpersonation } from '../../context/ImpersonationContext'
+import { FilesLayout, FilesSidebarToggle } from '../../components/FilesSidebar'
 
 export const Route = createFileRoute('/_auth/client/favorites')({
   component: RouteComponent,
 })
 
 function RouteComponent() {
+  return (
+    <FilesLayout>
+      <FavoritesView />
+    </FilesLayout>
+  )
+}
+
+function FavoritesView() {
   const queryClient = useQueryClient()
   const { notify } = useNotification()
   const { impersonatedUser } = useImpersonation()
@@ -49,9 +58,12 @@ function RouteComponent() {
 
   return (
     <div>
-      <h2 className="text-lg font-semibold text-gray-900 mb-6 mt-0">
-        {readOnly ? `${impersonatedUser!.username}'s Favorites` : 'Favorites'}
-      </h2>
+      <div className="flex items-center gap-3 mb-6">
+        <FilesSidebarToggle />
+        <h2 className="text-lg font-semibold text-gray-900 m-0">
+          {readOnly ? `${impersonatedUser!.username}'s Favorites` : 'Favorites'}
+        </h2>
+      </div>
 
       {isEmpty && (
         <p className="text-sm text-gray-400">
@@ -67,7 +79,9 @@ function RouteComponent() {
           <ul className="list-none m-0 p-0 divide-y divide-gray-100">
             {folders.map((folder) => (
               <li key={folder.id} className="flex items-center gap-2 py-2">
-                <MdFolder className="text-blue-400 text-lg shrink-0" />
+                {folder.kind === 'email'
+                  ? <MdAlternateEmail className="text-teal-500 text-lg shrink-0" title="Email backup" />
+                  : <MdFolder className="text-blue-400 text-lg shrink-0" />}
                 <Link
                   to="/client"
                   search={{ file: undefined, folder: folder.id }}

@@ -149,6 +149,32 @@ func (q *Queries) ListInvitations(ctx context.Context, in PageInput) (*PageResul
 	}, nil
 }
 
+// ListRecentlyAcceptedInvitations returns invitations accepted since the given
+// time, newest acceptance first. Backs the admin notification bell's
+// "invitation accepted" category.
+func (q *Queries) ListRecentlyAcceptedInvitations(ctx context.Context, since time.Time) ([]models.Invitation, error) {
+	rows, err := q.db.QueryContext(ctx, `
+		SELECT`+invitationColumns+`
+		FROM invitations
+		WHERE accepted_at IS NOT NULL AND accepted_at >= $1
+		ORDER BY accepted_at DESC
+	`, since)
+	if err != nil {
+		return nil, fmt.Errorf("ListRecentlyAcceptedInvitations: %w", err)
+	}
+	defer rows.Close()
+
+	var invs []models.Invitation
+	for rows.Next() {
+		inv, err := scanInvitationRow(rows)
+		if err != nil {
+			return nil, fmt.Errorf("ListRecentlyAcceptedInvitations scan: %w", err)
+		}
+		invs = append(invs, *inv)
+	}
+	return invs, rows.Err()
+}
+
 // RefreshInvitationToken replaces the token and expiry for a pending (not
 // accepted or revoked) invitation. Used by Resend to issue a fresh link.
 func (q *Queries) RefreshInvitationToken(ctx context.Context, id uuid.UUID, newToken string, expiresAt time.Time) error {

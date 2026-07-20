@@ -97,3 +97,47 @@ func (h *Handler) GetNodeDiskTempsHistory(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, temps)
 }
+
+// GetDriveIOHistory handles
+// GET /api/v1/admin/system/drives/:drive_id/io/history?hours=N.
+// Returns ~120 downsampled read/write cumulative-counter readings for one
+// drive, oldest-first — the frontend diffs adjacent points for bytes/second.
+func (h *Handler) GetDriveIOHistory(c *gin.Context) {
+	driveID, err := uuid.Parse(c.Param("drive_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid drive_id"})
+		return
+	}
+	hours, ok := parseHoursWindow(c)
+	if !ok {
+		return
+	}
+	io, err := h.metrics.GetDriveIOHistoryByHours(c.Request.Context(), driveID, hours)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not retrieve drive I/O history"})
+		return
+	}
+	c.JSON(http.StatusOK, io)
+}
+
+// GetNodeDiskIOHistory handles
+// GET /api/v1/admin/system/disks/:disk_id/io/history?hours=N.
+// Returns ~120 downsampled read/write cumulative-counter readings for one
+// physical disk, oldest-first.
+func (h *Handler) GetNodeDiskIOHistory(c *gin.Context) {
+	diskID, err := uuid.Parse(c.Param("disk_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid disk_id"})
+		return
+	}
+	hours, ok := parseHoursWindow(c)
+	if !ok {
+		return
+	}
+	io, err := h.metrics.GetNodeDiskIOHistoryByHours(c.Request.Context(), diskID, hours)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not retrieve disk I/O history"})
+		return
+	}
+	c.JSON(http.StatusOK, io)
+}

@@ -1,12 +1,14 @@
 import { get, post, patch, del } from './client'
 
-// A premium file-server mount link. mount_url is the WebDAV address the user
-// mounts as a network drive; connecting always additionally requires their
-// Apollo SFS login credentials.
+// A premium file-server mount link, scoped to one drive (a server + storage
+// tier). mount_url is the WebDAV address the user mounts as a network drive;
+// connecting always additionally requires their Apollo SFS login credentials.
 export interface FileServerLink {
   id: string
   server_id: string
+  drive_id: string
   server_name: string
+  drive_type: 'nvme' | 'hdd'
   enhanced_security: boolean
   created_at: string
   last_used_at: string | null
@@ -15,7 +17,7 @@ export interface FileServerLink {
 
 export interface CreateFileServerLinkResult {
   link: FileServerLink
-  // false when a link already existed for the chosen server — the UI shows
+  // false when a link already existed for the chosen drive — the UI shows
   // the existing link instead of a success state.
   created: boolean
 }
@@ -24,9 +26,9 @@ export function listFileServerLinks(): Promise<{ items: FileServerLink[] }> {
   return get<{ items: FileServerLink[] }>('/me/file-server-links')
 }
 
-export function createFileServerLink(serverId: string, enhancedSecurity: boolean): Promise<CreateFileServerLinkResult> {
+export function createFileServerLink(driveId: string, enhancedSecurity: boolean): Promise<CreateFileServerLinkResult> {
   return post<CreateFileServerLinkResult>('/me/file-server-links', {
-    server_id: serverId,
+    drive_id: driveId,
     enhanced_security: enhancedSecurity,
   })
 }

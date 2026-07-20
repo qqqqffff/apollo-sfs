@@ -68,6 +68,33 @@ func (m *APIKeyMiddleware) RequireAPIKey() gin.HandlerFunc {
 	}
 }
 
+// RequireKeyRateLimit enforces the per-key requests/minute cap set on the
+// key (models.APIKey.RateLimitPerMin), separate from the shared per-IP limit
+// applied earlier in the chain (mw.RateLimit()). Must run after
+// RequireAPIKey, which populates CtxAPIKey.
+func (m *APIKeyMiddleware) RequireKeyRateLimit() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		raw, ok := c.Get(CtxAPIKey)
+		if !ok {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "missing api key"})
+			return
+		}
+		key, ok := raw.(*models.APIKey)
+		if !ok {
+			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "invalid api key context"})
+			return
+		}
+		if !m.svc.Allow(key.ID, key.RateLimitPerMin) {
+			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
+				"error": "api key rate limit exceeded",
+				"limit": key.RateLimitPerMin,
+			})
+			return
+		}
+		c.Next()
+	}
+}
+
 // RequirePremiumAPI asserts the API key's owner is premium or admin.
 // Returns 402 Payment Required for free users so clients can show a
 // targeted upgrade prompt.

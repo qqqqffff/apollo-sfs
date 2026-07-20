@@ -82,6 +82,25 @@ function formatBytes(b: number) {
   return `${(b / 1024 / 1024 / 1024).toFixed(2)} GB`;
 }
 
+// uploadSourceLabel maps a file's `source` (no device_id — that case is
+// handled by the caller) to a human-readable origin.
+function uploadSourceLabel(source?: string) {
+  switch (source) {
+    case 'google_drive':
+      return 'Backed up from Google Drive';
+    case 'google_photos':
+      return 'Backed up from Google Photos';
+    case 'email_backup_gmail':
+      return 'Backed up from Gmail';
+    case 'email_backup_microsoft':
+      return 'Backed up from Microsoft email';
+    case 'file_server':
+      return 'Uploaded via File Server';
+    default:
+      return 'Uploaded from web';
+  }
+}
+
 // ─── Tile ─────────────────────────────────────────────────────────────────────
 
 interface TileProps {
@@ -658,9 +677,7 @@ export default function MediaGallery({ files, currentFolderID, isSubcollection, 
                       ? infoFile.device_id === thisDeviceID
                         ? '✓ Synced from this device'
                         : 'Synced from another device'
-                      : infoFile.source?.startsWith('google')
-                        ? 'Backed up from Google'
-                        : 'Uploaded from web'
+                      : uploadSourceLabel(infoFile.source)
                   }
                 />
               </>

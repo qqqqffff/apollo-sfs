@@ -86,6 +86,22 @@ export interface File {
   updated_at: string
   // Only present on the single-file GET endpoint; undefined in list responses.
   has_low_variant?: boolean
+  // Upload origin: "web" | "device" | "google_drive" | "google_photos" |
+  // "email_backup_gmail" | "email_backup_microsoft" | "file_server".
+  source: string
+  // Set when uploaded/synced from a registered mobile device; resolve against
+  // listDevices() to show a device name. Undefined for web/import uploads.
+  device_id?: string
+}
+
+// Device mirrors a row in the `devices` table (mobile device registrations).
+export interface Device {
+  id: string
+  user_id: string
+  name: string
+  platform: 'ios' | 'android'
+  created_at: string
+  last_seen_at: string
 }
 
 // MathGameScore mirrors a row in the backend `math_game_scores` table: one

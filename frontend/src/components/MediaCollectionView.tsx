@@ -18,6 +18,7 @@ import {
 import { getMediaFolder, createFolder } from '../api/folders'
 import { hideFile, unhideFile, previewUrl, streamUrl } from '../api/files'
 import { copyToCollection, removeFromCollection } from '../api/collections'
+import { listDevices } from '../api/devices'
 import { meQueryOptions } from '../api/me'
 import { recognitionStatusQueryOptions } from '../api/recognition'
 import { listMyServers, resolveDrive } from '../api/storage'
@@ -27,7 +28,7 @@ import { CollectionInfoModal } from './CollectionInfoModal'
 import { RecognitionGroupsModal } from './RecognitionGroupsModal'
 import { UploadModal } from './UploadModal'
 import { UploadToast } from './UploadToast'
-import type { File, Folder, HiddenMode, MediaSort } from '../types/api'
+import type { Device, File, Folder, HiddenMode, MediaSort } from '../types/api'
 
 interface Props {
   folderId: string
@@ -65,6 +66,7 @@ export function MediaCollectionView({ folderId, folder, readOnly, initialRecogni
   const queryClient = useQueryClient()
   const { notify } = useNotification()
   const { data: user } = useQuery(meQueryOptions)
+  const { data: devicesData } = useQuery({ queryKey: ['devices'], queryFn: listDevices })
   const isPremium = !!(user?.is_premium || user?.is_admin)
   const { data: myServers } = useQuery({ queryKey: ['storage', 'my-servers'], queryFn: listMyServers })
   const { drive: uploadDrive, isPinned: uploadDriveIsPinned } = resolveDrive(folder.drive_id, myServers)
@@ -307,7 +309,7 @@ export function MediaCollectionView({ folderId, folder, readOnly, initialRecogni
 
       <UploadToast progress={progress} onDismiss={dismiss} />
 
-      {infoFile && <MediaInfoModal file={infoFile} onClose={() => setInfoFile(null)} />}
+      {infoFile && <MediaInfoModal file={infoFile} devices={devicesData?.items} onClose={() => setInfoFile(null)} />}
 
       {showCollectionInfo && (
         <CollectionInfoModal
@@ -397,7 +399,10 @@ function MediaTile({
         <span className="absolute top-1 left-1 bg-black/60 text-white text-[10px] px-1.5 py-0.5 rounded">Hidden</span>
       )}
 
-      <div className="absolute top-1 right-1 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+      {/* Visible by default (touch devices below `sm` have no hover state to
+          reveal these on); from `sm` up, fade in on hover/focus so the grid
+          stays visually quiet on pointer-driven layouts. */}
+      <div className="absolute top-1 right-1 flex gap-1 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100 transition-opacity">
         <button
           onClick={onShowInfo}
           title="File info"
@@ -462,10 +467,41 @@ function formatBytes(bytes: number): string {
   return `${bytes} B`
 }
 
+// uploadSourceLabel turns a file's device_id/source into a human-readable
+// origin. A registered device (mobile app upload/sync) takes priority since
+// it's the most specific signal; otherwise falls back to the source string.
+function uploadSourceLabel(file: File, devices: Device[] | undefined): string {
+  if (file.device_id) {
+    const device = devices?.find((d) => d.id === file.device_id)
+    if (device) {
+      const platform = device.platform === 'ios' ? 'iOS' : device.platform === 'android' ? 'Android' : device.platform
+      return `${device.name} (${platform} app)`
+    }
+    return 'Mobile app (device removed)'
+  }
+  switch (file.source) {
+    case 'google_drive':
+      return 'Google Drive backup'
+    case 'google_photos':
+      return 'Google Photos backup'
+    case 'email_backup_gmail':
+      return 'Gmail backup'
+    case 'email_backup_microsoft':
+      return 'Microsoft email backup'
+    case 'file_server':
+      return 'File Server (WebDAV)'
+    case 'device':
+      return 'Mobile app'
+    case 'web':
+    default:
+      return 'Web upload'
+  }
+}
+
 // MediaInfoModal shows a media file's metadata: capture date (EXIF/container,
 // as extracted server-side into taken_at), upload/modified dates, type, size,
-// visibility, and — measured from the loaded preview — pixel dimensions.
-function MediaInfoModal({ file, onClose }: { file: File; onClose: () => void }) {
+// visibility, origin, and — measured from the loaded preview — pixel dimensions.
+function MediaInfoModal({ file, devices, onClose }: { file: File; devices?: Device[]; onClose: () => void }) {
   const [dimensions, setDimensions] = useState<{ w: number; h: number } | null>(null)
   const isImage = file.mime_type.startsWith('image/')
   const isVideo = file.mime_type.startsWith('video/')
@@ -517,6 +553,7 @@ function MediaInfoModal({ file, onClose }: { file: File; onClose: () => void }) 
         <dl className="m-0 px-5 py-2 divide-y divide-gray-50">
           <InfoRow label="Date taken" value={file.taken_at ? new Date(file.taken_at).toLocaleString() : 'Not available'} muted={!file.taken_at} />
           <InfoRow label="Uploaded" value={new Date(file.created_at).toLocaleString()} />
+          <InfoRow label="Uploaded from" value={uploadSourceLabel(file, devices)} />
           <InfoRow label="Modified" value={new Date(file.updated_at).toLocaleString()} />
           <InfoRow label="Type" value={file.mime_type} />
           <InfoRow label="Size" value={formatBytes(file.size_bytes)} />

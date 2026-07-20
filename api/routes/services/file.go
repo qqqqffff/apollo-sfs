@@ -53,7 +53,8 @@ type UploadInput struct {
 	// web uploads. Stored on the file row for "synced from this device" display.
 	DeviceID *uuid.UUID
 	// Source is the upload origin: "web" | "device" | "google_drive" |
-	// "google_photos". Blank is normalized to "web" when stored.
+	// "google_photos" | "email_backup_gmail" | "email_backup_microsoft" |
+	// "file_server". Blank is normalized to "web" when stored.
 	Source string
 	// Reader is the raw plaintext byte stream (multipart file reader).
 	// The service reads it fully into memory before encrypting; this is required

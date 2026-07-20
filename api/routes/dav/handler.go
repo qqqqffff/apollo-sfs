@@ -521,7 +521,7 @@ func (h *Handler) upload(c *gin.Context, link *models.FileServerLink, user *mode
 		FolderID:       folderID,
 		Name:           leaf,
 		IgnoreRedirect: true,
-		Source:         "web",
+		Source:         "file_server",
 		Reader:         http.MaxBytesReader(c.Writer, c.Request.Body, maxUploadBytes),
 		RequireDriveID: &driveID,
 	})

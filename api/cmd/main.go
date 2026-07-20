@@ -499,6 +499,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 
 		// Devices (mobile sync)
 		protected.POST("/devices", h.RegisterDevice)
+		protected.GET("/devices", h.ListDevices)
 		protected.DELETE("/devices/:device_id", h.DeleteDevice)
 
 		// Sync delta (mobile)

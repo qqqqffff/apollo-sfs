@@ -1,7 +1,7 @@
-import { createFileRoute, useNavigate } from '@tanstack/react-router'
+import { createFileRoute, useNavigate, Link } from '@tanstack/react-router'
 import { useEffect, useRef, useCallback, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { MdAddCircleOutline, MdAssignment, MdCheck, MdClose, MdEdit, MdFeedback, MdHistory, MdOpenInNew, MdPhotoLibrary, MdRocketLaunch, MdShield, MdStorage, MdBolt, MdRefresh, MdScience } from 'react-icons/md'
+import { MdAddCircleOutline, MdArrowForward, MdAssignment, MdCheck, MdClose, MdEdit, MdFeedback, MdHistory, MdPhotoLibrary, MdRocketLaunch, MdShield, MdStorage, MdBolt, MdRefresh, MdScience } from 'react-icons/md'
 import { FaApple } from 'react-icons/fa'
 import { meQueryOptions, updateUsername, preferencesQueryOptions, updatePreferences, updateStorageUIPreferences, updateSandboxPayments, updateExpansionOverride, unlinkProvider, lastBackupSyncQueryOptions, updateBackupReminderPreference } from '../../api/me'
 import { formatTimeSince } from '../../components/LastSyncNote'
@@ -713,14 +713,13 @@ function SandboxAccountRequestCard() {
         With sandbox payments on, use the public account request form to exercise the deposit
         checkout flow end to end — sign in as a PayPal sandbox test buyer when prompted.
       </p>
-      <a
-        href="/interest"
-        target="_blank"
-        rel="noopener noreferrer"
+      <Link
+        to="/interest"
+        search={{ sandbox: true }}
         className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 font-medium transition-colors"
       >
-        Open account request form <MdOpenInNew className="text-sm" />
-      </a>
+        Open account request form <MdArrowForward className="text-sm" />
+      </Link>
     </div>
   )
 }

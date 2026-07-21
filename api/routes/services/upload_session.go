@@ -1,6 +1,7 @@
 package services
 
 import (
+	"context"
 	"log"
 	"sync"
 	"time"
@@ -172,6 +173,18 @@ func (s *UploadSessionStore) cleanupLoop() {
 			sess := v.(*UploadSession)
 			if now.Sub(sess.createdAt) > uploadSessionTTL {
 				s.sessions.Delete(k)
+				// If BeginChunkedUpload already ran, a multipart upload is open in
+				// MinIO with no DB row ever created for it (the client abandoned the
+				// upload instead of finalizing or explicitly failing). Left alone,
+				// this is a ghost object the reconciliation scanner would otherwise
+				// have to find later — abort it now instead.
+				if sess.MinIOStorage != nil && sess.MinioUploadID != "" {
+					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+					if err := sess.MinIOStorage.AbortMultipartUpload(ctx, sess.ObjectKey, sess.MinioUploadID); err != nil {
+						log.Printf("upload session %s: abort abandoned multipart upload: %v", sess.ID, err)
+					}
+					cancel()
+				}
 				sess.Zero()
 			}
 			return true

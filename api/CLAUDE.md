@@ -111,6 +111,24 @@ matching (`recognition_cluster.go`, embeddings as BYTEA — no pgvector).
 Endpoints are premium-gated in `routes/recognition.go`; lifecycle events audit
 to `audit_logs`. See `docs/ai_recognition_setup.md`.
 
+## Storage Reconciliation
+
+MinIO and Postgres are updated as two separate steps on every upload/delete
+(never one atomic transaction), so a crash or partial failure between them can
+leave an object orphaned in MinIO or a DB row pointing at a since-deleted
+object ("ghost files"). `services.ReconciliationService`
+(`routes/services/reconciliation.go`) is the safety net: once a day at 4am
+server-local time (`DailyLoop`, started from `cmd/main.go`; also reachable
+on demand via `POST /admin/system/reconciliation`), it lists every active
+drive's MinIO bucket, diffs it against `files`/`video_variants`/
+`recognition_detections`, and auto-repairs what it finds — deleting orphan
+objects, deleting ghost rows (a ghost `files` row goes through the normal
+`FileService.Delete` path so the quota refund matches a real delete), and
+aborting abandoned incomplete multipart uploads. Every action is recorded in
+`reconciliation_runs`/`reconciliation_findings` (`GET /admin/system/reconciliation`
+shows the latest run). See `docs/storage_reconciliation.md` for the full design,
+including why variant/crop objects are diffed fleet-wide rather than per-drive.
+
 ## Real-Time Metrics
 
 `routes/admin/infrastructure.go` streams server metrics (CPU, RAM, disk) over WebSocket using `gopsutil`. The frontend connects via `hooks/useMetricsStream.ts`.

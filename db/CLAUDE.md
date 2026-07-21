@@ -51,6 +51,7 @@ Files in `db/` are numbered and applied in order during initial container creati
 | `35_file_server_links.sql` | `file_server_links`, `file_server_link_locations` | Premium WebDAV mount links + enhanced-security location ledger |
 | `36_recognition.sql` | `recognition_jobs`, `recognition_detections`, `recognition_groups`, `recognition_group_members` | Premium AI recognition: durable indexing queue, per-file detections (embeddings as BYTEA, quota-counted encrypted crops), per-collection groups + memberships (RLS on all but the queue) |
 | `37_feedback.sql` | `feedback` | User feedback submitted from the profile page (category + free-text message), triaged by admins on the admin feedback page (`new` → `reviewed`/`archived`) |
+| `38_reconciliation.sql` | `reconciliation_runs`, `reconciliation_findings` | MinIO <-> Postgres reconciliation ledger: one row per scan (daily 4am-local heartbeat or manual admin trigger) plus every orphan object / ghost row / abandoned upload it found and repaired — see `docs/storage_reconciliation.md` |
 
 ## Migrations
 

@@ -164,6 +164,11 @@ services:
       # Unified test-runner sidecar backing the admin metrics page's "Run
       # tests" button. Swarm-only — see the test-runner service below.
       TEST_RUNNER_URL: http://test-runner:9228/run-tests
+      # Server local time zone (IANA name, e.g. America/New_York). Used by the
+      # daily MinIO/Postgres reconciliation heartbeat, which fires at 4am in
+      # this zone — see docs/storage_reconciliation.md. tzdata is installed in
+      # the image (Dockerfile); defaults to UTC if unset.
+      TZ: ${TZ:-UTC}
     volumes:
       # Local HDD (standard tier) for disk-stats reads
       - /srv/minio/hdd-01:/data:ro

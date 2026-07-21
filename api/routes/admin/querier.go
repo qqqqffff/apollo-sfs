@@ -98,6 +98,10 @@ type AdminQuerier interface {
 	// Feedback review
 	ListFeedback(ctx context.Context, status string, in db.PageInput) (*db.PageResult[models.Feedback], error)
 	UpdateFeedbackStatus(ctx context.Context, id uuid.UUID, status string) (*models.Feedback, error)
+
+	// MinIO <-> Postgres reconciliation
+	GetLatestReconciliationRun(ctx context.Context) (*models.ReconciliationRun, error)
+	ListReconciliationFindings(ctx context.Context, runID *uuid.UUID, limit int) ([]models.ReconciliationFinding, error)
 }
 
 // AdminInviteService is the subset of *services.InviteService used by admin handlers.

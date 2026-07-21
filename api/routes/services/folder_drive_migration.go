@@ -331,9 +331,26 @@ func (s *FileService) runDriveMigration(migrationID, folderID, userID uuid.UUID,
 		if err := sourceStorage.RemoveObject(ctx, f.MinIOObjectKey); err != nil {
 			// The copy already landed on the destination; a stale source object is
 			// a cleanup nit, not a correctness problem, so this does not fail the
-			// migration — but it is logged since it does mean any per-drive
-			// capacity accounting stays off until manually cleaned up.
+			// migration — but it is logged and recorded in the reconciliation
+			// ledger (nil run_id — this happened outside a scheduled scan) so it
+			// stays visible until the next reconciliation run finds and deletes
+			// the now-orphaned object under the old drive.
 			log.Printf("drive migration: %s: remove source object for file %s: %v", migrationID, f.ID, err)
+			errStr := err.Error()
+			userID := f.UserID
+			fileID := f.ID
+			if fErr := s.queries.InsertReconciliationFinding(ctx, &models.ReconciliationFinding{
+				Kind:      models.ReconciliationKindOrphanObject,
+				DriveID:   fromDriveID,
+				ObjectKey: f.MinIOObjectKey,
+				UserID:    &userID,
+				FileID:    &fileID,
+				Detail:    fmt.Sprintf("drive migration %s: source object survives after copy to new drive", migrationID),
+				Action:    models.ReconciliationActionError,
+				Error:     &errStr,
+			}); fErr != nil {
+				log.Printf("drive migration: %s: record reconciliation finding: %v", migrationID, fErr)
+			}
 		}
 
 		filesMoved++

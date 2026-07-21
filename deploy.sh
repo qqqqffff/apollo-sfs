@@ -247,6 +247,10 @@ if [[ -z "$TAG" && $DEPLOY_ONLY -ne 1 ]]; then
   echo "Could not determine a tag automatically (not a git repo?). Pass --tag." >&2
   exit 1
 fi
+# Baked into the api image (APP_VERSION/APP_GIT_BRANCH build-args below) so the
+# admin metrics page's test-runner card can label each stored test run with the
+# version/branch it ran against. Best-effort — empty in a non-git checkout.
+GIT_BRANCH="$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
 if [[ -n "$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null || true)" ]]; then
   echo "Warning: working tree has uncommitted changes — the pushed image won't exactly match a commit." >&2
 fi
@@ -410,6 +414,10 @@ if [[ ${#SELECTED_SERVICES[@]} -gt 0 ]]; then
     # in from the root .env (sourced above). Empty is fine — it just disables
     # the Microsoft option in the email backup dialog.
     [[ "$svc" == "frontend" ]] && build_args+=(--build-arg "VITE_MS_CLIENT_ID=${VITE_MS_CLIENT_ID:-}")
+    # Bakes the deployed version (this build's tag) and git branch into the api
+    # image so it can label test runs it stores — see APP_VERSION/APP_GIT_BRANCH
+    # in api/Dockerfile and api/cmd/config.go.
+    [[ "$svc" == "api" ]] && build_args+=(--build-arg "APP_VERSION=${TAG}" --build-arg "APP_GIT_BRANCH=${GIT_BRANCH:-}")
     build_args+=("$context" --push)
     run docker "${build_args[@]}"
   done

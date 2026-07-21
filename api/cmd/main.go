@@ -286,6 +286,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	routes.SetRecognitionService(h, recogSvc)
 	authHandler := auth.NewHandler(authSvc, cfg.CookieDomain, cfg.CookieSecure)
 	adminHandler := admin.NewHandler(queries, inviteSvc, metricsSvc, authSvc, fileSvc, registry, geoReader, cfg.DiskStatsPath, cfg.DiskStatsDriveLabel, cfg.TestRunnerURL, cfg.AppDir, shutdownCh)
+	adminHandler.SetDeploymentInfo(cfg.AppVersion, cfg.AppGitBranch)
 	adminHandler.SetDiscountMailer(emailSvc)
 	adminHandler.SetReconciliationService(reconcileSvc)
 	// Configure the on-demand infrastructure sync (POST /system/sync): discover
@@ -787,6 +788,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 			adminGroup.POST("/interest/:id/provision", adminHandler.ProvisionInterestSubmission)
 			adminGroup.POST("/interest/:id/deny", adminHandler.DenyInterestSubmission)
 
+			adminGroup.GET("/system/tests/latest", adminHandler.GetLatestTests)
 			adminGroup.POST("/system/tests", adminHandler.RunTests)
 			adminGroup.POST("/system/shutdown", adminHandler.Shutdown)
 

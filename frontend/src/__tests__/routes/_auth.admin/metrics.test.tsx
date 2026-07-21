@@ -32,7 +32,9 @@ jest.mock('../../../api/admin', () => ({
   getDriveTempsHistory: jest.fn(),
   // Never resolves — prevents useServerPing from calling setResult outside act().
   pingServer:       jest.fn().mockReturnValue(new Promise(() => {})),
+  latestTestRunQueryOptions: { queryKey: ['admin', 'tests', 'latest'], queryFn: jest.fn() },
   runTests:         jest.fn(),
+  getLatestTestRun: jest.fn(),
   shutdownServer:   jest.fn(),
   triggerSpeedTest: jest.fn(),
   syncInfrastructure: jest.fn(),

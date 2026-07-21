@@ -379,6 +379,13 @@ type stubAdminQuerier struct {
 	feedbackErr          error
 	updateFeedbackErr    error
 	setFeedbackAccessErr error
+	// test-runner run history fields
+	createdTestRuns           []models.TestRun
+	createTestRunErr          error
+	latestTestRunForBranch    map[string]*models.TestRun
+	latestTestRunForBranchErr error
+	latestTestRunOverall      *models.TestRun
+	latestTestRunOverallErr   error
 }
 
 func (s *stubAdminQuerier) ListUsers(_ context.Context, _ db.PageInput) (*db.PageResult[models.User], error) {
@@ -611,6 +618,31 @@ func (s *stubAdminQuerier) GetLatestReconciliationRun(_ context.Context) (*model
 }
 func (s *stubAdminQuerier) ListReconciliationFindings(_ context.Context, _ *uuid.UUID, _ int) ([]models.ReconciliationFinding, error) {
 	return nil, nil
+}
+
+func (s *stubAdminQuerier) CreateTestRun(_ context.Context, version, branch string, report models.TestRunReport, passed bool) (*models.TestRun, error) {
+	if s.createTestRunErr != nil {
+		return nil, s.createTestRunErr
+	}
+	run := models.TestRun{
+		ID:                uuid.New(),
+		DeploymentVersion: version,
+		GitBranch:         branch,
+		Report:            report,
+		Passed:            passed,
+		CreatedAt:         time.Now(),
+	}
+	s.createdTestRuns = append(s.createdTestRuns, run)
+	return &run, nil
+}
+func (s *stubAdminQuerier) GetLatestTestRunForBranch(_ context.Context, branch string) (*models.TestRun, error) {
+	if s.latestTestRunForBranchErr != nil {
+		return nil, s.latestTestRunForBranchErr
+	}
+	return s.latestTestRunForBranch[branch], nil
+}
+func (s *stubAdminQuerier) GetLatestTestRun(_ context.Context) (*models.TestRun, error) {
+	return s.latestTestRunOverall, s.latestTestRunOverallErr
 }
 
 // ── Stub AdminInviteService ───────────────────────────────────────────────────

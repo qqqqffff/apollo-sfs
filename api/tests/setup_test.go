@@ -597,6 +597,13 @@ func (s *stubAdminQuerier) UpdateFeedbackStatus(_ context.Context, id uuid.UUID,
 	return &models.Feedback{ID: id, Status: status}, nil
 }
 
+func (s *stubAdminQuerier) GetLatestReconciliationRun(_ context.Context) (*models.ReconciliationRun, error) {
+	return nil, nil
+}
+func (s *stubAdminQuerier) ListReconciliationFindings(_ context.Context, _ *uuid.UUID, _ int) ([]models.ReconciliationFinding, error) {
+	return nil, nil
+}
+
 // ── Stub AdminInviteService ───────────────────────────────────────────────────
 
 type stubAdminInviteService struct {

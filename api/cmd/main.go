@@ -181,6 +181,11 @@ func main() {
 
 	metricsSvc := services.NewMetricsService(queries, cfg.DiskStatsPath)
 
+	// Daily MinIO <-> Postgres reconciliation heartbeat (4am server-local time —
+	// see docs/storage_reconciliation.md). Also reachable on demand via
+	// POST /admin/system/reconciliation.
+	reconcileSvc := services.NewReconciliationService(queries, registry, fileSvc)
+
 	// ── GeoIP MMDB ───────────────────────────────────────────────────────────
 	var geoReader *geoip2.Reader
 	for _, path := range []string{
@@ -204,9 +209,10 @@ func main() {
 	go metricsSvc.Start(context.Background())
 	go emailSvc.Start(context.Background())
 	go recogSvc.Start(context.Background())
+	go reconcileSvc.DailyLoop(context.Background(), 4, 0)
 
 	shutdownCh := make(chan struct{})
-	r := setupRouter(cfg, queries, oidcVerifier, authSvc, fileSvc, folderSvc, favSvc, inviteSvc, metricsSvc, registry, geoReader, emailSvc, inboundEmailSvc, recogSvc, shutdownCh)
+	r := setupRouter(cfg, queries, oidcVerifier, authSvc, fileSvc, folderSvc, favSvc, inviteSvc, metricsSvc, registry, geoReader, emailSvc, inboundEmailSvc, recogSvc, reconcileSvc, shutdownCh)
 
 	addr := ":" + cfg.Port
 	log.Printf("apollo-sfs API listening on %s", addr)
@@ -237,7 +243,7 @@ func main() {
 	log.Println("server stopped")
 }
 
-func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVerifier, authSvc *services.AuthService, fileSvc *services.FileService, folderSvc *services.FolderService, favSvc *services.FavoriteService, inviteSvc *services.InviteService, metricsSvc *services.MetricsService, registry *services.MinIORegistry, geoReader *geoip2.Reader, emailSvc *services.EmailService, inboundEmailSvc *services.InboundEmailService, recogSvc *services.RecognitionService, shutdownCh chan struct{}) *gin.Engine {
+func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVerifier, authSvc *services.AuthService, fileSvc *services.FileService, folderSvc *services.FolderService, favSvc *services.FavoriteService, inviteSvc *services.InviteService, metricsSvc *services.MetricsService, registry *services.MinIORegistry, geoReader *geoip2.Reader, emailSvc *services.EmailService, inboundEmailSvc *services.InboundEmailService, recogSvc *services.RecognitionService, reconcileSvc *services.ReconciliationService, shutdownCh chan struct{}) *gin.Engine {
 	r := gin.New()
 	r.Use(gin.Logger())
 	r.Use(gin.Recovery())
@@ -281,6 +287,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	authHandler := auth.NewHandler(authSvc, cfg.CookieDomain, cfg.CookieSecure)
 	adminHandler := admin.NewHandler(queries, inviteSvc, metricsSvc, authSvc, fileSvc, registry, geoReader, cfg.DiskStatsPath, cfg.DiskStatsDriveLabel, cfg.TestRunnerURL, cfg.AppDir, shutdownCh)
 	adminHandler.SetDiscountMailer(emailSvc)
+	adminHandler.SetReconciliationService(reconcileSvc)
 	// Configure the on-demand infrastructure sync (POST /system/sync): discover
 	// swarm nodes via the Docker socket and drives/capacity via the MinIO admin API.
 	adminHandler.ConfigureInfraSync(admin.InfraSyncConfig{
@@ -781,6 +788,9 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 
 			adminGroup.GET("/system/speed-test", adminHandler.GetSpeedTest)
 			adminGroup.POST("/system/speed-test", adminHandler.TriggerSpeedTest)
+
+			adminGroup.GET("/system/reconciliation", adminHandler.GetReconciliation)
+			adminGroup.POST("/system/reconciliation", adminHandler.TriggerReconciliation)
 
 			adminGroup.GET("/system/alarm/subscriptions", adminHandler.GetAlarmSubscriptions)
 			adminGroup.PUT("/system/alarm/subscriptions", adminHandler.UpsertAlarmSubscription)

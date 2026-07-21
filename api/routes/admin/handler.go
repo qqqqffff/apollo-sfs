@@ -77,6 +77,17 @@ type Handler struct {
 	// discountMailer announces new pricing discounts to users (see
 	// SetDiscountMailer). nil skips notifications.
 	discountMailer DiscountMailer
+
+	// reconcile drives the MinIO <-> Postgres reconciliation heartbeat (see
+	// SetReconciliationService); nil causes the endpoints to 503.
+	reconcile *services.ReconciliationService
+}
+
+// SetReconciliationService installs the reconciliation service used by
+// GetReconciliation/TriggerReconciliation. Wired from main once constructed;
+// nil is tolerated and causes those endpoints to return 503.
+func (h *Handler) SetReconciliationService(svc *services.ReconciliationService) {
+	h.reconcile = svc
 }
 
 // NewHandler constructs an admin Handler.

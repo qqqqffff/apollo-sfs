@@ -1375,6 +1375,13 @@ function TestGroupCard({ group, report }: { group: TestGroupDef; report: TestRun
           ))}
         </div>
       )}
+      <button
+        onClick={() => setShowOutput((o) => !o)}
+        className="text-xs text-gray-400 hover:text-gray-700 cursor-pointer bg-transparent border-0 text-left w-fit"
+      >
+        {showOutput ? '▲ hide raw output' : '▼ raw output'}
+      </button>
+      {showOutput && <OutputBlock label={label} output={result.output} />}
     </div>
   )
 }

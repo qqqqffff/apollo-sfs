@@ -145,6 +145,54 @@ func (h *Handler) callTestRunnerProgress(parent context.Context) (*testProgressR
 	return &result, nil
 }
 
+// latestTestRunResponse is the body of GET /admin/system/tests/latest.
+// Run is nil when no test run has ever been recorded. When Run is non-nil but
+// MatchedBranch is false, Run is the most recent run from ANY branch (there is
+// none yet for CurrentBranch) — the frontend renders a fallback note using
+// Run.GitBranch/Run.DeploymentVersion vs. CurrentBranch/CurrentVersion, and a
+// staleness note from Run.CreatedAt, rather than the API prose-generating them.
+type latestTestRunResponse struct {
+	Run            *models.TestRun `json:"run"`
+	MatchedBranch  bool            `json:"matched_branch"`
+	CurrentBranch  string          `json:"current_branch"`
+	CurrentVersion string          `json:"current_version"`
+}
+
+// GetLatestTests handles GET /admin/system/tests/latest.
+//
+// Backs the admin metrics page's test-runner card on load: rather than
+// re-running the full cross-service suite (which takes minutes) every time
+// the page is opened, the card shows the cached result of the most recent
+// POST /admin/system/tests run for the currently-deployed git branch. If the
+// current branch has no run of its own yet, it falls back to the most recent
+// run from any branch (MatchedBranch=false) so the card has something to show
+// instead of looking broken; if no run has ever been recorded, Run is nil.
+func (h *Handler) GetLatestTests(c *gin.Context) {
+	ctx := c.Request.Context()
+
+	run, err := h.queries.GetLatestTestRunForBranch(ctx, h.appGitBranch)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not load latest test run"})
+		return
+	}
+	matchedBranch := run != nil
+
+	if run == nil {
+		run, err = h.queries.GetLatestTestRun(ctx)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "could not load latest test run"})
+			return
+		}
+	}
+
+	c.JSON(http.StatusOK, latestTestRunResponse{
+		Run:            run,
+		MatchedBranch:  matchedBranch,
+		CurrentBranch:  h.appGitBranch,
+		CurrentVersion: h.appVersion,
+	})
+}
+
 // RunTests handles POST /admin/system/tests.
 //
 // Normal path — testRunnerURL is set: makes ONE call to the unified

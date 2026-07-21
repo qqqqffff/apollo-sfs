@@ -1,6 +1,7 @@
 package services
 
 import (
+	"context"
 	"log"
 	"sync"
 	"time"
@@ -28,6 +29,12 @@ type UploadSession struct {
 	// media auto-upload folder even if it turns out to be an image or video.
 	// Set by the handler after Create, before any chunks are dispatched.
 	IgnoreRedirect bool
+
+	// RootDriveID is the tier-first browser's soft root-drive pin: the drive
+	// whose view a root upload targets. Set by the handler after Create (when
+	// FolderID is nil). Honored only for a root upload; a folder pin takes
+	// precedence. See UploadInput.RootDriveID for the full semantics.
+	RootDriveID *uuid.UUID
 
 	// Set by FileService.BeginChunkedUpload before any chunks are dispatched.
 	FileID        uuid.UUID
@@ -166,6 +173,18 @@ func (s *UploadSessionStore) cleanupLoop() {
 			sess := v.(*UploadSession)
 			if now.Sub(sess.createdAt) > uploadSessionTTL {
 				s.sessions.Delete(k)
+				// If BeginChunkedUpload already ran, a multipart upload is open in
+				// MinIO with no DB row ever created for it (the client abandoned the
+				// upload instead of finalizing or explicitly failing). Left alone,
+				// this is a ghost object the reconciliation scanner would otherwise
+				// have to find later — abort it now instead.
+				if sess.MinIOStorage != nil && sess.MinioUploadID != "" {
+					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+					if err := sess.MinIOStorage.AbortMultipartUpload(ctx, sess.ObjectKey, sess.MinioUploadID); err != nil {
+						log.Printf("upload session %s: abort abandoned multipart upload: %v", sess.ID, err)
+					}
+					cancel()
+				}
 				sess.Zero()
 			}
 			return true

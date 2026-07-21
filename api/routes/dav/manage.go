@@ -468,7 +468,7 @@ func (h *Handler) copyResource(c *gin.Context, link *models.FileServerLink, user
 		FolderID:       dstParent,
 		Name:           dst[len(dst)-1],
 		IgnoreRedirect: true,
-		Source:         "web",
+		Source:         "file_server",
 		Reader:         bytes.NewReader(plaintext),
 		RequireDriveID: &driveID,
 	}); err != nil {

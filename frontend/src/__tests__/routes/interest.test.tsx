@@ -3,7 +3,8 @@ import { render, screen, fireEvent, act } from '@testing-library/react'
 import '@testing-library/jest-dom'
 
 jest.mock('@tanstack/react-router', () => ({
-  createFileRoute: () => (opts: any) => ({ options: opts }),
+  createFileRoute: () => (opts: any) => ({ options: opts, useSearch: () => ({}) }),
+  useNavigate: () => jest.fn(),
 }))
 
 const mockMutate = jest.fn()

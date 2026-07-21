@@ -12,7 +12,7 @@ import (
 )
 
 const folderDriveMigrationColumns = `
-	id, folder_id, user_id, from_drive_id, to_drive_id, status,
+	id, folder_id, user_id, from_drive_id, to_drive_id, dest_parent_id, status,
 	total_files, files_moved, total_bytes, bytes_moved, error_message,
 	created_at, completed_at`
 
@@ -20,11 +20,11 @@ func scanFolderDriveMigration(row interface {
 	Scan(...any) error
 }) (*models.FolderDriveMigration, error) {
 	var m models.FolderDriveMigration
-	var fromDriveID uuid.NullUUID
+	var fromDriveID, destParentID uuid.NullUUID
 	var errorMessage sql.NullString
 	var completedAt sql.NullTime
 	err := row.Scan(
-		&m.ID, &m.FolderID, &m.UserID, &fromDriveID, &m.ToDriveID, &m.Status,
+		&m.ID, &m.FolderID, &m.UserID, &fromDriveID, &m.ToDriveID, &destParentID, &m.Status,
 		&m.TotalFiles, &m.FilesMoved, &m.TotalBytes, &m.BytesMoved, &errorMessage,
 		&m.CreatedAt, &completedAt,
 	)
@@ -33,6 +33,9 @@ func scanFolderDriveMigration(row interface {
 	}
 	if fromDriveID.Valid {
 		m.FromDriveID = &fromDriveID.UUID
+	}
+	if destParentID.Valid {
+		m.DestParentID = &destParentID.UUID
 	}
 	if errorMessage.Valid {
 		m.ErrorMessage = &errorMessage.String
@@ -45,16 +48,21 @@ func scanFolderDriveMigration(row interface {
 
 // CreateFolderDriveMigration inserts a new pending migration row and returns it.
 // fromDriveID may be nil when the folder previously had no pinned drive.
-func (q *Queries) CreateFolderDriveMigration(ctx context.Context, folderID, userID uuid.UUID, fromDriveID *uuid.UUID, toDriveID uuid.UUID) (*models.FolderDriveMigration, error) {
-	var from uuid.NullUUID
+// destParentID is the destination folder the migrated folder will be reparented
+// under once its bytes finish moving; nil means the destination drive's root.
+func (q *Queries) CreateFolderDriveMigration(ctx context.Context, folderID, userID uuid.UUID, fromDriveID *uuid.UUID, toDriveID uuid.UUID, destParentID *uuid.UUID) (*models.FolderDriveMigration, error) {
+	var from, destParent uuid.NullUUID
 	if fromDriveID != nil {
 		from = uuid.NullUUID{UUID: *fromDriveID, Valid: true}
 	}
+	if destParentID != nil {
+		destParent = uuid.NullUUID{UUID: *destParentID, Valid: true}
+	}
 	row := q.db.QueryRowContext(ctx, `
-		INSERT INTO folder_drive_migrations (id, folder_id, user_id, from_drive_id, to_drive_id, status)
-		VALUES (gen_random_uuid(), $1, $2, $3, $4, $5)
+		INSERT INTO folder_drive_migrations (id, folder_id, user_id, from_drive_id, to_drive_id, dest_parent_id, status)
+		VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6)
 		RETURNING `+folderDriveMigrationColumns+`
-	`, folderID, userID, from, toDriveID, models.FolderDriveMigrationStatusPending)
+	`, folderID, userID, from, toDriveID, destParent, models.FolderDriveMigrationStatusPending)
 	m, err := scanFolderDriveMigration(row)
 	if err != nil {
 		return nil, fmt.Errorf("CreateFolderDriveMigration: %w", err)

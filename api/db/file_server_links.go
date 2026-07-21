@@ -293,23 +293,31 @@ func (q *Queries) ListFilesByFolderOnDrive(ctx context.Context, userID uuid.UUID
 	return out, rows.Err()
 }
 
-// GetDriveCapacityAndUsage reports driveID's total physical capacity and
-// userID's own bytes stored on it — the same per-drive figures shown on the
-// storage page (GetUserDrives), used here to report accurate WebDAV quota
-// properties instead of the account-wide quota. drives has no RLS, so this
-// is callable outside a ForUser transaction.
-func (q *Queries) GetDriveCapacityAndUsage(ctx context.Context, driveID, userID uuid.UUID) (capacityBytes, usedBytes int64, err error) {
+// GetUserDriveQuotaAndUsage reports userID's own per-drive quota_bytes
+// allocation on driveID and their bytes stored on it — the real per-user
+// figures hasRoomForUpload (routes/services/file.go) gates uploads against,
+// used here so WebDAV-reported quota can never drift from actual upload
+// enforcement. Returns (0, 0, nil) if the user has no allocation row on this
+// drive at all (orphaned link: allocation revoked, e.g. by an admin, but the
+// link row not yet cleaned up) — report an empty drive rather than erroring.
+// This is a different orphan case than GetDriveAvailableBytes's ErrNoRows
+// (missing drive row, not missing allocation row). drives/user_drive_allocations
+// have no RLS, so this is callable outside a ForUser transaction.
+func (q *Queries) GetUserDriveQuotaAndUsage(ctx context.Context, driveID uuid.UUID, username string, userID uuid.UUID) (quotaBytes, usedBytes int64, err error) {
 	err = q.db.QueryRowContext(ctx, `
-		SELECT d.capacity_bytes, COALESCE(SUM(f.size_bytes), 0)
-		FROM drives d
-		LEFT JOIN files f ON f.drive_id = d.id AND f.user_id = $2
-		WHERE d.id = $1
-		GROUP BY d.capacity_bytes
-	`, driveID, userID).Scan(&capacityBytes, &usedBytes)
-	if err != nil {
-		return 0, 0, fmt.Errorf("GetDriveCapacityAndUsage: %w", err)
+		SELECT uda.quota_bytes, COALESCE(SUM(f.size_bytes), 0)
+		FROM user_drive_allocations uda
+		LEFT JOIN files f ON f.drive_id = uda.drive_id AND f.user_id = $3
+		WHERE uda.drive_id = $1 AND uda.user_id = $2
+		GROUP BY uda.quota_bytes
+	`, driveID, username, userID).Scan(&quotaBytes, &usedBytes)
+	if err == sql.ErrNoRows {
+		return 0, 0, nil
 	}
-	return capacityBytes, usedBytes, nil
+	if err != nil {
+		return 0, 0, fmt.Errorf("GetUserDriveQuotaAndUsage: %w", err)
+	}
+	return quotaBytes, usedBytes, nil
 }
 
 func uuidPtrToNull(p *uuid.UUID) uuid.NullUUID {

@@ -61,6 +61,10 @@ type Querier interface {
 	GetUserPreferences(ctx context.Context, userID string) (*models.UserPreferences, error)
 	SetMediaAutouploadFolder(ctx context.Context, userID string, folderID *uuid.UUID) (*models.UserPreferences, error)
 	SetStorageUIPreferences(ctx context.Context, userID string, showButtons, promptEnabled *bool) (*models.UserPreferences, error)
+	SetDefaultDrive(ctx context.Context, userID string, driveID *uuid.UUID) (*models.UserPreferences, error)
+
+	// Default-display-drive validation (drive must be one of the user's allocations)
+	GetUserDrives(ctx context.Context, username, userID string) ([]db.UserDriveInfo, error)
 
 	// Ban / suspension enforcement (checked on every /me call)
 	GetActiveBan(ctx context.Context, username string) (*models.UserBan, error)
@@ -95,6 +99,7 @@ type Querier interface {
 	GetDevice(ctx context.Context, id uuid.UUID) (*db.Device, error)
 	UpdateDeviceLastSeen(ctx context.Context, id uuid.UUID, pushToken *string) error
 	DeleteDevice(ctx context.Context, id uuid.UUID) error
+	ListDevicesByUser(ctx context.Context, userID uuid.UUID) ([]db.Device, error)
 
 	// Sync (mobile)
 	DeltaSyncFiles(ctx context.Context, userID uuid.UUID, since time.Time) ([]models.File, error)

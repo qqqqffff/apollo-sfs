@@ -23,6 +23,8 @@
 #
 # USAGE
 #   ./deploy.sh                                  interactive checklist (TTY only)
+#                                                 (press 'a' in the checklist to select every
+#                                                 service and deploy immediately, no confirmation)
 #   ./deploy.sh --services frontend,api           non-interactive
 #   ./deploy.sh --registry 192.168.68.57:5000 --tag v1.2.0
 #   ./deploy.sh --deploy-only                     redeploy with no image changes (reapply stack config)
@@ -165,8 +167,9 @@ run() {
 
 # ── Interactive checklist ─────────────────────────────────────────────────────
 # ↑/↓ (or j/k) move, space toggles the highlighted item, enter confirms (must
-# have at least one selected), q cancels. Populates SELECTED (parallel to
-# OPTIONS) in place.
+# have at least one selected), a selects every service and deploys immediately
+# (skipping the y/n confirmation below — see ALL_SERVICES_NO_CONFIRM), q
+# cancels. Populates SELECTED (parallel to OPTIONS) in place.
 declare -a OPTIONS=("migrate" "${ORDER[@]}")
 declare -a OPTION_LABELS=("Run DB migrations (db/apply-migrations.sh)" "${ORDER[@]}")
 # One slot per option, all off — sized from OPTIONS so adding a service to
@@ -174,6 +177,10 @@ declare -a OPTION_LABELS=("Run DB migrations (db/apply-migrations.sh)" "${ORDER[
 declare -a SELECTED=()
 for _ in "${OPTIONS[@]}"; do SELECTED+=(0); done
 CURSOR=0
+# Set by select_services when 'a' is pressed — deliberately does NOT cover
+# "migrate", since silently running DB migrations on a no-confirm fast path
+# would be surprising; migrate stays an explicit opt-in via its own checkbox.
+ALL_SERVICES_NO_CONFIRM=0
 
 select_services() {
   local total_lines=$(( ${#OPTIONS[@]} + 3 ))
@@ -182,7 +189,7 @@ select_services() {
   draw() {
     local i mark
     printf '\r\033[2K%s\n' "Select images to build + push, then deploy:"
-    printf '\r\033[2K%s\n' "  up/down (or j/k) move   ·   space toggle   ·   enter confirm   ·   q quit"
+    printf '\r\033[2K%s\n' "  up/down (or j/k) move   ·   space toggle   ·   enter confirm   ·   a deploy all (skips confirmation)   ·   q quit"
     for i in "${!OPTIONS[@]}"; do
       mark=" "; [[ ${SELECTED[$i]} -eq 1 ]] && mark="x"
       if [[ $i -eq $CURSOR ]]; then
@@ -207,6 +214,12 @@ select_services() {
       $'\x1b[A'|k|K) CURSOR=$(( (CURSOR - 1 + ${#OPTIONS[@]}) % ${#OPTIONS[@]} )) ;;
       $'\x1b[B'|j|J) CURSOR=$(( (CURSOR + 1) % ${#OPTIONS[@]} )) ;;
       ' ') SELECTED[$CURSOR]=$(( 1 - SELECTED[$CURSOR] )) ;;
+      a|A)
+        local i
+        for i in "${!ORDER[@]}"; do SELECTED[$((i+1))]=1; done
+        ALL_SERVICES_NO_CONFIRM=1
+        break
+        ;;
       q|Q) tput cnorm 2>/dev/null || true; echo "Cancelled." >&2; exit 1 ;;
       ""|$'\n'|$'\r')
         local sum=0 s
@@ -247,6 +260,10 @@ if [[ -z "$TAG" && $DEPLOY_ONLY -ne 1 ]]; then
   echo "Could not determine a tag automatically (not a git repo?). Pass --tag." >&2
   exit 1
 fi
+# Baked into the api image (APP_VERSION/APP_GIT_BRANCH build-args below) so the
+# admin metrics page's test-runner card can label each stored test run with the
+# version/branch it ran against. Best-effort — empty in a non-git checkout.
+GIT_BRANCH="$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
 if [[ -n "$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null || true)" ]]; then
   echo "Warning: working tree has uncommitted changes — the pushed image won't exactly match a commit." >&2
 fi
@@ -283,6 +300,7 @@ elif [[ -t 0 && -t 1 ]]; then
   for i in "${!ORDER[@]}"; do
     [[ ${SELECTED[$((i+1))]} -eq 1 ]] && SELECTED_SERVICES+=("${ORDER[$i]}")
   done
+  [[ $ALL_SERVICES_NO_CONFIRM -eq 1 ]] && ASSUME_YES=1
 else
   echo "Not an interactive terminal — pass --services frontend,api,node-agent (or --deploy-only)." >&2
   exit 1
@@ -410,6 +428,10 @@ if [[ ${#SELECTED_SERVICES[@]} -gt 0 ]]; then
     # in from the root .env (sourced above). Empty is fine — it just disables
     # the Microsoft option in the email backup dialog.
     [[ "$svc" == "frontend" ]] && build_args+=(--build-arg "VITE_MS_CLIENT_ID=${VITE_MS_CLIENT_ID:-}")
+    # Bakes the deployed version (this build's tag) and git branch into the api
+    # image so it can label test runs it stores — see APP_VERSION/APP_GIT_BRANCH
+    # in api/Dockerfile and api/cmd/config.go.
+    [[ "$svc" == "api" ]] && build_args+=(--build-arg "APP_VERSION=${TAG}" --build-arg "APP_GIT_BRANCH=${GIT_BRANCH:-}")
     build_args+=("$context" --push)
     run docker "${build_args[@]}"
   done

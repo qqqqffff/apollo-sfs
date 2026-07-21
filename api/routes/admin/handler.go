@@ -59,6 +59,12 @@ type Handler struct {
 	// as a local-dev fallback for JUST the backend suite when testRunnerURL is
 	// unset. Requires the Go toolchain in PATH.
 	apiDir string
+	// appVersion / appGitBranch label test runs created by RunTests with what
+	// this api process was actually built from (APP_VERSION / APP_GIT_BRANCH,
+	// baked into the image at build time — see SetDeploymentInfo). Empty
+	// outside a deploy.sh build.
+	appVersion   string
+	appGitBranch string
 
 	// Speed test state — protected by speedTestMu; running flag uses atomic CAS.
 	speedTestMu      sync.RWMutex
@@ -77,6 +83,26 @@ type Handler struct {
 	// discountMailer announces new pricing discounts to users (see
 	// SetDiscountMailer). nil skips notifications.
 	discountMailer DiscountMailer
+
+	// reconcile drives the MinIO <-> Postgres reconciliation heartbeat (see
+	// SetReconciliationService); nil causes the endpoints to 503.
+	reconcile *services.ReconciliationService
+}
+
+// SetDeploymentInfo installs the deployment version/git branch labels
+// (cfg.AppVersion / cfg.AppGitBranch) used to tag test runs created by
+// RunTests. Wired from main once cfg is loaded; zero values are tolerated
+// (runs are simply tagged with an empty version/branch).
+func (h *Handler) SetDeploymentInfo(version, branch string) {
+	h.appVersion = version
+	h.appGitBranch = branch
+}
+
+// SetReconciliationService installs the reconciliation service used by
+// GetReconciliation/TriggerReconciliation. Wired from main once constructed;
+// nil is tolerated and causes those endpoints to return 503.
+func (h *Handler) SetReconciliationService(svc *services.ReconciliationService) {
+	h.reconcile = svc
 }
 
 // NewHandler constructs an admin Handler.

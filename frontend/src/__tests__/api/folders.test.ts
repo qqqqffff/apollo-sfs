@@ -159,13 +159,21 @@ describe('folderQueryOptions', () => {
 })
 
 describe('requestDriveMigration', () => {
-  it('POSTs to /folders/:id/drive-migrations with the target drive id', async () => {
+  it('POSTs to /folders/:id/drive-migrations with the target drive id (root destination)', async () => {
     mockFetch(202, { id: 'mig-1', folder_id: 'fold-1', status: 'pending' })
     await requestDriveMigration('fold-1', 'drive-123')
     const [url, init] = lastCall()
     expect(url).toBe('/api/v1/folders/fold-1/drive-migrations')
     expect(init.method).toBe('POST')
-    expect(JSON.parse(init.body as string)).toEqual({ drive_id: 'drive-123' })
+    // No destination folder given → null (the destination drive's root).
+    expect(JSON.parse(init.body as string)).toEqual({ drive_id: 'drive-123', dest_parent_id: null })
+  })
+
+  it('includes the destination folder when one is chosen', async () => {
+    mockFetch(202, { id: 'mig-2', folder_id: 'fold-1', status: 'pending' })
+    await requestDriveMigration('fold-1', 'drive-123', 'dest-9')
+    const [, init] = lastCall()
+    expect(JSON.parse(init.body as string)).toEqual({ drive_id: 'drive-123', dest_parent_id: 'dest-9' })
   })
 })
 

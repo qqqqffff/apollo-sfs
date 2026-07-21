@@ -36,7 +36,7 @@ type FileServicer interface {
 // PresignServicer is the subset of *services.PresignService used here.
 type PresignServicer interface {
 	IssueForFile(fileID, userID, username, action string, expiry time.Duration) (string, time.Time, error)
-	IssueForUpload(userID, username string, folderID *string, maxBytes int64, ignoreRedirect bool, expiry time.Duration) (string, time.Time, error)
+	IssueForUpload(userID, username string, folderID, driveID *string, maxBytes int64, ignoreRedirect bool, expiry time.Duration) (string, time.Time, error)
 }
 
 // APIKeyAuthorizer is the subset of *services.APIKeyService used to enforce

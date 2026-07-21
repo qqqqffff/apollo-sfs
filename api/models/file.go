@@ -29,7 +29,8 @@ type File struct {
 	// Nil for files uploaded from the web.
 	DeviceID *uuid.UUID `json:"device_id,omitempty" db:"device_id"`
 	// Source records the upload origin: "web" | "device" | "google_drive" |
-	// "google_photos". Defaults to "web".
+	// "google_photos" | "email_backup_gmail" | "email_backup_microsoft" |
+	// "file_server". Defaults to "web".
 	Source string `json:"source" db:"source"`
 	// Latitude and Longitude are the GPS coordinates extracted from image EXIF.
 	// Nil when the image has no GPS tags or the file is not an image.

@@ -144,6 +144,75 @@ func TestAdminGetUserFolder_FolderNotFound(t *testing.T) {
 	}
 }
 
+// ── AdminGetUserAncestors ─────────────────────────────────────────────────────
+
+func TestAdminGetUserAncestors_Success(t *testing.T) {
+	q := &stubQuerier{user: sampleUser()}
+	folderID := uuid.New()
+	h := browsHandler(q, &stubFolderService{}, nil, okKcResolver)
+
+	r := newEngine()
+	r.GET("/admin/users/:user_id/folders/:folder_id/ancestors", h.AdminGetUserAncestors)
+
+	w := doRequest(r, httptest.NewRequest(http.MethodGet, "/admin/users/alice/folders/"+folderID.String()+"/ancestors", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestAdminGetUserAncestors_InvalidFolderID(t *testing.T) {
+	q := &stubQuerier{user: sampleUser()}
+	h := browsHandler(q, &stubFolderService{}, nil, okKcResolver)
+
+	r := newEngine()
+	r.GET("/admin/users/:user_id/folders/:folder_id/ancestors", h.AdminGetUserAncestors)
+
+	w := doRequest(r, httptest.NewRequest(http.MethodGet, "/admin/users/alice/folders/not-a-uuid/ancestors", nil))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestAdminGetUserAncestors_UserNotFound(t *testing.T) {
+	q := &stubQuerier{userErr: sql.ErrNoRows}
+	h := browsHandler(q, &stubFolderService{}, nil, okKcResolver)
+
+	r := newEngine()
+	r.GET("/admin/users/:user_id/folders/:folder_id/ancestors", h.AdminGetUserAncestors)
+
+	w := doRequest(r, httptest.NewRequest(http.MethodGet, "/admin/users/nobody/folders/"+uuid.New().String()+"/ancestors", nil))
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
+	}
+}
+
+func TestAdminGetUserAncestors_KcError(t *testing.T) {
+	q := &stubQuerier{user: sampleUser()}
+	h := browsHandler(q, &stubFolderService{}, nil, errKcResolver)
+
+	r := newEngine()
+	r.GET("/admin/users/:user_id/folders/:folder_id/ancestors", h.AdminGetUserAncestors)
+
+	w := doRequest(r, httptest.NewRequest(http.MethodGet, "/admin/users/alice/folders/"+uuid.New().String()+"/ancestors", nil))
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", w.Code)
+	}
+}
+
+func TestAdminGetUserAncestors_IDTooLong(t *testing.T) {
+	q := &stubQuerier{}
+	h := browsHandler(q, &stubFolderService{}, nil, okKcResolver)
+
+	r := newEngine()
+	r.GET("/admin/users/:user_id/folders/:folder_id/ancestors", h.AdminGetUserAncestors)
+
+	longID := strings.Repeat("a", 151)
+	w := doRequest(r, httptest.NewRequest(http.MethodGet, "/admin/users/"+longID+"/folders/"+uuid.New().String()+"/ancestors", nil))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
 // ── AdminGetUserFavorites ─────────────────────────────────────────────────────
 
 func TestAdminGetUserFavorites_Success(t *testing.T) {

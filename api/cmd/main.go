@@ -181,6 +181,11 @@ func main() {
 
 	metricsSvc := services.NewMetricsService(queries, cfg.DiskStatsPath)
 
+	// Daily MinIO <-> Postgres reconciliation heartbeat (4am server-local time —
+	// see docs/storage_reconciliation.md). Also reachable on demand via
+	// POST /admin/system/reconciliation.
+	reconcileSvc := services.NewReconciliationService(queries, registry, fileSvc)
+
 	// ── GeoIP MMDB ───────────────────────────────────────────────────────────
 	var geoReader *geoip2.Reader
 	for _, path := range []string{
@@ -204,9 +209,10 @@ func main() {
 	go metricsSvc.Start(context.Background())
 	go emailSvc.Start(context.Background())
 	go recogSvc.Start(context.Background())
+	go reconcileSvc.DailyLoop(context.Background(), 4, 0)
 
 	shutdownCh := make(chan struct{})
-	r := setupRouter(cfg, queries, oidcVerifier, authSvc, fileSvc, folderSvc, favSvc, inviteSvc, metricsSvc, registry, geoReader, emailSvc, inboundEmailSvc, recogSvc, shutdownCh)
+	r := setupRouter(cfg, queries, oidcVerifier, authSvc, fileSvc, folderSvc, favSvc, inviteSvc, metricsSvc, registry, geoReader, emailSvc, inboundEmailSvc, recogSvc, reconcileSvc, shutdownCh)
 
 	addr := ":" + cfg.Port
 	log.Printf("apollo-sfs API listening on %s", addr)
@@ -237,7 +243,7 @@ func main() {
 	log.Println("server stopped")
 }
 
-func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVerifier, authSvc *services.AuthService, fileSvc *services.FileService, folderSvc *services.FolderService, favSvc *services.FavoriteService, inviteSvc *services.InviteService, metricsSvc *services.MetricsService, registry *services.MinIORegistry, geoReader *geoip2.Reader, emailSvc *services.EmailService, inboundEmailSvc *services.InboundEmailService, recogSvc *services.RecognitionService, shutdownCh chan struct{}) *gin.Engine {
+func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVerifier, authSvc *services.AuthService, fileSvc *services.FileService, folderSvc *services.FolderService, favSvc *services.FavoriteService, inviteSvc *services.InviteService, metricsSvc *services.MetricsService, registry *services.MinIORegistry, geoReader *geoip2.Reader, emailSvc *services.EmailService, inboundEmailSvc *services.InboundEmailService, recogSvc *services.RecognitionService, reconcileSvc *services.ReconciliationService, shutdownCh chan struct{}) *gin.Engine {
 	r := gin.New()
 	r.Use(gin.Logger())
 	r.Use(gin.Recovery())
@@ -280,7 +286,9 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	routes.SetRecognitionService(h, recogSvc)
 	authHandler := auth.NewHandler(authSvc, cfg.CookieDomain, cfg.CookieSecure)
 	adminHandler := admin.NewHandler(queries, inviteSvc, metricsSvc, authSvc, fileSvc, registry, geoReader, cfg.DiskStatsPath, cfg.DiskStatsDriveLabel, cfg.TestRunnerURL, cfg.AppDir, shutdownCh)
+	adminHandler.SetDeploymentInfo(cfg.AppVersion, cfg.AppGitBranch)
 	adminHandler.SetDiscountMailer(emailSvc)
+	adminHandler.SetReconciliationService(reconcileSvc)
 	// Configure the on-demand infrastructure sync (POST /system/sync): discover
 	// swarm nodes via the Docker socket and drives/capacity via the MinIO admin API.
 	adminHandler.ConfigureInfraSync(admin.InfraSyncConfig{
@@ -490,6 +498,8 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		// PUT /me/preferences is premium-only (media auto-upload); registered below.
 		// Storage UI toggles are available to every user.
 		protected.PUT("/me/preferences/storage-ui", h.UpdateStorageUIPreferences)
+		// Default display drive (server & tier the browser lands on) — every user.
+		protected.PUT("/me/preferences/default-drive", h.UpdateDefaultDrive)
 		// Admin-only, session-scoped sandbox-payments toggle (not persisted).
 		protected.PUT("/me/sandbox-payments", h.UpdateSandboxPayments)
 		// Admin-only, session-scoped storage-expansion-override toggle (not persisted).
@@ -499,6 +509,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 
 		// Devices (mobile sync)
 		protected.POST("/devices", h.RegisterDevice)
+		protected.GET("/devices", h.ListDevices)
 		protected.DELETE("/devices/:device_id", h.DeleteDevice)
 
 		// Sync delta (mobile)
@@ -699,6 +710,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 			adminGroup.PUT("/users/:user_id/storage/allocations", h.AdminUpdateUserStorageAllocations)
 			adminGroup.GET("/users/:user_id/folders", h.AdminListUserFolders)
 			adminGroup.GET("/users/:user_id/folders/:folder_id", h.AdminGetUserFolder)
+			adminGroup.GET("/users/:user_id/folders/:folder_id/ancestors", h.AdminGetUserAncestors)
 			adminGroup.GET("/users/:user_id/favorites", h.AdminGetUserFavorites)
 			adminGroup.GET("/users/:user_id/audit-logs", h.AdminGetUserAuditLogs)
 			adminGroup.POST("/users/:user_id/audit-logs", h.AdminLogImpersonation)
@@ -776,11 +788,16 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 			adminGroup.POST("/interest/:id/provision", adminHandler.ProvisionInterestSubmission)
 			adminGroup.POST("/interest/:id/deny", adminHandler.DenyInterestSubmission)
 
+			adminGroup.GET("/system/tests/latest", adminHandler.GetLatestTests)
+			adminGroup.GET("/system/tests/progress", adminHandler.GetTestProgress)
 			adminGroup.POST("/system/tests", adminHandler.RunTests)
 			adminGroup.POST("/system/shutdown", adminHandler.Shutdown)
 
 			adminGroup.GET("/system/speed-test", adminHandler.GetSpeedTest)
 			adminGroup.POST("/system/speed-test", adminHandler.TriggerSpeedTest)
+
+			adminGroup.GET("/system/reconciliation", adminHandler.GetReconciliation)
+			adminGroup.POST("/system/reconciliation", adminHandler.TriggerReconciliation)
 
 			adminGroup.GET("/system/alarm/subscriptions", adminHandler.GetAlarmSubscriptions)
 			adminGroup.PUT("/system/alarm/subscriptions", adminHandler.UpsertAlarmSubscription)

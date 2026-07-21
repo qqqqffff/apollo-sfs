@@ -86,6 +86,7 @@ type uploadClaim struct {
 	UserID         string  `json:"uid"`
 	Username       string  `json:"usr"`
 	FolderID       *string `json:"fid,omitempty"`
+	DriveID        *string `json:"drv,omitempty"`
 	MaxBytes       int64   `json:"max"`
 	IgnoreRedirect bool    `json:"ir,omitempty"`
 	Action         string  `json:"act"`
@@ -95,13 +96,16 @@ type uploadClaim struct {
 // IssueForUpload returns a signed token that authorises a single-file upload
 // for userID/username into folderID (nil = root) up to maxBytes. When
 // ignoreRedirect is true, the upload bypasses the user's media auto-upload
-// folder redirect even if the file turns out to be an image or video.
-func (s *PresignService) IssueForUpload(userID, username string, folderID *string, maxBytes int64, ignoreRedirect bool, expiry time.Duration) (token string, expiresAt time.Time, err error) {
+// folder redirect even if the file turns out to be an image or video. driveID
+// (nil = none) is the tier-first browser's root-drive pin, honored only for a
+// root upload (folderID nil after any media redirect).
+func (s *PresignService) IssueForUpload(userID, username string, folderID, driveID *string, maxBytes int64, ignoreRedirect bool, expiry time.Duration) (token string, expiresAt time.Time, err error) {
 	exp := time.Now().Add(expiry)
 	token, err = s.sign(uploadClaim{
 		UserID:         userID,
 		Username:       username,
 		FolderID:       folderID,
+		DriveID:        driveID,
 		MaxBytes:       maxBytes,
 		IgnoreRedirect: ignoreRedirect,
 		Action:         PresignActionUpload,
@@ -115,6 +119,7 @@ type UploadPresignClaim struct {
 	UserID         string
 	Username       string
 	FolderID       *string
+	DriveID        *string
 	MaxBytes       int64
 	IgnoreRedirect bool
 }
@@ -132,6 +137,7 @@ func (s *PresignService) ValidateForUpload(token string) (*UploadPresignClaim, e
 		UserID:         c.UserID,
 		Username:       c.Username,
 		FolderID:       c.FolderID,
+		DriveID:        c.DriveID,
 		MaxBytes:       c.MaxBytes,
 		IgnoreRedirect: c.IgnoreRedirect,
 	}, nil

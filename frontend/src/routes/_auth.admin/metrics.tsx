@@ -12,7 +12,9 @@ import {
   getNodeDiskIOHistory,
   getNodeDiskTempsHistory,
   getNodeMetricsHistory,
+  getTestProgress,
   infrastructureQueryOptions,
+  latestTestRunQueryOptions,
   pingServer,
   renameServer,
   runTests,
@@ -22,7 +24,8 @@ import {
   triggerSpeedTest,
   upsertAlarmSubscription,
 } from '../../api/admin'
-import type { AlarmType, DiskFrame, DriveFrame, DriveStat, DriveSummary, MetricsFrame, NodeDisk, NodeFrame, NodeSummary, TestRunResponse } from '../../api/admin'
+import type { AlarmType, DiskFrame, DriveFrame, DriveStat, DriveSummary, LatestTestRunResponse, MetricsFrame, NodeDisk, NodeFrame, NodeSummary, TestCase, TestProgressResponse, TestRun, TestRunReport, TestSuiteEntry } from '../../api/admin'
+import { ApiError } from '../../api/client'
 import { useMetricsStream } from '../../hooks/useMetricsStream'
 import { LineGraph } from '../../components/LineGraph'
 import type { LinePoint } from '../../components/LineGraph'
@@ -531,8 +534,6 @@ function RouteComponent() {
         }
       : speedTest
 
-  const [testResult, setTestResult] = useState<TestRunResponse | null>(null)
-  const [testOutputOpen, setTestOutputOpen] = useState(false)
   const [shutdownConfirm, setShutdownConfirm] = useState(false)
 
   const shutdownMutation = useMutation({
@@ -540,16 +541,45 @@ function RouteComponent() {
     onError: () => notify('error', 'Shutdown request failed'),
   })
 
+  // The cached-run query (GET /admin/system/tests/latest) is the single
+  // source of truth for what the card displays — "Run tests" just writes its
+  // fresh result into that same cache entry instead of keeping separate local
+  // state, so a run that fails (422, still a full report) renders exactly
+  // like a cached one instead of silently going nowhere.
+  const { data: latestTestRun, isLoading: latestTestRunLoading } = useQuery(latestTestRunQueryOptions)
+
+  const applyTestRun = useCallback((run: TestRun) => {
+    queryClient.setQueryData<LatestTestRunResponse>(latestTestRunQueryOptions.queryKey, {
+      run,
+      matched_branch: true,
+      current_branch: run.git_branch,
+      current_version: run.deployment_version,
+    })
+  }, [queryClient])
+
   const runTestsMutation = useMutation({
     mutationFn: runTests,
-    onSuccess: (data) => setTestResult(data),
-    onError: (err: { status?: number }) => {
-      if (err.status === 422) {
-        // 422 still returns the full result body — handled via onSuccess for non-2xx
+    onSuccess: applyTestRun,
+    onError: (err: ApiError) => {
+      // A failing suite still returns the full run as the error body (422),
+      // so it renders the same way a passing run would rather than vanishing.
+      if (err instanceof ApiError && err.status === 422 && err.body) {
+        applyTestRun(err.body as unknown as TestRun)
       } else {
         notify('error', 'Failed to run tests')
       }
     },
+  })
+
+  // The full cross-service suite can take minutes, so while a run is in
+  // flight, poll the sidecar's live status instead of leaving the card on a
+  // static "Running…" message — this shows which suite is currently
+  // executing and the results of whichever suites have already finished.
+  const { data: testProgress } = useQuery({
+    queryKey: ['admin', 'tests', 'progress'],
+    queryFn: getTestProgress,
+    enabled: runTestsMutation.isPending,
+    refetchInterval: runTestsMutation.isPending ? 3000 : false,
   })
 
   const graphW = Math.min(820, window.innerWidth - 80)
@@ -901,45 +931,20 @@ function RouteComponent() {
           </button>
         </div>
         <div className="bg-white border border-gray-200 rounded-xl px-5 py-4">
-          {!testResult && !runTestsMutation.isPending && (
-            <p className="text-sm text-gray-400 m-0">No test run yet. Click "Run tests" to execute the suite.</p>
+          {latestTestRunLoading && !runTestsMutation.isPending && (
+            <p className="text-sm text-gray-400 m-0">Loading…</p>
           )}
           {runTestsMutation.isPending && (
-            <p className="text-sm text-gray-400 m-0 animate-pulse">Running test suites…</p>
-          )}
-          {testResult && (
-            <div className="flex flex-col gap-3">
-              <TestSuiteRow label="Backend" entry={testResult.backend} />
-              <TestSuiteRow label="Frontend" entry={testResult.frontend} />
-              <TestSuiteRow label="Frontend E2E" entry={testResult.frontend_e2e} />
-              <TestSuiteRow label="Mobile" entry={testResult.mobile} />
-              <TestSuiteRow label="Recognition" entry={testResult.recognition} />
-              <button
-                onClick={() => setTestOutputOpen(o => !o)}
-                className="text-xs text-gray-400 hover:text-gray-700 cursor-pointer bg-transparent border-0 text-left w-fit"
-              >
-                {testOutputOpen ? '▲ Hide output' : '▼ Show output'}
-              </button>
-              {testOutputOpen && (
-                <div className="flex flex-col gap-3">
-                  {testResult.backend.enabled && testResult.backend.result && (
-                    <OutputBlock label="Backend" output={testResult.backend.result.output} />
-                  )}
-                  {testResult.frontend.enabled && testResult.frontend.result && (
-                    <OutputBlock label="Frontend" output={testResult.frontend.result.output} />
-                  )}
-                  {testResult.frontend_e2e.enabled && testResult.frontend_e2e.result && (
-                    <OutputBlock label="Frontend E2E" output={testResult.frontend_e2e.result.output} />
-                  )}
-                  {testResult.mobile.enabled && testResult.mobile.result && (
-                    <OutputBlock label="Mobile" output={testResult.mobile.result.output} />
-                  )}
-                  {testResult.recognition.enabled && testResult.recognition.result && (
-                    <OutputBlock label="Recognition" output={testResult.recognition.result.output} />
-                  )}
-                </div>
-              )}
+            <div className="flex flex-col gap-2">
+              <p className="text-sm text-gray-400 m-0 animate-pulse">Running test suites…</p>
+              <TestProgressList progress={testProgress} />
             </div>
+          )}
+          {!latestTestRunLoading && !runTestsMutation.isPending && (!latestTestRun || !latestTestRun.run) && (
+            <p className="text-sm text-gray-400 m-0">None — no test run has been recorded yet. Click "Run tests" to execute the suite.</p>
+          )}
+          {!runTestsMutation.isPending && latestTestRun?.run && (
+            <TestRunPanel latest={latestTestRun} />
           )}
         </div>
       </section>
@@ -1122,7 +1127,7 @@ function StatCard({ label, value, sub, selected, onClick }: { label: string; val
   )
 }
 
-import type { SpeedTestResult, TestSuiteEntry } from '../../api/admin'
+import type { SpeedTestResult } from '../../api/admin'
 
 function SpeedTestCard({ result, onRun, pending, selected, onClick }: {
   result: SpeedTestResult | undefined
@@ -1171,77 +1176,283 @@ function SpeedTestCard({ result, onRun, pending, selected, onClick }: {
   )
 }
 
-// parseSuiteDetail extracts a human-readable count summary from test runner output.
-// Go: "ok  apollo-sfs.com/api/tests  1.234s" lines → "N suites passing"
-// Jest: "Test Suites: 3 passed, 3 total\nTests: 42 passed, 42 total"
-// Playwright: "38 passed (12s)" or "35 passed, 3 failed"
-function parseSuiteDetail(output: string, passed: boolean): string | null {
-  if (!output) return null
+// ── Test-runner card ─────────────────────────────────────────────────────────
+// Groups the five suites the sidecar reports into four application areas:
+// Frontend (unit + E2E), API (backend), Recognition, and Mobile.
 
-  // Go — count "ok" lines
-  const goOk = (output.match(/^ok\s+\S+/gm) ?? []).length
-  const goFail = (output.match(/^FAIL\s+\S+/gm) ?? []).length
-  if (goOk > 0 || goFail > 0) {
-    return passed
-      ? `${goOk} suite${goOk !== 1 ? 's' : ''} passing`
-      : `${goFail} suite${goFail !== 1 ? 's' : ''} failing · ${goOk} passing`
-  }
+type SuiteKey = 'backend' | 'frontend' | 'frontend_e2e' | 'mobile' | 'recognition'
 
-  // Jest — "Test Suites: X passed, Y total" and "Tests: A passed, B total"
-  const suiteMatch = output.match(/Test Suites:\s+(?:(\d+) failed,\s*)?(\d+) passed,\s*(\d+) total/)
-  const testMatch  = output.match(/Tests:\s+(?:(\d+) failed,\s*)?(\d+) passed,\s*(\d+) total/)
-  if (suiteMatch && testMatch) {
-    const suiteFail = parseInt(suiteMatch[1] ?? '0')
-    const suitePass = parseInt(suiteMatch[2])
-    const testFail  = parseInt(testMatch[1]  ?? '0')
-    const testPass  = parseInt(testMatch[2])
-    const sTotal = suitePass + suiteFail
-    const tTotal = testPass  + testFail
-    if (passed) return `${suitePass}/${sTotal} suite${sTotal !== 1 ? 's' : ''} · ${testPass}/${tTotal} tests passing`
-    return `${suiteFail} suite${suiteFail !== 1 ? 's' : ''} failing · ${testFail} test${testFail !== 1 ? 's' : ''} failing`
-  }
-
-  // Playwright — "X passed" or "X passed, Y failed"
-  const pwPass = output.match(/(\d+) passed/)
-  const pwFail = output.match(/(\d+) failed/)
-  if (pwPass) {
-    const p = parseInt(pwPass[1])
-    const f = pwFail ? parseInt(pwFail[1]) : 0
-    if (passed) return `${p} test${p !== 1 ? 's' : ''} passing`
-    return f > 0
-      ? `${f} test${f !== 1 ? 's' : ''} failing · ${p} passing`
-      : `${p} test${p !== 1 ? 's' : ''} passing`
-  }
-
-  return null
+interface TestGroupDef {
+  key: string
+  label: string
+  suites: { key: SuiteKey; label: string }[]
 }
 
-function TestSuiteRow({ label, entry }: { label: string; entry: TestSuiteEntry }) {
-  if (!entry.enabled) {
+const TEST_GROUPS: TestGroupDef[] = [
+  { key: 'frontend', label: 'Frontend', suites: [{ key: 'frontend', label: 'Unit' }, { key: 'frontend_e2e', label: 'E2E' }] },
+  { key: 'api', label: 'API', suites: [{ key: 'backend', label: 'Backend' }] },
+  { key: 'recognition', label: 'Recognition', suites: [{ key: 'recognition', label: 'Recognition' }] },
+  { key: 'mobile', label: 'Mobile', suites: [{ key: 'mobile', label: 'Mobile' }] },
+]
+
+function formatDurationMs(ms: number): string {
+  if (ms < 1000) return `${ms} ms`
+  return `${(ms / 1000).toFixed(1)}s`
+}
+
+function average(values: number[]): number | null {
+  if (values.length === 0) return null
+  return values.reduce((a, b) => a + b, 0) / values.length
+}
+
+function daysSince(iso: string): number {
+  return Math.floor((Date.now() - new Date(iso).getTime()) / (24 * 60 * 60 * 1000))
+}
+
+// A suite with no discrete test count (e.g. the backend local-exec fallback,
+// which has no structured parser) still counts as one pass/fail unit so the
+// percentage bar always has something to show.
+function suiteUnits(entry: TestSuiteEntry): { total: number; passed: number } {
+  const result = entry.result
+  if (!result) return { total: 0, passed: 0 }
+  if (result.num_tests > 0) return { total: result.num_tests, passed: result.num_passed }
+  return { total: 1, passed: result.passed ? 1 : 0 }
+}
+
+const SUITE_LABELS: Record<SuiteKey, string> = {
+  backend: 'Backend (API)',
+  frontend: 'Frontend (unit)',
+  frontend_e2e: 'Frontend (E2E)',
+  mobile: 'Mobile',
+  recognition: 'Recognition',
+}
+
+// Live status of a single suite while a run is in flight — derived from
+// TestProgressResponse (see GET /admin/system/tests/progress): 'done' suites
+// render their pass/fail exactly like a finished run would.
+type SuiteProgressStatus = 'pending' | 'running' | 'passed' | 'failed' | 'skipped'
+
+function suiteProgressStatus(key: string, progress: TestProgressResponse | undefined): SuiteProgressStatus {
+  const entry = progress?.completed?.[key]
+  if (entry) {
+    if (!entry.enabled) return 'skipped'
+    return entry.result && entry.result.passed === false ? 'failed' : 'passed'
+  }
+  if (progress?.current_suite === key) return 'running'
+  return 'pending'
+}
+
+// Shown while runTestsMutation.isPending, polling GET /admin/system/tests/progress
+// (every 3s — see the useQuery above) so the card reflects which suite is
+// currently running and the results of whichever have already finished,
+// instead of a single static "Running…" message for the whole multi-minute run.
+function TestProgressList({ progress }: { progress: TestProgressResponse | undefined }) {
+  const order = progress?.order ?? ['backend', 'frontend', 'frontend_e2e', 'mobile', 'recognition']
+  return (
+    <ul className="flex flex-col gap-1 pl-0 list-none">
+      {order.map((key) => {
+        const status = suiteProgressStatus(key, progress)
+        const entry = progress?.completed?.[key]
+        return (
+          <li key={key} className="flex items-center gap-2 text-xs">
+            {status === 'running' ? (
+              <span className="w-1.5 h-1.5 rounded-full bg-blue-500 shrink-0 animate-pulse" />
+            ) : (
+              <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                status === 'passed' ? 'bg-green-500' :
+                status === 'failed' ? 'bg-red-500' :
+                status === 'skipped' ? 'bg-gray-300' : 'bg-gray-200'
+              }`} />
+            )}
+            <span className={status === 'pending' ? 'text-gray-400' : 'text-gray-600'}>
+              {SUITE_LABELS[key as SuiteKey] ?? key}
+            </span>
+            <span className="text-gray-400">
+              {status === 'running' && 'running…'}
+              {status === 'passed' && entry?.result && `passed · ${formatDurationMs(entry.result.duration_ms)}`}
+              {status === 'failed' && entry?.result && `failed · ${formatDurationMs(entry.result.duration_ms)}`}
+              {status === 'skipped' && 'skipped'}
+              {status === 'pending' && 'pending'}
+            </span>
+          </li>
+        )
+      })}
+    </ul>
+  )
+}
+
+function TestRunPanel({ latest }: { latest: LatestTestRunResponse }) {
+  const run = latest.run
+  if (!run) return null
+  const stale = daysSince(run.created_at) > 30
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-col gap-1 text-xs text-gray-500">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+          <span>Branch <span className="font-medium text-gray-700">{run.git_branch || 'unknown'}</span></span>
+          <span>Version <span className="font-mono text-gray-700">{run.deployment_version || 'unknown'}</span></span>
+          <span>Ran {new Date(run.created_at).toLocaleString()}</span>
+        </div>
+        {!latest.matched_branch && (
+          <div className="text-amber-600">
+            No test run yet for the current branch ("{latest.current_branch || 'unknown'}") — showing the most recent run, from branch "{run.git_branch || 'unknown'}" (version {run.deployment_version || 'unknown'}).
+          </div>
+        )}
+        {stale && (
+          <div className="text-amber-600">
+            Last run was {daysSince(run.created_at)} days ago — results may be out of date.
+          </div>
+        )}
+      </div>
+      <div className="flex flex-col gap-3">
+        {TEST_GROUPS.map((group) => (
+          <TestGroupCard key={group.key} group={group} report={run.report} />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function TestGroupCard({ group, report }: { group: TestGroupDef; report: TestRunReport }) {
+  const [expanded, setExpanded] = useState(false)
+  const entries = group.suites.map((s) => ({ ...s, entry: report[s.key] }))
+  const enabledEntries = entries.filter((e) => e.entry.enabled)
+
+  if (enabledEntries.length === 0) {
     return (
       <div className="flex items-center gap-2 text-sm text-gray-400">
         <span className="w-2 h-2 rounded-full bg-gray-200 shrink-0" />
-        <span className="font-medium text-gray-500">{label}</span>
-        <span className="text-xs">{entry.message ?? 'disabled'}</span>
+        <span className="font-medium text-gray-500">{group.label}</span>
+        <span className="text-xs">{entries[0]?.entry.message ?? 'disabled'}</span>
       </div>
     )
   }
-  const passed = entry.result?.passed
-  const detail = entry.result ? parseSuiteDetail(entry.result.output, !!passed) : null
+
+  let total = 0
+  let passed = 0
+  let durationMs = 0
+  const linesSamples: number[] = []
+  const branchesSamples: number[] = []
+  for (const e of enabledEntries) {
+    const units = suiteUnits(e.entry)
+    total += units.total
+    passed += units.passed
+    durationMs += e.entry.result?.duration_ms ?? 0
+    const cov = e.entry.result?.coverage
+    if (cov?.lines_pct != null) linesSamples.push(cov.lines_pct)
+    if (cov?.branches_pct != null) branchesSamples.push(cov.branches_pct)
+  }
+  const pct = total > 0 ? (passed / total) * 100 : null
+  const linesPct = average(linesSamples)
+  const branchesPct = average(branchesSamples)
+
   return (
-    <div className="flex items-center gap-2 text-sm">
-      <span className={`w-2 h-2 rounded-full shrink-0 ${passed ? 'bg-green-500' : 'bg-red-500'}`} />
-      <span className="font-medium text-gray-700">{label}</span>
-      <span className={`text-xs font-medium ${passed ? 'text-green-600' : 'text-red-600'}`}>
-        {passed ? 'PASS' : 'FAIL'}
-      </span>
-      {detail && (
-        <span className="text-xs text-gray-500">{detail}</span>
+    <div className="border border-gray-100 rounded-lg p-3">
+      <div className="flex items-center justify-between mb-2 gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="font-medium text-gray-700 text-sm">{group.label}</span>
+          <span className="text-xs text-gray-400">{passed}/{total} tests · {formatDurationMs(durationMs)}</span>
+        </div>
+        <button
+          onClick={() => setExpanded((x) => !x)}
+          className="text-xs text-gray-400 hover:text-gray-700 cursor-pointer bg-transparent border-0 shrink-0"
+        >
+          {expanded ? '▲ hide details' : '▼ details'}
+        </button>
+      </div>
+      <PercentBar pct={pct} />
+      {(linesPct != null || branchesPct != null) && (
+        <div className="flex gap-4 mt-2 text-xs text-gray-500">
+          {linesPct != null && <span>Lines: {linesPct.toFixed(1)}%</span>}
+          {branchesPct != null && <span>Branches: {branchesPct.toFixed(1)}%</span>}
+        </div>
       )}
-      {entry.result && (
-        <span className="text-xs text-gray-400">{entry.result.duration_ms} ms</span>
+      {expanded && (
+        <div className="mt-3 flex flex-col gap-3">
+          {enabledEntries.map((e) => (
+            <SuiteDetail key={e.key} label={e.label} entry={e.entry} />
+          ))}
+        </div>
       )}
+      <button
+        onClick={() => setShowOutput((o) => !o)}
+        className="text-xs text-gray-400 hover:text-gray-700 cursor-pointer bg-transparent border-0 text-left w-fit"
+      >
+        {showOutput ? '▲ hide raw output' : '▼ raw output'}
+      </button>
+      {showOutput && <OutputBlock label={label} output={result.output} />}
     </div>
+  )
+}
+
+function PercentBar({ pct }: { pct: number | null }) {
+  if (pct == null) {
+    return <div className="h-2 rounded-full bg-gray-100" />
+  }
+  const color = pct >= 100 ? 'bg-green-500' : pct >= 50 ? 'bg-amber-500' : 'bg-red-500'
+  return (
+    <div className="h-2 rounded-full bg-gray-100 overflow-hidden">
+      <div className={`h-full ${color}`} style={{ width: `${Math.max(0, Math.min(100, pct))}%` }} />
+    </div>
+  )
+}
+
+function SuiteDetail({ label, entry }: { label: string; entry: TestSuiteEntry }) {
+  const [showOutput, setShowOutput] = useState(false)
+  const result = entry.result
+  if (!result) return null
+
+  return (
+    <div>
+      <div className="flex items-center gap-2 text-xs mb-1.5 flex-wrap">
+        <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${result.passed ? 'bg-green-500' : 'bg-red-500'}`} />
+        <span className="font-medium text-gray-600">{label}</span>
+        <span className={`font-medium ${result.passed ? 'text-green-600' : 'text-red-600'}`}>
+          {result.passed ? 'PASS' : 'FAIL'}
+        </span>
+        {result.num_tests > 0 && (
+          <span className="text-gray-400">{result.num_passed}/{result.num_tests} tests</span>
+        )}
+        <span className="text-gray-400">{formatDurationMs(result.duration_ms)}</span>
+      </div>
+      {result.tests && result.tests.length > 0 && (
+        <ul className="flex flex-col gap-0.5 mb-1.5 max-h-52 overflow-y-auto pl-0 list-none">
+          {result.tests.map((t, i) => (
+            <TestCaseRow key={`${t.name}-${i}`} test={t} />
+          ))}
+        </ul>
+      )}
+      <button
+        onClick={() => setShowOutput((o) => !o)}
+        className="text-xs text-gray-400 hover:text-gray-700 cursor-pointer bg-transparent border-0 text-left w-fit"
+      >
+        {showOutput ? '▲ hide raw output' : '▼ raw output'}
+      </button>
+      {showOutput && <OutputBlock label={label} output={result.output} />}
+    </div>
+  )
+}
+
+function TestCaseRow({ test }: { test: TestCase }) {
+  const [open, setOpen] = useState(false)
+  const hasMessage = !!test.message
+  return (
+    <li className="text-xs">
+      <button
+        onClick={() => hasMessage && setOpen((o) => !o)}
+        className={`flex items-center gap-1.5 w-full text-left bg-transparent border-0 p-0 ${hasMessage ? 'cursor-pointer' : 'cursor-default'}`}
+      >
+        <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${test.passed ? 'bg-green-500' : 'bg-red-500'}`} />
+        <span className={`truncate ${test.passed ? 'text-gray-600' : 'text-red-700'}`}>{test.name}</span>
+        {test.duration_ms != null && <span className="text-gray-400 shrink-0 ml-auto">{test.duration_ms} ms</span>}
+      </button>
+      {open && hasMessage && (
+        <pre className="mt-1 ml-3 bg-red-50 border border-red-100 rounded p-2 text-[11px] text-red-700 whitespace-pre-wrap overflow-x-auto max-h-40 overflow-y-auto">
+          {test.message}
+        </pre>
+      )}
+    </li>
   )
 }
 

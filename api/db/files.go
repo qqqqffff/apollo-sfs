@@ -181,6 +181,39 @@ func (q *Queries) ListFilesByFolder(ctx context.Context, folderID uuid.UUID, in 
 	}, nil
 }
 
+// ListFilesInFolderSubtree returns every file under folderID recursively — the
+// folder's own direct files plus those in all descendant folders. Used by the
+// tier-first drive migration, which relocates a whole folder subtree onto
+// another drive (a folder subtree always shares one drive under that model).
+// Not paginated: a migration must see every file. RLS on folders/files keeps
+// the recursion and result scoped to the current user.
+func (q *Queries) ListFilesInFolderSubtree(ctx context.Context, folderID uuid.UUID) ([]models.File, error) {
+	rows, err := q.db.QueryContext(ctx, `
+		WITH RECURSIVE d(id) AS (
+			SELECT $1::uuid
+			UNION ALL
+			SELECT cf.id FROM folders cf JOIN d ON cf.parent_id = d.id
+		)
+		SELECT`+fileColumns+`
+		FROM files
+		WHERE folder_id IN (SELECT id FROM d)
+	`, folderID)
+	if err != nil {
+		return nil, fmt.Errorf("ListFilesInFolderSubtree %s: %w", folderID, err)
+	}
+	defer rows.Close()
+
+	files := make([]models.File, 0)
+	for rows.Next() {
+		f, err := scanFileRow(rows)
+		if err != nil {
+			return nil, fmt.Errorf("ListFilesInFolderSubtree scan: %w", err)
+		}
+		files = append(files, *f)
+	}
+	return files, rows.Err()
+}
+
 // ListRootFiles returns a page of files owned by userID that have no containing
 // folder (folder_id IS NULL), ordered by name.
 func (q *Queries) ListRootFiles(ctx context.Context, userID uuid.UUID, in PageInput) (*PageResult[models.File], error) {
@@ -212,6 +245,48 @@ func (q *Queries) ListRootFiles(ctx context.Context, userID uuid.UUID, in PageIn
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("ListRootFiles: %w", err)
+	}
+	return &PageResult[models.File]{
+		Items:     files,
+		NextToken: offsetNextToken(len(files), limit, offset),
+	}, nil
+}
+
+// ListRootFilesOnDrive is ListRootFiles filtered to a single drive: root files
+// (folder_id IS NULL) whose drive_id is driveID. When includeUnassigned is true
+// it also returns rows with a NULL drive_id — used when viewing the user's
+// PRIMARY drive, since a NULL drive_id resolves to the primary at read time
+// (see migration 055). Backs the tier-first browser's per-drive root view.
+func (q *Queries) ListRootFilesOnDrive(ctx context.Context, userID, driveID uuid.UUID, includeUnassigned bool, in PageInput) (*PageResult[models.File], error) {
+	limit := clampLimit(in.Limit)
+	offset, err := decodeOffsetCursor(in.Cursor)
+	if err != nil {
+		return nil, fmt.Errorf("ListRootFilesOnDrive: %w", err)
+	}
+
+	rows, err := q.db.QueryContext(ctx, `
+		SELECT`+fileColumns+`
+		FROM files
+		WHERE user_id = $1 AND folder_id IS NULL
+		  AND (drive_id = $2 OR ($3 AND drive_id IS NULL))
+		ORDER BY name ASC
+		LIMIT $4 OFFSET $5
+	`, userID, driveID, includeUnassigned, limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("ListRootFilesOnDrive: %w", err)
+	}
+	defer rows.Close()
+
+	files := make([]models.File, 0)
+	for rows.Next() {
+		f, err := scanFileRow(rows)
+		if err != nil {
+			return nil, fmt.Errorf("ListRootFilesOnDrive scan: %w", err)
+		}
+		files = append(files, *f)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("ListRootFilesOnDrive: %w", err)
 	}
 	return &PageResult[models.File]{
 		Items:     files,

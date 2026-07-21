@@ -24,6 +24,11 @@ type FolderDriveMigration struct {
 	UserID       uuid.UUID  `json:"-"`
 	FromDriveID  *uuid.UUID `json:"from_drive_id"`
 	ToDriveID    uuid.UUID  `json:"to_drive_id"`
+	// DestParentID is the folder the migrated folder is reparented under on the
+	// destination drive once its bytes finish moving. NULL means the destination
+	// drive's root (the folder becomes top-level). Chosen by the user in the
+	// "move to another server & tier" flow.
+	DestParentID *uuid.UUID `json:"dest_parent_id"`
 	Status       string     `json:"status"`
 	TotalFiles   int        `json:"total_files"`
 	FilesMoved   int        `json:"files_moved"`

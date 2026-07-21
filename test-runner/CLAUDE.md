@@ -18,39 +18,73 @@ Swarm-only, like `recognition`: the deprecated `docker-compose.yml` has no `test
 
 Sequential, not parallel — this container has limited CPU/RAM (it runs on the same dev host as everything else) and five toolchains contending for the same cores at once isn't worth the wall-clock savings.
 
+Each suite process is killed (`SIGTERM`, escalating to `SIGKILL` after a 5s grace period) if it runs past `SUITE_TIMEOUT_MS` (5 minutes, hardcoded in `server.js`) — reported as a failed, timed-out result rather than left to hang, so one stuck suite (e.g. Playwright waiting on a dead `frontend` container) can't block the rest of the run indefinitely. The Go API's own call to `POST /run-tests` (`runnerTimeout` in `api/routes/admin/tests.go`) is set generously above the worst case of every suite timing out back to back.
+
 ## Files
 
 - `Dockerfile` — multi-toolchain image. Go's official image is used only to donate a compiled toolchain (`COPY --from=go-toolchain /usr/local/go`) onto a `node:22-bookworm-slim` base (needed for Playwright's Chromium, which requires glibc); Python comes from Debian bookworm's `apt` package (close enough to the recognition service's own `python:3.12-slim` for running tests, even though it isn't an exact version match — this is test tooling, not a deployed image). Recognition's Python deps install into a dedicated venv (`/opt/recognition-venv`) since Debian's system Python is "externally managed" (PEP 668).
-- `server.js` — the sidecar's HTTP server (CommonJS, no build step). `POST /run-tests` runs all five suites and returns the combined report; `GET /health` is a liveness probe.
+- `server.js` — the sidecar's HTTP server (CommonJS, no build step). `POST /run-tests` runs all five suites and returns the combined report; `GET /progress` reports live status of the in-flight (or most recently finished) run — which suite is currently executing and the `{ enabled, result }` of every suite that's already finished, in the same shape the final report uses — so a caller can poll it during the multi-minute `POST /run-tests` call instead of waiting in the dark; `GET /health` is a liveness probe.
 
 **Build context must be the repo root**, not this directory — the Dockerfile needs `api/`, `frontend/`, `mobile/`, and `recognition/` all in its build context simultaneously. See `docker-stack.yml`'s `test-runner` service (image `apollo-sfs_test-runner:${TEST_RUNNER_TAG}`) and `deploy.sh`'s `IMAGE_CONTEXT[test-runner]="."` / `IMAGE_DOCKERFILE[test-runner]="test-runner/Dockerfile"`.
 
 ## Triggering a run
 
-Normally via the admin metrics page's "Run tests" button. To trigger manually from the manager (the service publishes no ports and is reachable only on the overlay network, same as `recognition`):
+Normally via the admin metrics page's "Run tests" button, which polls `GET /admin/system/tests/progress` (proxying this sidecar's `GET /progress`) every few seconds while the run is in flight to show live per-suite status. To trigger manually from the manager (the service publishes no ports and is reachable only on the overlay network, same as `recognition`):
 
 ```bash
 docker exec "$(docker ps -q -f name=apollo-sfs_api)" \
   wget -qO- --post-data='' http://test-runner:9228/run-tests
+
+# Poll progress from another shell while that's running:
+docker exec "$(docker ps -q -f name=apollo-sfs_api)" \
+  wget -qO- http://test-runner:9228/progress
 ```
 
 ## Report shape
 
+Each suite is run through its toolchain's structured/JSON reporter (`go test
+-json -cover`, Jest `--json --coverage --coverageReporters=json-summary`,
+Playwright `--reporter=json,list` via `PLAYWRIGHT_JSON_OUTPUT_NAME`,
+`pytest --json-report --cov --cov-report=json`), so `result` carries a
+per-test breakdown and line/branch coverage, not just an aggregate pass/fail —
+see the `parse*()` functions in `server.js`, one per toolchain. A suite whose
+structured output can't be parsed (crashed before producing one) still
+reports `passed`/`exit_code`/`output`/`duration_ms`; it just omits
+`tests`/`coverage` rather than failing the whole run. Playwright E2E has no
+meaningful coverage concept and always omits `coverage`.
+
 ```json
 {
-  "backend":      { "enabled": true, "result": { "passed": true, "exit_code": 0, "output": "...", "duration_ms": 3316 } },
-  "frontend":     { "enabled": true, "result": { ... } },
-  "frontend_e2e": { "enabled": true, "result": { ... } },
-  "mobile":       { "enabled": true, "result": { ... } },
-  "recognition":  { "enabled": true, "result": { ... } }
+  "backend": {
+    "enabled": true,
+    "result": {
+      "passed": true, "exit_code": 0, "output": "...", "duration_ms": 3316,
+      "num_tests": 42, "num_passed": 42, "num_failed": 0,
+      "tests": [{ "name": "TestFoo", "passed": true, "duration_ms": 12 }],
+      "coverage": { "lines_pct": 87.5, "branches_pct": null }
+    }
+  },
+  "frontend":     { "enabled": true, "result": { "...": "same shape, coverage.branches_pct populated" } },
+  "frontend_e2e": { "enabled": true, "result": { "...": "same shape, no coverage key" } },
+  "mobile":       { "enabled": true, "result": { "..." : "same shape as frontend" } },
+  "recognition":  { "enabled": true, "result": { "..." : "same shape, coverage from pytest-cov" } }
 }
 ```
 
-This shape is consumed directly by `api/routes/admin/tests.go` (`testRunResponse`) — the Go side just proxies it, computing the aggregate HTTP status (503 nothing configured / 422 something failed / 200 all passed) rather than re-deriving each suite's result. The frontend renders it on the admin metrics page's "Run tests" panel, one row + expandable output block per suite.
+This shape is consumed directly by `api/routes/admin/tests.go`
+(`models.TestRunReport` in `api/models/test_run.go`) — the Go side just
+proxies it, computing the aggregate HTTP status (503 nothing configured / 422
+something failed / 200 all passed) rather than re-deriving each suite's
+result, and persists every run (tagged with this deployment's version/git
+branch) to the `test_runs` table so `GET /admin/system/tests/latest` can serve
+a cached run back without re-running the whole suite. The frontend groups the
+five suites into four application areas (Frontend = frontend + frontend_e2e,
+API = backend, Recognition, Mobile) on the admin metrics page's test-runner
+card — see `frontend/src/routes/_auth.admin/metrics.tsx`.
 
 ## Adding a suite
 
 1. Add the toolchain/deps to `Dockerfile` (a new `COPY .../package.json` + install step, following the existing per-service sections).
-2. Add a `runSuite(...)` call in `server.js`'s `runAllSuites()`, and a key in the object it returns.
-3. Add the matching field to `testRunResponse` in `api/routes/admin/tests.go` and to `TestRunResponse` in `frontend/src/api/admin.ts`.
-4. Add a `<TestSuiteRow>` (and `<OutputBlock>`) for it in `frontend/src/routes/_auth.admin/metrics.tsx`.
+2. Add a `run*Suite(...)` function in `server.js` (following the existing per-toolchain parse/run pairs) and a key in `runAllSuites()`'s returned object.
+3. Add the matching field to `models.TestRunReport` in `api/models/test_run.go` and to `TestRunReport` in `frontend/src/api/admin.ts`.
+4. Add it to the relevant application-area group (or a new one) in `frontend/src/routes/_auth.admin/metrics.tsx`'s test-runner card.

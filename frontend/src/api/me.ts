@@ -58,6 +58,15 @@ export function updateBackupReminderPreference(enabled: boolean) {
   })
 }
 
+// updateDefaultDrive sets the drive (server & tier) the file browser lands on
+// for a multi-drive user. Pass null to clear it. The drive must be one of the
+// user's own allocations.
+export function updateDefaultDrive(driveId: string | null) {
+  return put<UserPreferences>('/me/preferences/default-drive', {
+    default_drive_id: driveId,
+  })
+}
+
 // LastBackupSync reports when each backup type last completed; null means the
 // user has never used that backup.
 export interface LastBackupSync {

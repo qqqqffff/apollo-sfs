@@ -53,14 +53,27 @@ func (s *FolderService) GetAncestors(ctx context.Context, folderID, userID uuid.
 	return q.GetFolderAncestors(ctx, userID, folderID)
 }
 
+// DriveFilter scopes a root listing to a single drive (server & tier). When
+// IncludeUnassigned is true, rows with a NULL drive_id are also returned — set
+// only when the drive is the user's PRIMARY, since NULL resolves to the primary
+// at read time. A nil *DriveFilter means "all drives" (unfiltered root).
+type DriveFilter struct {
+	DriveID           uuid.UUID
+	IncludeUnassigned bool
+}
+
 // ListRoot returns the top-level folders (parent_id IS NULL) and root-level
 // files for the given userID, with independent pagination for each list.
 // When folderPage.Skip or filePage.Skip is true the corresponding list is
 // returned as an empty page without hitting the database.
+// When drive is non-nil the lists are scoped to that drive (the tier-first
+// browser's per-drive root view); nil returns every root row regardless of
+// drive (unchanged legacy behavior, used by the SFS API and search).
 func (s *FolderService) ListRoot(
 	ctx context.Context,
 	userID uuid.UUID,
 	folderPage, filePage db.PageInput,
+	drive *DriveFilter,
 ) (*FolderContents, error) {
 	q, tx, err := s.queries.ForUser(ctx, userID)
 	if err != nil {
@@ -69,23 +82,29 @@ func (s *FolderService) ListRoot(
 	defer func() { _ = tx.Rollback() }()
 
 	var subfolders *db.PageResult[models.Folder]
-	if folderPage.Skip {
+	switch {
+	case folderPage.Skip:
 		subfolders = emptyFolders()
-	} else {
+	case drive != nil:
+		subfolders, err = q.ListRootFoldersOnDrive(ctx, userID, drive.DriveID, drive.IncludeUnassigned, folderPage)
+	default:
 		subfolders, err = q.ListRootFolders(ctx, userID, folderPage)
-		if err != nil {
-			return nil, fmt.Errorf("list root folders: %w", err)
-		}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("list root folders: %w", err)
 	}
 
 	var files *db.PageResult[models.File]
-	if filePage.Skip {
+	switch {
+	case filePage.Skip:
 		files = emptyFiles()
-	} else {
+	case drive != nil:
+		files, err = q.ListRootFilesOnDrive(ctx, userID, drive.DriveID, drive.IncludeUnassigned, filePage)
+	default:
 		files, err = q.ListRootFiles(ctx, userID, filePage)
-		if err != nil {
-			return nil, fmt.Errorf("list root files: %w", err)
-		}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("list root files: %w", err)
 	}
 
 	return &FolderContents{
@@ -178,7 +197,10 @@ func (s *FolderService) Create(
 	}
 
 	// Verify the parent folder exists and belongs to this user. A child of a
-	// media folder is itself a media subcollection.
+	// media folder is itself a media subcollection, and — under the tier-first
+	// model — always inherits the parent's EXACT drive so a folder subtree can
+	// never straddle servers/tiers. Any client-supplied driveID is ignored for a
+	// subfolder.
 	if parentID != nil {
 		parent, err := s.getOwned(ctx, q, *parentID, userID)
 		if err != nil {
@@ -187,15 +209,21 @@ func (s *FolderService) Create(
 		if parent.Kind == models.FolderKindMedia {
 			kind = models.FolderKindMedia
 		}
-	}
-
-	if driveID != nil {
+		driveID = parent.DriveID
+	} else {
+		// Top-level folder: bind it to a drive. Use the client's choice when given
+		// (must be one of the user's allocations), else default to their primary
+		// drive so every top-level folder resolves to a concrete server & tier.
 		drives, err := s.queries.GetUserDrives(ctx, username, userID.String())
 		if err != nil {
 			return nil, fmt.Errorf("create folder: get user drives: %w", err)
 		}
-		if !driveIsAllocated(drives, *driveID) {
-			return nil, ErrDriveNotAllocated
+		if driveID != nil {
+			if !driveIsAllocated(drives, *driveID) {
+				return nil, ErrDriveNotAllocated
+			}
+		} else {
+			driveID = primaryDriveID(drives)
 		}
 	}
 
@@ -226,6 +254,54 @@ func driveIsAllocated(drives []db.UserDriveInfo, driveID uuid.UUID) bool {
 		}
 	}
 	return false
+}
+
+// primaryDriveID returns a pointer to the user's primary drive allocation, or
+// nil when the user has no allocations at all. Used to bind a new top-level
+// folder to a concrete server & tier when the client doesn't specify one.
+func primaryDriveID(drives []db.UserDriveInfo) *uuid.UUID {
+	for _, d := range drives {
+		if d.IsPrimary {
+			id := d.DriveID
+			return &id
+		}
+	}
+	return nil
+}
+
+// ptrEqUUID reports whether two optional UUIDs are equal, treating two nils as
+// equal (both "unassigned").
+func ptrEqUUID(a, b *uuid.UUID) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
+// sameEffectiveDrive reports whether two folder drive pins refer to the same
+// drive once NULL is resolved to the user's primary (a NULL drive_id resolves to
+// the primary drive at read time — see migration 055). Only hits the DB when the
+// raw pins differ and at least one is NULL.
+func (s *FolderService) sameEffectiveDrive(ctx context.Context, username string, userID uuid.UUID, a, b *uuid.UUID) (bool, error) {
+	if ptrEqUUID(a, b) {
+		return true, nil
+	}
+	if a != nil && b != nil {
+		return false, nil // both concrete and already known unequal
+	}
+	drives, err := s.queries.GetUserDrives(ctx, username, userID.String())
+	if err != nil {
+		return false, err
+	}
+	primary := primaryDriveID(drives)
+	ra, rb := a, b
+	if ra == nil {
+		ra = primary
+	}
+	if rb == nil {
+		rb = primary
+	}
+	return ptrEqUUID(ra, rb), nil
 }
 
 // GetMediaContents returns a media folder's metadata, its direct subcollections,
@@ -391,6 +467,7 @@ func (s *FolderService) Rename(
 func (s *FolderService) Move(
 	ctx context.Context,
 	folderID, targetID, userID uuid.UUID,
+	username string,
 ) (*models.Folder, error) {
 	q, tx, err := s.queries.ForUser(ctx, userID)
 	if err != nil {
@@ -398,11 +475,28 @@ func (s *FolderService) Move(
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	if _, err := s.getOwned(ctx, q, folderID, userID); err != nil {
+	src, err := s.getOwned(ctx, q, folderID, userID)
+	if err != nil {
 		return nil, err
 	}
-	if _, err := s.getOwned(ctx, q, targetID, userID); err != nil {
+	target, err := s.getOwned(ctx, q, targetID, userID)
+	if err != nil {
 		return nil, ErrFolderNotFound
+	}
+
+	// Tier-first model: a plain reparent may not cross drives (server & tier).
+	// Moving a folder's data to a different drive is a physical relocation and
+	// must go through the migration flow (RequestDriveMigration), not a reparent
+	// — which only rewrites parent_id and would otherwise leave the subtree's
+	// bytes/drive_id inconsistent with its new ancestor. Compares EFFECTIVE
+	// drives so a legacy NULL drive_id (which resolves to the primary) and the
+	// concrete primary drive count as the same drive.
+	sameDrive, err := s.sameEffectiveDrive(ctx, username, userID, src.DriveID, target.DriveID)
+	if err != nil {
+		return nil, fmt.Errorf("move folder: resolve drives: %w", err)
+	}
+	if !sameDrive {
+		return nil, ErrCrossDriveMove
 	}
 
 	cycle, err := s.queries.FolderWouldCreateCycle(ctx, folderID, targetID)
@@ -517,6 +611,12 @@ var ErrDuplicateFolderName = errors.New("a folder with that name already exists 
 
 // ErrFolderCycle is returned when a move would make a folder its own descendant.
 var ErrFolderCycle = errors.New("cannot move a folder into itself or one of its subfolders")
+
+// ErrCrossDriveMove is returned when a plain reparent (Move) would place a
+// folder under a parent on a different drive (server & tier). Crossing drives
+// physically relocates data and must go through the drive-migration flow, which
+// keeps the folder's subtree bytes and drive_id consistent with the destination.
+var ErrCrossDriveMove = errors.New("can't move a folder to a different server or tier here — use the storage-change option instead")
 
 // ErrNotMediaCollection is returned when an operation requires a media folder
 // but the target folder is a regular folder.

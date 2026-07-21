@@ -142,6 +142,26 @@ func TestIsSimpleXMLName(t *testing.T) {
 	}
 }
 
+func TestComputeQuotaInfo(t *testing.T) {
+	cases := []struct {
+		name                  string
+		quotaBytes, usedBytes int64
+		wantUsed, wantAvail   int64
+	}{
+		{"normal", 100, 40, 40, 60},
+		{"usage exceeds quota (admin lowered allocation)", 100, 150, 150, 0},
+		{"unconfigured or orphaned allocation", 0, 0, 0, 0},
+		{"exact fit", 100, 100, 100, 0},
+	}
+	for _, tc := range cases {
+		got := computeQuotaInfo(tc.quotaBytes, tc.usedBytes)
+		if got.usedBytes != tc.wantUsed || got.availableBytes != tc.wantAvail {
+			t.Errorf("%s: computeQuotaInfo(%d, %d) = {used:%d avail:%d}, want {used:%d avail:%d}",
+				tc.name, tc.quotaBytes, tc.usedBytes, got.usedBytes, got.availableBytes, tc.wantUsed, tc.wantAvail)
+		}
+	}
+}
+
 func TestWriteFileResponseEscapesXMLAndForcesOctetStream(t *testing.T) {
 	var buf bytes.Buffer
 	writeFileResponse(&buf, "/dav/tok/a&b.txt", `evil<name>&"`, 42, time.Unix(0, 0))

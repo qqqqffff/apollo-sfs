@@ -53,18 +53,18 @@ type FileServicer interface {
 	BeginChunkedUpload(ctx context.Context, sess *services.UploadSession) error
 	EncryptAndUploadPart(ctx context.Context, sess *services.UploadSession, index int, data []byte)
 	FinalizeChunkedUpload(ctx context.Context, sess *services.UploadSession) (*models.File, error)
-	RequestDriveMigration(ctx context.Context, userID uuid.UUID, username string, folderID, toDriveID uuid.UUID) (*models.FolderDriveMigration, error)
+	RequestDriveMigration(ctx context.Context, userID uuid.UUID, username string, folderID, toDriveID uuid.UUID, destParentID *uuid.UUID) (*models.FolderDriveMigration, error)
 	GetLatestDriveMigration(ctx context.Context, userID, folderID uuid.UUID) (*services.DriveMigrationStatus, error)
 }
 
 // FolderServicer is the subset of *services.FolderService used by route handlers.
 type FolderServicer interface {
-	ListRoot(ctx context.Context, userID uuid.UUID, folderPage, filePage db.PageInput) (*services.FolderContents, error)
+	ListRoot(ctx context.Context, userID uuid.UUID, folderPage, filePage db.PageInput, drive *services.DriveFilter) (*services.FolderContents, error)
 	GetContents(ctx context.Context, folderID, userID uuid.UUID, folderPage, filePage db.PageInput) (*services.FolderContents, error)
 	GetMediaContents(ctx context.Context, folderID, userID uuid.UUID, sort db.MediaSort, hidden db.HiddenFilter, folderPage, filePage db.PageInput) (*services.FolderContents, error)
 	Create(ctx context.Context, userID uuid.UUID, parentID *uuid.UUID, name, kind, username string, driveID *uuid.UUID) (*models.Folder, error)
 	Rename(ctx context.Context, folderID, userID uuid.UUID, name string) (*models.Folder, error)
-	Move(ctx context.Context, folderID, targetID, userID uuid.UUID) (*models.Folder, error)
+	Move(ctx context.Context, folderID, targetID, userID uuid.UUID, username string) (*models.Folder, error)
 	Delete(ctx context.Context, folderID, userID uuid.UUID) error
 	CopyToSubcollection(ctx context.Context, userID, collectionID, fileID uuid.UUID) error
 	MoveSubcollectionItem(ctx context.Context, userID, fileID, fromCollectionID, toCollectionID uuid.UUID) error

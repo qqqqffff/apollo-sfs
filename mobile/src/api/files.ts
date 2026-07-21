@@ -16,7 +16,8 @@ export interface ApiFile {
   latitude?: number;
   longitude?: number;
   hidden: boolean;
-  // Origin of the upload: "web" | "device" | "google_drive" | "google_photos".
+  // Origin of the upload: "web" | "device" | "google_drive" | "google_photos" |
+  // "email_backup_gmail" | "email_backup_microsoft" | "file_server".
   source?: string;
   created_at: string;
   updated_at: string;

@@ -93,16 +93,18 @@ export function useFileUpload() {
     liveRef.current = { ...liveRef.current, items, loadedBytes }
   }
 
-  // Upload a single file using the presigned URL flow.
+  // Upload a single file using the presigned URL flow. driveId pins a root
+  // upload (folderId null) to the drive whose view the user is in.
   async function uploadSingleFile(
     file: globalThis.File,
     folderId: string | null,
     itemIndex: number,
     ignoreRedirect: boolean,
+    driveId: string | null,
   ): Promise<void> {
     if (file.size <= CHUNK_SIZE) {
       // ── Presigned single-file upload ───────────────────────────────────────
-      const { url } = await presignUpload(file.name, file.size, folderId, ignoreRedirect)
+      const { url } = await presignUpload(file.name, file.size, folderId, ignoreRedirect, driveId)
       await uploadFilePresigned(url, file, (xhrLoaded, xhrTotal) => {
         const scaled = xhrTotal > 0
           ? Math.min(Math.round((xhrLoaded / xhrTotal) * file.size), file.size)
@@ -120,6 +122,7 @@ export function useFileUpload() {
       file.size,
       folderId,
       ignoreRedirect,
+      driveId,
     )
 
     for (let ci = 0; ci < totalChunks; ci++) {
@@ -144,6 +147,7 @@ export function useFileUpload() {
     folderId: string | null,
     onAnySuccess: () => void,
     ignoreRedirectIndices?: Set<number>,
+    driveId?: string | null,
   ) => {
     const items: FileUploadItem[] = files.map((f) => ({
       name: f.name,
@@ -170,7 +174,7 @@ export function useFileUpload() {
           await sleep(RETRY_DELAYS_MS[attempt - 1])
         }
         try {
-          await uploadSingleFile(file, folderId, i, ignoreRedirectIndices?.has(i) ?? false)
+          await uploadSingleFile(file, folderId, i, ignoreRedirectIndices?.has(i) ?? false, driveId ?? null)
           patchItem(i, { loaded: file.size, status: 'done' })
           succeededCount++
           liveRef.current = { ...liveRef.current, succeeded: succeededCount }

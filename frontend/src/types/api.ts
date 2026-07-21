@@ -86,6 +86,22 @@ export interface File {
   updated_at: string
   // Only present on the single-file GET endpoint; undefined in list responses.
   has_low_variant?: boolean
+  // Upload origin: "web" | "device" | "google_drive" | "google_photos" |
+  // "email_backup_gmail" | "email_backup_microsoft" | "file_server".
+  source: string
+  // Set when uploaded/synced from a registered mobile device; resolve against
+  // listDevices() to show a device name. Undefined for web/import uploads.
+  device_id?: string
+}
+
+// Device mirrors a row in the `devices` table (mobile device registrations).
+export interface Device {
+  id: string
+  user_id: string
+  name: string
+  platform: 'ios' | 'android'
+  created_at: string
+  last_seen_at: string
 }
 
 // MathGameScore mirrors a row in the backend `math_game_scores` table: one
@@ -122,11 +138,15 @@ export interface Folder {
 
 export type FolderDriveMigrationStatus = 'pending' | 'in_progress' | 'completed' | 'failed'
 
-// FolderDriveMigration tracks a single job moving a folder's direct files
-// from one drive to another (potentially across servers/tiers).
+// FolderDriveMigration tracks a single job moving a folder's whole subtree
+// (its files plus every descendant folder's files) from one drive to another
+// server & tier, and reparenting the folder under dest_parent_id on arrival.
 export interface FolderDriveMigration {
   id: string
   folder_id: string
+  // Destination folder the folder is reparented under on the target drive.
+  // Null = the destination drive's root (folder becomes top-level there).
+  dest_parent_id: string | null
   status: FolderDriveMigrationStatus
   total_files: number
   files_moved: number
@@ -158,6 +178,10 @@ export interface UserPreferences {
   // Warn in the notification bell when the most recent Google or email backup
   // is more than 30 days old. Premium-only; default false.
   backup_stale_notify: boolean
+  // Drive (server & tier) the file browser lands on for a multi-drive user.
+  // Null = no default (falls back to the primary drive / drive picker). A
+  // display preference, distinct from the upload-routing primary drive.
+  default_drive_id: string | null
   created_at: string
   updated_at: string
 }

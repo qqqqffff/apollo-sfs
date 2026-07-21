@@ -2,7 +2,22 @@ import { useQuery } from '@tanstack/react-query'
 import { useLayoutEffect, useRef, useState } from 'react'
 import { MdChevronRight } from 'react-icons/md'
 import { ancestorsQueryOptions } from '../api/folders'
+import { adminGetUserAncestors } from '../api/admin'
 import type { Folder } from '../types/api'
+
+// The breadcrumb never grows past this share of the viewport width — even on
+// an ultra-wide window with a short path that would otherwise fit in full, we
+// still collapse ancestors into "..". Keeps the header row from being
+// dominated by a long path just because the flex container happens to have
+// room for it.
+const MAX_WIDTH_RATIO = 0.4
+
+type FolderDropHandlers = {
+  onDragEnter: (e: React.DragEvent) => void
+  onDragOver: (e: React.DragEvent) => void
+  onDragLeave: (e: React.DragEvent) => void
+  onDrop: (e: React.DragEvent) => void
+}
 
 interface Props {
   folderId: string | 'root'
@@ -10,36 +25,71 @@ interface Props {
   // Optional trailing slot — the share-directory button sits here on premium
   // accounts so the breadcrumb row stays as one visual unit.
   trailing?: React.ReactNode
+  // Set while an admin is browsing another user's files via impersonation —
+  // routes the ancestors lookup through the admin-scoped endpoint instead of
+  // the caller's own, since the folders belong to a different user.
+  asUsername?: string
+  // Tier-first browser: when set, the leading crumb is this drive (server &
+  // tier) rather than a generic "root", with an "All storage" step before it
+  // for multi-drive users. onNavigateDrive goes to the drive's root; onNavigate-
+  // AllStorage goes to the super-level drive picker.
+  drive?: { id: string; label: string; type: 'nvme' | 'hdd'; showAllStorage: boolean }
+  onNavigateDrive?: (driveId: string) => void
+  onNavigateAllStorage?: () => void
+  // Drag-to-move: dropping a file/folder being dragged (elsewhere in the
+  // browser) onto an ancestor crumb moves it there. Only real folders are
+  // droppable — not the root/drive/"All storage" crumbs, which have no
+  // folder id to move into. Shares state/handlers with the folder list's own
+  // drop targets (useFileDrag) so hover-to-open behaves identically in both.
+  getFolderDropHandlers?: (folder: Folder) => FolderDropHandlers
+  dragOverFolderId?: string | null
 }
 
 // FolderBreadcrumb renders the clickable path from root → current folder.
 // The leading "root" is always the root sentinel. When the path doesn't fit
 // the available width, the leftmost segments collapse into a single ".."
 // button that navigates to the immediate parent of the current folder.
-export function FolderBreadcrumb({ folderId, onNavigate, trailing }: Props) {
+export function FolderBreadcrumb({
+  folderId, onNavigate, trailing, asUsername, drive, onNavigateDrive, onNavigateAllStorage,
+  getFolderDropHandlers, dragOverFolderId,
+}: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null)
-  const [available, setAvailable] = useState<number>(0)
+  const [containerWidth, setContainerWidth] = useState<number>(0)
+  const [viewportWidth, setViewportWidth] = useState<number>(() => window.innerWidth)
   const isRoot = folderId === 'root'
   const { data, isLoading } = useQuery({
-    ...ancestorsQueryOptions(folderId),
+    queryKey: ['folders', folderId, 'ancestors', asUsername ?? ''] as const,
+    queryFn: asUsername
+      ? () => adminGetUserAncestors(asUsername, folderId)
+      : ancestorsQueryOptions(folderId).queryFn,
     enabled: !isRoot,
   })
 
   const ancestors: Folder[] = data?.ancestors ?? []
 
   // Track container width so we know when to truncate. ResizeObserver fires
-  // on initial mount and any subsequent layout change.
+  // on initial mount and any subsequent layout change; the window resize
+  // listener keeps the viewport-ratio cap (below) current too.
   useLayoutEffect(() => {
     const el = containerRef.current
     if (!el) return
-    setAvailable(el.clientWidth)
+    setContainerWidth(el.clientWidth)
     const ro = new ResizeObserver((entries) => {
       const w = entries[0]?.contentRect.width ?? el.clientWidth
-      setAvailable(Math.floor(w))
+      setContainerWidth(Math.floor(w))
     })
     ro.observe(el)
-    return () => ro.disconnect()
+    const onResize = () => setViewportWidth(window.innerWidth)
+    window.addEventListener('resize', onResize)
+    return () => {
+      ro.disconnect()
+      window.removeEventListener('resize', onResize)
+    }
   }, [])
+
+  // Available space is capped at a ratio of the viewport, not just whatever
+  // room the flex container offers — see MAX_WIDTH_RATIO above.
+  const available = containerWidth === 0 ? 0 : Math.min(containerWidth, viewportWidth * MAX_WIDTH_RATIO)
 
   // Estimate how many right-most ancestor segments fit. We approximate with
   // ~10 px per character (text-sm + chevron gap) which is conservative
@@ -74,13 +124,34 @@ export function FolderBreadcrumb({ folderId, onNavigate, trailing }: Props) {
       ref={containerRef}
       className="flex items-center gap-1 text-sm text-gray-600 mb-5 min-w-0"
     >
-      <Crumb
-        label="root"
-        title="Root"
-        clickable={!isRoot}
-        onClick={() => onNavigate(undefined)}
-        current={isRoot}
-      />
+      {drive && drive.showAllStorage && (
+        <>
+          <Crumb
+            label="All storage"
+            title="All storage"
+            clickable
+            onClick={() => onNavigateAllStorage?.()}
+          />
+          <Sep />
+        </>
+      )}
+      {drive ? (
+        <Crumb
+          label={drive.label}
+          title={drive.label}
+          clickable={!isRoot}
+          onClick={() => onNavigateDrive?.(drive.id)}
+          current={isRoot}
+        />
+      ) : (
+        <Crumb
+          label="root"
+          title="Root"
+          clickable={!isRoot}
+          onClick={() => onNavigate(undefined)}
+          current={isRoot}
+        />
+      )}
       {!isRoot && truncated && parentOfCurrent && (
         <>
           <Sep />
@@ -89,6 +160,8 @@ export function FolderBreadcrumb({ folderId, onNavigate, trailing }: Props) {
             title="Up one level"
             clickable
             onClick={() => onNavigate(parentOfCurrent.id)}
+            dropHandlers={getFolderDropHandlers?.(parentOfCurrent)}
+            dragOver={dragOverFolderId === parentOfCurrent.id}
           />
         </>
       )}
@@ -101,6 +174,8 @@ export function FolderBreadcrumb({ folderId, onNavigate, trailing }: Props) {
               label={f.name}
               title={f.name}
               clickable={!isCurrent}
+              dropHandlers={!isCurrent ? getFolderDropHandlers?.(f) : undefined}
+              dragOver={!isCurrent && dragOverFolderId === f.id}
               onClick={() => onNavigate(f.id)}
               current={isCurrent}
             />
@@ -113,8 +188,16 @@ export function FolderBreadcrumb({ folderId, onNavigate, trailing }: Props) {
 }
 
 function Crumb({
-  label, title, onClick, clickable, current,
-}: { label: string; title: string; onClick: () => void; clickable: boolean; current?: boolean }) {
+  label, title, onClick, clickable, current, dropHandlers, dragOver,
+}: {
+  label: string
+  title: string
+  onClick: () => void
+  clickable: boolean
+  current?: boolean
+  dropHandlers?: FolderDropHandlers
+  dragOver?: boolean
+}) {
   if (!clickable) {
     return (
       <span
@@ -129,7 +212,10 @@ function Crumb({
     <button
       onClick={onClick}
       title={title}
-      className="truncate bg-transparent border-0 p-0 cursor-pointer text-blue-600 hover:underline"
+      {...dropHandlers}
+      className={`truncate bg-transparent border-0 p-0 cursor-pointer text-blue-600 hover:underline ${
+        dragOver ? 'rounded px-1 -mx-1 bg-blue-50 ring-2 ring-blue-300 ring-inset' : ''
+      }`}
     >
       {label}
     </button>

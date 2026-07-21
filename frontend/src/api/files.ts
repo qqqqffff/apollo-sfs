@@ -97,17 +97,21 @@ export interface PresignUploadResponse {
   expires_at: string
 }
 
-/** Request a presigned single-file upload URL. */
+/** Request a presigned single-file upload URL. driveId pins a ROOT upload
+ * (folderId null) to a specific drive (the tier-first browser's current drive);
+ * ignored when a folder is targeted. */
 export function presignUpload(
   name: string,
   size: number,
   folderId: string | null,
   ignoreRedirect?: boolean,
+  driveId?: string | null,
 ): Promise<PresignUploadResponse> {
   return post<PresignUploadResponse>('/files/upload/presign', {
     name,
     size,
     folder_id: folderId ?? undefined,
+    drive_id: folderId ? undefined : (driveId ?? undefined),
     ignore_redirect: ignoreRedirect || undefined,
   })
 }
@@ -118,19 +122,22 @@ export interface PresignChunkedUploadResponse {
   expires_at: string
 }
 
-/** Request a presigned session token for a chunked upload. */
+/** Request a presigned session token for a chunked upload. driveId pins a ROOT
+ * upload (folderId null) to a specific drive; ignored when a folder is targeted. */
 export function presignChunkedUpload(
   name: string,
   totalChunks: number,
   totalSize: number,
   folderId: string | null,
   ignoreRedirect?: boolean,
+  driveId?: string | null,
 ): Promise<PresignChunkedUploadResponse> {
   return post<PresignChunkedUploadResponse>('/files/upload/presign/init', {
     name,
     total_chunks: totalChunks,
     total_size: totalSize,
     folder_id: folderId ?? undefined,
+    drive_id: folderId ? undefined : (driveId ?? undefined),
     ignore_redirect: ignoreRedirect || undefined,
   })
 }

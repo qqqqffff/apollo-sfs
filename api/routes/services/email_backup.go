@@ -187,7 +187,7 @@ func (s *EmailBackupService) BackupMessage(ctx context.Context, in EmailBackupMe
 		FolderID:       &folder.ID,
 		Name:           emailBackupFileName(in.Message.Subject, in.ProviderMessageID, receivedAt),
 		MimeType:       "application/json",
-		Source:         "email_backup",
+		Source:         "email_backup_" + in.Provider,
 		IgnoreRedirect: true,
 		Reader:         bytes.NewReader(raw),
 	})

@@ -6,6 +6,10 @@
  * Listens on PORT (default 9228) and handles:
  *   POST /run-tests — runs backend/frontend/frontend_e2e/mobile/recognition
  *                     suites in turn and returns a combined JSON report
+ *   GET  /progress  — live status of the in-flight run (or the last one), so
+ *                     a caller polling during the (multi-minute) POST above
+ *                     can show which suite is currently running and the
+ *                     results of whichever suites have already finished
  *   GET  /health    — liveness probe
  *
  * Only one run executes at a time; concurrent requests receive 503.
@@ -20,6 +24,11 @@
  * A suite whose structured output can't be parsed (crashed before producing
  * one, unexpected format) still reports passed/exit_code/output/duration_ms —
  * it just omits `tests`/`coverage` rather than failing the whole run.
+ *
+ * Every suite process is killed if it runs past SUITE_TIMEOUT_MS (5 minutes)
+ * so one hung suite (e.g. Playwright waiting on a dead server) can't block
+ * the rest of the run forever — the killed suite is reported as a failure
+ * with a note in its output, and the run continues to the next suite.
  */
 
 const { createServer } = require('node:http');
@@ -30,8 +39,19 @@ const fs = require('node:fs/promises');
 const PORT = Number(process.env.TEST_SERVER_PORT ?? 9228);
 const ROOT = __dirname;
 const RECOGNITION_PYTHON = process.env.RECOGNITION_PYTHON ?? '/opt/recognition-venv/bin/python';
+const SUITE_TIMEOUT_MS = 5 * 60 * 1000;
 
-let running = false;
+// Execution order the suites always run in — also what GET /progress reports
+// as `order`, so a caller can render "pending" placeholders for suites that
+// haven't started yet.
+const SUITE_ORDER = ['backend', 'frontend', 'frontend_e2e', 'mobile', 'recognition'];
+
+// Tracks the in-flight (or most recently finished) run for GET /progress.
+// Reset at the start of every POST /run-tests; `completed[key]` is filled in
+// as each suite finishes, in the same { enabled, result } shape as the final
+// report, so a caller can render a finished suite identically whether it
+// came from here or from the final POST response.
+let currentRun = { running: false, currentSuite: null, completed: {} };
 
 function json(res, status, body) {
   const payload = JSON.stringify(body);
@@ -226,11 +246,17 @@ function parsePytestCoverage(covReport) {
 // stdout — e.g. Go's -json stream, which stderr build-error text would corrupt
 // if merged in). Never rejects, so one suite's crash can't take down the rest
 // of the run.
-function exec(command, args, cwd, env = {}) {
+//
+// Killed (SIGTERM, escalating to SIGKILL after a 5s grace period) if it runs
+// past timeoutMs — reported as a failed, timed-out result rather than left to
+// hang, so one stuck suite can't block the rest of the run indefinitely.
+function exec(command, args, cwd, env = {}, timeoutMs = SUITE_TIMEOUT_MS) {
   return new Promise((resolve) => {
     const start = Date.now();
     const stdoutChunks = [];
     const stderrChunks = [];
+    let settled = false;
+    let timedOut = false;
 
     let child;
     try {
@@ -239,25 +265,39 @@ function exec(command, args, cwd, env = {}) {
         env: { ...process.env, CI: 'true', FORCE_COLOR: '0', ...env },
       });
     } catch (err) {
-      resolve({ exitCode: -1, stdout: '', stderr: err.message, durationMs: Date.now() - start });
+      resolve({ exitCode: -1, stdout: '', stderr: err.message, durationMs: Date.now() - start, timedOut: false });
       return;
     }
+
+    const killTimer = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGTERM');
+      setTimeout(() => {
+        try { child.kill('SIGKILL'); } catch { /* already exited */ }
+      }, 5000);
+    }, timeoutMs);
 
     child.stdout.on('data', (chunk) => stdoutChunks.push(chunk));
     child.stderr.on('data', (chunk) => stderrChunks.push(chunk));
 
-    child.on('close', (code) => {
+    function finish(exitCode, extraErr) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(killTimer);
+      let stderr = Buffer.concat(stderrChunks).toString();
+      if (extraErr) stderr += extraErr;
+      if (timedOut) stderr += `\n[test-runner] suite killed after exceeding its ${Math.round(timeoutMs / 1000)}s timeout\n`;
       resolve({
-        exitCode: code ?? -1,
+        exitCode,
         stdout: Buffer.concat(stdoutChunks).toString(),
-        stderr: Buffer.concat(stderrChunks).toString(),
+        stderr,
         durationMs: Date.now() - start,
+        timedOut,
       });
-    });
+    }
 
-    child.on('error', (err) => {
-      resolve({ exitCode: -1, stdout: '', stderr: err.message, durationMs: Date.now() - start });
-    });
+    child.on('close', (code) => finish(timedOut ? -1 : (code ?? -1)));
+    child.on('error', (err) => finish(-1, err.message));
   });
 }
 
@@ -374,38 +414,59 @@ async function runRecognitionSuite() {
 
 // Runs every suite in sequence (not in parallel — this container has limited
 // CPU/RAM and go test/npm test/Playwright/pytest would otherwise contend for
-// the same cores) and assembles the combined report.
+// the same cores) and assembles the combined report. Updates currentRun
+// before/after each suite so a concurrent GET /progress reflects live status —
+// which suite is running now, and the { enabled, result } of every suite
+// that's already finished, in the same shape the final report uses.
 async function runAllSuites() {
-  const backend = await runBackendSuite();
-  const frontend = await runJestSuite(path.join(ROOT, 'frontend'));
-  const frontendE2E = await runPlaywrightSuite();
-  const mobile = await runJestSuite(path.join(ROOT, 'mobile'));
-  const recognition = await runRecognitionSuite();
+  currentRun = { running: true, currentSuite: null, completed: {} };
 
-  return {
-    backend: { enabled: true, result: backend },
-    frontend: { enabled: true, result: frontend },
-    frontend_e2e: { enabled: true, result: frontendE2E },
-    mobile: { enabled: true, result: mobile },
-    recognition: { enabled: true, result: recognition },
+  const runners = {
+    backend: runBackendSuite,
+    frontend: () => runJestSuite(path.join(ROOT, 'frontend')),
+    frontend_e2e: runPlaywrightSuite,
+    mobile: () => runJestSuite(path.join(ROOT, 'mobile')),
+    recognition: runRecognitionSuite,
   };
+
+  const report = {};
+  for (const key of SUITE_ORDER) {
+    currentRun.currentSuite = key;
+    const result = await runners[key]();
+    const entry = { enabled: true, result };
+    report[key] = entry;
+    currentRun.completed[key] = entry;
+  }
+
+  currentRun.currentSuite = null;
+  currentRun.running = false;
+  return report;
 }
 
 const server = createServer((req, res) => {
   if (req.method === 'GET' && req.url === '/health') {
-    json(res, 200, { status: 'ok', running });
+    json(res, 200, { status: 'ok', running: currentRun.running });
+    return;
+  }
+
+  if (req.method === 'GET' && req.url === '/progress') {
+    json(res, 200, {
+      running: currentRun.running,
+      current_suite: currentRun.currentSuite,
+      order: SUITE_ORDER,
+      completed: currentRun.completed,
+    });
     return;
   }
 
   if (req.method === 'POST' && req.url === '/run-tests') {
-    if (running) {
+    if (currentRun.running) {
       json(res, 503, { error: 'a test run is already in progress' });
       return;
     }
-    running = true;
     runAllSuites()
-      .then((report) => { running = false; json(res, 200, report); })
-      .catch((err) => { running = false; json(res, 500, { error: err.message }); });
+      .then((report) => { json(res, 200, report); })
+      .catch((err) => { currentRun.running = false; json(res, 500, { error: err.message }); });
     return;
   }
 
@@ -428,4 +489,5 @@ module.exports = {
   parsePytestReport,
   parsePytestCoverage,
   summarize,
+  exec,
 };

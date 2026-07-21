@@ -18,20 +18,26 @@ Swarm-only, like `recognition`: the deprecated `docker-compose.yml` has no `test
 
 Sequential, not parallel — this container has limited CPU/RAM (it runs on the same dev host as everything else) and five toolchains contending for the same cores at once isn't worth the wall-clock savings.
 
+Each suite process is killed (`SIGTERM`, escalating to `SIGKILL` after a 5s grace period) if it runs past `SUITE_TIMEOUT_MS` (5 minutes, hardcoded in `server.js`) — reported as a failed, timed-out result rather than left to hang, so one stuck suite (e.g. Playwright waiting on a dead `frontend` container) can't block the rest of the run indefinitely. The Go API's own call to `POST /run-tests` (`runnerTimeout` in `api/routes/admin/tests.go`) is set generously above the worst case of every suite timing out back to back.
+
 ## Files
 
 - `Dockerfile` — multi-toolchain image. Go's official image is used only to donate a compiled toolchain (`COPY --from=go-toolchain /usr/local/go`) onto a `node:22-bookworm-slim` base (needed for Playwright's Chromium, which requires glibc); Python comes from Debian bookworm's `apt` package (close enough to the recognition service's own `python:3.12-slim` for running tests, even though it isn't an exact version match — this is test tooling, not a deployed image). Recognition's Python deps install into a dedicated venv (`/opt/recognition-venv`) since Debian's system Python is "externally managed" (PEP 668).
-- `server.js` — the sidecar's HTTP server (CommonJS, no build step). `POST /run-tests` runs all five suites and returns the combined report; `GET /health` is a liveness probe.
+- `server.js` — the sidecar's HTTP server (CommonJS, no build step). `POST /run-tests` runs all five suites and returns the combined report; `GET /progress` reports live status of the in-flight (or most recently finished) run — which suite is currently executing and the `{ enabled, result }` of every suite that's already finished, in the same shape the final report uses — so a caller can poll it during the multi-minute `POST /run-tests` call instead of waiting in the dark; `GET /health` is a liveness probe.
 
 **Build context must be the repo root**, not this directory — the Dockerfile needs `api/`, `frontend/`, `mobile/`, and `recognition/` all in its build context simultaneously. See `docker-stack.yml`'s `test-runner` service (image `apollo-sfs_test-runner:${TEST_RUNNER_TAG}`) and `deploy.sh`'s `IMAGE_CONTEXT[test-runner]="."` / `IMAGE_DOCKERFILE[test-runner]="test-runner/Dockerfile"`.
 
 ## Triggering a run
 
-Normally via the admin metrics page's "Run tests" button. To trigger manually from the manager (the service publishes no ports and is reachable only on the overlay network, same as `recognition`):
+Normally via the admin metrics page's "Run tests" button, which polls `GET /admin/system/tests/progress` (proxying this sidecar's `GET /progress`) every few seconds while the run is in flight to show live per-suite status. To trigger manually from the manager (the service publishes no ports and is reachable only on the overlay network, same as `recognition`):
 
 ```bash
 docker exec "$(docker ps -q -f name=apollo-sfs_api)" \
   wget -qO- --post-data='' http://test-runner:9228/run-tests
+
+# Poll progress from another shell while that's running:
+docker exec "$(docker ps -q -f name=apollo-sfs_api)" \
+  wget -qO- http://test-runner:9228/progress
 ```
 
 ## Report shape

@@ -42,6 +42,7 @@ import { StorageUpgradeModal, STORAGE_PROMPT_THRESHOLD } from '../../components/
 import { ShareModal } from '../../components/ShareModal'
 import { DeleteConfirmModal, readSkipDeleteCookie } from '../../components/DeleteConfirmModal'
 import { FolderBreadcrumb } from '../../components/FolderBreadcrumb'
+import { AccountBadges } from '../../components/GroupBadge'
 import { RowActionsMenu, MenuRow } from '../../components/RowActionsMenu'
 import { TierIcon } from '../../components/TierIcon'
 import { StorageTierBars } from '../../components/StorageTierBars'
@@ -105,7 +106,9 @@ function RouteComponent() {
 
   return (
     <FilesLayout>
-      <FolderView folderId={folderId ?? 'root'} fileId={fileId} />
+      {folderId
+        ? <FolderView folderId={folderId} fileId={fileId} />
+        : <RootView driveParam={driveParam} fileId={fileId} />}
     </FilesLayout>
   )
 }
@@ -116,7 +119,7 @@ function RouteComponent() {
 // tier-first grouping is skipped — the admin sees the target user's whole root
 // flat, since the drive list is the caller's own — so it renders the plain
 // unscoped root exactly as before.
-function RootView({ driveParam }: { driveParam?: string }) {
+function RootView({ driveParam, fileId }: { driveParam?: string; fileId?: string }) {
   const { impersonatedUser } = useImpersonation()
   const { data: prefs } = useQuery(preferencesQueryOptions)
   const { data: myServers, isLoading } = useQuery({
@@ -125,15 +128,15 @@ function RootView({ driveParam }: { driveParam?: string }) {
     enabled: impersonatedUser === null,
   })
 
-  if (impersonatedUser !== null) return <FolderView folderId="root" />
+  if (impersonatedUser !== null) return <FolderView folderId="root" fileId={fileId} />
 
   if (isLoading) return <p className="text-sm text-gray-500">Loading…</p>
   const servers = myServers ?? []
 
   // No drives yet → plain root (its empty-state messaging applies). A single
   // drive always lands straight in it — there's no drive layer to choose from.
-  if (servers.length === 0) return <FolderView folderId="root" />
-  if (servers.length === 1) return <FolderView folderId="root" driveId={servers[0].drive_id} />
+  if (servers.length === 0) return <FolderView folderId="root" fileId={fileId} />
+  if (servers.length === 1) return <FolderView folderId="root" driveId={servers[0].drive_id} fileId={fileId} />
 
   // 'all' is the explicit "show the picker" sentinel set by the All storage
   // link, so it wins over the saved-default auto-landing (otherwise clicking
@@ -141,12 +144,12 @@ function RootView({ driveParam }: { driveParam?: string }) {
   if (driveParam === DRIVE_OVERVIEW) return <DrivePicker servers={servers} />
 
   const named = driveParam && servers.find((s) => s.drive_id === driveParam)
-  if (named) return <FolderView folderId="root" driveId={named.drive_id} />
+  if (named) return <FolderView folderId="root" driveId={named.drive_id} fileId={fileId} />
 
   // Bare /client (no valid drive): land in the saved default when it still
   // exists, otherwise show the picker.
   const dflt = prefs?.default_drive_id && servers.find((s) => s.drive_id === prefs.default_drive_id)
-  if (dflt) return <FolderView folderId="root" driveId={dflt.drive_id} />
+  if (dflt) return <FolderView folderId="root" driveId={dflt.drive_id} fileId={fileId} />
   return <DrivePicker servers={servers} />
 }
 
@@ -260,7 +263,7 @@ function FileView({ fileId }: { fileId: string }) {
 
 // ── Folder view ───────────────────────────────────────────────────────────────
 
-function FolderView({ folderId, fileId }: { folderId: string | 'root'; fileId?: string }) {
+function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; fileId?: string; driveId?: string }) {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const { notify } = useNotification()
@@ -847,7 +850,7 @@ function FolderView({ folderId, fileId }: { folderId: string | 'root'; fileId?: 
               </div>
             )}
           </div>
-        ) : (
+        ) : !readOnly && currentDrive ? (
           <div className="mb-5">
             {driveCrumb?.showAllStorage && (
               <button
@@ -860,27 +863,25 @@ function FolderView({ folderId, fileId }: { folderId: string | 'root'; fileId?: 
             <div className="flex items-center gap-3">
               <FilesSidebarToggle />
               <h2 className="text-lg font-semibold text-gray-900 mt-0 mb-0 flex items-center gap-1.5">
-                {!readOnly && currentDrive
-                  ? (<><TierIcon type={currentDrive.drive_type} /> {tierLabel(currentDrive.drive_type)} · {currentDrive.name}</>)
-                  : readOnly ? `${impersonatedUser!.username}'s Files` : 'My Files'}
+                <TierIcon type={currentDrive.drive_type} /> {tierLabel(currentDrive.drive_type)} · {currentDrive.name}
               </h2>
               {(user?.is_premium || user?.is_admin) && (
                 <AccountBadges user={user} className="text-[10px]" />
               )}
             </div>
-          )}
-        </div>
-      ) : (
-        <div className="flex items-center gap-3 mb-5">
-          {/* The sidebar drawer is a file-browsing/actions tool — not applicable
-              on the storage-preview (root) screen, so it's not rendered here at
-              all (subfolder headers above still show it). */}
-          <h2 className="text-lg font-semibold text-gray-900 mt-0 mb-0">
-            {readOnly ? `${impersonatedUser!.username}'s Storage` : 'My Storage'}
-          </h2>
-          <DriveInfoButton folder={null} servers={myServers} isAdmin={!!user?.is_admin} align="left" />
-        </div>
-      )}
+          </div>
+        ) : (
+          <div className="flex items-center gap-3 mb-5">
+            {/* The sidebar drawer is a file-browsing/actions tool — not applicable
+                on the storage-preview (root) screen, so it's not rendered here at
+                all (subfolder headers above still show it). */}
+            <h2 className="text-lg font-semibold text-gray-900 mt-0 mb-0">
+              {readOnly ? `${impersonatedUser!.username}'s Storage` : 'My Storage'}
+            </h2>
+            <DriveInfoButton folder={null} servers={myServers} isAdmin={!!user?.is_admin} align="left" />
+          </div>
+        )
+      })()}
 
       {!readOnly && (
         <div className={`gap-2 mb-4 ${folderId === 'root' ? 'hidden sm:flex' : 'flex'}`}>
@@ -1130,42 +1131,65 @@ function FolderView({ folderId, fileId }: { folderId: string | 'root'; fileId?: 
                   </>
                 ) : (
                   <>
-                    <div className="hidden sm:flex items-center gap-0.5 shrink-0">
-                      {f.kind === 'media' && (
-                        <AutoUploadButton
-                          active={autoUploadTargetId === f.id}
-                          onClick={() => toggleAutoUploadTarget(f.id)}
-                        />
-                      )}
-                      <StarButton active={favoriteFolderIds.has(f.id)} onClick={() => toggleFolder(f.id)} title={favoriteFolderIds.has(f.id) ? 'Remove from favorites' : 'Add to favorites'} />
-                      <ShareButton onClick={() => setPendingShare({ type: 'folder', id: f.id, name: f.name })} title="Share folder" />
-                      <DriveInfoButton folder={f} servers={myServers} isAdmin={!!user?.is_admin} />
-                      <DeleteButton onClick={() => handleDeleteClick('folder', f.id, f.name)} title="Delete folder" />
-                    </div>
-                    <div className="sm:hidden">
-                      <RowActionsMenu>
-                        {f.kind === 'media' && (
-                          <MenuRow label={autoUploadTargetId === f.id ? 'Auto-upload target' : 'Set auto-upload target'}>
+                    <button
+                      onClick={() => openFolder(f.id)}
+                      className="flex-1 flex items-center gap-2 bg-transparent border-0 cursor-pointer text-left text-sm text-gray-800 hover:text-gray-900 p-0 min-w-0"
+                    >
+                      {f.kind === 'media'
+                        ? <MdPhotoLibrary className="text-purple-400 text-lg shrink-0" />
+                        : f.kind === 'email'
+                          ? <MdAlternateEmail className="text-teal-500 text-lg shrink-0" title="Email backup" />
+                          : <MdFolder className="text-blue-400 text-lg shrink-0" />}
+                      <span className="truncate">{f.name}</span>
+                    </button>
+                    <span className="text-xs text-gray-400 shrink-0 hidden sm:inline">
+                      {new Date(f.created_at).toLocaleDateString()}
+                    </span>
+                    <span className="text-xs text-gray-400 shrink-0">{formatSize(f.size_bytes)}</span>
+                    {!readOnly && (
+                      <>
+                        <div className="hidden sm:flex items-center gap-0.5 shrink-0">
+                          {f.kind === 'media' && (
                             <AutoUploadButton
                               active={autoUploadTargetId === f.id}
                               onClick={() => toggleAutoUploadTarget(f.id)}
                             />
-                          </MenuRow>
-                        )}
-                        <MenuRow label={favoriteFolderIds.has(f.id) ? 'Remove from favorites' : 'Add to favorites'}>
+                          )}
                           <StarButton active={favoriteFolderIds.has(f.id)} onClick={() => toggleFolder(f.id)} title={favoriteFolderIds.has(f.id) ? 'Remove from favorites' : 'Add to favorites'} />
-                        </MenuRow>
-                        <MenuRow label="Share folder">
+                          <RenameButton onClick={() => startRename('folder', f.id, f.name)} title="Rename folder" />
                           <ShareButton onClick={() => setPendingShare({ type: 'folder', id: f.id, name: f.name })} title="Share folder" />
-                        </MenuRow>
-                        <MenuRow label="Storage location">
                           <DriveInfoButton folder={f} servers={myServers} isAdmin={!!user?.is_admin} />
-                        </MenuRow>
-                        <MenuRow label="Delete folder">
                           <DeleteButton onClick={() => handleDeleteClick('folder', f.id, f.name)} title="Delete folder" />
-                        </MenuRow>
-                      </RowActionsMenu>
-                    </div>
+                        </div>
+                        <div className="sm:hidden">
+                          <RowActionsMenu>
+                            {f.kind === 'media' && (
+                              <MenuRow label={autoUploadTargetId === f.id ? 'Auto-upload target' : 'Set auto-upload target'}>
+                                <AutoUploadButton
+                                  active={autoUploadTargetId === f.id}
+                                  onClick={() => toggleAutoUploadTarget(f.id)}
+                                />
+                              </MenuRow>
+                            )}
+                            <MenuRow label={favoriteFolderIds.has(f.id) ? 'Remove from favorites' : 'Add to favorites'}>
+                              <StarButton active={favoriteFolderIds.has(f.id)} onClick={() => toggleFolder(f.id)} title={favoriteFolderIds.has(f.id) ? 'Remove from favorites' : 'Add to favorites'} />
+                            </MenuRow>
+                            <MenuRow label="Rename folder">
+                              <RenameButton onClick={() => startRename('folder', f.id, f.name)} title="Rename folder" />
+                            </MenuRow>
+                            <MenuRow label="Share folder">
+                              <ShareButton onClick={() => setPendingShare({ type: 'folder', id: f.id, name: f.name })} title="Share folder" />
+                            </MenuRow>
+                            <MenuRow label="Storage location">
+                              <DriveInfoButton folder={f} servers={myServers} isAdmin={!!user?.is_admin} />
+                            </MenuRow>
+                            <MenuRow label="Delete folder">
+                              <DeleteButton onClick={() => handleDeleteClick('folder', f.id, f.name)} title="Delete folder" />
+                            </MenuRow>
+                          </RowActionsMenu>
+                        </div>
+                      </>
+                    )}
                   </>
                 )}
               </li>
@@ -1217,24 +1241,43 @@ function FolderView({ folderId, fileId }: { folderId: string | 'root'; fileId?: 
                   </>
                 ) : (
                   <>
-                    <div className="hidden sm:flex items-center gap-0.5 shrink-0">
-                      <StarButton active={favoriteFileIds.has(f.id)} onClick={() => toggleFile(f.id)} title={favoriteFileIds.has(f.id) ? 'Remove from favorites' : 'Add to favorites'} />
-                      <ShareButton onClick={() => setPendingShare({ type: 'file', id: f.id, name: f.name })} title="Share file" />
-                      <DeleteButton onClick={() => handleDeleteClick('file', f.id, f.name)} title="Delete file" />
-                    </div>
-                    <div className="sm:hidden">
-                      <RowActionsMenu>
-                        <MenuRow label={favoriteFileIds.has(f.id) ? 'Remove from favorites' : 'Add to favorites'}>
+                    <button
+                      onClick={() => openFile(f.id)}
+                      className="flex-1 flex items-center gap-2 bg-transparent border-0 cursor-pointer text-left text-sm text-gray-800 hover:text-gray-900 p-0 min-w-0"
+                    >
+                      <MdInsertDriveFile className="text-gray-400 text-lg shrink-0" />
+                      <span className="truncate">{f.name}</span>
+                    </button>
+                    <span className="text-xs text-gray-400 shrink-0 hidden sm:inline">
+                      {new Date(f.created_at).toLocaleDateString()}
+                    </span>
+                    <span className="text-xs text-gray-400 shrink-0">{formatSize(f.size_bytes)}</span>
+                    {!readOnly && (
+                      <>
+                        <div className="hidden sm:flex items-center gap-0.5 shrink-0">
                           <StarButton active={favoriteFileIds.has(f.id)} onClick={() => toggleFile(f.id)} title={favoriteFileIds.has(f.id) ? 'Remove from favorites' : 'Add to favorites'} />
-                        </MenuRow>
-                        <MenuRow label="Share file">
+                          <RenameButton onClick={() => startRename('file', f.id, f.name)} title="Rename file" />
                           <ShareButton onClick={() => setPendingShare({ type: 'file', id: f.id, name: f.name })} title="Share file" />
-                        </MenuRow>
-                        <MenuRow label="Delete file">
                           <DeleteButton onClick={() => handleDeleteClick('file', f.id, f.name)} title="Delete file" />
-                        </MenuRow>
-                      </RowActionsMenu>
-                    </div>
+                        </div>
+                        <div className="sm:hidden">
+                          <RowActionsMenu>
+                            <MenuRow label={favoriteFileIds.has(f.id) ? 'Remove from favorites' : 'Add to favorites'}>
+                              <StarButton active={favoriteFileIds.has(f.id)} onClick={() => toggleFile(f.id)} title={favoriteFileIds.has(f.id) ? 'Remove from favorites' : 'Add to favorites'} />
+                            </MenuRow>
+                            <MenuRow label="Rename file">
+                              <RenameButton onClick={() => startRename('file', f.id, f.name)} title="Rename file" />
+                            </MenuRow>
+                            <MenuRow label="Share file">
+                              <ShareButton onClick={() => setPendingShare({ type: 'file', id: f.id, name: f.name })} title="Share file" />
+                            </MenuRow>
+                            <MenuRow label="Delete file">
+                              <DeleteButton onClick={() => handleDeleteClick('file', f.id, f.name)} title="Delete file" />
+                            </MenuRow>
+                          </RowActionsMenu>
+                        </div>
+                      </>
+                    )}
                   </>
                 )}
               </li>

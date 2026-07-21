@@ -20,6 +20,7 @@ import { Route as AboutRouteImport } from './routes/about'
 import { Route as AuthRouteImport } from './routes/_auth'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as VerifyLocationTokenRouteImport } from './routes/verify-location.$token'
+import { Route as BlogDriveSpeedBenchmarkRouteImport } from './routes/blog.drive-speed-benchmark'
 import { Route as AuthPremiumRouteImport } from './routes/_auth.premium'
 import { Route as AuthClientIndexRouteImport } from './routes/_auth.client/index'
 import { Route as AuthShareTokenRouteImport } from './routes/_auth.share.$token'
@@ -96,6 +97,11 @@ const IndexRoute = IndexRouteImport.update({
 const VerifyLocationTokenRoute = VerifyLocationTokenRouteImport.update({
   id: '/verify-location/$token',
   path: '/verify-location/$token',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const BlogDriveSpeedBenchmarkRoute = BlogDriveSpeedBenchmarkRouteImport.update({
+  id: '/blog/drive-speed-benchmark',
+  path: '/blog/drive-speed-benchmark',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AuthPremiumRoute = AuthPremiumRouteImport.update({
@@ -226,6 +232,7 @@ export interface FileRoutesByFullPath {
   '/suspended': typeof SuspendedRoute
   '/terms': typeof TermsRoute
   '/premium': typeof AuthPremiumRoute
+  '/blog/drive-speed-benchmark': typeof BlogDriveSpeedBenchmarkRoute
   '/verify-location/$token': typeof VerifyLocationTokenRoute
   '/admin/alarm': typeof AuthAdminAlarmRoute
   '/admin/banned-ips': typeof AuthAdminBannedIpsRoute
@@ -261,6 +268,7 @@ export interface FileRoutesByTo {
   '/suspended': typeof SuspendedRoute
   '/terms': typeof TermsRoute
   '/premium': typeof AuthPremiumRoute
+  '/blog/drive-speed-benchmark': typeof BlogDriveSpeedBenchmarkRoute
   '/verify-location/$token': typeof VerifyLocationTokenRoute
   '/admin/alarm': typeof AuthAdminAlarmRoute
   '/admin/banned-ips': typeof AuthAdminBannedIpsRoute
@@ -298,6 +306,7 @@ export interface FileRoutesById {
   '/suspended': typeof SuspendedRoute
   '/terms': typeof TermsRoute
   '/_auth/premium': typeof AuthPremiumRoute
+  '/blog/drive-speed-benchmark': typeof BlogDriveSpeedBenchmarkRoute
   '/verify-location/$token': typeof VerifyLocationTokenRoute
   '/_auth/admin/alarm': typeof AuthAdminAlarmRoute
   '/_auth/admin/banned-ips': typeof AuthAdminBannedIpsRoute
@@ -335,6 +344,7 @@ export interface FileRouteTypes {
     | '/suspended'
     | '/terms'
     | '/premium'
+    | '/blog/drive-speed-benchmark'
     | '/verify-location/$token'
     | '/admin/alarm'
     | '/admin/banned-ips'
@@ -370,6 +380,7 @@ export interface FileRouteTypes {
     | '/suspended'
     | '/terms'
     | '/premium'
+    | '/blog/drive-speed-benchmark'
     | '/verify-location/$token'
     | '/admin/alarm'
     | '/admin/banned-ips'
@@ -406,6 +417,7 @@ export interface FileRouteTypes {
     | '/suspended'
     | '/terms'
     | '/_auth/premium'
+    | '/blog/drive-speed-benchmark'
     | '/verify-location/$token'
     | '/_auth/admin/alarm'
     | '/_auth/admin/banned-ips'
@@ -442,6 +454,7 @@ export interface RootRouteChildren {
   RegisterRoute: typeof RegisterRoute
   SuspendedRoute: typeof SuspendedRoute
   TermsRoute: typeof TermsRoute
+  BlogDriveSpeedBenchmarkRoute: typeof BlogDriveSpeedBenchmarkRoute
   VerifyLocationTokenRoute: typeof VerifyLocationTokenRoute
 }
 
@@ -522,6 +535,13 @@ declare module '@tanstack/react-router' {
       path: '/verify-location/$token'
       fullPath: '/verify-location/$token'
       preLoaderRoute: typeof VerifyLocationTokenRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/blog/drive-speed-benchmark': {
+      id: '/blog/drive-speed-benchmark'
+      path: '/blog/drive-speed-benchmark'
+      fullPath: '/blog/drive-speed-benchmark'
+      preLoaderRoute: typeof BlogDriveSpeedBenchmarkRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/_auth/premium': {
@@ -753,6 +773,7 @@ const rootRouteChildren: RootRouteChildren = {
   RegisterRoute: RegisterRoute,
   SuspendedRoute: SuspendedRoute,
   TermsRoute: TermsRoute,
+  BlogDriveSpeedBenchmarkRoute: BlogDriveSpeedBenchmarkRoute,
   VerifyLocationTokenRoute: VerifyLocationTokenRoute,
 }
 export const routeTree = rootRouteImport

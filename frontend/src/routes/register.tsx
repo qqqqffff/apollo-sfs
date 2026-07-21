@@ -1,8 +1,8 @@
-import { createFileRoute, useNavigate } from '@tanstack/react-router'
+import { createFileRoute, useNavigate, Link } from '@tanstack/react-router'
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { PayPalScriptProvider, PayPalButtons } from '@paypal/react-paypal-js'
-import { MdCloud, MdRocketLaunch, MdCheckCircle } from 'react-icons/md'
+import { MdCloud, MdRocketLaunch, MdCheckCircle, MdSpeed } from 'react-icons/md'
 import { register, validateInviteToken } from '../api/auth'
 import { ApiError } from '../api/client'
 import { publicConfigQueryOptions } from '../api/interest'
@@ -203,6 +203,18 @@ function RouteComponent() {
               </span>
             </button>
           </div>
+
+          {/* Drive speed benchmark promo */}
+          <Link
+            to="/blog/drive-speed-benchmark"
+            className="flex items-center gap-3 px-5 py-3.5 rounded-xl border border-gray-200 bg-white hover:border-blue-300 hover:shadow-sm cursor-pointer transition-all no-underline max-w-md w-full mx-auto"
+          >
+            <MdSpeed className="text-xl text-blue-500 shrink-0" />
+            <span className="text-sm text-gray-600">
+              <span className="font-medium text-gray-800">Curious how fast our storage is?</span>{' '}
+              See our fast vs. standard tier speed benchmark →
+            </span>
+          </Link>
 
           {/* Inline premium checkout: plan selector + PayPal subscribe button.
               Same flow/styling as the premium upgrade modal. */}

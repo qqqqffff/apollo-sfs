@@ -617,6 +617,7 @@ function StorageUIPreferences() {
 
   const showButtons = prefs?.show_storage_buttons ?? true
   const promptEnabled = prefs?.storage_prompt_enabled ?? true
+  const hideBenchmarkPromo = prefs?.hide_benchmark_promo ?? false
 
   return (
     <div className="bg-white border border-gray-200 rounded-xl px-5 py-4">
@@ -644,6 +645,15 @@ function StorageUIPreferences() {
             className="cursor-pointer"
           />
           Offer more storage when an upload passes 75% of my quota or exceeds it
+        </label>
+        <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={hideBenchmarkPromo}
+            onChange={(e) => mutation.mutate({ hide_benchmark_promo: e.target.checked })}
+            className="cursor-pointer"
+          />
+          Hide the drive speed benchmark promo in the Add Storage dialog
         </label>
         {error && <p className="text-xs text-red-500 m-0">{error}</p>}
       </div>

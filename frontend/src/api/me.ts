@@ -41,11 +41,13 @@ export function updatePreferences(mediaAutouploadFolderId: string | null) {
   })
 }
 
-// updateStorageUIPreferences toggles the "+" add-storage buttons and the
-// automatic upgrade prompt. Only the provided fields are changed.
+// updateStorageUIPreferences toggles the "+" add-storage buttons, the
+// automatic upgrade prompt, and the drive-benchmark promo card shown in the
+// Add Storage modal. Only the provided fields are changed.
 export function updateStorageUIPreferences(prefs: {
   show_storage_buttons?: boolean
   storage_prompt_enabled?: boolean
+  hide_benchmark_promo?: boolean
 }) {
   return put<UserPreferences>('/me/preferences/storage-ui', prefs)
 }

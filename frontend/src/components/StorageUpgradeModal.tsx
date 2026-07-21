@@ -9,9 +9,11 @@ import {
   MdExpandMore,
   MdStorage,
   MdDns,
+  MdSpeed,
   MdWarningAmber,
 } from 'react-icons/md'
-import { meQueryOptions } from '../api/me'
+import { meQueryOptions, preferencesQueryOptions } from '../api/me'
+import { publicDriveBenchmarkQueryOptions } from '../api/interest'
 import { listServers, pingServer, type PublicServer } from '../api/storage'
 import { useBillingConfig } from '../hooks/useBillingConfig'
 import {
@@ -97,6 +99,8 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
   const queryClient = useQueryClient()
   const navigate = useNavigate()
   const { data: user } = useQuery(meQueryOptions)
+  const { data: prefs } = useQuery(preferencesQueryOptions)
+  const { data: benchmark } = useQuery(publicDriveBenchmarkQueryOptions)
 
   const { data: config, isLoading: configLoading } = useBillingConfig()
 
@@ -689,6 +693,30 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
                   ))}
                 </div>
               </div>
+
+              {/* Drive speed benchmark promo */}
+              {!prefs?.hide_benchmark_promo && (
+                <Link
+                  to="/blog/drive-speed-benchmark"
+                  className="flex items-center gap-3 px-4 py-3 rounded-xl border border-gray-200 bg-white hover:border-blue-300 hover:shadow-sm cursor-pointer transition-all no-underline"
+                >
+                  <MdSpeed className="text-lg text-blue-500 shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-medium text-gray-800 m-0">
+                      {benchmark?.available
+                        ? `${storageType === 'nvme' ? 'Fast' : 'Standard'} tier: ${
+                            (storageType === 'nvme' ? benchmark.fast : benchmark.standard)?.write_mbps.toFixed(0) ?? '—'
+                          } MB/s write · ${
+                            (storageType === 'nvme' ? benchmark.fast : benchmark.standard)?.read_mbps.toFixed(0) ?? '—'
+                          } MB/s read`
+                        : 'How fast is each storage tier?'}
+                    </p>
+                    <p className="text-[11px] text-gray-400 m-0 mt-0.5">
+                      {benchmark?.available ? 'See the full fast vs. standard benchmark' : 'Read our speed benchmark — results coming soon'}
+                    </p>
+                  </div>
+                </Link>
+              )}
 
               {/* Plans */}
               <div>

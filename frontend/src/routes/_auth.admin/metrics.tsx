@@ -5,6 +5,7 @@ import { MdComputer, MdStorage } from 'react-icons/md'
 import {
   alarmSubscriptionsQueryOptions,
   deleteAlarmSubscription,
+  driveBenchmarkQueryOptions,
   driveStatsQueryOptions,
   getDriveIOHistory,
   getDriveTempsHistory,
@@ -21,10 +22,11 @@ import {
   shutdownServer,
   speedTestQueryOptions,
   syncInfrastructure,
+  triggerDriveBenchmark,
   triggerSpeedTest,
   upsertAlarmSubscription,
 } from '../../api/admin'
-import type { AlarmType, DiskFrame, DriveFrame, DriveStat, DriveSummary, LatestTestRunResponse, MetricsFrame, NodeDisk, NodeFrame, NodeSummary, TestCase, TestProgressResponse, TestRun, TestRunReport, TestSuiteEntry } from '../../api/admin'
+import type { AlarmType, DiskFrame, DriveFrame, DriveStat, DriveSummary, LatestTestRunResponse, MetricsFrame, NodeDisk, NodeFrame, NodeSummary, TestCase, TestProgressResponse, TestRun, TestRunReport, TestSuiteEntry, TierBenchmarkStat } from '../../api/admin'
 import { ApiError } from '../../api/client'
 import { useMetricsStream } from '../../hooks/useMetricsStream'
 import { LineGraph } from '../../components/LineGraph'
@@ -582,6 +584,32 @@ function RouteComponent() {
     refetchInterval: runTestsMutation.isPending ? 3000 : false,
   })
 
+  // Drive tier benchmark: an on-demand write/read test, not a continuous
+  // sample, so it has no "…over time" graph — see the Tests section above for
+  // the same request/poll shape this mirrors. benchmarkPolling is a client-side
+  // safety net (stops after 90s) layered on top of the server's own `pending`
+  // flag, since node-agent may take several seconds per disk to finish and
+  // there's no push notification when it does — only polling.
+  const [benchmarkPolling, setBenchmarkPolling] = useState(false)
+  const { data: driveBenchmark, isLoading: driveBenchmarkLoading } = useQuery({
+    ...driveBenchmarkQueryOptions,
+    enabled: !inactive,
+    refetchInterval: (query) => (benchmarkPolling || query.state.data?.pending) ? 3000 : false,
+  })
+  const benchmarkRunning = benchmarkPolling || !!driveBenchmark?.pending
+
+  const triggerBenchmarkMutation = useMutation({
+    mutationFn: triggerDriveBenchmark,
+    onSuccess: () => {
+      setBenchmarkPolling(true)
+      window.setTimeout(() => setBenchmarkPolling(false), 90_000)
+      queryClient.invalidateQueries({ queryKey: driveBenchmarkQueryOptions.queryKey })
+    },
+    onError: (err: ApiError) => {
+      notify('error', err instanceof ApiError && err.status === 409 ? 'A benchmark run is already in progress' : 'Failed to start benchmark')
+    },
+  })
+
   const graphW = Math.min(820, window.innerWidth - 80)
 
   // For windows >= 24 hr the x-axis spans multiple calendar days, so show
@@ -949,6 +977,37 @@ function RouteComponent() {
         </div>
       </section>
 
+      <section className="mb-10">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-sm font-semibold text-gray-600 m-0">Drive benchmark</h3>
+          <button
+            onClick={() => triggerBenchmarkMutation.mutate()}
+            disabled={triggerBenchmarkMutation.isPending || benchmarkRunning}
+            className="text-xs bg-blue-600 text-white rounded px-2 py-1 disabled:opacity-50 cursor-pointer"
+            title="Write and read a test file on every fast-tier NVMe drive and the standard-tier HDD, then compare them"
+          >
+            {benchmarkRunning ? 'Running…' : 'Run benchmark'}
+          </button>
+        </div>
+        <div className="bg-white border border-gray-200 rounded-xl px-5 py-4">
+          {driveBenchmarkLoading && !benchmarkRunning && (
+            <p className="text-sm text-gray-400 m-0">Loading…</p>
+          )}
+          {benchmarkRunning && (
+            <p className="text-sm text-gray-400 m-0 animate-pulse">Benchmarking fast and standard tier drives…</p>
+          )}
+          {!driveBenchmarkLoading && !benchmarkRunning && !driveBenchmark?.fast && !driveBenchmark?.standard && (
+            <p className="text-sm text-gray-400 m-0">None — no benchmark has been run yet. Click "Run benchmark" to test both tiers.</p>
+          )}
+          {!benchmarkRunning && (driveBenchmark?.fast || driveBenchmark?.standard) && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <TierBenchmarkCard label="Fast (NVMe)" stat={driveBenchmark?.fast} />
+              <TierBenchmarkCard label="Standard (HDD)" stat={driveBenchmark?.standard} />
+            </div>
+          )}
+        </div>
+      </section>
+
       <section>
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-2">
@@ -1176,6 +1235,36 @@ function SpeedTestCard({ result, onRun, pending, selected, onClick }: {
   )
 }
 
+// ── Drive benchmark card ─────────────────────────────────────────────────────
+// One tier's averaged write/read result — no history to graph (see the Tests
+// section above for the shape this on-demand result mirrors), just the most
+// recent run.
+
+function TierBenchmarkCard({ label, stat }: { label: string; stat: TierBenchmarkStat | undefined }) {
+  if (!stat) {
+    return (
+      <div className="border border-dashed border-gray-200 rounded-lg px-4 py-3">
+        <p className="text-xs font-semibold text-gray-500 m-0 mb-1">{label}</p>
+        <p className="text-xs text-gray-400 m-0">No successful result yet</p>
+      </div>
+    )
+  }
+  return (
+    <div className="border border-gray-200 rounded-lg px-4 py-3">
+      <p className="text-xs font-semibold text-gray-500 m-0 mb-1">{label}</p>
+      <p className="text-lg font-bold text-gray-900 tabular-nums m-0">
+        {stat.write_mbps.toFixed(0)} <span className="text-xs font-normal text-gray-400">MB/s write</span>
+      </p>
+      <p className="text-lg font-bold text-gray-900 tabular-nums m-0">
+        {stat.read_mbps.toFixed(0)} <span className="text-xs font-normal text-gray-400">MB/s read</span>
+      </p>
+      <p className="text-[11px] text-gray-400 m-0 mt-1">
+        {stat.disk_count} disk{stat.disk_count === 1 ? '' : 's'} · {new Date(stat.tested_at).toLocaleString()}
+      </p>
+    </div>
+  )
+}
+
 // ── Test-runner card ─────────────────────────────────────────────────────────
 // Groups the five suites the sidecar reports into four application areas:
 // Frontend (unit + E2E), API (backend), Recognition, and Mobile.
@@ -1375,13 +1464,6 @@ function TestGroupCard({ group, report }: { group: TestGroupDef; report: TestRun
           ))}
         </div>
       )}
-      <button
-        onClick={() => setShowOutput((o) => !o)}
-        className="text-xs text-gray-400 hover:text-gray-700 cursor-pointer bg-transparent border-0 text-left w-fit"
-      >
-        {showOutput ? '▲ hide raw output' : '▼ raw output'}
-      </button>
-      {showOutput && <OutputBlock label={label} output={result.output} />}
     </div>
   )
 }

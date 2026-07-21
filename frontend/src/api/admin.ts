@@ -615,6 +615,48 @@ export const speedTestQueryOptions = {
   queryFn: getSpeedTest,
 }
 
+// ── Drive benchmark ──────────────────────────────────────────────────────────
+
+export interface TierBenchmarkStat {
+  write_mbps: number
+  read_mbps: number
+  disk_count: number
+  tested_at: string
+}
+
+export interface NodeDiskBenchmarkRow {
+  node_id: string
+  hostname: string
+  label: string
+  write_mbps?: number
+  read_mbps?: number
+  size_bytes: number
+  error?: string
+  tested_at: string
+  drive_type: string
+}
+
+export interface DriveBenchmarkDetail {
+  /** True while a triggered run hasn't been picked up/reported by every node yet. */
+  pending: boolean
+  disks: NodeDiskBenchmarkRow[]
+  fast?: TierBenchmarkStat
+  standard?: TierBenchmarkStat
+}
+
+export function getDriveBenchmark() {
+  return get<DriveBenchmarkDetail>('/admin/system/drives/benchmark')
+}
+
+export function triggerDriveBenchmark() {
+  return post<{ status: string }>('/admin/system/drives/benchmark')
+}
+
+export const driveBenchmarkQueryOptions = {
+  queryKey: ['admin', 'drive-benchmark'] as const,
+  queryFn: getDriveBenchmark,
+}
+
 // ── Test runner ────────────────────────────────────────────────────────────────
 
 export interface TestCase {

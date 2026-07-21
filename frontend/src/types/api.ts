@@ -182,6 +182,9 @@ export interface UserPreferences {
   // Null = no default (falls back to the primary drive / drive picker). A
   // display preference, distinct from the upload-routing primary drive.
   default_drive_id: string | null
+  // Hide the drive-speed-benchmark promo card in the Add Storage modal.
+  // Default false.
+  hide_benchmark_promo: boolean
   created_at: string
   updated_at: string
 }

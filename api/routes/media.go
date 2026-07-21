@@ -277,29 +277,33 @@ func (h *Handler) UpdatePreferences(c *gin.Context) {
 }
 
 type updateStorageUIPreferencesRequest struct {
-	// Both fields optional; only the ones present are updated.
+	// All fields optional; only the ones present are updated.
 	ShowStorageButtons   *bool `json:"show_storage_buttons"`
 	StoragePromptEnabled *bool `json:"storage_prompt_enabled"`
+	// HideBenchmarkPromo hides the drive-speed-benchmark promo card in the Add
+	// Storage modal (see docs/drive_benchmark_setup.md).
+	HideBenchmarkPromo *bool `json:"hide_benchmark_promo"`
 }
 
 // UpdateStorageUIPreferences handles PUT /api/v1/me/preferences/storage-ui.
-// Toggles the "+" add-storage buttons and the automatic upgrade prompt shown
-// when an upload nears/exceeds the quota. Available to all users (unlike the
-// premium-only media auto-upload preference).
-// Body: {"show_storage_buttons": bool?, "storage_prompt_enabled": bool?}.
+// Toggles the "+" add-storage buttons, the automatic upgrade prompt shown
+// when an upload nears/exceeds the quota, and the benchmark promo card in
+// the Add Storage modal. Available to all users (unlike the premium-only
+// media auto-upload preference).
+// Body: {"show_storage_buttons": bool?, "storage_prompt_enabled": bool?, "hide_benchmark_promo": bool?}.
 func (h *Handler) UpdateStorageUIPreferences(c *gin.Context) {
 	var req updateStorageUIPreferencesRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 		return
 	}
-	if req.ShowStorageButtons == nil && req.StoragePromptEnabled == nil {
+	if req.ShowStorageButtons == nil && req.StoragePromptEnabled == nil && req.HideBenchmarkPromo == nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "no preference fields provided"})
 		return
 	}
 
 	username := c.GetString("username")
-	prefs, err := h.queries.SetStorageUIPreferences(c.Request.Context(), username, req.ShowStorageButtons, req.StoragePromptEnabled)
+	prefs, err := h.queries.SetStorageUIPreferences(c.Request.Context(), username, req.ShowStorageButtons, req.StoragePromptEnabled, req.HideBenchmarkPromo)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not save preferences"})
 		return

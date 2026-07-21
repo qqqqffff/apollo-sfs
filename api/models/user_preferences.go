@@ -30,6 +30,10 @@ type UserPreferences struct {
 	// browser falls back to the primary drive, or the drive picker). Set NULL
 	// automatically if the referenced drive is removed.
 	DefaultDriveID *uuid.UUID `json:"default_drive_id" db:"default_drive_id"`
-	CreatedAt      time.Time  `json:"created_at" db:"created_at"`
-	UpdatedAt      time.Time  `json:"updated_at" db:"updated_at"`
+	// HideBenchmarkPromo hides the drive-speed-benchmark promo card in the Add
+	// Storage modal. Default false. Purely cosmetic — never affects the
+	// benchmark itself or the admin metrics page.
+	HideBenchmarkPromo bool      `json:"hide_benchmark_promo" db:"hide_benchmark_promo"`
+	CreatedAt          time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at" db:"updated_at"`
 }

@@ -127,7 +127,7 @@ func (s *stubQuerier) GetUserPreferences(_ context.Context, userID string) (*mod
 func (s *stubQuerier) SetMediaAutouploadFolder(_ context.Context, userID string, folderID *uuid.UUID) (*models.UserPreferences, error) {
 	return &models.UserPreferences{UserID: userID, MediaAutouploadFolderID: folderID}, nil
 }
-func (s *stubQuerier) SetStorageUIPreferences(_ context.Context, userID string, showButtons, promptEnabled *bool) (*models.UserPreferences, error) {
+func (s *stubQuerier) SetStorageUIPreferences(_ context.Context, userID string, showButtons, promptEnabled, hideBenchmarkPromo *bool) (*models.UserPreferences, error) {
 	p := &models.UserPreferences{UserID: userID, ShowStorageButtons: true, StoragePromptEnabled: true}
 	if showButtons != nil {
 		p.ShowStorageButtons = *showButtons
@@ -135,7 +135,13 @@ func (s *stubQuerier) SetStorageUIPreferences(_ context.Context, userID string, 
 	if promptEnabled != nil {
 		p.StoragePromptEnabled = *promptEnabled
 	}
+	if hideBenchmarkPromo != nil {
+		p.HideBenchmarkPromo = *hideBenchmarkPromo
+	}
 	return p, nil
+}
+func (s *stubQuerier) ListNodeDiskBenchmarks(_ context.Context) ([]db.NodeDiskBenchmarkRow, error) {
+	return nil, nil
 }
 func (s *stubQuerier) SetDefaultDrive(_ context.Context, userID string, driveID *uuid.UUID) (*models.UserPreferences, error) {
 	return &models.UserPreferences{UserID: userID, DefaultDriveID: driveID}, nil
@@ -514,6 +520,15 @@ func (s *stubAdminQuerier) ReassignDriveToServer(_ context.Context, _, _ uuid.UU
 	return nil
 }
 func (s *stubAdminQuerier) ListAllNodeDisks(_ context.Context) ([]models.NodeDisk, error) {
+	return nil, nil
+}
+
+// Drive benchmark
+func (s *stubAdminQuerier) RequestBenchmarkOnAllNodes(_ context.Context) error { return nil }
+func (s *stubAdminQuerier) CountPendingBenchmarkRequests(_ context.Context) (int, error) {
+	return 0, nil
+}
+func (s *stubAdminQuerier) ListNodeDiskBenchmarks(_ context.Context) ([]db.NodeDiskBenchmarkRow, error) {
 	return nil, nil
 }
 

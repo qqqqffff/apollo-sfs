@@ -15,13 +15,13 @@ import (
 // returned models.UserPreferences is always fully populated (callers and the
 // frontend cache rely on every field being present, not just the one mutated).
 const prefColumns = `user_id, media_autoupload_folder_id, show_storage_buttons,
-	storage_prompt_enabled, backup_stale_notify, default_drive_id, created_at, updated_at`
+	storage_prompt_enabled, backup_stale_notify, default_drive_id, hide_benchmark_promo, created_at, updated_at`
 
 // scanPrefs scans a row projected with prefColumns into p.
 func scanPrefs(row interface{ Scan(...any) error }, p *models.UserPreferences) error {
 	var folderID, driveID uuid.NullUUID
 	if err := row.Scan(&p.UserID, &folderID, &p.ShowStorageButtons,
-		&p.StoragePromptEnabled, &p.BackupStaleNotify, &driveID,
+		&p.StoragePromptEnabled, &p.BackupStaleNotify, &driveID, &p.HideBenchmarkPromo,
 		&p.CreatedAt, &p.UpdatedAt); err != nil {
 		return err
 	}
@@ -79,18 +79,21 @@ func (q *Queries) SetMediaAutouploadFolder(ctx context.Context, userID string, f
 }
 
 // SetStorageUIPreferences upserts the storage upgrade UI toggles. Nil fields
-// are left unchanged (or default to true when the row is first created).
-func (q *Queries) SetStorageUIPreferences(ctx context.Context, userID string, showButtons, promptEnabled *bool) (*models.UserPreferences, error) {
+// are left unchanged (or default to their normal default when the row is
+// first created — true for showButtons/promptEnabled, false for
+// hideBenchmarkPromo).
+func (q *Queries) SetStorageUIPreferences(ctx context.Context, userID string, showButtons, promptEnabled, hideBenchmarkPromo *bool) (*models.UserPreferences, error) {
 	var p models.UserPreferences
 	err := scanPrefs(q.db.QueryRowContext(ctx, `
-		INSERT INTO user_preferences (user_id, show_storage_buttons, storage_prompt_enabled, created_at, updated_at)
-		VALUES ($1, COALESCE($2, TRUE), COALESCE($3, TRUE), NOW(), NOW())
+		INSERT INTO user_preferences (user_id, show_storage_buttons, storage_prompt_enabled, hide_benchmark_promo, created_at, updated_at)
+		VALUES ($1, COALESCE($2, TRUE), COALESCE($3, TRUE), COALESCE($4, FALSE), NOW(), NOW())
 		ON CONFLICT (user_id) DO UPDATE
 			SET show_storage_buttons   = COALESCE($2, user_preferences.show_storage_buttons),
 			    storage_prompt_enabled = COALESCE($3, user_preferences.storage_prompt_enabled),
+			    hide_benchmark_promo   = COALESCE($4, user_preferences.hide_benchmark_promo),
 			    updated_at = NOW()
 		RETURNING `+prefColumns+`
-	`, userID, nullBool(showButtons), nullBool(promptEnabled)), &p)
+	`, userID, nullBool(showButtons), nullBool(promptEnabled), nullBool(hideBenchmarkPromo)), &p)
 	if err != nil {
 		return nil, fmt.Errorf("SetStorageUIPreferences: %w", err)
 	}

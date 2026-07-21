@@ -492,10 +492,17 @@ services:
       # container without resolving /dev/disk/by-label symlinks (whose block-device
       # targets under /dev are not mounted into the agent).
       NODE_DISK_MOUNTS: "hdd-01:/srv/minio/hdd-01"
+      # Writable scratch directory for the on-demand drive benchmark (see
+      # docs/drive_benchmark_setup.md) — a small, dedicated subdirectory, not a
+      # blanket reopening of the read-only data mount above. The host path
+      # must be created once (`mkdir -p /srv/minio/hdd-01/.bench`) before
+      # deploying; it is never read by anything else.
+      NODE_BENCHMARK_MOUNTS: "hdd-01:/bench/hdd-01"
     volumes:
       - /sys:/sys:ro
       - /dev/disk/by-label:/dev/disk/by-label:ro
       - /srv/minio/hdd-01:/srv/minio/hdd-01:ro
+      - /srv/minio/hdd-01/.bench:/bench/hdd-01
     networks: [app-network]
     deploy:
       replicas: 1
@@ -521,11 +528,19 @@ services:
       # container without resolving /dev/disk/by-label symlinks (whose block-device
       # targets under /dev are not mounted into the agent).
       NODE_DISK_MOUNTS: "nvme-01:/home/apollo/apollo-sfs/minio/nvme-01,nvme-02:/home/apollo/apollo-sfs/minio/nvme-02"
+      # Writable scratch directories for the on-demand drive benchmark (see
+      # docs/drive_benchmark_setup.md) — a small, dedicated subdirectory per
+      # physical NVMe, not a blanket reopening of the read-only data mounts
+      # above. Both host paths must be created once (`mkdir -p .../.bench`)
+      # before deploying; neither is read by anything else.
+      NODE_BENCHMARK_MOUNTS: "nvme-01:/bench/nvme-01,nvme-02:/bench/nvme-02"
     volumes:
       - /sys:/sys:ro
       - /dev/disk/by-label:/dev/disk/by-label:ro
       - /home/apollo/apollo-sfs/minio/nvme-01:/home/apollo/apollo-sfs/minio/nvme-01:ro
       - /home/apollo/apollo-sfs/minio/nvme-02:/home/apollo/apollo-sfs/minio/nvme-02:ro
+      - /home/apollo/apollo-sfs/minio/nvme-01/.bench:/bench/nvme-01
+      - /home/apollo/apollo-sfs/minio/nvme-02/.bench:/bench/nvme-02
     networks: [app-network]
     deploy:
       replicas: 1

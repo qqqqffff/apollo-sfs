@@ -59,6 +59,11 @@ type AdminQuerier interface {
 	AutoSyncDriveCapacities(ctx context.Context, capacityBytes int64) error
 	ListAllNodeDisks(ctx context.Context) ([]models.NodeDisk, error)
 
+	// Drive benchmark
+	RequestBenchmarkOnAllNodes(ctx context.Context) error
+	CountPendingBenchmarkRequests(ctx context.Context) (int, error)
+	ListNodeDiskBenchmarks(ctx context.Context) ([]db.NodeDiskBenchmarkRow, error)
+
 	// Nodes (storage-node layer between servers and drives)
 	GetNodeSummaries(ctx context.Context) ([]models.NodeSummary, error)
 	GetNode(ctx context.Context, id uuid.UUID) (*models.Node, error)

@@ -400,6 +400,10 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	// button) for the public interest page — always the live client, same as
 	// /config above. Domain-bound and SDK-init-only by design.
 	v1.GET("/config/paypal-client-token", billingHandler.PublicClientToken)
+	// Fast-vs-standard drive speed comparison shown on the home page,
+	// registration, and Add Storage modal promo cards — see
+	// docs/drive_benchmark_setup.md.
+	v1.GET("/drive-benchmark", h.GetPublicDriveBenchmark)
 	v1.GET("/invitations/:token", h.ValidateInvitationToken)
 	v1.POST("/interest", h.SubmitInterestForm)
 	// Native-app account request form: no Turnstile (the app cannot render
@@ -735,6 +739,8 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 			adminGroup.GET("/system/disks/:disk_id/temps/history", adminHandler.GetNodeDiskTempsHistory)
 			adminGroup.GET("/system/drives/:drive_id/io/history", adminHandler.GetDriveIOHistory)
 			adminGroup.GET("/system/disks/:disk_id/io/history", adminHandler.GetNodeDiskIOHistory)
+			adminGroup.GET("/system/drives/benchmark", adminHandler.GetDriveBenchmark)
+			adminGroup.POST("/system/drives/benchmark", adminHandler.TriggerDriveBenchmark)
 			adminGroup.POST("/system/servers", adminHandler.CreateServer)
 			adminGroup.PATCH("/system/servers/:server_id", adminHandler.UpdateServer)
 			adminGroup.POST("/system/servers/:server_id/nodes", adminHandler.CreateNode)

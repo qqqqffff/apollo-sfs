@@ -19,6 +19,8 @@ import (
 	"strconv"
 	"syscall"
 	"time"
+
+	"apollo-sfs.com/api/models"
 )
 
 func main() {
@@ -44,13 +46,17 @@ func main() {
 		log.Fatal("node-agent: could not determine hostname (set NODE_HOSTNAME)")
 	}
 
-	endpoint := ingestURL + "/internal/node-metrics"
+	metricsEndpoint := ingestURL + "/internal/node-metrics"
+	benchmarkResultEndpoint := ingestURL + "/internal/node-benchmark-result"
+	// Benchmarks can take several seconds per disk (256 MiB write+fsync+read on
+	// a spinning HDD); the shared 10s client timeout is too tight for that leg.
 	client := &http.Client{Timeout: 10 * time.Second}
+	benchmarkClient := &http.Client{Timeout: 60 * time.Second}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	log.Printf("node-agent: started as %q, pushing to %s every %s", hostname, endpoint, interval)
+	log.Printf("node-agent: started as %q, pushing to %s every %s", hostname, metricsEndpoint, interval)
 
 	// Prime cpu.Percent so the first pushed sample carries a real utilisation value.
 	collectPayload(hostname)
@@ -63,15 +69,70 @@ func main() {
 			log.Print("node-agent: shutting down")
 			return
 		case <-ticker.C:
-			if err := push(ctx, client, endpoint, token, hostname); err != nil {
+			runBenchmark, err := push(ctx, client, metricsEndpoint, token, hostname)
+			if err != nil {
 				log.Printf("node-agent: push: %v", err)
+				continue
+			}
+			if !runBenchmark {
+				continue
+			}
+			// Runs synchronously — node-agent has no inbound listener, so this
+			// is the only way an admin-triggered "run now" request reaches the
+			// node (see docs/drive_benchmark_setup.md). Delaying this tick's
+			// regular metrics push by however long the benchmark takes is an
+			// acceptable trade-off for a background collector loop.
+			log.Print("node-agent: benchmark requested, running now")
+			results := runBenchmarks()
+			if err := postBenchmarkResults(ctx, benchmarkClient, benchmarkResultEndpoint, token, hostname, results); err != nil {
+				log.Printf("node-agent: post benchmark results: %v", err)
 			}
 		}
 	}
 }
 
-func push(ctx context.Context, client *http.Client, endpoint, token, hostname string) error {
+// push POSTs the current metrics sample and reports whether the ingest
+// service asked this node to run a benchmark (set by an admin trigger and
+// consumed server-side on this exact push — see ConsumeBenchmarkRequest).
+func push(ctx context.Context, client *http.Client, endpoint, token, hostname string) (runBenchmark bool, err error) {
 	payload := collectPayload(hostname)
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return false, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return false, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-Token", token)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return false, errStatus(resp.StatusCode)
+	}
+
+	var ack struct {
+		RunBenchmark bool `json:"run_benchmark"`
+	}
+	// Older/mismatched ingest builds may not send this field — decode errors
+	// are non-fatal, they just mean no benchmark runs this tick.
+	_ = json.NewDecoder(resp.Body).Decode(&ack)
+	return ack.RunBenchmark, nil
+}
+
+// postBenchmarkResults sends every disk's benchmark result back to
+// node-metrics-ingest in one call.
+func postBenchmarkResults(ctx context.Context, client *http.Client, endpoint, token, hostname string, results []models.BenchmarkResultPayload) error {
+	if len(results) == 0 {
+		return nil
+	}
+	payload := models.BenchmarkResultBatch{Hostname: hostname, Results: results}
+
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return err

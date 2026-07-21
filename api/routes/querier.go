@@ -60,7 +60,7 @@ type Querier interface {
 	// User preferences
 	GetUserPreferences(ctx context.Context, userID string) (*models.UserPreferences, error)
 	SetMediaAutouploadFolder(ctx context.Context, userID string, folderID *uuid.UUID) (*models.UserPreferences, error)
-	SetStorageUIPreferences(ctx context.Context, userID string, showButtons, promptEnabled *bool) (*models.UserPreferences, error)
+	SetStorageUIPreferences(ctx context.Context, userID string, showButtons, promptEnabled, hideBenchmarkPromo *bool) (*models.UserPreferences, error)
 	SetDefaultDrive(ctx context.Context, userID string, driveID *uuid.UUID) (*models.UserPreferences, error)
 
 	// Default-display-drive validation (drive must be one of the user's allocations)
@@ -108,4 +108,8 @@ type Querier interface {
 
 	// Feedback (profile page submission; reviewed on the admin feedback page)
 	CreateFeedback(ctx context.Context, userID uuid.UUID, username, category, message string) (*models.Feedback, error)
+
+	// Drive benchmark (public fast-vs-standard summary; see routes/admin for
+	// the admin trigger/detail endpoints and their own AdminQuerier methods)
+	ListNodeDiskBenchmarks(ctx context.Context) ([]db.NodeDiskBenchmarkRow, error)
 }

@@ -102,6 +102,11 @@ type AdminQuerier interface {
 	// MinIO <-> Postgres reconciliation
 	GetLatestReconciliationRun(ctx context.Context) (*models.ReconciliationRun, error)
 	ListReconciliationFindings(ctx context.Context, runID *uuid.UUID, limit int) ([]models.ReconciliationFinding, error)
+
+	// Test-runner sidecar run history
+	CreateTestRun(ctx context.Context, version, branch string, report models.TestRunReport, passed bool) (*models.TestRun, error)
+	GetLatestTestRunForBranch(ctx context.Context, branch string) (*models.TestRun, error)
+	GetLatestTestRun(ctx context.Context) (*models.TestRun, error)
 }
 
 // AdminInviteService is the subset of *services.InviteService used by admin handlers.

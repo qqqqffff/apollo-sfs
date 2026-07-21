@@ -617,11 +617,31 @@ export const speedTestQueryOptions = {
 
 // ── Test runner ────────────────────────────────────────────────────────────────
 
+export interface TestCase {
+  name: string
+  passed: boolean
+  duration_ms?: number
+  /** Failure output — only present when passed is false. */
+  message?: string
+}
+
+export interface CoverageStat {
+  lines_pct?: number
+  branches_pct?: number
+}
+
 export interface SuiteResult {
   passed: boolean
   exit_code: number
   output: string
   duration_ms: number
+  num_tests: number
+  num_passed: number
+  num_failed: number
+  /** Per-test breakdown, when the runner sidecar could parse one. */
+  tests?: TestCase[]
+  /** Absent for suites with no meaningful coverage concept (Playwright E2E). */
+  coverage?: CoverageStat
 }
 
 export interface TestSuiteEntry {
@@ -630,7 +650,7 @@ export interface TestSuiteEntry {
   message?: string
 }
 
-export interface TestRunResponse {
+export interface TestRunReport {
   backend: TestSuiteEntry
   frontend: TestSuiteEntry
   frontend_e2e: TestSuiteEntry
@@ -638,8 +658,35 @@ export interface TestRunResponse {
   recognition: TestSuiteEntry
 }
 
+export interface TestRun {
+  id: string
+  deployment_version: string
+  git_branch: string
+  report: TestRunReport
+  passed: boolean
+  created_at: string
+}
+
+export interface LatestTestRunResponse {
+  /** null when no test run has ever been recorded. */
+  run: TestRun | null
+  /** false when `run` is a fallback from a different branch (no run yet for current_branch). */
+  matched_branch: boolean
+  current_branch: string
+  current_version: string
+}
+
 export function runTests() {
-  return post<TestRunResponse>('/admin/system/tests')
+  return post<TestRun>('/admin/system/tests')
+}
+
+export function getLatestTestRun() {
+  return get<LatestTestRunResponse>('/admin/system/tests/latest')
+}
+
+export const latestTestRunQueryOptions = {
+  queryKey: ['admin', 'tests', 'latest'] as const,
+  queryFn: getLatestTestRun,
 }
 
 // ── Kill switch ────────────────────────────────────────────────────────────────

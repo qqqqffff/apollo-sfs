@@ -134,6 +134,15 @@ type Config struct {
 	// accepts during token exchange. Set via GOOGLE_WEB_CLIENT_ID / GOOGLE_WEB_CLIENT_SECRET.
 	GoogleWebClientID     string
 	GoogleWebClientSecret string
+
+	// AppVersion / AppGitBranch identify what's actually running — baked into
+	// the api image at build time from deploy.sh's image tag and the git
+	// branch it was built from (see api/Dockerfile). Used only to label test
+	// runs stored by the admin metrics page's test-runner card so a run can be
+	// matched back to the deployment/branch it ran against. Empty outside a
+	// deploy.sh build (e.g. local `go run`/`docker build` with no --build-arg).
+	AppVersion   string
+	AppGitBranch string
 }
 
 func loadConfig() Config {
@@ -225,6 +234,9 @@ func loadConfig() Config {
 
 		GoogleWebClientID:     getEnv("GOOGLE_WEB_CLIENT_ID", ""),
 		GoogleWebClientSecret: getEnv("GOOGLE_WEB_CLIENT_SECRET", ""),
+
+		AppVersion:   getEnv("APP_VERSION", ""),
+		AppGitBranch: getEnv("APP_GIT_BRANCH", ""),
 	}
 }
 

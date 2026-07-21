@@ -689,6 +689,20 @@ export const latestTestRunQueryOptions = {
   queryFn: getLatestTestRun,
 }
 
+export interface TestProgressResponse {
+  running: boolean
+  /** Suite key currently executing (e.g. "frontend_e2e"), absent when nothing is running. */
+  current_suite?: string
+  /** Execution order of every suite key, so pending ones (not yet in `completed`) can be listed. */
+  order?: string[]
+  /** Suites that have finished so far, keyed by suite name — same shape as TestRunReport's fields. */
+  completed: Record<string, TestSuiteEntry>
+}
+
+export function getTestProgress() {
+  return get<TestProgressResponse>('/admin/system/tests/progress')
+}
+
 // ── Kill switch ────────────────────────────────────────────────────────────────
 
 export function shutdownServer() {

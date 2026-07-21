@@ -26,6 +26,7 @@ import {
   triggerSpeedTest,
   runTests,
   getLatestTestRun,
+  getTestProgress,
   shutdownServer,
   infrastructureQueryOptions,
   capacityQueryOptions,
@@ -468,6 +469,24 @@ describe('getLatestTestRun', () => {
     expect(lastUrl()).toBe('/api/v1/admin/system/tests/latest')
     expect(result.run).toBeNull()
     expect(result.current_branch).toBe('release-1.2.2')
+  })
+})
+
+describe('getTestProgress', () => {
+  it('GETs /admin/system/tests/progress', async () => {
+    mockFetch(200, {
+      running: true,
+      current_suite: 'frontend_e2e',
+      order: ['backend', 'frontend', 'frontend_e2e', 'mobile', 'recognition'],
+      completed: {
+        backend: { enabled: true, result: { passed: true, exit_code: 0, output: '', duration_ms: 100, num_tests: 1, num_passed: 1, num_failed: 0 } },
+      },
+    })
+    const result = await getTestProgress()
+    expect(lastUrl()).toBe('/api/v1/admin/system/tests/progress')
+    expect(result.running).toBe(true)
+    expect(result.current_suite).toBe('frontend_e2e')
+    expect(result.completed.backend.enabled).toBe(true)
   })
 })
 

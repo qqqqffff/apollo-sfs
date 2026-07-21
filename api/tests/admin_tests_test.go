@@ -324,3 +324,82 @@ func TestGetLatestTests_FallsBackToOverallWhenBranchHasNoRun(t *testing.T) {
 		t.Errorf("expected current_branch/current_version to reflect this deployment, got %v/%v", body["current_branch"], body["current_version"])
 	}
 }
+
+// ── GetTestProgress ────────────────────────────────────────────────────────────
+
+func TestGetTestProgress_NoSidecarConfigured(t *testing.T) {
+	h := newTestRunnerHandler("", "")
+	r := newEngine()
+	r.GET("/admin/system/tests/progress", h.GetTestProgress)
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/system/tests/progress", nil)
+	w := doRequest(r, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body: %s)", w.Code, w.Body.String())
+	}
+
+	var body map[string]any
+	decodeBody(w, &body) //nolint
+	if body["running"] != false {
+		t.Errorf("expected running=false with no sidecar configured, got %v", body["running"])
+	}
+	completed, _ := body["completed"].(map[string]any)
+	if len(completed) != 0 {
+		t.Errorf("expected an empty completed map, got %v", completed)
+	}
+}
+
+func TestGetTestProgress_ProxiesSidecarMidRun(t *testing.T) {
+	sidecar := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/progress" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint
+			"running":       true,
+			"current_suite": "frontend_e2e",
+			"order":         []string{"backend", "frontend", "frontend_e2e", "mobile", "recognition"},
+			"completed": map[string]any{
+				"backend":  map[string]any{"enabled": true, "result": map[string]any{"passed": true, "exit_code": 0, "output": "ok", "duration_ms": 10}},
+				"frontend": map[string]any{"enabled": true, "result": map[string]any{"passed": true, "exit_code": 0, "output": "ok", "duration_ms": 20}},
+			},
+		})
+	}))
+	defer sidecar.Close()
+
+	h := newTestRunnerHandler("", sidecar.URL+"/run-tests")
+	r := newEngine()
+	r.GET("/admin/system/tests/progress", h.GetTestProgress)
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/system/tests/progress", nil)
+	w := doRequest(r, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body: %s)", w.Code, w.Body.String())
+	}
+
+	var body map[string]any
+	decodeBody(w, &body) //nolint
+	if body["running"] != true {
+		t.Errorf("expected running=true, got %v", body["running"])
+	}
+	if body["current_suite"] != "frontend_e2e" {
+		t.Errorf("expected current_suite=frontend_e2e, got %v", body["current_suite"])
+	}
+	completed, _ := body["completed"].(map[string]any)
+	if len(completed) != 2 {
+		t.Errorf("expected 2 completed suites, got %v", completed)
+	}
+}
+
+func TestGetTestProgress_SidecarUnreachable(t *testing.T) {
+	h := newTestRunnerHandler("", "http://127.0.0.1:19228/run-tests")
+	r := newEngine()
+	r.GET("/admin/system/tests/progress", h.GetTestProgress)
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/system/tests/progress", nil)
+	w := doRequest(r, req)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502 when the sidecar is unreachable, got %d (body: %s)", w.Code, w.Body.String())
+	}
+}

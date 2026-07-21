@@ -12,6 +12,7 @@ import {
   getNodeDiskIOHistory,
   getNodeDiskTempsHistory,
   getNodeMetricsHistory,
+  getTestProgress,
   infrastructureQueryOptions,
   latestTestRunQueryOptions,
   pingServer,
@@ -23,7 +24,7 @@ import {
   triggerSpeedTest,
   upsertAlarmSubscription,
 } from '../../api/admin'
-import type { AlarmType, DiskFrame, DriveFrame, DriveStat, DriveSummary, LatestTestRunResponse, MetricsFrame, NodeDisk, NodeFrame, NodeSummary, TestCase, TestRun, TestRunReport, TestSuiteEntry } from '../../api/admin'
+import type { AlarmType, DiskFrame, DriveFrame, DriveStat, DriveSummary, LatestTestRunResponse, MetricsFrame, NodeDisk, NodeFrame, NodeSummary, TestCase, TestProgressResponse, TestRun, TestRunReport, TestSuiteEntry } from '../../api/admin'
 import { ApiError } from '../../api/client'
 import { useMetricsStream } from '../../hooks/useMetricsStream'
 import { LineGraph } from '../../components/LineGraph'
@@ -570,6 +571,17 @@ function RouteComponent() {
     },
   })
 
+  // The full cross-service suite can take minutes, so while a run is in
+  // flight, poll the sidecar's live status instead of leaving the card on a
+  // static "Running…" message — this shows which suite is currently
+  // executing and the results of whichever suites have already finished.
+  const { data: testProgress } = useQuery({
+    queryKey: ['admin', 'tests', 'progress'],
+    queryFn: getTestProgress,
+    enabled: runTestsMutation.isPending,
+    refetchInterval: runTestsMutation.isPending ? 3000 : false,
+  })
+
   const graphW = Math.min(820, window.innerWidth - 80)
 
   // For windows >= 24 hr the x-axis spans multiple calendar days, so show
@@ -923,7 +935,10 @@ function RouteComponent() {
             <p className="text-sm text-gray-400 m-0">Loading…</p>
           )}
           {runTestsMutation.isPending && (
-            <p className="text-sm text-gray-400 m-0 animate-pulse">Running test suites…</p>
+            <div className="flex flex-col gap-2">
+              <p className="text-sm text-gray-400 m-0 animate-pulse">Running test suites…</p>
+              <TestProgressList progress={testProgress} />
+            </div>
           )}
           {!latestTestRunLoading && !runTestsMutation.isPending && (!latestTestRun || !latestTestRun.run) && (
             <p className="text-sm text-gray-400 m-0">None — no test run has been recorded yet. Click "Run tests" to execute the suite.</p>
@@ -1204,6 +1219,68 @@ function suiteUnits(entry: TestSuiteEntry): { total: number; passed: number } {
   return { total: 1, passed: result.passed ? 1 : 0 }
 }
 
+const SUITE_LABELS: Record<SuiteKey, string> = {
+  backend: 'Backend (API)',
+  frontend: 'Frontend (unit)',
+  frontend_e2e: 'Frontend (E2E)',
+  mobile: 'Mobile',
+  recognition: 'Recognition',
+}
+
+// Live status of a single suite while a run is in flight — derived from
+// TestProgressResponse (see GET /admin/system/tests/progress): 'done' suites
+// render their pass/fail exactly like a finished run would.
+type SuiteProgressStatus = 'pending' | 'running' | 'passed' | 'failed' | 'skipped'
+
+function suiteProgressStatus(key: string, progress: TestProgressResponse | undefined): SuiteProgressStatus {
+  const entry = progress?.completed?.[key]
+  if (entry) {
+    if (!entry.enabled) return 'skipped'
+    return entry.result && entry.result.passed === false ? 'failed' : 'passed'
+  }
+  if (progress?.current_suite === key) return 'running'
+  return 'pending'
+}
+
+// Shown while runTestsMutation.isPending, polling GET /admin/system/tests/progress
+// (every 3s — see the useQuery above) so the card reflects which suite is
+// currently running and the results of whichever have already finished,
+// instead of a single static "Running…" message for the whole multi-minute run.
+function TestProgressList({ progress }: { progress: TestProgressResponse | undefined }) {
+  const order = progress?.order ?? ['backend', 'frontend', 'frontend_e2e', 'mobile', 'recognition']
+  return (
+    <ul className="flex flex-col gap-1 pl-0 list-none">
+      {order.map((key) => {
+        const status = suiteProgressStatus(key, progress)
+        const entry = progress?.completed?.[key]
+        return (
+          <li key={key} className="flex items-center gap-2 text-xs">
+            {status === 'running' ? (
+              <span className="w-1.5 h-1.5 rounded-full bg-blue-500 shrink-0 animate-pulse" />
+            ) : (
+              <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                status === 'passed' ? 'bg-green-500' :
+                status === 'failed' ? 'bg-red-500' :
+                status === 'skipped' ? 'bg-gray-300' : 'bg-gray-200'
+              }`} />
+            )}
+            <span className={status === 'pending' ? 'text-gray-400' : 'text-gray-600'}>
+              {SUITE_LABELS[key as SuiteKey] ?? key}
+            </span>
+            <span className="text-gray-400">
+              {status === 'running' && 'running…'}
+              {status === 'passed' && entry?.result && `passed · ${formatDurationMs(entry.result.duration_ms)}`}
+              {status === 'failed' && entry?.result && `failed · ${formatDurationMs(entry.result.duration_ms)}`}
+              {status === 'skipped' && 'skipped'}
+              {status === 'pending' && 'pending'}
+            </span>
+          </li>
+        )
+      })}
+    </ul>
+  )
+}
+
 function TestRunPanel({ latest }: { latest: LatestTestRunResponse }) {
   const run = latest.run
   if (!run) return null
@@ -1298,6 +1375,13 @@ function TestGroupCard({ group, report }: { group: TestGroupDef; report: TestRun
           ))}
         </div>
       )}
+      <button
+        onClick={() => setShowOutput((o) => !o)}
+        className="text-xs text-gray-400 hover:text-gray-700 cursor-pointer bg-transparent border-0 text-left w-fit"
+      >
+        {showOutput ? '▲ hide raw output' : '▼ raw output'}
+      </button>
+      {showOutput && <OutputBlock label={label} output={result.output} />}
     </div>
   )
 }

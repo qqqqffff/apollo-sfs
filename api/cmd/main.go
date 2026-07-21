@@ -789,6 +789,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 			adminGroup.POST("/interest/:id/deny", adminHandler.DenyInterestSubmission)
 
 			adminGroup.GET("/system/tests/latest", adminHandler.GetLatestTests)
+			adminGroup.GET("/system/tests/progress", adminHandler.GetTestProgress)
 			adminGroup.POST("/system/tests", adminHandler.RunTests)
 			adminGroup.POST("/system/shutdown", adminHandler.Shutdown)
 

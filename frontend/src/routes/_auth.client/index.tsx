@@ -121,6 +121,7 @@ function RouteComponent() {
 // unscoped root exactly as before.
 function RootView({ driveParam, fileId }: { driveParam?: string; fileId?: string }) {
   const { impersonatedUser } = useImpersonation()
+  const { action: sidebarAction } = useSearch({ from: '/_auth/client/' })
   const { data: prefs } = useQuery(preferencesQueryOptions)
   const { data: myServers, isLoading } = useQuery({
     queryKey: ['storage', 'my-servers'],
@@ -150,6 +151,18 @@ function RootView({ driveParam, fileId }: { driveParam?: string; fileId?: string
   // exists, otherwise show the picker.
   const dflt = prefs?.default_drive_id && servers.find((s) => s.drive_id === prefs.default_drive_id)
   if (dflt) return <FolderView folderId="root" driveId={dflt.drive_id} fileId={fileId} />
+
+  // A pending sidebar action (Google/email backup, new folder/collection)
+  // travels as ?action= and is only ever consumed by the effect inside
+  // FolderView — DrivePicker doesn't read it and would strand it in the URL
+  // forever, silently swallowing the click. Land in a real drive (primary,
+  // else the first) so the action still fires; the user can switch drives
+  // afterward same as anyone else.
+  if (sidebarAction) {
+    const fallback = servers.find((s) => s.is_primary) ?? servers[0]
+    return <FolderView folderId="root" driveId={fallback.drive_id} fileId={fileId} />
+  }
+
   return <DrivePicker servers={servers} />
 }
 

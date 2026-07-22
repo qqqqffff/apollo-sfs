@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"strings"
 )
 
 type Config struct {
@@ -188,7 +189,7 @@ func loadConfig() Config {
 		MailFrom:            requireEnv("MAIL_FROM"),
 		MailDomain:          requireEnv("MAIL_DOMAIN"),
 
-		AppBaseURL: requireEnv("APP_BASE_URL"),
+		AppBaseURL: requireHTTPSURL("APP_BASE_URL"),
 
 		KeyEncryptionKey:         requireEnv("KEY_ENCRYPTION_KEY"),
 		QuotaWarningThresholdPct: quotaPct,
@@ -246,6 +247,18 @@ func requireEnv(key string) string {
 		log.Fatalf("required environment variable %q is not set", key)
 	}
 	return v
+}
+
+// requireHTTPSURL is requireEnv plus a scheme check. It guards every link
+// built from this value (invite/reset/share emails, OIDC redirect URIs) so a
+// misconfigured value can never produce a scheme-less or http:// URL that
+// browsers/mail clients treat as unsafe or resolve as a relative link.
+func requireHTTPSURL(key string) string {
+	v := requireEnv(key)
+	if !strings.HasPrefix(v, "https://") {
+		log.Fatalf("environment variable %q must be an absolute https:// URL, got %q", key, v)
+	}
+	return strings.TrimRight(v, "/")
 }
 
 func getEnv(key, fallback string) string {

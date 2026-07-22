@@ -28,7 +28,7 @@ describe('login', () => {
 describe('register', () => {
   it('POSTs to /api/v1/auth/register with all fields', async () => {
     mockFetch(201, { username: 'bob' })
-    await register('bob', 'bob@example.com', 'pass123', 'tok-abc')
+    await register('bob', 'bob@example.com', 'pass123', 'tok-abc', 'captcha-xyz')
     const [url, init] = lastCall()
     expect(url).toBe('/api/v1/auth/register')
     expect(JSON.parse(init.body as string)).toEqual({
@@ -36,6 +36,7 @@ describe('register', () => {
       email: 'bob@example.com',
       password: 'pass123',
       invite_token: 'tok-abc',
+      captcha_token: 'captcha-xyz',
     })
   })
 })

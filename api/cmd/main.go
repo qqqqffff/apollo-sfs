@@ -284,7 +284,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	routes.SetMathGameService(h, services.NewMathGameService(queries))
 	routes.SetShareService(h, services.NewShareService(queries, emailSvc, cfg.AppBaseURL))
 	routes.SetRecognitionService(h, recogSvc)
-	authHandler := auth.NewHandler(authSvc, cfg.CookieDomain, cfg.CookieSecure)
+	authHandler := auth.NewHandler(authSvc, cfg.CookieDomain, cfg.CookieSecure, cfg.TurnstileSecretKey)
 	adminHandler := admin.NewHandler(queries, inviteSvc, metricsSvc, authSvc, fileSvc, registry, geoReader, cfg.DiskStatsPath, cfg.DiskStatsDriveLabel, cfg.TestRunnerURL, cfg.AppDir, shutdownCh)
 	adminHandler.SetDeploymentInfo(cfg.AppVersion, cfg.AppGitBranch)
 	adminHandler.SetDiscountMailer(emailSvc)

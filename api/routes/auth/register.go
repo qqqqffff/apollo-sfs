@@ -12,19 +12,30 @@ import (
 )
 
 type registerRequest struct {
-	Username    string `json:"username"     binding:"required,max=150"`
-	Email       string `json:"email"        binding:"required,email,max=254"`
-	Password    string `json:"password"     binding:"required,min=8,max=1024"`
-	InviteToken string `json:"invite_token" binding:"required,max=512"`
+	Username     string `json:"username"      binding:"required,max=150"`
+	Email        string `json:"email"         binding:"required,email,max=254"`
+	Password     string `json:"password"      binding:"required,min=8,max=1024"`
+	InviteToken  string `json:"invite_token"  binding:"required,max=512"`
+	CaptchaToken string `json:"captcha_token" binding:"required"`
 }
 
 // Register handles POST /api/v1/auth/register.
-// Validates the invitation token, creates the user in Keycloak and the app DB,
-// then auto-logs the user in by storing the new tokens in the session.
+// Validates the Turnstile captcha and the invitation token, creates the user
+// in Keycloak and the app DB, then auto-logs the user in by storing the new
+// tokens in the session.
 func (h *Handler) Register(c *gin.Context) {
 	var req registerRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	verifyFn := h.verifyCaptcha
+	if verifyFn == nil {
+		verifyFn = verifyTurnstile
+	}
+	if ok, err := verifyFn(h.turnstileSecret, req.CaptchaToken, c.ClientIP()); err != nil || !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "captcha verification failed — please try again"})
 		return
 	}
 

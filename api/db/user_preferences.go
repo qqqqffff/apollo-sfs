@@ -14,8 +14,22 @@ import (
 // prefColumns is the full projection returned by every preferences query so the
 // returned models.UserPreferences is always fully populated (callers and the
 // frontend cache rely on every field being present, not just the one mutated).
+//
+// default_drive_id is coalesced to the user's longest-owned drive allocation
+// when no explicit preference has been saved, so multi-drive accounts land
+// straight in a real drive instead of the drive picker even before they ever
+// touch the preference. Relies on every query using prefColumns passing
+// userID as $1 (true of Get and all four Set* functions below). Moot for
+// single/zero-drive accounts — there's nothing else the subquery could return.
 const prefColumns = `user_id, media_autoupload_folder_id, show_storage_buttons,
-	storage_prompt_enabled, backup_stale_notify, default_drive_id, hide_benchmark_promo, created_at, updated_at`
+	storage_prompt_enabled, backup_stale_notify,
+	COALESCE(default_drive_id, (
+		SELECT uda.drive_id FROM user_drive_allocations uda
+		WHERE uda.user_id = $1
+		ORDER BY uda.allocated_at ASC
+		LIMIT 1
+	)) AS default_drive_id,
+	hide_benchmark_promo, created_at, updated_at`
 
 // scanPrefs scans a row projected with prefColumns into p.
 func scanPrefs(row interface{ Scan(...any) error }, p *models.UserPreferences) error {
@@ -36,7 +50,9 @@ func scanPrefs(row interface{ Scan(...any) error }, p *models.UserPreferences) e
 
 // GetUserPreferences returns the preferences row for userID. If no row exists
 // yet it returns a defaults record (with UserID set) and no error, so callers
-// can treat "never configured" as "all defaults".
+// can treat "never configured" as "all defaults" — including the same
+// longest-owned-drive coalescing prefColumns does, since there's no row here
+// for that projection to run against.
 func (q *Queries) GetUserPreferences(ctx context.Context, userID string) (*models.UserPreferences, error) {
 	var p models.UserPreferences
 	err := scanPrefs(q.db.QueryRowContext(ctx, `
@@ -44,11 +60,23 @@ func (q *Queries) GetUserPreferences(ctx context.Context, userID string) (*model
 		FROM user_preferences WHERE user_id = $1
 	`, userID), &p)
 	if errors.Is(err, sql.ErrNoRows) {
-		return &models.UserPreferences{
+		p := models.UserPreferences{
 			UserID:               userID,
 			ShowStorageButtons:   true,
 			StoragePromptEnabled: true,
-		}, nil
+		}
+		var driveID uuid.NullUUID
+		err := q.db.QueryRowContext(ctx, `
+			SELECT drive_id FROM user_drive_allocations
+			WHERE user_id = $1 ORDER BY allocated_at ASC LIMIT 1
+		`, userID).Scan(&driveID)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("GetUserPreferences: %w", err)
+		}
+		if driveID.Valid {
+			p.DefaultDriveID = &driveID.UUID
+		}
+		return &p, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("GetUserPreferences: %w", err)

@@ -247,9 +247,10 @@ function parsePytestCoverage(covReport) {
 // if merged in). Never rejects, so one suite's crash can't take down the rest
 // of the run.
 //
-// Killed (SIGTERM, escalating to SIGKILL after a 5s grace period) if it runs
-// past timeoutMs — reported as a failed, timed-out result rather than left to
-// hang, so one stuck suite can't block the rest of the run indefinitely.
+// Killed (SIGTERM to the whole process group, escalating to SIGKILL after a
+// 5s grace period) if it runs past timeoutMs — reported as a failed,
+// timed-out result rather than left to hang, so one stuck suite can't block
+// the rest of the run indefinitely.
 function exec(command, args, cwd, env = {}, timeoutMs = SUITE_TIMEOUT_MS) {
   return new Promise((resolve) => {
     const start = Date.now();
@@ -263,17 +264,38 @@ function exec(command, args, cwd, env = {}, timeoutMs = SUITE_TIMEOUT_MS) {
       child = spawn(command, args, {
         cwd,
         env: { ...process.env, CI: 'true', FORCE_COLOR: '0', ...env },
+        // Own process group (pgid = child.pid) so a timeout can kill the
+        // whole tree, not just the immediate child — npx/npm/go/pytest all
+        // spawn their own subprocesses (Playwright in particular forks a
+        // worker per project, which in turn spawns a real browser process),
+        // and child.kill() only ever signals the single pid it's called on.
+        // Without this, a hung grandchild (e.g. a browser stuck mid-navigation
+        // against a dead frontend container) outlives the "killed" parent,
+        // keeps the stdout/stderr pipes open, and 'close' never fires — the
+        // suite hangs forever past SUITE_TIMEOUT_MS instead of being reported
+        // as a timed-out failure.
+        detached: true,
       });
     } catch (err) {
       resolve({ exitCode: -1, stdout: '', stderr: err.message, durationMs: Date.now() - start, timedOut: false });
       return;
     }
 
+    // Signals the whole process group (negative pid), not just `child` itself.
+    function killGroup(signal) {
+      try { process.kill(-child.pid, signal); } catch { /* group already gone */ }
+    }
+
     const killTimer = setTimeout(() => {
       timedOut = true;
-      child.kill('SIGTERM');
+      killGroup('SIGTERM');
       setTimeout(() => {
-        try { child.kill('SIGKILL'); } catch { /* already exited */ }
+        killGroup('SIGKILL');
+        // Belt and suspenders: even a process-group kill can't reach a
+        // process that double-forked/escaped the group, so guarantee this
+        // suite can't block the run forever regardless — force the promise
+        // to settle a moment after SIGKILL even if 'close' never arrives.
+        setTimeout(() => finish(-1), 2000);
       }, 5000);
     }, timeoutMs);
 

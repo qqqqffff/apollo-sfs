@@ -17,8 +17,9 @@ export function register(
   email: string,
   password: string,
   invite_token: string,
+  captcha_token: string,
 ) {
-  return post<RegisterResponse>('/auth/register', { username, email, password, invite_token })
+  return post<RegisterResponse>('/auth/register', { username, email, password, invite_token, captcha_token })
 }
 
 export function logout() {

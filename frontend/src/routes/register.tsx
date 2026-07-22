@@ -1,8 +1,10 @@
 import { createFileRoute, useNavigate, Link } from '@tanstack/react-router'
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { PayPalScriptProvider, PayPalButtons } from '@paypal/react-paypal-js'
-import { MdCloud, MdRocketLaunch, MdCheckCircle, MdSpeed } from 'react-icons/md'
+import { Turnstile } from '@marsidev/react-turnstile'
+import type { TurnstileInstance } from '@marsidev/react-turnstile'
+import { MdCloud, MdRocketLaunch, MdCheckCircle, MdSpeed, MdCheck, MdClose } from 'react-icons/md'
 import { register, validateInviteToken } from '../api/auth'
 import { ApiError } from '../api/client'
 import { publicConfigQueryOptions } from '../api/interest'
@@ -52,6 +54,31 @@ interface RegisterParams {
   token: string
 }
 
+interface PasswordChecks {
+  length: boolean
+  upper: boolean
+  number: boolean
+  symbol: boolean
+}
+
+function getPasswordChecks(password: string): PasswordChecks {
+  return {
+    length: password.length >= 8,
+    upper: /[A-Z]/.test(password),
+    number: /[0-9]/.test(password),
+    symbol: /[^A-Za-z0-9]/.test(password),
+  }
+}
+
+function PasswordCheckItem({ ok, label }: { ok: boolean; label: string }) {
+  return (
+    <li className={`flex items-center gap-1.5 text-xs transition-colors ${ok ? 'text-green-600' : 'text-red-500'}`}>
+      {ok ? <MdCheck className="shrink-0" /> : <MdClose className="shrink-0" />}
+      {label}
+    </li>
+  )
+}
+
 export const Route = createFileRoute('/register')({
   component: RouteComponent,
   validateSearch: (search: Record<string, unknown>): RegisterParams => ({
@@ -79,10 +106,22 @@ function RouteComponent() {
   const [username, setUsername] = useState('')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  const [passwordFocused, setPasswordFocused] = useState(false)
   const [agreedToTerms, setAgreedToTerms] = useState(false)
   const [showTerms, setShowTerms] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [step, setStep] = useState<'form' | 'plan'>('form')
+  const [captchaToken, setCaptchaToken] = useState<string | null>(null)
+  const turnstileRef = useRef<TurnstileInstance>(null)
+
+  // The invited email is authoritative — lock it to whatever the token
+  // resolves to rather than letting the user redirect the invite elsewhere.
+  useEffect(() => {
+    if (invite?.email) setEmail(invite.email)
+  }, [invite?.email])
+
+  const passwordChecks = getPasswordChecks(password)
+  const captchaRequired = !!config?.turnstile_site_key
 
   // Inline premium checkout on the plan step. Registration auto-logs-in (sets
   // the session cookie), so the protected /payments endpoints work here even
@@ -122,13 +161,15 @@ function RouteComponent() {
   }
 
   const mutation = useMutation({
-    mutationFn: () => register(username, email, password, token),
+    mutationFn: () => register(username, email, password, token, captchaToken!),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ['me'] })
       setStep('plan')
     },
     onError: (err) => {
       setError(err instanceof ApiError ? err.message : 'Registration failed')
+      turnstileRef.current?.reset()
+      setCaptchaToken(null)
     },
   })
 
@@ -278,11 +319,22 @@ function RouteComponent() {
             <input
               type="email"
               value={email}
-              onChange={(e) => setEmail(e.target.value)}
+              readOnly
               autoComplete="email"
               required
-              className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              className="border border-gray-300 rounded-lg px-3 py-2 text-sm bg-gray-50 text-gray-500 cursor-not-allowed focus:outline-none"
             />
+            <span className="text-xs text-gray-400">
+              This invitation is tied to the email above and can't be changed here. If this is not
+              the correct email please contact us at{' '}
+              <a
+                href="mailto:support@apollo-sfs.com"
+                className="text-blue-600 hover:text-blue-800 transition-colors"
+              >
+                Apollo SFS support
+              </a>
+              .
+            </span>
           </label>
           <label className="flex flex-col gap-1">
             <span className="text-sm font-medium text-gray-700">Password</span>
@@ -290,11 +342,21 @@ function RouteComponent() {
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
+              onFocus={() => setPasswordFocused(true)}
+              onBlur={() => setPasswordFocused(false)}
               autoComplete="new-password"
               minLength={8}
               required
               className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
             />
+            {passwordFocused && (
+              <ul className="space-y-1 pl-0.5 mt-1">
+                <PasswordCheckItem ok={passwordChecks.length} label="At least 8 characters" />
+                <PasswordCheckItem ok={passwordChecks.upper} label="One uppercase letter" />
+                <PasswordCheckItem ok={passwordChecks.number} label="One number" />
+                <PasswordCheckItem ok={passwordChecks.symbol} label="One symbol" />
+              </ul>
+            )}
           </label>
           <label className="flex items-center gap-2 cursor-pointer select-none">
             <input
@@ -315,10 +377,21 @@ function RouteComponent() {
               </button>
             </span>
           </label>
+          {config?.turnstile_site_key && (
+            <div>
+              <Turnstile
+                ref={turnstileRef}
+                siteKey={config.turnstile_site_key}
+                onSuccess={(token) => setCaptchaToken(token)}
+                onExpire={() => setCaptchaToken(null)}
+                onError={() => setCaptchaToken(null)}
+              />
+            </div>
+          )}
           {error && <p className="text-sm text-red-500">{error}</p>}
           <button
             type="submit"
-            disabled={mutation.isPending || !agreedToTerms}
+            disabled={mutation.isPending || !agreedToTerms || (captchaRequired && !captchaToken)}
             className="mt-1 bg-blue-600 hover:bg-blue-700 text-white rounded-lg py-2 text-sm font-medium disabled:opacity-50 cursor-pointer transition-colors"
           >
             {mutation.isPending ? 'Creating account…' : 'Create account'}

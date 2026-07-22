@@ -110,7 +110,7 @@ export function PdfViewer({ url, onError, className }: Props) {
           canvas.className = 'mx-auto mb-2 shadow-sm bg-white'
           const ctx = canvas.getContext('2d')
           if (!ctx) throw new Error('no 2d context')
-          await page.render({ canvasContext: ctx, canvas, viewport }).promise
+          await page.render({ canvasContext: ctx, viewport }).promise
           return canvas
         }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 
 	"github.com/lib/pq"
 
@@ -13,15 +14,17 @@ import (
 const userColumns = `
 	username, email, encrypted_key, key_nonce, master_key_version,
 	storage_used_bytes, storage_quota_bytes, last_seen_at, created_at, is_admin,
-	is_premium, premium_granted_at, feedback_access_enabled`
+	is_premium, premium_granted_at, feedback_access_enabled,
+	premium_expires_at, premium_purchase_blocked`
 
 func scanUser(row *sql.Row) (*models.User, error) {
 	var u models.User
-	var lastSeenAt, premiumGrantedAt sql.NullTime
+	var lastSeenAt, premiumGrantedAt, premiumExpiresAt sql.NullTime
 	err := row.Scan(
 		&u.Username, &u.Email, &u.EncryptedKey, &u.KeyNonce, &u.MasterKeyVersion,
 		&u.StorageUsedBytes, &u.StorageQuotaBytes, &lastSeenAt, &u.CreatedAt, &u.IsAdmin,
 		&u.IsPremium, &premiumGrantedAt, &u.FeedbackAccessEnabled,
+		&premiumExpiresAt, &u.PremiumPurchaseBlocked,
 	)
 	if err != nil {
 		return nil, err
@@ -31,17 +34,21 @@ func scanUser(row *sql.Row) (*models.User, error) {
 	}
 	if premiumGrantedAt.Valid {
 		u.PremiumGrantedAt = &premiumGrantedAt.Time
+	}
+	if premiumExpiresAt.Valid {
+		u.PremiumExpiresAt = &premiumExpiresAt.Time
 	}
 	return &u, nil
 }
 
 func scanUserRow(rows *sql.Rows) (*models.User, error) {
 	var u models.User
-	var lastSeenAt, premiumGrantedAt sql.NullTime
+	var lastSeenAt, premiumGrantedAt, premiumExpiresAt sql.NullTime
 	err := rows.Scan(
 		&u.Username, &u.Email, &u.EncryptedKey, &u.KeyNonce, &u.MasterKeyVersion,
 		&u.StorageUsedBytes, &u.StorageQuotaBytes, &lastSeenAt, &u.CreatedAt, &u.IsAdmin,
 		&u.IsPremium, &premiumGrantedAt, &u.FeedbackAccessEnabled,
+		&premiumExpiresAt, &u.PremiumPurchaseBlocked,
 	)
 	if err != nil {
 		return nil, err
@@ -51,6 +58,9 @@ func scanUserRow(rows *sql.Rows) (*models.User, error) {
 	}
 	if premiumGrantedAt.Valid {
 		u.PremiumGrantedAt = &premiumGrantedAt.Time
+	}
+	if premiumExpiresAt.Valid {
+		u.PremiumExpiresAt = &premiumExpiresAt.Time
 	}
 	return &u, nil
 }
@@ -117,6 +127,7 @@ func (q *Queries) ListUsers(ctx context.Context, in PageInput) (*PageResult[mode
 		SELECT u.username, u.email, u.encrypted_key, u.key_nonce, u.master_key_version,
 		       u.storage_used_bytes, u.storage_quota_bytes, u.last_seen_at, u.created_at, u.is_admin,
 		       u.is_premium, u.premium_granted_at, u.feedback_access_enabled,
+		       u.premium_expires_at, u.premium_purchase_blocked,
 		       b.id, b.ban_type, b.violation_code, b.comments, b.banned_by,
 		       b.banned_at, b.expires_at, b.pardoned_at, b.pardoned_by,
 		       EXISTS (
@@ -257,6 +268,7 @@ func (q *Queries) ListAdminUsers(ctx context.Context, f ListUsersFilter, limit, 
 		SELECT u.username, u.email, u.encrypted_key, u.key_nonce, u.master_key_version,
 		       u.storage_used_bytes, u.storage_quota_bytes, u.last_seen_at, u.created_at, u.is_admin,
 		       u.is_premium, u.premium_granted_at, u.feedback_access_enabled,
+		       u.premium_expires_at, u.premium_purchase_blocked,
 		       b.id, b.ban_type, b.violation_code, b.comments, b.banned_by,
 		       b.banned_at, b.expires_at, b.pardoned_at, b.pardoned_by,
 		       EXISTS (
@@ -298,7 +310,7 @@ func (q *Queries) ListAdminUsers(ctx context.Context, f ListUsersFilter, limit, 
 
 func scanUserWithBanRow(rows *sql.Rows) (*models.User, error) {
 	var u models.User
-	var lastSeenAt, premiumGrantedAt sql.NullTime
+	var lastSeenAt, premiumGrantedAt, premiumExpiresAt sql.NullTime
 	// Ban columns — all nullable because of the LEFT JOIN.
 	var (
 		banID         sql.NullInt64
@@ -315,6 +327,7 @@ func scanUserWithBanRow(rows *sql.Rows) (*models.User, error) {
 		&u.Username, &u.Email, &u.EncryptedKey, &u.KeyNonce, &u.MasterKeyVersion,
 		&u.StorageUsedBytes, &u.StorageQuotaBytes, &lastSeenAt, &u.CreatedAt, &u.IsAdmin,
 		&u.IsPremium, &premiumGrantedAt, &u.FeedbackAccessEnabled,
+		&premiumExpiresAt, &u.PremiumPurchaseBlocked,
 		&banID, &banType, &violationCode, &comments, &bannedBy,
 		&bannedAt, &expiresAt, &pardonedAt, &pardonedBy,
 		&u.PremiumSubscribed,
@@ -327,6 +340,9 @@ func scanUserWithBanRow(rows *sql.Rows) (*models.User, error) {
 	}
 	if premiumGrantedAt.Valid {
 		u.PremiumGrantedAt = &premiumGrantedAt.Time
+	}
+	if premiumExpiresAt.Valid {
+		u.PremiumExpiresAt = &premiumExpiresAt.Time
 	}
 	if banID.Valid {
 		b := &models.UserBan{
@@ -571,6 +587,118 @@ func (q *Queries) ResetUserStorage(ctx context.Context, username string) error {
 	)
 	if err != nil {
 		return fmt.Errorf("ResetUserStorage %q: %w", username, err)
+	}
+	return nil
+}
+
+// ── Admin role editor + account deletion ──────────────────────────────────────
+
+// SetUserAdmin toggles the is_admin flag. Used by the admin Users page's role
+// editor (routes/admin.UpdateUserRole). Like SetUserPremium, this is an
+// immediate-read convenience only — the auth middleware resyncs is_admin from
+// the JWT's realm roles on every request, so the corresponding Keycloak realm
+// role change (AuthService.SetAdminRealmRole) is what actually sticks.
+func (q *Queries) SetUserAdmin(ctx context.Context, username string, isAdmin bool) error {
+	_, err := q.db.ExecContext(ctx,
+		`UPDATE users SET is_admin = $2 WHERE username = $1`,
+		username, isAdmin,
+	)
+	if err != nil {
+		return fmt.Errorf("SetUserAdmin %q: %w", username, err)
+	}
+	return nil
+}
+
+// SetPremiumExpiry sets or clears (nil) a user's admin-granted Premium trial
+// expiry. This column is independent of real PayPal billing — it only
+// governs the background sweep (PaymentService.ExpireAdminGrantedPremium)
+// that later revokes an admin-granted trial once it lapses.
+func (q *Queries) SetPremiumExpiry(ctx context.Context, username string, expiresAt *time.Time) error {
+	_, err := q.db.ExecContext(ctx,
+		`UPDATE users SET premium_expires_at = $2 WHERE username = $1`,
+		username, expiresAt,
+	)
+	if err != nil {
+		return fmt.Errorf("SetPremiumExpiry %q: %w", username, err)
+	}
+	return nil
+}
+
+// SetPremiumPurchaseBlocked toggles whether a user may start a new Premium
+// subscription (checked by payments.Handler.CreateSubscription). Set by the
+// admin Users page's role editor when demoting an active Premium user to a
+// regular user.
+func (q *Queries) SetPremiumPurchaseBlocked(ctx context.Context, username string, blocked bool) error {
+	_, err := q.db.ExecContext(ctx,
+		`UPDATE users SET premium_purchase_blocked = $2 WHERE username = $1`,
+		username, blocked,
+	)
+	if err != nil {
+		return fmt.Errorf("SetPremiumPurchaseBlocked %q: %w", username, err)
+	}
+	return nil
+}
+
+// ListExpiredPremiumGrants returns usernames whose admin-granted Premium
+// trial has lapsed as of now. Excludes anyone with an active/suspended real
+// PayPal subscription of their own — that field only governs admin-granted
+// trials and must never auto-revoke a paying subscriber's access.
+func (q *Queries) ListExpiredPremiumGrants(ctx context.Context, now time.Time) ([]string, error) {
+	rows, err := q.db.QueryContext(ctx, `
+		SELECT username FROM users u
+		WHERE is_premium AND NOT is_admin
+		  AND premium_expires_at IS NOT NULL
+		  AND premium_expires_at <= $1
+		  AND NOT EXISTS (
+		    SELECT 1 FROM premium_subscriptions ps
+		    WHERE ps.username = u.username AND ps.status IN ('active', 'suspended')
+		  )
+	`, now)
+	if err != nil {
+		return nil, fmt.Errorf("ListExpiredPremiumGrants: %w", err)
+	}
+	defer rows.Close()
+
+	var usernames []string
+	for rows.Next() {
+		var username string
+		if err := rows.Scan(&username); err != nil {
+			return nil, fmt.Errorf("ListExpiredPremiumGrants scan: %w", err)
+		}
+		usernames = append(usernames, username)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("ListExpiredPremiumGrants: %w", err)
+	}
+	return usernames, nil
+}
+
+// DeleteUserRecord permanently deletes a user's row. Every other per-user
+// table cascades off users.username (ON DELETE CASCADE) except folders,
+// favorites, and user_preferences, which reference the user by a plain
+// column with no formal FK — the caller (routes/admin.DeleteUser) is
+// responsible for cleaning those up (DeleteAllUserFolders below; favorites
+// then cascade off folders/files, which cascade off each other).
+func (q *Queries) DeleteUserRecord(ctx context.Context, username string) error {
+	res, err := q.db.ExecContext(ctx, `DELETE FROM users WHERE username = $1`, username)
+	if err != nil {
+		return fmt.Errorf("DeleteUserRecord %q: %w", username, err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("DeleteUserRecord: user %q not found", username)
+	}
+	return nil
+}
+
+// DeleteAllUserFolders bulk-deletes every folder the user owns. Files under
+// them must already be gone (FileService.AdminDeleteAllFiles) — folders.id
+// ON DELETE CASCADE handles nested subfolders and any remaining
+// files/favorites rows in one statement regardless of nesting depth.
+func (q *Queries) DeleteAllUserFolders(ctx context.Context, username string) error {
+	_, err := q.db.ExecContext(ctx, `DELETE FROM folders WHERE user_id = $1`, username)
+	if err != nil {
+		return fmt.Errorf("DeleteAllUserFolders %q: %w", username, err)
 	}
 	return nil
 }

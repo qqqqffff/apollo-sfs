@@ -19,6 +19,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	"apollo-sfs.com/api/db"
 	"apollo-sfs.com/api/models"
 	"apollo-sfs.com/api/routes/middleware"
 	"apollo-sfs.com/api/routes/services"
@@ -492,6 +493,10 @@ const subscriptionCancelNotificationWindow = 30 * 24 * time.Hour
 // in the bell dropdown.
 const adminNotificationWindow = 7 * 24 * time.Hour
 
+// roleChangeNotificationWindow bounds how long an admin role assignment keeps
+// showing in the bell dropdown.
+const roleChangeNotificationWindow = 30 * 24 * time.Hour
+
 // emailBackupNotificationWindow bounds how long a completed email backup run
 // (with notifications enabled) keeps showing in the bell dropdown.
 const emailBackupNotificationWindow = 7 * 24 * time.Hour
@@ -527,6 +532,8 @@ func notificationCategory(kind string) string {
 		return "Emails"
 	case "alarm_triggered":
 		return "Alarms"
+	case "role_changed":
+		return "Account"
 	default:
 		return ""
 	}
@@ -765,6 +772,23 @@ func (h *Handler) gatherNotificationItems(ctx context.Context, username, userID 
 			Link:      "/client/profile",
 			CreatedAt: qc.CreatedAt,
 			Details:   qc.Details,
+		})
+	}
+
+	// Role assignments an admin made via the Users page's role editor, within
+	// the same window as the admin-cancelled-subscription notice above.
+	roleChanges, err := h.queries.ListRecentRoleChangeNotificationsForUser(ctx, username, time.Now().Add(-roleChangeNotificationWindow))
+	if err != nil {
+		return nil, err
+	}
+	for _, rc := range roleChanges {
+		items = append(items, notificationItem{
+			ID:        rc.ID.String() + ":role-changed",
+			Kind:      "role_changed",
+			Title:     "Account role updated",
+			Body:      describeRoleChange(rc),
+			Link:      "/client/profile",
+			CreatedAt: rc.CreatedAt,
 		})
 	}
 
@@ -1027,6 +1051,40 @@ func summarizeQuotaChange(raw json.RawMessage) string {
 		"An admin updated your storage across %d %s: %s → %s total.",
 		n, drives, formatCapacityShort(before), formatCapacityShort(after),
 	)
+}
+
+// roleLabel maps a role value ("admin"|"premium"|"user") to the display
+// label used in bell/email copy — mirrors GroupBadge's THEME on the frontend.
+func roleLabel(role string) string {
+	switch role {
+	case "admin":
+		return "Admin"
+	case "premium":
+		return "Premium"
+	default:
+		return "User"
+	}
+}
+
+// describeRoleChange builds the bell body for a role_change_notifications
+// row: the role transition, the admin's reason, and — for a demotion away
+// from Premium — the trial-expiry/purchase-block notes.
+func describeRoleChange(rc db.RoleChangeNotification) string {
+	body := fmt.Sprintf("Your account role was changed from %s to %s by an admin.", roleLabel(rc.PreviousRole), roleLabel(rc.NewRole))
+	if rc.NewRole == "premium" {
+		if rc.PremiumExpiresAt != nil {
+			body += fmt.Sprintf(" Your Premium trial expires on %s.", rc.PremiumExpiresAt.Format("Jan 2, 2006"))
+		} else {
+			body += " Premium access does not expire."
+		}
+	}
+	if rc.BlockFuturePremium {
+		body += " You have also been restricted from purchasing a new Premium subscription."
+	}
+	if rc.Reason != "" {
+		body += fmt.Sprintf(" Reason: %s", rc.Reason)
+	}
+	return body
 }
 
 func formatCapacityShort(bytes int64) string {

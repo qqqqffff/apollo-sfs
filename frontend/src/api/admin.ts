@@ -526,6 +526,23 @@ export function pardonUser(username: string) {
   return post<{ message: string }>(`/admin/users/${encodeURIComponent(username)}/pardon`)
 }
 
+// ── Role editor / account deletion ────────────────────────────────────────────
+
+export interface UpdateUserRoleBody {
+  role: 'admin' | 'premium' | 'user'
+  reason: string
+  premium_expires_at?: string | null
+  block_future_premium?: boolean
+}
+
+export function updateUserRole(username: string, body: UpdateUserRoleBody) {
+  return patch<{ message: string }>(`/admin/users/${encodeURIComponent(username)}/role`, body)
+}
+
+export function deleteAdminUser(username: string, reason: string) {
+  return del<{ message: string }>(`/admin/users/${encodeURIComponent(username)}`, { reason })
+}
+
 export function listUserBans(status: BanStatus, cursor?: string, limit?: number) {
   const params = new URLSearchParams({ status })
   if (cursor) params.set('cursor', cursor)

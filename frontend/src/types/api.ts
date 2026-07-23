@@ -8,6 +8,13 @@ export interface User {
   is_admin: boolean
   is_premium: boolean
   premium_granted_at: string | null
+  // Admin-granted Premium "trial" expiry (independent of real PayPal
+  // billing) — null means either not premium, or premium granted with no
+  // expiry (permanent). Set via the admin Users page's role editor.
+  premium_expires_at?: string | null
+  // True when the admin has restricted this account from purchasing a new
+  // Premium subscription (set on a Premium → User demotion).
+  premium_purchase_blocked?: boolean
   // True when the user has an active/suspended premium subscription of their
   // own — distinct from is_premium, which is also true for every admin
   // regardless of whether they ever subscribed. Lets the UI show a separate

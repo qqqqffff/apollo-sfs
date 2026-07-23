@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -22,6 +23,17 @@ type AdminQuerier interface {
 	SetUserFeedbackAccess(ctx context.Context, username string, enabled bool) error
 	GetUserDrive(ctx context.Context, username string) (*models.UserDriveAllocation, error)
 	GetDriveAvailableBytes(ctx context.Context, driveID uuid.UUID) (int64, error)
+
+	// Role editor + account deletion (admin Users page)
+	SetUserAdmin(ctx context.Context, username string, isAdmin bool) error
+	SetUserPremium(ctx context.Context, username string, isPremium bool) error
+	SetPremiumExpiry(ctx context.Context, username string, expiresAt *time.Time) error
+	SetPremiumPurchaseBlocked(ctx context.Context, username string, blocked bool) error
+	InsertRoleChangeNotification(ctx context.Context, p db.InsertRoleChangeNotificationParams) error
+	GetActiveSubscriptionForUser(ctx context.Context, username string) (*models.PremiumSubscription, error)
+	InsertAuditLog(ctx context.Context, in db.AuditInput) error
+	DeleteUserRecord(ctx context.Context, username string) error
+	DeleteAllUserFolders(ctx context.Context, username string) error
 
 	// Banned IPs
 	ListBannedIPs(ctx context.Context, activeOnly bool, in db.PageInput) (*db.PageResult[models.BannedIP], error)

@@ -40,6 +40,7 @@ type Querier interface {
 	ListSharesForRecipient(ctx context.Context, email string) ([]models.Share, error)
 	ListRecentAdminCancelledSubscriptionsForUser(ctx context.Context, username string, since time.Time) ([]models.PremiumSubscription, error)
 	ListRecentQuotaChangeNotificationsForUser(ctx context.Context, username string, since time.Time) ([]db.QuotaChangeNotification, error)
+	ListRecentRoleChangeNotificationsForUser(ctx context.Context, username string, since time.Time) ([]db.RoleChangeNotification, error)
 	ListRecentEmailBackupRunsForUser(ctx context.Context, username string, since time.Time) ([]models.EmailBackupRun, error)
 
 	// Backup last-sync times (backup pages + opt-in stale-backup reminder)

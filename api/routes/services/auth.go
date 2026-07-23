@@ -61,11 +61,11 @@ type kcTokenResponse struct {
 
 // kcUser is the body sent to POST /admin/realms/{realm}/users.
 type kcUser struct {
-	Username      string          `json:"username"`
-	Email         string          `json:"email"`
-	Enabled       bool            `json:"enabled"`
-	EmailVerified bool            `json:"emailVerified"`
-	Credentials   []kcCredential  `json:"credentials,omitempty"`
+	Username      string         `json:"username"`
+	Email         string         `json:"email"`
+	Enabled       bool           `json:"enabled"`
+	EmailVerified bool           `json:"emailVerified"`
+	Credentials   []kcCredential `json:"credentials,omitempty"`
 }
 
 type kcCredential struct {
@@ -85,13 +85,13 @@ type kcUserResult struct {
 // AuthService handles all authentication operations: login, registration,
 // logout, token refresh, and password-reset email triggering.
 type AuthService struct {
-	queries       *db.Queries
-	kcURL         string
-	kcRealm       string
-	kcClientID    string
-	kcSecret      string
-	appBaseURL    string
-	http          *http.Client
+	queries        *db.Queries
+	kcURL          string
+	kcRealm        string
+	kcClientID     string
+	kcSecret       string
+	appBaseURL     string
+	http           *http.Client
 	googleClientID string
 	googleSecret   string
 
@@ -799,6 +799,87 @@ func (s *AuthService) kcGrantRealmRoles(ctx context.Context, adminToken, userID 
 	return nil
 }
 
+// kcRevokeRealmRoles removes the given realm roles from the Keycloak user —
+// the DELETE counterpart of kcGrantRealmRoles, same endpoint and body shape.
+func (s *AuthService) kcRevokeRealmRoles(ctx context.Context, adminToken, userID string, roles []kcRoleRef) error {
+	body, err := json.Marshal(roles)
+	if err != nil {
+		return err
+	}
+	endpoint := fmt.Sprintf("%s/admin/realms/%s/users/%s/role-mappings/realm", s.kcURL, s.kcRealm, userID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, endpoint, strings.NewReader(string(body)))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	resp, err := s.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("keycloak request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("keycloak returned %s: %s", resp.Status, string(b))
+	}
+	return nil
+}
+
+// SetAdminRealmRole grants or revokes the "admin" realm role for username —
+// used by the admin Users page's role editor (routes/admin.UpdateUserRole).
+// Unlike the DB is_admin flag, this is what actually takes effect: the auth
+// middleware resyncs is_admin/is_premium from the JWT's realm roles on every
+// request, so a DB-only change would be overwritten on the user's next call.
+func (s *AuthService) SetAdminRealmRole(ctx context.Context, username string, grant bool) error {
+	adminToken, err := s.adminToken(ctx)
+	if err != nil {
+		return fmt.Errorf("set admin realm role: get admin token: %w", err)
+	}
+	kcID, err := s.kcFindUserByUsername(ctx, adminToken, username)
+	if err != nil {
+		return fmt.Errorf("set admin realm role: look up keycloak user: %w", err)
+	}
+	if kcID == "" {
+		return fmt.Errorf("set admin realm role: user %q not found in keycloak", username)
+	}
+	role, err := s.kcGetRealmRole(ctx, adminToken, "admin")
+	if err != nil {
+		return fmt.Errorf("set admin realm role: %w", err)
+	}
+	if grant {
+		if err := s.kcGrantRealmRoles(ctx, adminToken, kcID, []kcRoleRef{*role}); err != nil {
+			return fmt.Errorf("set admin realm role: grant: %w", err)
+		}
+		return nil
+	}
+	if err := s.kcRevokeRealmRoles(ctx, adminToken, kcID, []kcRoleRef{*role}); err != nil {
+		return fmt.Errorf("set admin realm role: revoke: %w", err)
+	}
+	return nil
+}
+
+// DeleteUser permanently removes username's Keycloak identity — used by the
+// admin Users page's delete action once local files/DB rows have been (or
+// are about to be) purged. Returns nil (no-op) if the user is already gone
+// from Keycloak, so a retried delete stays idempotent.
+func (s *AuthService) DeleteUser(ctx context.Context, username string) error {
+	adminToken, err := s.adminToken(ctx)
+	if err != nil {
+		return fmt.Errorf("delete user: get admin token: %w", err)
+	}
+	kcID, err := s.kcFindUserByUsername(ctx, adminToken, username)
+	if err != nil {
+		return fmt.Errorf("delete user: look up keycloak user: %w", err)
+	}
+	if kcID == "" {
+		return nil
+	}
+	if err := s.kcDeleteUser(ctx, adminToken, kcID); err != nil {
+		return fmt.Errorf("delete user: keycloak: %w", err)
+	}
+	return nil
+}
+
 // kcCreateUser calls POST /admin/realms/{realm}/users to create the account.
 // Returns the new user's Keycloak UUID extracted from the Location response header.
 func (s *AuthService) kcCreateUser(ctx context.Context, adminToken, username, email, password string) (string, error) {
@@ -1166,8 +1247,8 @@ func (s *AuthService) ExchangeGoogleServerAuthCode(ctx context.Context, serverAu
 	defer resp.Body.Close()
 
 	var gr struct {
-		IDToken string `json:"id_token"`
-		Error   string `json:"error"`
+		IDToken   string `json:"id_token"`
+		Error     string `json:"error"`
 		ErrorDesc string `json:"error_description"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&gr); err != nil {
@@ -1439,4 +1520,3 @@ func (s *AuthService) kcFindGroupByName(ctx context.Context, adminToken, name st
 	}
 	return "", nil
 }
-

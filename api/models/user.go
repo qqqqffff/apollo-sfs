@@ -18,6 +18,15 @@ type User struct {
 	IsAdmin           bool       `json:"is_admin" db:"is_admin"`
 	IsPremium         bool       `json:"is_premium" db:"is_premium"`
 	PremiumGrantedAt  *time.Time `json:"premium_granted_at" db:"premium_granted_at"`
+	// PremiumExpiresAt is an admin-granted Premium "trial" expiry — independent
+	// of real PayPal billing. Nil means either not premium, or premium granted
+	// with no expiry (permanent). Set via the admin Users page's role editor;
+	// swept by PaymentService.ExpireAdminGrantedPremium once it lapses.
+	PremiumExpiresAt *time.Time `json:"premium_expires_at" db:"premium_expires_at"`
+	// PremiumPurchaseBlocked, when true, prevents the user from starting a new
+	// Premium subscription (payments.Handler.CreateSubscription). Set by the
+	// admin Users page's role editor when demoting an active Premium user.
+	PremiumPurchaseBlocked bool `json:"premium_purchase_blocked" db:"premium_purchase_blocked"`
 	// FeedbackAccessEnabled gates submission of the profile-page feedback form.
 	// Disabled by default; admins grant it per-user from the admin Feedback →
 	// Access tab.

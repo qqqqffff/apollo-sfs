@@ -170,6 +170,53 @@ func (s *PaymentService) RevokePremiumAllocation(ctx context.Context, username s
 	return s.revokePremiumEffects(ctx, username)
 }
 
+// ExpireAdminGrantedPremium revokes premium access for every user whose
+// admin-granted Premium trial (users.premium_expires_at, set by the admin
+// Users page's role editor) has lapsed. Real PayPal subscriptions are never
+// touched here — ListExpiredPremiumGrants excludes anyone with an
+// active/suspended subscription row of their own. Errors for one user are
+// logged and do not stop the sweep from continuing to the next.
+func (s *PaymentService) ExpireAdminGrantedPremium(ctx context.Context) error {
+	usernames, err := s.queries.ListExpiredPremiumGrants(ctx, time.Now())
+	if err != nil {
+		return fmt.Errorf("expire admin granted premium: list: %w", err)
+	}
+	for _, username := range usernames {
+		if err := s.RevokePremiumAllocation(ctx, username); err != nil {
+			log.Printf("expire admin granted premium: revoke %q: %v", username, err)
+			continue
+		}
+		if err := s.queries.SetPremiumExpiry(ctx, username, nil); err != nil {
+			log.Printf("expire admin granted premium: clear expiry %q: %v", username, err)
+		}
+		if err := s.queries.InsertRoleChangeNotification(ctx, db.InsertRoleChangeNotificationParams{
+			Username: username, ChangedBy: "system", PreviousRole: "premium", NewRole: "user",
+			Reason: "Premium trial expired",
+		}); err != nil {
+			log.Printf("expire admin granted premium: notification %q: %v", username, err)
+		}
+	}
+	return nil
+}
+
+// PremiumExpiryLoop runs ExpireAdminGrantedPremium on a fixed interval until
+// ctx is cancelled. Started once from main.go next to the other periodic
+// background loops (allocation revert, reconciliation).
+func (s *PaymentService) PremiumExpiryLoop(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := s.ExpireAdminGrantedPremium(ctx); err != nil {
+				log.Printf("PremiumExpiryLoop: %v", err)
+			}
+		}
+	}
+}
+
 // CreatePending records a new "created" payments row. Returns the row so
 // the caller can echo back the order_id to the frontend.
 func (s *PaymentService) CreatePending(ctx context.Context, p *models.Payment) error {

@@ -341,6 +341,10 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	})
 	adminHandler.SetPayPalClient(paypalClient)
 	paymentSvc := services.NewPaymentService(queries, authSvc)
+	adminHandler.SetEmailService(emailSvc)
+	adminHandler.SetPayPalClients(paypalClients)
+	adminHandler.SetPaymentService(paymentSvc)
+	go paymentSvc.PremiumExpiryLoop(context.Background(), 15*time.Minute)
 	paymentsHandler := payments.NewHandler(paypalClients, paymentSvc, queries, payments.Config{
 		AppBaseURL: cfg.AppBaseURL,
 		PlanIDs: map[string]string{
@@ -720,6 +724,8 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 			adminGroup.PATCH("/users/:user_id/quota", adminHandler.UpdateUserQuota)
 			adminGroup.PATCH("/users/:user_id/username", adminHandler.UpdateUsername)
 			adminGroup.PATCH("/users/:user_id/feedback-access", adminHandler.UpdateUserFeedbackAccess)
+			adminGroup.PATCH("/users/:user_id/role", adminHandler.UpdateUserRole)
+			adminGroup.DELETE("/users/:user_id", adminHandler.DeleteUser)
 			adminGroup.GET("/users/:user_id/storage", h.AdminGetUserStorage)
 			adminGroup.PUT("/users/:user_id/storage/allocations", h.AdminUpdateUserStorageAllocations)
 			adminGroup.GET("/users/:user_id/folders", h.AdminListUserFolders)

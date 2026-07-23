@@ -10,6 +10,7 @@ const TARGET_FOLDER: Folder = { id: 'fold-target', user_id: 'u1', name: 'Target'
 
 const FILE_DRAG_TYPE = 'application/x-apollo-file'
 const FOLDER_DRAG_TYPE = 'application/x-apollo-folder'
+const SELECTION_DRAG_TYPE = 'application/x-apollo-selection'
 
 function makeDataTransfer(type?: string, value?: string) {
   const store: Record<string, string> = {}
@@ -24,12 +25,28 @@ function makeDataTransfer(type?: string, value?: string) {
   }
 }
 
-function makeDragEvent(dataTransfer = makeDataTransfer()) {
+// Like makeDataTransfer but carries several types at once — needed to
+// simulate a multi-selection drag, which sets SELECTION_DRAG_TYPE alongside
+// the single-item type of whichever row was actually grabbed.
+function makeMultiDataTransfer(entries: Record<string, string>) {
+  const store: Record<string, string> = { ...entries }
+  return {
+    types: Object.keys(entries),
+    effectAllowed: '',
+    dropEffect: '',
+    setData: jest.fn((t: string, v: string) => { store[t] = v }),
+    getData: jest.fn((t: string) => store[t] ?? ''),
+    setDragImage: jest.fn(),
+  }
+}
+
+function makeDragEvent(dataTransfer = makeDataTransfer(), defaultPrevented = false) {
   return {
     preventDefault: jest.fn(),
     dataTransfer,
     currentTarget: { contains: jest.fn().mockReturnValue(false) },
     relatedTarget: null,
+    defaultPrevented,
   } as unknown as React.DragEvent
 }
 
@@ -143,5 +160,110 @@ describe('getFolderDropHandlers', () => {
     const e = makeDragEvent(makeDataTransfer('text/plain', 'hello'))
     act(() => result.current.getFolderDropHandlers(TARGET_FOLDER).onDragEnter(e))
     expect(result.current.dragOverFolderId).toBeNull()
+  })
+})
+
+describe('getListBackgroundDropHandlers', () => {
+  it('moves a file to the parent folder on drop', () => {
+    const onMoveFile = jest.fn()
+    const { result } = renderHook(() => useFileDrag(onMoveFile, jest.fn()))
+    const e = makeDragEvent(makeDataTransfer(FILE_DRAG_TYPE, 'f1'))
+    act(() => result.current.getListBackgroundDropHandlers('parent-1').onDrop(e))
+    expect(onMoveFile).toHaveBeenCalledWith('f1', 'parent-1')
+  })
+
+  it('does nothing when there is no parent to move to', () => {
+    const onMoveFile = jest.fn()
+    const { result } = renderHook(() => useFileDrag(onMoveFile, jest.fn()))
+    const e = makeDragEvent(makeDataTransfer(FILE_DRAG_TYPE, 'f1'))
+    act(() => result.current.getListBackgroundDropHandlers(null).onDrop(e))
+    expect(onMoveFile).not.toHaveBeenCalled()
+  })
+
+  it('ignores the drop when a more specific target (e.g. a folder row) already claimed it', () => {
+    const onMoveFile = jest.fn()
+    const { result } = renderHook(() => useFileDrag(onMoveFile, jest.fn()))
+    const e = makeDragEvent(makeDataTransfer(FILE_DRAG_TYPE, 'f1'), /* defaultPrevented */ true)
+    act(() => result.current.getListBackgroundDropHandlers('parent-1').onDrop(e))
+    expect(onMoveFile).not.toHaveBeenCalled()
+  })
+
+  it('sets dragOverBackground on dragEnter and clears it on dragLeave', () => {
+    const { result } = renderHook(() => useFileDrag(jest.fn(), jest.fn()))
+    const enterE = makeDragEvent(makeDataTransfer(FILE_DRAG_TYPE, 'f1'))
+    act(() => result.current.getListBackgroundDropHandlers('parent-1').onDragEnter(enterE))
+    expect(result.current.dragOverBackground).toBe(true)
+    const leaveE = makeDragEvent(makeDataTransfer(FILE_DRAG_TYPE, 'f1'))
+    act(() => result.current.getListBackgroundDropHandlers('parent-1').onDragLeave(leaveE))
+    expect(result.current.dragOverBackground).toBe(false)
+  })
+
+  it('does not set dragOverBackground when there is no parent to move to', () => {
+    const { result } = renderHook(() => useFileDrag(jest.fn(), jest.fn()))
+    const enterE = makeDragEvent(makeDataTransfer(FILE_DRAG_TYPE, 'f1'))
+    act(() => result.current.getListBackgroundDropHandlers(null).onDragEnter(enterE))
+    expect(result.current.dragOverBackground).toBe(false)
+  })
+})
+
+describe('multi-selection drag payload', () => {
+  it('attaches a selection payload on dragStart when the dragged row is part of an active selection', () => {
+    const snapshot = { fileIds: ['f1', 'f2'], folderIds: ['fold-1'] }
+    const getSelectionSnapshot = jest.fn(() => snapshot)
+    const { result } = renderHook(() => useFileDrag(jest.fn(), jest.fn(), undefined, getSelectionSnapshot))
+    const dt = makeDataTransfer()
+    act(() => result.current.getFileDragHandlers(FILE).onDragStart(makeDragEvent(dt)))
+    expect(dt.setData).toHaveBeenCalledWith(SELECTION_DRAG_TYPE, JSON.stringify(snapshot))
+    // The single-item type is still set too, so every existing hasFile/
+    // hasFolder gate on hover targets keeps working unmodified.
+    expect(dt.setData).toHaveBeenCalledWith(FILE_DRAG_TYPE, 'f1')
+  })
+
+  it('does not attach a selection payload when getSelectionSnapshot returns null (not part of an active selection)', () => {
+    const getSelectionSnapshot = jest.fn(() => null)
+    const { result } = renderHook(() => useFileDrag(jest.fn(), jest.fn(), undefined, getSelectionSnapshot))
+    const dt = makeDataTransfer()
+    act(() => result.current.getFileDragHandlers(FILE).onDragStart(makeDragEvent(dt)))
+    expect(dt.setData).not.toHaveBeenCalledWith(SELECTION_DRAG_TYPE, expect.anything())
+  })
+
+  it('calls onMoveMany on drop when the payload is a multi-item selection', () => {
+    const onMoveMany = jest.fn()
+    const { result } = renderHook(() => useFileDrag(jest.fn(), jest.fn(), undefined, undefined, onMoveMany))
+    const dt = makeMultiDataTransfer({
+      [FILE_DRAG_TYPE]: 'f1',
+      [SELECTION_DRAG_TYPE]: JSON.stringify({ fileIds: ['f1', 'f2'], folderIds: ['fold-1'] }),
+    })
+    act(() => result.current.getFolderDropHandlers(TARGET_FOLDER).onDrop(makeDragEvent(dt)))
+    expect(onMoveMany).toHaveBeenCalledWith(['f1', 'f2'], ['fold-1'], 'fold-target')
+  })
+
+  it('falls back to onMoveFolder when excluding the drop target leaves only one item', () => {
+    const onMoveMany = jest.fn()
+    const onMoveFolder = jest.fn()
+    const { result } = renderHook(() => useFileDrag(jest.fn(), onMoveFolder, undefined, undefined, onMoveMany))
+    // Selection is [fold-1, fold-target] — dropped onto fold-target itself,
+    // which is filtered out (can't move a folder into itself), leaving just
+    // fold-1 — a single remaining item resolves through the plain
+    // onMoveFolder path rather than onMoveMany.
+    const dt = makeMultiDataTransfer({
+      [SELECTION_DRAG_TYPE]: JSON.stringify({ fileIds: [], folderIds: ['fold-1', 'fold-target'] }),
+    })
+    act(() => result.current.getFolderDropHandlers(TARGET_FOLDER).onDrop(makeDragEvent(dt)))
+    expect(onMoveFolder).toHaveBeenCalledWith('fold-1', 'fold-target')
+    expect(onMoveMany).not.toHaveBeenCalled()
+  })
+
+  it('falls back to looping onMoveFile/onMoveFolder when onMoveMany is not provided', () => {
+    const onMoveFile = jest.fn()
+    const onMoveFolder = jest.fn()
+    const { result } = renderHook(() => useFileDrag(onMoveFile, onMoveFolder))
+    const dt = makeMultiDataTransfer({
+      [SELECTION_DRAG_TYPE]: JSON.stringify({ fileIds: ['f1', 'f2'], folderIds: ['fold-1'] }),
+    })
+    act(() => result.current.getFolderDropHandlers(TARGET_FOLDER).onDrop(makeDragEvent(dt)))
+    expect(onMoveFile).toHaveBeenCalledWith('f1', 'fold-target')
+    expect(onMoveFile).toHaveBeenCalledWith('f2', 'fold-target')
+    expect(onMoveFolder).toHaveBeenCalledWith('fold-1', 'fold-target')
   })
 })

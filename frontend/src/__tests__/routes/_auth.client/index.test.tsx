@@ -48,9 +48,11 @@ jest.mock('../../../hooks/useFileDrag', () => ({
     draggingFileId: null,
     draggingFolderId: null,
     dragOverFolderId: null,
+    dragOverBackground: false,
     getFileDragHandlers:   () => ({}),
     getFolderDragHandlers: () => ({}),
     getFolderDropHandlers: () => ({}),
+    getListBackgroundDropHandlers: () => ({}),
   }),
 }))
 jest.mock('../../../hooks/useSort', () => ({

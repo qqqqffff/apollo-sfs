@@ -8,6 +8,9 @@ import {
   MdBolt,
   MdAutoAwesome,
   MdCheck,
+  MdCheckBox,
+  MdCheckBoxOutlineBlank,
+  MdChecklist,
   MdChevronRight,
   MdCloudQueue,
   MdCloudUpload,
@@ -51,6 +54,9 @@ import { DriveDestinationPicker } from '../../components/DriveDestinationPicker'
 import { UploadToast } from '../../components/UploadToast'
 import { SortControls } from '../../components/SortControls'
 import { SearchBar } from '../../components/SearchBar'
+import { SelectionToolbar } from '../../components/SelectionToolbar'
+import { BulkMoveModal, type BulkMoveItem } from '../../components/BulkMoveModal'
+import { BulkDeleteConfirmModal } from '../../components/BulkDeleteConfirmModal'
 import { useFileUpload } from '../../hooks/useFileUpload'
 import { useDragDrop } from '../../hooks/useDragDrop'
 import { useFileDrag } from '../../hooks/useFileDrag'
@@ -300,6 +306,50 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
   const { progress, startUpload, dismiss } = useFileUpload()
   const { isDragging } = useDragDrop((dropped) => { if (!readOnly) setPendingFiles(dropped) })
 
+  // ── Multi-select state ─────────────────────────────────────────────────────
+  const [selectionMode, setSelectionMode] = useState(false)
+  const [selectedFileIds, setSelectedFileIds] = useState<Set<string>>(new Set())
+  const [selectedFolderIds, setSelectedFolderIds] = useState<Set<string>>(new Set())
+  const [pendingBulkMove, setPendingBulkMove] = useState(false)
+  const [pendingBulkDelete, setPendingBulkDelete] = useState(false)
+  const [bulkMovePending, setBulkMovePending] = useState(false)
+  const [bulkDeletePending, setBulkDeletePending] = useState(false)
+
+  // Selected ids only make sense against the folder they were selected in —
+  // clear them (but keep selectionMode itself) whenever the user navigates.
+  useEffect(() => {
+    setSelectedFileIds(new Set())
+    setSelectedFolderIds(new Set())
+  }, [folderId])
+
+  function clearSelection() {
+    setSelectedFileIds(new Set())
+    setSelectedFolderIds(new Set())
+  }
+
+  function toggleSelectionMode() {
+    setSelectionMode((m) => {
+      if (m) clearSelection()
+      return !m
+    })
+  }
+
+  function toggleSelectFile(id: string) {
+    setSelectedFileIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id); else next.add(id)
+      return next
+    })
+  }
+
+  function toggleSelectFolder(id: string) {
+    setSelectedFolderIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id); else next.add(id)
+      return next
+    })
+  }
+
   // Auto-open the storage upgrade modal when a pending upload would exceed the
   // quota or push usage past 75% of it (unless disabled in preferences).
   useEffect(() => {
@@ -424,12 +474,89 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
     },
   })
 
-  const { draggingFileId, draggingFolderId, dragOverFolderId, getFileDragHandlers, getFolderDragHandlers, getFolderDropHandlers } =
-    useFileDrag(
-      (fileId, targetFolderId) => moveFileMutation.mutate({ fileId, targetFolderId }),
-      (folderId, targetFolderId) => moveFolderMutation.mutate({ folderId, targetFolderId }),
-      (hoveredFolderId) => openFolder(hoveredFolderId),
-    )
+  // Shared by both bulk-move paths: the toolbar's Move modal (ids come from
+  // the current selection state) and a multi-selection drag-and-drop (ids
+  // come from the drag payload, captured at drag start — see
+  // getSelectionSnapshot below). Mirrors what the single-item
+  // moveFileMutation/moveFolderMutation already do on success (invalidate +
+  // navigate into the destination), just batched.
+  async function moveManyTo(fileIds: string[], folderIds: string[], targetFolderId: string) {
+    setBulkMovePending(true)
+    const results = await Promise.allSettled([
+      ...fileIds.map((id) => moveFile(id, targetFolderId)),
+      ...folderIds.map((id) => moveFolder(id, targetFolderId)),
+    ])
+    const total = results.length
+    const failed = results.filter((r) => r.status === 'rejected').length
+    setBulkMovePending(false)
+    setPendingBulkMove(false)
+    clearSelection()
+    setSelectionMode(false)
+    queryClient.invalidateQueries({ queryKey: ['folders'] })
+    if (failed > 0) notify('error', `${total - failed} moved, ${failed} failed to move`)
+    if (failed < total) navigate({ to: '/client', search: { file: undefined, folder: targetFolderId } })
+  }
+
+  function runBulkMove(targetFolderId: string) {
+    moveManyTo(Array.from(selectedFileIds), Array.from(selectedFolderIds), targetFolderId)
+  }
+
+  async function runBulkDelete() {
+    setBulkDeletePending(true)
+    const fileIds = Array.from(selectedFileIds)
+    const folderIds = Array.from(selectedFolderIds)
+    const results = await Promise.allSettled([
+      ...fileIds.map((id) => deleteFile(id)),
+      ...folderIds.map((id) => deleteFolder(id)),
+    ])
+    const total = results.length
+    const failed = results.filter((r) => r.status === 'rejected').length
+    setBulkDeletePending(false)
+    setPendingBulkDelete(false)
+    clearSelection()
+    setSelectionMode(false)
+    queryClient.invalidateQueries({ queryKey: ['folders'] })
+    queryClient.invalidateQueries({ queryKey: ['me'] })
+    queryClient.invalidateQueries({ queryKey: ['storage', 'my-servers'] })
+    if (failed > 0) notify('error', `${total - failed} deleted, ${failed} failed (folders must be empty first)`)
+  }
+
+  function handleBulkDeleteClick() {
+    if (user && readSkipDeleteCookie(user.username)) runBulkDelete()
+    else setPendingBulkDelete(true)
+  }
+
+  // Coalesced favorite/unfavorite: if every selected item is already
+  // favorited, the action removes all of them; otherwise it adds only the
+  // ones that aren't favorited yet (already-favorited selections are left
+  // alone rather than being toggled off).
+  function runBulkFavorite() {
+    const allFavorited =
+      Array.from(selectedFileIds).every((id) => favoriteFileIds.has(id)) &&
+      Array.from(selectedFolderIds).every((id) => favoriteFolderIds.has(id))
+    if (allFavorited) {
+      selectedFileIds.forEach((id) => toggleFile(id))
+      selectedFolderIds.forEach((id) => toggleFolder(id))
+    } else {
+      selectedFileIds.forEach((id) => { if (!favoriteFileIds.has(id)) toggleFile(id) })
+      selectedFolderIds.forEach((id) => { if (!favoriteFolderIds.has(id)) toggleFolder(id) })
+    }
+  }
+
+  const {
+    draggingFileId, draggingFolderId, dragOverFolderId, dragOverBackground,
+    getFileDragHandlers, getFolderDragHandlers, getFolderDropHandlers, getListBackgroundDropHandlers,
+  } = useFileDrag(
+    (fileId, targetFolderId) => moveFileMutation.mutate({ fileId, targetFolderId }),
+    (folderId, targetFolderId) => moveFolderMutation.mutate({ folderId, targetFolderId }),
+    (hoveredFolderId) => openFolder(hoveredFolderId),
+    (id, kind) => {
+      const inSelection = kind === 'file' ? selectedFileIds.has(id) : selectedFolderIds.has(id)
+      if (!inSelection || selectedFileIds.size + selectedFolderIds.size <= 1) return null
+      return { fileIds: Array.from(selectedFileIds), folderIds: Array.from(selectedFolderIds) }
+    },
+    (fileIds, folderIds, targetFolderId) => moveManyTo(fileIds, folderIds, targetFolderId),
+  )
 
   const setAutoUploadMutation = useMutation({
     mutationFn: (folderId: string | null) => updatePreferences(folderId),
@@ -823,6 +950,18 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
   const noResults = search && !isLoading && !hasNextPage && !hasContent
   const viewingUser = impersonatedUser ?? user
 
+  // Selection derived state — the items list feeds both bulk modals (name +
+  // size to display), and allSelectedFavorited drives the toolbar's
+  // Favorite/Unfavorite coalescing (see runBulkFavorite above).
+  const selectionCount = selectedFileIds.size + selectedFolderIds.size
+  const selectedBulkItems: BulkMoveItem[] = [
+    ...subfolders.filter((f) => selectedFolderIds.has(f.id)).map((f) => ({ id: f.id, name: f.name, size_bytes: f.size_bytes, kind: 'folder' as const })),
+    ...files.filter((f) => selectedFileIds.has(f.id)).map((f) => ({ id: f.id, name: f.name, size_bytes: f.size_bytes, kind: 'file' as const })),
+  ]
+  const allSelectedFavorited = selectionCount > 0 &&
+    Array.from(selectedFileIds).every((id) => favoriteFileIds.has(id)) &&
+    Array.from(selectedFolderIds).every((id) => favoriteFolderIds.has(id))
+
   // Photos/videos get silently redirected server-side into the auto-upload
   // folder unless we're already uploading into a media collection — mirrors
   // FileService.resolveUploadFolder so the modal's lock icons match reality.
@@ -850,7 +989,7 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
         const goToAllStorage = () => navigate({ to: '/client', search: { file: undefined, drive: DRIVE_OVERVIEW } })
         return folderId !== 'root' ? (
           <div className="mb-2">
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-3 mb-5">
               <FilesSidebarToggle />
               <FolderBreadcrumb
                 folderId={folderId}
@@ -924,6 +1063,19 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
           >
             <MdUploadFile className="text-base" /> Upload
           </button>
+          {hasContent && (
+            <button
+              onClick={toggleSelectionMode}
+              title={selectionMode ? 'Exit selection mode' : 'Select multiple files and folders'}
+              className={`inline-flex items-center gap-1.5 px-3 py-2 text-sm rounded-lg font-medium cursor-pointer border transition-colors ${
+                selectionMode
+                  ? 'bg-blue-50 text-blue-600 border-blue-200'
+                  : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'
+              }`}
+            >
+              <MdChecklist className="text-base" /> Select
+            </button>
+          )}
           {showGoogleBackup && googleLoading && (
             <button
               onClick={handleCancelGoogleLoading}
@@ -1012,6 +1164,25 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
 
       <SearchBar value={search} onChange={setSearch} />
 
+      {/* The whole list area — including empty space below/around the rows —
+          is a drop target: dropping anywhere here that isn't a specific
+          subfolder row moves the dragged item(s) up to the parent folder (a
+          much bigger, closer target than the breadcrumb crumb that already
+          does the same thing). Generous padding + a min-height keep that
+          target comfortably sized even when the folder is nearly empty. */}
+      <div
+        {...(!readOnly ? getListBackgroundDropHandlers(folder?.parent_id ?? null) : {})}
+        className={`relative rounded-xl p-4 min-h-52 border-2 transition-colors ${
+          dragOverBackground ? 'bg-blue-50/40 border-dashed border-blue-300' : 'border-transparent'
+        }`}
+      >
+        {dragOverBackground && (
+          <div className="pointer-events-none absolute inset-x-0 top-1 flex justify-center">
+            <span className="px-3 py-1 rounded-full bg-blue-600 text-white text-xs font-medium shadow">
+              Drop to move to the parent folder
+            </span>
+          </div>
+        )}
       {!search && !hasContent && (
         <p className="text-sm text-gray-400 mt-4">
           {folderId === 'root' ? 'No files yet. Upload something to get started.' : 'This folder is empty.'}
@@ -1109,14 +1280,23 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
                 key={f.id}
                 {...(!readOnly ? getFolderDragHandlers(f) : {})}
                 {...(!readOnly ? getFolderDropHandlers(f) : {})}
-                className={`flex items-center gap-2 px-2 py-1.5 rounded-lg transition-colors ${
-                  !readOnly ? 'cursor-grab' : ''
+                className={`flex items-center gap-2 px-3 py-2 rounded-lg transition-colors hover:shadow-sm ${
+                  !readOnly ? (selectionMode ? 'cursor-pointer' : 'cursor-grab') : ''
                 } ${
                   dragOverFolderId === f.id
                     ? 'bg-blue-50 ring-2 ring-blue-300 ring-inset'
                     : 'hover:bg-gray-50'
                 } ${draggingFolderId === f.id ? 'opacity-40' : ''}`}
               >
+                {selectionMode && (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); toggleSelectFolder(f.id) }}
+                    aria-label={selectedFolderIds.has(f.id) ? 'Deselect folder' : 'Select folder'}
+                    className="shrink-0 cursor-pointer bg-transparent border-0 p-0.5 text-blue-500 hover:text-blue-600"
+                  >
+                    {selectedFolderIds.has(f.id) ? <MdCheckBox className="text-lg" /> : <MdCheckBoxOutlineBlank className="text-lg text-gray-300" />}
+                  </button>
+                )}
                 {renaming?.type === 'folder' && renaming.id === f.id ? (
                   <>
                     {f.kind === 'media'
@@ -1154,7 +1334,7 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
                 ) : (
                   <>
                     <button
-                      onClick={() => openFolder(f.id)}
+                      onClick={() => selectionMode ? toggleSelectFolder(f.id) : openFolder(f.id)}
                       className="flex-1 flex items-center gap-2 bg-transparent border-0 cursor-pointer text-left text-sm text-gray-800 hover:text-gray-900 p-0 min-w-0"
                     >
                       {f.kind === 'media'
@@ -1168,7 +1348,7 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
                       {new Date(f.created_at).toLocaleDateString()}
                     </span>
                     <span className="text-xs text-gray-400 shrink-0">{formatSize(f.size_bytes)}</span>
-                    {!readOnly && (
+                    {!readOnly && !selectionMode && (
                       <>
                         <div className="hidden sm:flex items-center gap-0.5 shrink-0">
                           {f.kind === 'media' && (
@@ -1228,8 +1408,19 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
               <li
                 key={f.id}
                 {...(!readOnly ? getFileDragHandlers(f) : {})}
-                className={`flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-gray-50 transition-colors ${!readOnly ? 'cursor-grab' : ''} ${draggingFileId === f.id ? 'opacity-40' : ''}`}
+                className={`flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-gray-50 hover:shadow-sm transition-colors ${
+                  !readOnly ? (selectionMode ? 'cursor-pointer' : 'cursor-grab') : ''
+                } ${draggingFileId === f.id ? 'opacity-40' : ''}`}
               >
+                {selectionMode && (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); toggleSelectFile(f.id) }}
+                    aria-label={selectedFileIds.has(f.id) ? 'Deselect file' : 'Select file'}
+                    className="shrink-0 cursor-pointer bg-transparent border-0 p-0.5 text-blue-500 hover:text-blue-600"
+                  >
+                    {selectedFileIds.has(f.id) ? <MdCheckBox className="text-lg" /> : <MdCheckBoxOutlineBlank className="text-lg text-gray-300" />}
+                  </button>
+                )}
                 {renaming?.type === 'file' && renaming.id === f.id ? (
                   <>
                     <MdInsertDriveFile className="text-gray-400 text-lg shrink-0" />
@@ -1264,7 +1455,7 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
                 ) : (
                   <>
                     <button
-                      onClick={() => openFile(f.id)}
+                      onClick={() => selectionMode ? toggleSelectFile(f.id) : openFile(f.id)}
                       className="flex-1 flex items-center gap-2 bg-transparent border-0 cursor-pointer text-left text-sm text-gray-800 hover:text-gray-900 p-0 min-w-0"
                     >
                       <MdInsertDriveFile className="text-gray-400 text-lg shrink-0" />
@@ -1274,7 +1465,7 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
                       {new Date(f.created_at).toLocaleDateString()}
                     </span>
                     <span className="text-xs text-gray-400 shrink-0">{formatSize(f.size_bytes)}</span>
-                    {!readOnly && (
+                    {!readOnly && !selectionMode && (
                       <>
                         <div className="hidden sm:flex items-center gap-0.5 shrink-0">
                           <StarButton active={favoriteFileIds.has(f.id)} onClick={() => toggleFile(f.id)} title={favoriteFileIds.has(f.id) ? 'Remove from favorites' : 'Add to favorites'} />
@@ -1317,6 +1508,7 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
           {isFetchingNextPage ? 'Loading…' : 'Load more'}
         </button>
       )}
+      </div>
 
       {pendingFiles.length > 0 && user && !readOnly && (
         <UploadModal
@@ -1458,6 +1650,41 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
             setPendingDelete(null)
           }}
           onCancel={() => setPendingDelete(null)}
+        />
+      )}
+
+      {!readOnly && (
+        <SelectionToolbar
+          count={selectionCount}
+          allFavorited={allSelectedFavorited}
+          onMove={() => setPendingBulkMove(true)}
+          onDelete={handleBulkDeleteClick}
+          onToggleFavorite={runBulkFavorite}
+          onClose={clearSelection}
+        />
+      )}
+
+      {pendingBulkMove && currentDrive && (
+        <BulkMoveModal
+          items={selectedBulkItems}
+          driveId={currentDrive.drive_id}
+          includeUnassigned={currentDrive.is_primary}
+          isPending={bulkMovePending}
+          onConfirm={runBulkMove}
+          onClose={() => setPendingBulkMove(false)}
+        />
+      )}
+
+      {pendingBulkDelete && (
+        <BulkDeleteConfirmModal
+          items={selectedBulkItems}
+          username={user?.username ?? ''}
+          usedBytes={currentDrive ? currentDrive.used_bytes : (viewingUser?.storage_used_bytes ?? 0)}
+          quotaBytes={currentDrive ? currentDrive.quota_bytes : (viewingUser?.storage_quota_bytes ?? 0)}
+          quotaLabel={currentDrive ? `${tierLabel(currentDrive.drive_type)} · ${currentDrive.name}` : undefined}
+          isPending={bulkDeletePending}
+          onConfirm={runBulkDelete}
+          onCancel={() => setPendingBulkDelete(false)}
         />
       )}
 

@@ -1,16 +1,9 @@
 import { useQuery } from '@tanstack/react-query'
 import { useLayoutEffect, useRef, useState } from 'react'
-import { MdChevronRight } from 'react-icons/md'
+import { MdChevronRight, MdStorage } from 'react-icons/md'
 import { ancestorsQueryOptions } from '../api/folders'
 import { adminGetUserAncestors } from '../api/admin'
 import type { Folder } from '../types/api'
-
-// The breadcrumb never grows past this share of the viewport width — even on
-// an ultra-wide window with a short path that would otherwise fit in full, we
-// still collapse ancestors into "..". Keeps the header row from being
-// dominated by a long path just because the flex container happens to have
-// room for it.
-const MAX_WIDTH_RATIO = 0.4
 
 type FolderDropHandlers = {
   onDragEnter: (e: React.DragEvent) => void
@@ -55,7 +48,6 @@ export function FolderBreadcrumb({
 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const [containerWidth, setContainerWidth] = useState<number>(0)
-  const [viewportWidth, setViewportWidth] = useState<number>(() => window.innerWidth)
   const isRoot = folderId === 'root'
   const { data, isLoading } = useQuery({
     queryKey: ['folders', folderId, 'ancestors', asUsername ?? ''] as const,
@@ -67,9 +59,13 @@ export function FolderBreadcrumb({
 
   const ancestors: Folder[] = data?.ancestors ?? []
 
-  // Track container width so we know when to truncate. ResizeObserver fires
-  // on initial mount and any subsequent layout change; the window resize
-  // listener keeps the viewport-ratio cap (below) current too.
+  // Track the crumbs wrapper's own rendered width so we know when to
+  // truncate — it's a flex-1 sibling of `trailing` (see the render below), so
+  // its clientWidth already reflects exactly the space left over after
+  // trailing controls (e.g. the share button) claim their own room. The only
+  // limiting factor is real available width — no artificial viewport cap —
+  // so the breadcrumb spans the full file-list width and truncates only once
+  // it actually runs out of room.
   useLayoutEffect(() => {
     const el = containerRef.current
     if (!el) return
@@ -79,17 +75,10 @@ export function FolderBreadcrumb({
       setContainerWidth(Math.floor(w))
     })
     ro.observe(el)
-    const onResize = () => setViewportWidth(window.innerWidth)
-    window.addEventListener('resize', onResize)
-    return () => {
-      ro.disconnect()
-      window.removeEventListener('resize', onResize)
-    }
+    return () => ro.disconnect()
   }, [])
 
-  // Available space is capped at a ratio of the viewport, not just whatever
-  // room the flex container offers — see MAX_WIDTH_RATIO above.
-  const available = containerWidth === 0 ? 0 : Math.min(containerWidth, viewportWidth * MAX_WIDTH_RATIO)
+  const available = containerWidth
 
   // Estimate how many right-most ancestor segments fit. We approximate with
   // ~10 px per character (text-sm + chevron gap) which is conservative
@@ -120,18 +109,21 @@ export function FolderBreadcrumb({
   const parentOfCurrent = segments.length >= 2 ? segments[segments.length - 2] : undefined
 
   return (
-    <div
-      ref={containerRef}
-      className="flex items-center gap-1 text-sm text-gray-600 mb-5 min-w-0"
-    >
+    <div className="flex items-center gap-3 min-w-0 flex-1">
+      <div
+        ref={containerRef}
+        className="flex items-center gap-1 text-sm text-gray-600 min-w-0 flex-1"
+      >
       {drive && drive.showAllStorage && (
         <>
-          <Crumb
-            label="All storage"
-            title="All storage"
-            clickable
+          <button
             onClick={() => onNavigateAllStorage?.()}
-          />
+            title="All storage"
+            aria-label="All storage"
+            className="shrink-0 inline-flex items-center justify-center bg-transparent border-0 p-0 text-blue-600 hover:text-blue-700 cursor-pointer"
+          >
+            <MdStorage className="text-base" />
+          </button>
           <Sep />
         </>
       )}
@@ -182,7 +174,8 @@ export function FolderBreadcrumb({
           </span>
         )
       })}
-      {trailing && <div className="ml-3 flex items-center">{trailing}</div>}
+      </div>
+      {trailing && <div className="flex items-center shrink-0">{trailing}</div>}
     </div>
   )
 }

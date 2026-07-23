@@ -12,11 +12,20 @@ import (
 // DriveBenchmarkDetail is the admin-facing response for GET
 // /admin/system/drives/benchmark: every disk's latest result plus the
 // fast-vs-standard tier aggregates shown on the metrics page.
+//
+// CompletedNodes/TotalNodes back the progress bar on that page: a node's
+// benchmark result arrives in one atomic push (see docs/drive_benchmark_setup.md),
+// so per-node is the finest-grained real progress signal the server can offer
+// while a run is in flight — TotalNodes is every active node a triggered run
+// fans out to, CompletedNodes is how many have already reported back (or
+// never had anything pending, when no run is in flight).
 type DriveBenchmarkDetail struct {
-	Pending  bool                      `json:"pending"`
-	Disks    []db.NodeDiskBenchmarkRow `json:"disks"`
-	Fast     *models.TierBenchmarkStat `json:"fast,omitempty"`
-	Standard *models.TierBenchmarkStat `json:"standard,omitempty"`
+	Pending        bool                      `json:"pending"`
+	CompletedNodes int                       `json:"completed_nodes"`
+	TotalNodes     int                       `json:"total_nodes"`
+	Disks          []db.NodeDiskBenchmarkRow `json:"disks"`
+	Fast           *models.TierBenchmarkStat `json:"fast,omitempty"`
+	Standard       *models.TierBenchmarkStat `json:"standard,omitempty"`
 }
 
 // GetDriveBenchmark handles GET /admin/system/drives/benchmark.
@@ -28,6 +37,15 @@ func (h *Handler) GetDriveBenchmark(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not check benchmark status"})
 		return
 	}
+	totalNodes, err := h.queries.CountActiveNodes(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not check benchmark status"})
+		return
+	}
+	completedNodes := totalNodes - pending
+	if completedNodes < 0 {
+		completedNodes = 0
+	}
 
 	rows, err := h.queries.ListNodeDiskBenchmarks(ctx)
 	if err != nil {
@@ -37,10 +55,12 @@ func (h *Handler) GetDriveBenchmark(c *gin.Context) {
 	fast, standard := db.AggregateBenchmarkRows(rows)
 
 	c.JSON(http.StatusOK, DriveBenchmarkDetail{
-		Pending:  pending > 0,
-		Disks:    rows,
-		Fast:     fast,
-		Standard: standard,
+		Pending:        pending > 0,
+		CompletedNodes: completedNodes,
+		TotalNodes:     totalNodes,
+		Disks:          rows,
+		Fast:           fast,
+		Standard:       standard,
 	})
 }
 

@@ -4,14 +4,33 @@ import "time"
 
 // BenchmarkResultPayload is one physical disk's result within the batch
 // node-agent POSTs to /internal/node-benchmark-result after running its local
-// write/read test (see cmd/node-agent/benchmark.go). WriteMbps/ReadMbps are
-// nil when Error is set (the disk's test failed).
+// benchmark (see cmd/node-agent/benchmark.go): a sequential ("same sector")
+// write+read pass and a random-access (random 4 KiB block) write+read pass,
+// mirroring the split industry tools like fio/CrystalDiskMark use. The *Mbps/
+// *IOPS fields are nil when Error is set (the disk's test failed).
 type BenchmarkResultPayload struct {
-	Label     string   `json:"label"`
-	WriteMbps *float64 `json:"write_mbps,omitempty"`
-	ReadMbps  *float64 `json:"read_mbps,omitempty"`
-	SizeBytes int64    `json:"size_bytes"`
-	Error     string   `json:"error,omitempty"`
+	Label     string `json:"label"`
+	SizeBytes int64  `json:"size_bytes"`
+	Error     string `json:"error,omitempty"`
+
+	// Sequential pass: one large fsync'd write, then a sequential read of the
+	// same file.
+	SeqWriteMbps *float64 `json:"seq_write_mbps,omitempty"`
+	SeqReadMbps  *float64 `json:"seq_read_mbps,omitempty"`
+
+	// Random-access pass: fixed 4 KiB reads/writes at random block-aligned
+	// offsets within the same file, time-boxed rather than a fixed operation
+	// count so a slow HDD's low IOPS doesn't blow out the run time.
+	RandomWriteMbps *float64 `json:"random_write_mbps,omitempty"`
+	RandomWriteIOPS *float64 `json:"random_write_iops,omitempty"`
+	RandomReadMbps  *float64 `json:"random_read_mbps,omitempty"`
+	RandomReadIOPS  *float64 `json:"random_read_iops,omitempty"`
+
+	// DirectIO is true only if every pass above opened the file with
+	// O_DIRECT, bypassing the kernel page cache. False means at least one
+	// pass fell back to buffered I/O (the mount's filesystem doesn't support
+	// O_DIRECT) and the numbers may still be cache-inflated.
+	DirectIO bool `json:"direct_io"`
 }
 
 // BenchmarkResultBatch is the full body node-agent POSTs to
@@ -22,13 +41,18 @@ type BenchmarkResultBatch struct {
 	Results  []BenchmarkResultPayload `json:"results"`
 }
 
-// TierBenchmarkStat is the write/read throughput averaged across every
-// physical disk on one storage tier's node(s) — e.g. the fast tier's two
-// pooled NVMe drives averaged together, compared against the standard tier's
-// single HDD.
+// TierBenchmarkStat is the sequential and random-access throughput averaged
+// across every physical disk on one storage tier's node(s) — e.g. the fast
+// tier's two pooled NVMe drives averaged together, compared against the
+// standard tier's single HDD.
 type TierBenchmarkStat struct {
-	WriteMbps float64   `json:"write_mbps"`
-	ReadMbps  float64   `json:"read_mbps"`
+	SeqWriteMbps    float64 `json:"seq_write_mbps"`
+	SeqReadMbps     float64 `json:"seq_read_mbps"`
+	RandomWriteMbps float64 `json:"random_write_mbps"`
+	RandomWriteIOPS float64 `json:"random_write_iops"`
+	RandomReadMbps  float64 `json:"random_read_mbps"`
+	RandomReadIOPS  float64 `json:"random_read_iops"`
+
 	DiskCount int       `json:"disk_count"`
 	TestedAt  time.Time `json:"tested_at"`
 }

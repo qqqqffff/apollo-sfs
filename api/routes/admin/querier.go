@@ -62,6 +62,7 @@ type AdminQuerier interface {
 	// Drive benchmark
 	RequestBenchmarkOnAllNodes(ctx context.Context) error
 	CountPendingBenchmarkRequests(ctx context.Context) (int, error)
+	CountActiveNodes(ctx context.Context) (int, error)
 	ListNodeDiskBenchmarks(ctx context.Context) ([]db.NodeDiskBenchmarkRow, error)
 
 	// Nodes (storage-node layer between servers and drives)

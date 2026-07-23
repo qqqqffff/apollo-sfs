@@ -28,16 +28,22 @@ Instead, the request rides that same push:
    `node-metrics-ingest`'s `POST /internal/node-metrics` handler
    atomically checks-and-clears the column for that hostname and replies
    `{"run_benchmark": true}`.
-3. `node-agent` sees the flag in the response and runs the write/read test
-   synchronously (delaying that tick's next regular push by however long the
-   test takes — a few seconds even on the HDD), then POSTs the results to a
-   new `POST /internal/node-benchmark-result` endpoint.
+3. `node-agent` sees the flag in the response and runs the sequential +
+   random-access test synchronously against every configured disk on that
+   node (delaying that tick's next regular push by however long it takes —
+   the sequential pass alone is a few seconds even on the HDD, plus up to 2
+   seconds per direction for the random pass; see Methodology below), then
+   POSTs the results to a new `POST /internal/node-benchmark-result` endpoint.
 
 Because of this, a trigger doesn't complete in one HTTP round-trip like the
 network speed test does — the admin metrics page polls `GET
 /admin/system/drives/benchmark` every few seconds after clicking "Run
 benchmark" until fresh results show up (same shape as the "Run tests"
-progress polling).
+progress polling). That same response carries `completed_nodes`/`total_nodes`
+(`nodes.benchmark_requested_at` cleared vs. every active node), which is the
+finest-grained real progress signal the server can offer — a node's whole
+disk batch arrives in one atomic push, so progress only ever advances in
+per-node steps — and is what drives the progress bar on that card.
 
 ## Writable scratch directories (manual host setup required)
 
@@ -76,27 +82,62 @@ mkdir -p /home/apollo/apollo-sfs/minio/nvme-01/.bench
 mkdir -p /home/apollo/apollo-sfs/minio/nvme-02/.bench
 ```
 
-Nothing else reads or writes these directories. Each benchmark run writes one
-256 MiB test file, times the write (with an explicit `fsync`) and a
-subsequent sequential read, then deletes the file immediately.
+Nothing else reads or writes these directories.
 
-## Known limitation: read numbers can be cache-inflated
+## Methodology: sequential + random, both bypassing the page cache
 
-The read pass runs right after the write pass, so the kernel page cache is
-warm for those exact pages. There's no portable, unprivileged way to drop
-caches from inside a container (no `CAP_SYS_ADMIN`), so on a host with plenty
-of free RAM the read throughput can look better than a genuine cold read. The
-write number (fsync'd) is the more reliable tier-comparison signal. This is
-called out in the blog post's methodology note too.
+Each benchmark run (`cmd/node-agent/benchmark.go`) writes one 256 MiB test
+file and puts it through two passes, mirroring the split industry tools like
+fio and CrystalDiskMark use — a drive's sequential and random-access numbers
+can differ by orders of magnitude (especially on a spinning disk), so a
+single number understates that gap:
+
+1. **Sequential ("same sector")** — one large write (4 MiB chunks, explicit
+   `fsync`), then a sequential read of the same file start to finish. This is
+   the best case for the HDD: once the head is positioned there's no further
+   seek overhead.
+2. **Random-access** — fixed 4 KiB reads/writes (the standard random-I/O
+   block size) at random block-aligned offsets within that same file,
+   time-boxed to 2 seconds per direction rather than a fixed operation count,
+   since the HDD's random IOPS can be two to three orders of magnitude below
+   the NVMe's. Reports both throughput (MB/s) and IOPS. This is the worst
+   case for the HDD (seek-bound) and the number that best predicts real-world
+   small-file/metadata-heavy workloads — it's where NVMe's advantage over HDD
+   is most dramatic and most representative of actual usage.
+
+The file is deleted immediately after the random-read pass.
+
+### Why read numbers used to be (and no longer are) cache-inflated
+
+Early on, the read pass ran right after the write pass with a plain buffered
+`open()`, so the kernel page cache was warm for those exact pages — on a host
+with plenty of free RAM, read throughput reflected the page cache (DRAM
+speed), not the physical device. It was easiest to spot on the HDD: a real
+7200 RPM drive's sequential read tops out somewhere around 150–280 MB/s, so
+any HDD read number in the thousands of MB/s (or higher) was almost certainly
+a cache round-trip, not the disk.
+
+Every pass now opens the file with `O_DIRECT`, which bypasses the page cache
+for that I/O entirely — no `CAP_SYS_ADMIN` or cache-dropping required, it's
+a normal `open()` flag, just one that requires the buffer, offset, and length
+of every read/write to be aligned (4096 bytes here, a safe superset of every
+real drive's logical sector size). Not every filesystem supports it —
+notably tmpfs — so if the `O_DIRECT` open fails, node-agent falls back to a
+regular buffered open for that pass and clears `direct_io` on the result,
+which the admin page surfaces as a warning that the numbers may still be
+cache-inflated rather than presenting them as trustworthy.
 
 ## Data model
 
 - `nodes.benchmark_requested_at` — pending-trigger flag, see above.
 - `node_disk_benchmarks` — latest result per physical disk (upserted on every
-  run, no history — this is an on-demand probe, not a continuous sample).
-  Tier (`nvme`/`hdd`) is resolved by joining to any `drives` row on the same
-  node, since every physical disk on a given node is the same tier by
-  construction.
+  run, no history — this is an on-demand probe, not a continuous sample):
+  `seq_write_mbps`/`seq_read_mbps` (sequential pass), `random_write_mbps`/
+  `random_write_iops`/`random_read_mbps`/`random_read_iops` (random-access
+  pass), and `direct_io` (false if any pass fell back to buffered I/O — see
+  above). Tier (`nvme`/`hdd`) is resolved by joining to any `drives` row on
+  the same node, since every physical disk on a given node is the same tier
+  by construction.
 - `user_preferences.hide_benchmark_promo` — hides the promo card in the Add
   Storage modal only; never affects the benchmark itself or the admin page.
 

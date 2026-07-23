@@ -136,12 +136,17 @@ func (s *NodeIngestService) RecordBenchmarkResults(ctx context.Context, batch *m
 
 	for _, r := range batch.Results {
 		err := s.queries.UpsertNodeDiskBenchmark(ctx, db.UpsertNodeDiskBenchmarkParams{
-			NodeID:    node.ID,
-			Label:     r.Label,
-			WriteMbps: r.WriteMbps,
-			ReadMbps:  r.ReadMbps,
-			SizeBytes: r.SizeBytes,
-			Error:     r.Error,
+			NodeID:          node.ID,
+			Label:           r.Label,
+			SizeBytes:       r.SizeBytes,
+			Error:           r.Error,
+			SeqWriteMbps:    r.SeqWriteMbps,
+			SeqReadMbps:     r.SeqReadMbps,
+			RandomWriteMbps: r.RandomWriteMbps,
+			RandomWriteIOPS: r.RandomWriteIOPS,
+			RandomReadMbps:  r.RandomReadMbps,
+			RandomReadIOPS:  r.RandomReadIOPS,
+			DirectIO:        r.DirectIO,
 		})
 		if err != nil {
 			log.Printf("node-ingest: upsert disk benchmark %q: %v", r.Label, err)

@@ -60,20 +60,45 @@ func (q *Queries) ConsumeBenchmarkRequest(ctx context.Context, hostname string) 
 	return n > 0, nil
 }
 
+// CountActiveNodes returns how many nodes are active — i.e. how many benchmark
+// requests a triggered run fans out to. Paired with CountPendingBenchmarkRequests
+// this lets the admin page show real completed/total progress (one node's
+// result arrives in a single atomic push, so per-node is the finest-grained
+// progress signal available) rather than a purely time-based estimate.
+func (q *Queries) CountActiveNodes(ctx context.Context) (int, error) {
+	var n int
+	err := q.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM nodes WHERE is_active = true`).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("CountActiveNodes: %w", err)
+	}
+	return n, nil
+}
+
 // ── Disk benchmark results ──────────────────────────────────────────────────
 //
 // One latest row per physical disk, upserted on every run — an on-demand
 // probe has no history to keep, unlike the continuously-sampled IO counters
 // in node_disk_io_snapshots.
 
-// UpsertNodeDiskBenchmarkParams carries one physical disk's benchmark result.
+// UpsertNodeDiskBenchmarkParams carries one physical disk's benchmark result:
+// a sequential ("same sector") pass and a random-access pass, mirroring
+// models.BenchmarkResultPayload.
 type UpsertNodeDiskBenchmarkParams struct {
 	NodeID    uuid.UUID
 	Label     string
-	WriteMbps *float64
-	ReadMbps  *float64
 	SizeBytes int64
 	Error     string
+
+	SeqWriteMbps *float64
+	SeqReadMbps  *float64
+
+	RandomWriteMbps *float64
+	RandomWriteIOPS *float64
+	RandomReadMbps  *float64
+	RandomReadIOPS  *float64
+
+	DirectIO bool
 }
 
 // UpsertNodeDiskBenchmark records the latest benchmark result for one
@@ -84,15 +109,28 @@ func (q *Queries) UpsertNodeDiskBenchmark(ctx context.Context, p UpsertNodeDiskB
 		errVal = &p.Error
 	}
 	_, err := q.db.ExecContext(ctx, `
-		INSERT INTO node_disk_benchmarks (node_id, label, write_mbps, read_mbps, size_bytes, error, tested_at)
-		VALUES ($1, $2, $3, $4, $5, $6, NOW())
+		INSERT INTO node_disk_benchmarks (
+			node_id, label, size_bytes, error,
+			seq_write_mbps, seq_read_mbps,
+			random_write_mbps, random_write_iops, random_read_mbps, random_read_iops,
+			direct_io, tested_at
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
 		ON CONFLICT (node_id, label) DO UPDATE SET
-			write_mbps = EXCLUDED.write_mbps,
-			read_mbps  = EXCLUDED.read_mbps,
-			size_bytes = EXCLUDED.size_bytes,
-			error      = EXCLUDED.error,
-			tested_at  = NOW()
-	`, p.NodeID, p.Label, p.WriteMbps, p.ReadMbps, p.SizeBytes, errVal)
+			size_bytes         = EXCLUDED.size_bytes,
+			error              = EXCLUDED.error,
+			seq_write_mbps     = EXCLUDED.seq_write_mbps,
+			seq_read_mbps      = EXCLUDED.seq_read_mbps,
+			random_write_mbps  = EXCLUDED.random_write_mbps,
+			random_write_iops  = EXCLUDED.random_write_iops,
+			random_read_mbps   = EXCLUDED.random_read_mbps,
+			random_read_iops   = EXCLUDED.random_read_iops,
+			direct_io          = EXCLUDED.direct_io,
+			tested_at          = NOW()
+	`, p.NodeID, p.Label, p.SizeBytes, errVal,
+		p.SeqWriteMbps, p.SeqReadMbps,
+		p.RandomWriteMbps, p.RandomWriteIOPS, p.RandomReadMbps, p.RandomReadIOPS,
+		p.DirectIO)
 	if err != nil {
 		return fmt.Errorf("UpsertNodeDiskBenchmark: %w", err)
 	}
@@ -108,12 +146,20 @@ type NodeDiskBenchmarkRow struct {
 	NodeID    uuid.UUID
 	Hostname  string
 	Label     string
-	WriteMbps *float64
-	ReadMbps  *float64
 	SizeBytes int64
 	Error     string
 	TestedAt  time.Time
 	DriveType string
+
+	SeqWriteMbps *float64
+	SeqReadMbps  *float64
+
+	RandomWriteMbps *float64
+	RandomWriteIOPS *float64
+	RandomReadMbps  *float64
+	RandomReadIOPS  *float64
+
+	DirectIO bool
 }
 
 // ListNodeDiskBenchmarks returns every disk's latest benchmark result, newest
@@ -121,8 +167,11 @@ type NodeDiskBenchmarkRow struct {
 // (see AggregateBenchmarkRows).
 func (q *Queries) ListNodeDiskBenchmarks(ctx context.Context) ([]NodeDiskBenchmarkRow, error) {
 	rows, err := q.db.QueryContext(ctx, `
-		SELECT ndb.node_id, n.hostname, ndb.label, ndb.write_mbps, ndb.read_mbps,
-		       ndb.size_bytes, COALESCE(ndb.error, ''), ndb.tested_at, COALESCE(d.drive_type, '')
+		SELECT ndb.node_id, n.hostname, ndb.label, ndb.size_bytes, COALESCE(ndb.error, ''),
+		       ndb.tested_at, COALESCE(d.drive_type, ''),
+		       ndb.seq_write_mbps, ndb.seq_read_mbps,
+		       ndb.random_write_mbps, ndb.random_write_iops, ndb.random_read_mbps, ndb.random_read_iops,
+		       ndb.direct_io
 		FROM node_disk_benchmarks ndb
 		JOIN nodes n ON n.id = ndb.node_id
 		LEFT JOIN LATERAL (
@@ -138,16 +187,31 @@ func (q *Queries) ListNodeDiskBenchmarks(ctx context.Context) ([]NodeDiskBenchma
 	var out []NodeDiskBenchmarkRow
 	for rows.Next() {
 		var r NodeDiskBenchmarkRow
-		var write, read sql.NullFloat64
-		if err := rows.Scan(&r.NodeID, &r.Hostname, &r.Label, &write, &read,
-			&r.SizeBytes, &r.Error, &r.TestedAt, &r.DriveType); err != nil {
+		var seqWrite, seqRead, randWriteMbps, randWriteIOPS, randReadMbps, randReadIOPS sql.NullFloat64
+		if err := rows.Scan(&r.NodeID, &r.Hostname, &r.Label, &r.SizeBytes, &r.Error,
+			&r.TestedAt, &r.DriveType,
+			&seqWrite, &seqRead,
+			&randWriteMbps, &randWriteIOPS, &randReadMbps, &randReadIOPS,
+			&r.DirectIO); err != nil {
 			return nil, fmt.Errorf("ListNodeDiskBenchmarks scan: %w", err)
 		}
-		if write.Valid {
-			r.WriteMbps = &write.Float64
+		if seqWrite.Valid {
+			r.SeqWriteMbps = &seqWrite.Float64
 		}
-		if read.Valid {
-			r.ReadMbps = &read.Float64
+		if seqRead.Valid {
+			r.SeqReadMbps = &seqRead.Float64
+		}
+		if randWriteMbps.Valid {
+			r.RandomWriteMbps = &randWriteMbps.Float64
+		}
+		if randWriteIOPS.Valid {
+			r.RandomWriteIOPS = &randWriteIOPS.Float64
+		}
+		if randReadMbps.Valid {
+			r.RandomReadMbps = &randReadMbps.Float64
+		}
+		if randReadIOPS.Valid {
+			r.RandomReadIOPS = &randReadIOPS.Float64
 		}
 		out = append(out, r)
 	}
@@ -155,28 +219,37 @@ func (q *Queries) ListNodeDiskBenchmarks(ctx context.Context) ([]NodeDiskBenchma
 }
 
 // AggregateBenchmarkRows groups benchmark rows by storage tier and averages
-// write/read throughput across every successfully-tested disk in each group —
-// this is the "average the NVMe drives, compare to the standard drive" logic.
-// Rows with an Error (failed disk test) or an unrecognized/missing DriveType
-// are excluded. Returns nil for a tier with no successful results yet.
+// every sequential/random metric across each group's successfully-tested
+// disks — this is the "average the NVMe drives, compare to the standard
+// drive" logic. Rows with an Error (failed disk test), a missing metric, or
+// an unrecognized/missing DriveType are excluded. Returns nil for a tier with
+// no successful results yet.
 func AggregateBenchmarkRows(rows []NodeDiskBenchmarkRow) (fast, standard *models.TierBenchmarkStat) {
 	type acc struct {
-		writeSum, readSum float64
-		count             int
-		latest            time.Time
+		seqWriteSum, seqReadSum            float64
+		randWriteMbpsSum, randWriteIOPSSum float64
+		randReadMbpsSum, randReadIOPSSum   float64
+		count                              int
+		latest                             time.Time
 	}
 	accs := map[string]*acc{"nvme": {}, "hdd": {}}
 
 	for _, r := range rows {
-		if r.Error != "" || r.WriteMbps == nil || r.ReadMbps == nil {
+		if r.Error != "" || r.SeqWriteMbps == nil || r.SeqReadMbps == nil ||
+			r.RandomWriteMbps == nil || r.RandomWriteIOPS == nil ||
+			r.RandomReadMbps == nil || r.RandomReadIOPS == nil {
 			continue
 		}
 		a, ok := accs[r.DriveType]
 		if !ok {
 			continue
 		}
-		a.writeSum += *r.WriteMbps
-		a.readSum += *r.ReadMbps
+		a.seqWriteSum += *r.SeqWriteMbps
+		a.seqReadSum += *r.SeqReadMbps
+		a.randWriteMbpsSum += *r.RandomWriteMbps
+		a.randWriteIOPSSum += *r.RandomWriteIOPS
+		a.randReadMbpsSum += *r.RandomReadMbps
+		a.randReadIOPSSum += *r.RandomReadIOPS
 		a.count++
 		if r.TestedAt.After(a.latest) {
 			a.latest = r.TestedAt
@@ -187,11 +260,16 @@ func AggregateBenchmarkRows(rows []NodeDiskBenchmarkRow) (fast, standard *models
 		if a.count == 0 {
 			return nil
 		}
+		n := float64(a.count)
 		return &models.TierBenchmarkStat{
-			WriteMbps: a.writeSum / float64(a.count),
-			ReadMbps:  a.readSum / float64(a.count),
-			DiskCount: a.count,
-			TestedAt:  a.latest,
+			SeqWriteMbps:    a.seqWriteSum / n,
+			SeqReadMbps:     a.seqReadSum / n,
+			RandomWriteMbps: a.randWriteMbpsSum / n,
+			RandomWriteIOPS: a.randWriteIOPSSum / n,
+			RandomReadMbps:  a.randReadMbpsSum / n,
+			RandomReadIOPS:  a.randReadIOPSSum / n,
+			DiskCount:       a.count,
+			TestedAt:        a.latest,
 		}
 	}
 	return toStat(accs["nvme"]), toStat(accs["hdd"])

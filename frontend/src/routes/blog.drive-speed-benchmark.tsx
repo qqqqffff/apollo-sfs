@@ -27,16 +27,30 @@ function TierStatCard({
       </div>
       {stat ? (
         <>
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-gray-400 mb-1.5 mt-0">Sequential</p>
           <div className="flex items-baseline gap-4 mb-1">
             <div>
-              <span className="text-2xl font-bold text-gray-900 tabular-nums">{stat.write_mbps.toFixed(0)}</span>
+              <span className="text-2xl font-bold text-gray-900 tabular-nums">{stat.seq_write_mbps.toFixed(0)}</span>
               <span className="text-xs text-gray-400 ml-1">MB/s write</span>
             </div>
           </div>
           <div className="flex items-baseline gap-4 mb-3">
             <div>
-              <span className="text-2xl font-bold text-gray-900 tabular-nums">{stat.read_mbps.toFixed(0)}</span>
+              <span className="text-2xl font-bold text-gray-900 tabular-nums">{stat.seq_read_mbps.toFixed(0)}</span>
               <span className="text-xs text-gray-400 ml-1">MB/s read</span>
+            </div>
+          </div>
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-gray-400 mb-1.5 mt-0">Random (4K)</p>
+          <div className="flex items-baseline gap-4 mb-1">
+            <div>
+              <span className="text-lg font-bold text-gray-900 tabular-nums">{stat.random_write_iops.toFixed(0)}</span>
+              <span className="text-xs text-gray-400 ml-1">IOPS write</span>
+            </div>
+          </div>
+          <div className="flex items-baseline gap-4 mb-3">
+            <div>
+              <span className="text-lg font-bold text-gray-900 tabular-nums">{stat.random_read_iops.toFixed(0)}</span>
+              <span className="text-xs text-gray-400 ml-1">IOPS read</span>
             </div>
           </div>
           <p className="text-xs text-gray-400 m-0">
@@ -82,9 +96,12 @@ function RouteComponent() {
             <TierStatCard label="Standard tier (HDD)" icon={MdStorage} accent="amber" stat={data?.standard} />
           </div>
           <p className="text-xs text-gray-400 mt-3 mb-0">
-            Methodology: a sequential write (fsync'd to disk) followed by a sequential read of a fixed-size
-            test file on each physical drive. The fast tier's figure is the average of both pooled NVMe drives;
-            the standard tier is the single HDD.
+            Methodology: two passes on each physical drive, both bypassing the OS page cache so every number
+            reflects the real device rather than a RAM round-trip. Sequential — one large write (fsync'd to
+            disk) followed by a sequential read of a fixed-size test file. Random (4K) — fixed 4 KiB reads and
+            writes at random offsets within that file, the industry-standard way to measure small-file,
+            seek-heavy performance. The fast tier's figures are the average of both pooled NVMe drives; the
+            standard tier is the single HDD.
           </p>
         </section>
 

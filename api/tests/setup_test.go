@@ -528,6 +528,9 @@ func (s *stubAdminQuerier) RequestBenchmarkOnAllNodes(_ context.Context) error {
 func (s *stubAdminQuerier) CountPendingBenchmarkRequests(_ context.Context) (int, error) {
 	return 0, nil
 }
+func (s *stubAdminQuerier) CountActiveNodes(_ context.Context) (int, error) {
+	return 0, nil
+}
 func (s *stubAdminQuerier) ListNodeDiskBenchmarks(_ context.Context) ([]db.NodeDiskBenchmarkRow, error) {
 	return nil, nil
 }

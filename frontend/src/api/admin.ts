@@ -618,8 +618,12 @@ export const speedTestQueryOptions = {
 // ── Drive benchmark ──────────────────────────────────────────────────────────
 
 export interface TierBenchmarkStat {
-  write_mbps: number
-  read_mbps: number
+  seq_write_mbps: number
+  seq_read_mbps: number
+  random_write_mbps: number
+  random_write_iops: number
+  random_read_mbps: number
+  random_read_iops: number
   disk_count: number
   tested_at: string
 }
@@ -628,8 +632,13 @@ export interface NodeDiskBenchmarkRow {
   node_id: string
   hostname: string
   label: string
-  write_mbps?: number
-  read_mbps?: number
+  seq_write_mbps?: number
+  seq_read_mbps?: number
+  random_write_mbps?: number
+  random_write_iops?: number
+  random_read_mbps?: number
+  random_read_iops?: number
+  direct_io: boolean
   size_bytes: number
   error?: string
   tested_at: string
@@ -639,6 +648,10 @@ export interface NodeDiskBenchmarkRow {
 export interface DriveBenchmarkDetail {
   /** True while a triggered run hasn't been picked up/reported by every node yet. */
   pending: boolean
+  /** Active nodes that have reported back since the last trigger (or since always, when nothing is pending). */
+  completed_nodes: number
+  /** Every active node a triggered run fans out to — a node's whole disk batch arrives in one atomic push, so this is the finest progress granularity available. */
+  total_nodes: number
   disks: NodeDiskBenchmarkRow[]
   fast?: TierBenchmarkStat
   standard?: TierBenchmarkStat

@@ -712,9 +712,9 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason, initia
                     <p className="text-xs font-medium text-gray-800 m-0">
                       {benchmark?.available
                         ? `${storageType === 'nvme' ? 'Fast' : 'Standard'} tier: ${
-                            (storageType === 'nvme' ? benchmark.fast : benchmark.standard)?.write_mbps.toFixed(0) ?? '—'
+                            (storageType === 'nvme' ? benchmark.fast : benchmark.standard)?.seq_write_mbps.toFixed(0) ?? '—'
                           } MB/s write · ${
-                            (storageType === 'nvme' ? benchmark.fast : benchmark.standard)?.read_mbps.toFixed(0) ?? '—'
+                            (storageType === 'nvme' ? benchmark.fast : benchmark.standard)?.seq_read_mbps.toFixed(0) ?? '—'
                           } MB/s read`
                         : 'How fast is each storage tier?'}
                     </p>

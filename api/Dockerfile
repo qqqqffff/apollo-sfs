@@ -27,6 +27,16 @@ RUN apk add --no-cache ca-certificates ffmpeg tzdata util-linux iputils \
 
 WORKDIR /app
 
+# Deployed version (deploy.sh's image tag, normally a git short SHA) and git
+# branch, baked in at build time so the admin metrics page's test-runner card
+# can label each stored test run with what was actually running. Empty in a
+# local `docker build` with no --build-arg — the test-runner card just shows
+# "unknown" for both.
+ARG APP_VERSION=""
+ARG APP_GIT_BRANCH=""
+ENV APP_VERSION="${APP_VERSION}"
+ENV APP_GIT_BRANCH="${APP_GIT_BRANCH}"
+
 COPY --from=builder /build/api .
 
 # Email templates are read from disk at runtime.

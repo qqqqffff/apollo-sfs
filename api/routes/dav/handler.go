@@ -323,21 +323,29 @@ type quotaInfo struct {
 	availableBytes int64
 }
 
-// driveQuota reports link.DriveID's physical capacity and the user's own
-// bytes stored on it — the same per-drive figures shown on the storage page
-// (GetUserDrives / "my-servers"), so a fast-tier mount and a standard-tier
-// mount on the same server correctly report different capacities instead of
-// both echoing one account-wide number.
-func (h *Handler) driveQuota(c *gin.Context, link *models.FileServerLink) (*quotaInfo, error) {
-	capacityBytes, usedBytes, err := h.pool.GetDriveCapacityAndUsage(c.Request.Context(), link.DriveID, link.UserID)
-	if err != nil {
-		return nil, err
-	}
-	available := capacityBytes - usedBytes
+// computeQuotaInfo clamps availableBytes to zero when usedBytes exceeds
+// quotaBytes (e.g. an admin lowered the allocation below current usage, or
+// an orphaned allocation reports quotaBytes == 0).
+func computeQuotaInfo(quotaBytes, usedBytes int64) *quotaInfo {
+	available := quotaBytes - usedBytes
 	if available < 0 {
 		available = 0
 	}
-	return &quotaInfo{usedBytes: usedBytes, availableBytes: available}, nil
+	return &quotaInfo{usedBytes: usedBytes, availableBytes: available}
+}
+
+// driveQuota reports link.UserID's real per-drive quota_bytes allocation on
+// link.DriveID and their own usage on it — the same figures upload
+// enforcement (hasRoomForUpload) gates against, so a fast-tier mount and a
+// standard-tier mount on the same server correctly report different
+// capacities instead of both echoing one account-wide number, and neither
+// echoes the drive's shared physical capacity.
+func (h *Handler) driveQuota(c *gin.Context, link *models.FileServerLink) (*quotaInfo, error) {
+	quotaBytes, usedBytes, err := h.pool.GetUserDriveQuotaAndUsage(c.Request.Context(), link.DriveID, link.Username, link.UserID)
+	if err != nil {
+		return nil, err
+	}
+	return computeQuotaInfo(quotaBytes, usedBytes), nil
 }
 
 func writeCollectionResponse(buf *bytes.Buffer, href, name string, modified time.Time, quota *quotaInfo) {
@@ -521,7 +529,7 @@ func (h *Handler) upload(c *gin.Context, link *models.FileServerLink, user *mode
 		FolderID:       folderID,
 		Name:           leaf,
 		IgnoreRedirect: true,
-		Source:         "web",
+		Source:         "file_server",
 		Reader:         http.MaxBytesReader(c.Writer, c.Request.Body, maxUploadBytes),
 		RequireDriveID: &driveID,
 	})

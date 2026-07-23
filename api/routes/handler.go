@@ -53,18 +53,18 @@ type FileServicer interface {
 	BeginChunkedUpload(ctx context.Context, sess *services.UploadSession) error
 	EncryptAndUploadPart(ctx context.Context, sess *services.UploadSession, index int, data []byte)
 	FinalizeChunkedUpload(ctx context.Context, sess *services.UploadSession) (*models.File, error)
-	RequestDriveMigration(ctx context.Context, userID uuid.UUID, username string, folderID, toDriveID uuid.UUID) (*models.FolderDriveMigration, error)
+	RequestDriveMigration(ctx context.Context, userID uuid.UUID, username string, folderID, toDriveID uuid.UUID, destParentID *uuid.UUID) (*models.FolderDriveMigration, error)
 	GetLatestDriveMigration(ctx context.Context, userID, folderID uuid.UUID) (*services.DriveMigrationStatus, error)
 }
 
 // FolderServicer is the subset of *services.FolderService used by route handlers.
 type FolderServicer interface {
-	ListRoot(ctx context.Context, userID uuid.UUID, folderPage, filePage db.PageInput) (*services.FolderContents, error)
+	ListRoot(ctx context.Context, userID uuid.UUID, folderPage, filePage db.PageInput, drive *services.DriveFilter) (*services.FolderContents, error)
 	GetContents(ctx context.Context, folderID, userID uuid.UUID, folderPage, filePage db.PageInput) (*services.FolderContents, error)
 	GetMediaContents(ctx context.Context, folderID, userID uuid.UUID, sort db.MediaSort, hidden db.HiddenFilter, folderPage, filePage db.PageInput) (*services.FolderContents, error)
 	Create(ctx context.Context, userID uuid.UUID, parentID *uuid.UUID, name, kind, username string, driveID *uuid.UUID) (*models.Folder, error)
 	Rename(ctx context.Context, folderID, userID uuid.UUID, name string) (*models.Folder, error)
-	Move(ctx context.Context, folderID, targetID, userID uuid.UUID) (*models.Folder, error)
+	Move(ctx context.Context, folderID, targetID, userID uuid.UUID, username string) (*models.Folder, error)
 	Delete(ctx context.Context, folderID, userID uuid.UUID) error
 	CopyToSubcollection(ctx context.Context, userID, collectionID, fileID uuid.UUID) error
 	MoveSubcollectionItem(ctx context.Context, userID, fileID, fromCollectionID, toCollectionID uuid.UUID) error
@@ -111,6 +111,11 @@ type Handler struct {
 	fileServerLinks *services.FileServerLinkService
 	emailBackup     *services.EmailBackupService
 	recognition     RecognitionServicer
+	// bandwidth enforces the fair per-user upload rate cap (see
+	// services.BandwidthManager). Nil is tolerated and means the operator
+	// hasn't configured UPLOAD_BANDWIDTH_BUDGET_MBPS — upload handlers skip
+	// throttling entirely rather than failing closed.
+	bandwidth       *services.BandwidthManager
 	turnstileSecret string
 	// paypal is used for the interest-form deposit (nil is tolerated and
 	// causes the deposit endpoints to return 503).
@@ -158,6 +163,14 @@ func SetAPIKeyService(h *Handler, svc *services.APIKeyService) {
 // causes the share endpoints to return 503 (configured, not crash).
 func SetShareService(h *Handler, svc *services.ShareService) {
 	h.shares = svc
+}
+
+// SetBandwidthManager installs the fair upload-bandwidth limiter on an
+// existing Handler. Wired from main once UPLOAD_BANDWIDTH_BUDGET_MBPS is
+// parsed; nil is tolerated (feature unconfigured) and upload handlers skip
+// throttling entirely.
+func SetBandwidthManager(h *Handler, mgr *services.BandwidthManager) {
+	h.bandwidth = mgr
 }
 
 // SetRecognitionService installs the AI recognition service on an existing

@@ -41,11 +41,13 @@ export function updatePreferences(mediaAutouploadFolderId: string | null) {
   })
 }
 
-// updateStorageUIPreferences toggles the "+" add-storage buttons and the
-// automatic upgrade prompt. Only the provided fields are changed.
+// updateStorageUIPreferences toggles the "+" add-storage buttons, the
+// automatic upgrade prompt, and the drive-benchmark promo card shown in the
+// Add Storage modal. Only the provided fields are changed.
 export function updateStorageUIPreferences(prefs: {
   show_storage_buttons?: boolean
   storage_prompt_enabled?: boolean
+  hide_benchmark_promo?: boolean
 }) {
   return put<UserPreferences>('/me/preferences/storage-ui', prefs)
 }
@@ -55,6 +57,15 @@ export function updateStorageUIPreferences(prefs: {
 export function updateBackupReminderPreference(enabled: boolean) {
   return put<UserPreferences>('/me/preferences/backup-reminder', {
     backup_stale_notify: enabled,
+  })
+}
+
+// updateDefaultDrive sets the drive (server & tier) the file browser lands on
+// for a multi-drive user. Pass null to clear it. The drive must be one of the
+// user's own allocations.
+export function updateDefaultDrive(driveId: string | null) {
+  return put<UserPreferences>('/me/preferences/default-drive', {
+    default_drive_id: driveId,
   })
 }
 

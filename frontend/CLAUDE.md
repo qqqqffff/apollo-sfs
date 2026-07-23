@@ -15,6 +15,7 @@ React 18.3 + TypeScript single-page application built with Vite 7. Served in pro
 | Bot protection | Cloudflare Turnstile (`@marsidev/react-turnstile`) |
 | HTML sanitization | DOMPurify 3.4 |
 | DOCX preview | mammoth 1.12 |
+| PDF preview | pdfjs-dist 4.10 (canvas rendering — iOS WebKit's native `<iframe>` PDF plugin only shows page 1, so previews are hand-rendered instead of embedded; see `PdfViewer.tsx`). **Pinned to v4** on purpose: v5/v6 call bleeding-edge JS (`Map.prototype.getOrInsertComputed`, only in Safari 18.4+) that throws on the mobile WebKit versions most iOS devices run — do not bump without checking mobile-Safari support. |
 | Unit tests | Jest 29 + `@testing-library/react` |
 | E2E tests | Playwright 1.60 |
 

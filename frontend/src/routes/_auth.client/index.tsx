@@ -8,10 +8,15 @@ import {
   MdBolt,
   MdAutoAwesome,
   MdCheck,
+  MdCheckBox,
+  MdCheckBoxOutlineBlank,
+  MdChecklist,
+  MdChevronRight,
   MdCloudQueue,
   MdCloudUpload,
   MdClose,
   MdDeleteOutline,
+  MdEdit,
   MdFolder,
   MdFolderOpen,
   MdInfoOutline,
@@ -24,8 +29,8 @@ import {
   MdUploadFile,
   MdVisibility,
 } from 'react-icons/md'
-import { createFolder, deleteFolder, moveFolder, requestDriveMigration } from '../../api/folders'
-import { deleteFile, downloadUrl, fileQueryOptions, moveFile, previewUrl } from '../../api/files'
+import { createFolder, deleteFolder, moveFolder, renameFolder, requestDriveMigration } from '../../api/folders'
+import { deleteFile, downloadUrl, fileQueryOptions, moveFile, previewUrl, renameFile } from '../../api/files'
 import { detectionThumbUrl } from '../../api/recognition'
 import { meQueryOptions, preferencesQueryOptions, updatePreferences } from '../../api/me'
 import { listMyServers, resolveDrive, type MyServer } from '../../api/storage'
@@ -37,14 +42,21 @@ import { MediaCollectionView } from '../../components/MediaCollectionView'
 import type { Folder, FolderKind } from '../../types/api'
 import { UploadModal } from '../../components/UploadModal'
 import { StorageUpgradeModal, STORAGE_PROMPT_THRESHOLD } from '../../components/StorageUpgradeModal'
+import { StorageBreakdownModal } from '../../components/StorageBreakdownModal'
 import { ShareModal } from '../../components/ShareModal'
 import { DeleteConfirmModal, readSkipDeleteCookie } from '../../components/DeleteConfirmModal'
 import { FolderBreadcrumb } from '../../components/FolderBreadcrumb'
 import { AccountBadges } from '../../components/GroupBadge'
+import { RowActionsMenu, MenuRow } from '../../components/RowActionsMenu'
 import { TierIcon } from '../../components/TierIcon'
+import { StorageTierBars } from '../../components/StorageTierBars'
+import { DriveDestinationPicker } from '../../components/DriveDestinationPicker'
 import { UploadToast } from '../../components/UploadToast'
 import { SortControls } from '../../components/SortControls'
 import { SearchBar } from '../../components/SearchBar'
+import { SelectionToolbar } from '../../components/SelectionToolbar'
+import { BulkMoveModal, type BulkMoveItem } from '../../components/BulkMoveModal'
+import { BulkDeleteConfirmModal } from '../../components/BulkDeleteConfirmModal'
 import { useFileUpload } from '../../hooks/useFileUpload'
 import { useDragDrop } from '../../hooks/useDragDrop'
 import { useFileDrag } from '../../hooks/useFileDrag'
@@ -83,10 +95,11 @@ import {
 export const Route = createFileRoute('/_auth/client/')({
   // All keys optional so navigations to /client elsewhere need not pass every
   // one. Only keys with a concrete value are included.
-  validateSearch: (search: Record<string, unknown>): { file?: string; folder?: string; action?: FilesAction; recognitionGroup?: string } => {
-    const out: { file?: string; folder?: string; action?: FilesAction; recognitionGroup?: string } = {}
+  validateSearch: (search: Record<string, unknown>): { file?: string; folder?: string; drive?: string; action?: FilesAction; recognitionGroup?: string } => {
+    const out: { file?: string; folder?: string; drive?: string; action?: FilesAction; recognitionGroup?: string } = {}
     if (typeof search.file === 'string') out.file = search.file
     if (typeof search.folder === 'string') out.folder = search.folder
+    if (typeof search.drive === 'string') out.drive = search.drive
     if (typeof search.recognitionGroup === 'string') out.recognitionGroup = search.recognitionGroup
     const action = parseFilesAction(search.action)
     if (action) out.action = action
@@ -96,12 +109,129 @@ export const Route = createFileRoute('/_auth/client/')({
 })
 
 function RouteComponent() {
-  const { file: fileId, folder: folderId } = useSearch({ from: '/_auth/client/' })
+  const { file: fileId, folder: folderId, drive: driveParam } = useSearch({ from: '/_auth/client/' })
 
   return (
     <FilesLayout>
-      {fileId ? <FileView fileId={fileId} /> : <FolderView folderId={folderId ?? 'root'} />}
+      {folderId
+        ? <FolderView folderId={folderId} fileId={fileId} />
+        : <RootView driveParam={driveParam} fileId={fileId} />}
     </FilesLayout>
+  )
+}
+
+// RootView resolves what the "super level" shows: the drive picker (a user with
+// multiple drives and no default landing), or a single drive's root view (one
+// drive, an explicit ?drive, or a saved default). While impersonating, the
+// tier-first grouping is skipped — the admin sees the target user's whole root
+// flat, since the drive list is the caller's own — so it renders the plain
+// unscoped root exactly as before.
+function RootView({ driveParam, fileId }: { driveParam?: string; fileId?: string }) {
+  const { impersonatedUser } = useImpersonation()
+  const { action: sidebarAction } = useSearch({ from: '/_auth/client/' })
+  const { data: prefs } = useQuery(preferencesQueryOptions)
+  const { data: myServers, isLoading } = useQuery({
+    queryKey: ['storage', 'my-servers'],
+    queryFn: listMyServers,
+    enabled: impersonatedUser === null,
+  })
+
+  if (impersonatedUser !== null) return <FolderView folderId="root" fileId={fileId} />
+
+  if (isLoading) return <p className="text-sm text-gray-500">Loading…</p>
+  const servers = myServers ?? []
+
+  // No drives yet → plain root (its empty-state messaging applies). A single
+  // drive always lands straight in it — there's no drive layer to choose from.
+  if (servers.length === 0) return <FolderView folderId="root" fileId={fileId} />
+  if (servers.length === 1) return <FolderView folderId="root" driveId={servers[0].drive_id} fileId={fileId} />
+
+  // 'all' is the explicit "show the picker" sentinel set by the All storage
+  // link, so it wins over the saved-default auto-landing (otherwise clicking
+  // All storage would bounce straight back into the default drive).
+  if (driveParam === DRIVE_OVERVIEW) return <DrivePicker servers={servers} />
+
+  const named = driveParam && servers.find((s) => s.drive_id === driveParam)
+  if (named) return <FolderView folderId="root" driveId={named.drive_id} fileId={fileId} />
+
+  // Bare /client (no valid drive): land in the saved default when it still
+  // exists, otherwise show the picker.
+  const dflt = prefs?.default_drive_id && servers.find((s) => s.drive_id === prefs.default_drive_id)
+  if (dflt) return <FolderView folderId="root" driveId={dflt.drive_id} fileId={fileId} />
+
+  // A pending sidebar action (Google/email backup, new folder/collection)
+  // travels as ?action= and is only ever consumed by the effect inside
+  // FolderView — DrivePicker doesn't read it and would strand it in the URL
+  // forever, silently swallowing the click. Land in a real drive (primary,
+  // else the first) so the action still fires; the user can switch drives
+  // afterward same as anyone else.
+  if (sidebarAction) {
+    const fallback = servers.find((s) => s.is_primary) ?? servers[0]
+    return <FolderView folderId="root" driveId={fallback.drive_id} fileId={fileId} />
+  }
+
+  return <DrivePicker servers={servers} />
+}
+
+// DRIVE_OVERVIEW is the ?drive sentinel meaning "show the drive picker" — a real
+// drive id is always a UUID, so this can never collide with one.
+const DRIVE_OVERVIEW = 'all'
+
+// DrivePicker is the "super level": the granular per-drive quota bars plus a
+// clickable list of the drives (server & tier) the user owns. Clicking a drive
+// enters that drive's root view. Shown only to multi-drive users with no saved
+// default — single-drive users and defaults land straight in a drive.
+function DrivePicker({ servers }: { servers: MyServer[] }) {
+  const navigate = useNavigate()
+  const { data: user } = useQuery(meQueryOptions)
+  const openDrive = (driveId: string) =>
+    navigate({ to: '/client', search: { file: undefined, drive: driveId } })
+
+  return (
+    <div>
+      <div className="flex items-center gap-3 mb-5">
+        <FilesSidebarToggle />
+        <h2 className="text-lg font-semibold text-gray-900 mt-0 mb-0">My Files</h2>
+        {(user?.is_premium || user?.is_admin) && (
+          <AccountBadges user={user} className="text-[10px]" />
+        )}
+      </div>
+
+      <StorageTierBars servers={servers} />
+
+      <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Your storage</h3>
+      <ul className="list-none m-0 p-0">
+        {servers.map((s) => {
+          const isFast = s.drive_type === 'nvme'
+          return (
+            <li key={s.drive_id}>
+              <button
+                onClick={() => openDrive(s.drive_id)}
+                className="w-full flex items-center gap-3 px-2 py-2.5 rounded-lg hover:bg-gray-50 cursor-pointer bg-transparent border-0 text-left transition-colors"
+              >
+                <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${isFast ? 'bg-blue-50' : 'bg-amber-50'}`}>
+                  {isFast ? <MdBolt className="text-blue-600" /> : <MdStorage className="text-amber-500" />}
+                </div>
+                <span className="flex-1 min-w-0">
+                  <span className="flex items-center gap-2">
+                    <span className="text-sm font-medium text-gray-800">{tierLabel(s.drive_type)} · {s.name}</span>
+                    {s.is_primary && (
+                      <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider bg-blue-50 text-blue-600 rounded">
+                        Primary
+                      </span>
+                    )}
+                  </span>
+                  <span className="block text-xs text-gray-400">
+                    {formatSize(s.used_bytes)} of {formatSize(s.quota_bytes)} used
+                  </span>
+                </span>
+                <MdChevronRight className="text-gray-300 text-xl shrink-0" />
+              </button>
+            </li>
+          )
+        })}
+      </ul>
+    </div>
   )
 }
 
@@ -109,11 +239,11 @@ function RouteComponent() {
 
 function FileView({ fileId }: { fileId: string }) {
   const navigate = useNavigate()
-  const { folder: currentFolder } = useSearch({ from: '/_auth/client/' })
+  const { folder: currentFolder, drive: currentDrive } = useSearch({ from: '/_auth/client/' })
   const { data: file, isLoading, error } = useQuery(fileQueryOptions(fileId))
 
   function close() {
-    navigate({ to: '/client', search: { file: undefined, folder: currentFolder } })
+    navigate({ to: '/client', search: { file: undefined, folder: currentFolder, drive: currentDrive } })
   }
 
   if (isLoading) return <p className="text-sm text-gray-500">Loading…</p>
@@ -153,7 +283,7 @@ function FileView({ fileId }: { fileId: string }) {
 
 // ── Folder view ───────────────────────────────────────────────────────────────
 
-function FolderView({ folderId }: { folderId: string | 'root' }) {
+function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; fileId?: string; driveId?: string }) {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const { notify } = useNotification()
@@ -169,10 +299,56 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
   const [search, setSearch] = useState('')
   const [creatingFolder, setCreatingFolder] = useState(false)
   const [newFolderName, setNewFolderName] = useState('')
+  const [renaming, setRenaming] = useState<{ type: 'file' | 'folder'; id: string; ext: string } | null>(null)
+  const [renameValue, setRenameValue] = useState('')
   const [newFolderKind, setNewFolderKind] = useState<FolderKind>('regular')
   const [newFolderDriveId, setNewFolderDriveId] = useState<string | null>(null)
   const { progress, startUpload, dismiss } = useFileUpload()
   const { isDragging } = useDragDrop((dropped) => { if (!readOnly) setPendingFiles(dropped) })
+
+  // ── Multi-select state ─────────────────────────────────────────────────────
+  const [selectionMode, setSelectionMode] = useState(false)
+  const [selectedFileIds, setSelectedFileIds] = useState<Set<string>>(new Set())
+  const [selectedFolderIds, setSelectedFolderIds] = useState<Set<string>>(new Set())
+  const [pendingBulkMove, setPendingBulkMove] = useState(false)
+  const [pendingBulkDelete, setPendingBulkDelete] = useState(false)
+  const [bulkMovePending, setBulkMovePending] = useState(false)
+  const [bulkDeletePending, setBulkDeletePending] = useState(false)
+
+  // Selected ids only make sense against the folder they were selected in —
+  // clear them (but keep selectionMode itself) whenever the user navigates.
+  useEffect(() => {
+    setSelectedFileIds(new Set())
+    setSelectedFolderIds(new Set())
+  }, [folderId])
+
+  function clearSelection() {
+    setSelectedFileIds(new Set())
+    setSelectedFolderIds(new Set())
+  }
+
+  function toggleSelectionMode() {
+    setSelectionMode((m) => {
+      if (m) clearSelection()
+      return !m
+    })
+  }
+
+  function toggleSelectFile(id: string) {
+    setSelectedFileIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id); else next.add(id)
+      return next
+    })
+  }
+
+  function toggleSelectFolder(id: string) {
+    setSelectedFolderIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id); else next.add(id)
+      return next
+    })
+  }
 
   // Auto-open the storage upgrade modal when a pending upload would exceed the
   // quota or push usage past 75% of it (unless disabled in preferences).
@@ -195,6 +371,12 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
   const storagePromptEnabled = prefs?.storage_prompt_enabled ?? true
   const [storageModalReason, setStorageModalReason] =
     useState<'open' | 'upload-near-quota' | 'upload-over-quota' | null>(null)
+  // Server/tier to preselect in the storage upgrade modal, set when it's
+  // opened from a specific drive context (e.g. the upload modal's "Add
+  // storage" action) so the flow lands where the user was already working.
+  const [storageModalPreselect, setStorageModalPreselect] =
+    useState<{ serverId: string; tier: 'nvme' | 'hdd' } | null>(null)
+  const [showStorageBreakdown, setShowStorageBreakdown] = useState(false)
   const { data: myServers } = useQuery({
     queryKey: ['storage', 'my-servers'],
     queryFn: listMyServers,
@@ -250,6 +432,11 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sidebarAction, user])
 
+  // At a drive's root the listing is scoped to that drive; the primary drive
+  // also owns NULL-drive rows (they resolve to the primary at read time).
+  const rootDrive = folderId === 'root' && driveId ? myServers?.find((s) => s.drive_id === driveId) : undefined
+  const driveScope = rootDrive ? { driveId: rootDrive.drive_id, includeUnassigned: rootDrive.is_primary } : undefined
+
   const {
     folder,
     folders: rawSubfolders,
@@ -260,7 +447,14 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
     hasNextPage,
     isFetchingNextPage,
     fetchNextPage,
-  } = useInfiniteFolderContents(folderId, search, impersonatedUser?.username)
+  } = useInfiniteFolderContents(folderId, search, impersonatedUser?.username, driveScope)
+
+  // The drive (server & tier) the current view lives on: the scoped drive at a
+  // drive root, otherwise the folder's own drive (NULL resolves to primary).
+  // Drives the granular quota bar, uploads, and new-folder binding.
+  const currentDrive = folderId === 'root'
+    ? rootDrive
+    : resolveDrive(folder?.drive_id ?? null, myServers).drive
 
   const moveFileMutation = useMutation({
     mutationFn: ({ fileId, targetFolderId }: { fileId: string; targetFolderId: string }) =>
@@ -280,11 +474,89 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
     },
   })
 
-  const { draggingFileId, draggingFolderId, dragOverFolderId, getFileDragHandlers, getFolderDragHandlers, getFolderDropHandlers } =
-    useFileDrag(
-      (fileId, targetFolderId) => moveFileMutation.mutate({ fileId, targetFolderId }),
-      (folderId, targetFolderId) => moveFolderMutation.mutate({ folderId, targetFolderId }),
-    )
+  // Shared by both bulk-move paths: the toolbar's Move modal (ids come from
+  // the current selection state) and a multi-selection drag-and-drop (ids
+  // come from the drag payload, captured at drag start — see
+  // getSelectionSnapshot below). Mirrors what the single-item
+  // moveFileMutation/moveFolderMutation already do on success (invalidate +
+  // navigate into the destination), just batched.
+  async function moveManyTo(fileIds: string[], folderIds: string[], targetFolderId: string) {
+    setBulkMovePending(true)
+    const results = await Promise.allSettled([
+      ...fileIds.map((id) => moveFile(id, targetFolderId)),
+      ...folderIds.map((id) => moveFolder(id, targetFolderId)),
+    ])
+    const total = results.length
+    const failed = results.filter((r) => r.status === 'rejected').length
+    setBulkMovePending(false)
+    setPendingBulkMove(false)
+    clearSelection()
+    setSelectionMode(false)
+    queryClient.invalidateQueries({ queryKey: ['folders'] })
+    if (failed > 0) notify('error', `${total - failed} moved, ${failed} failed to move`)
+    if (failed < total) navigate({ to: '/client', search: { file: undefined, folder: targetFolderId } })
+  }
+
+  function runBulkMove(targetFolderId: string) {
+    moveManyTo(Array.from(selectedFileIds), Array.from(selectedFolderIds), targetFolderId)
+  }
+
+  async function runBulkDelete() {
+    setBulkDeletePending(true)
+    const fileIds = Array.from(selectedFileIds)
+    const folderIds = Array.from(selectedFolderIds)
+    const results = await Promise.allSettled([
+      ...fileIds.map((id) => deleteFile(id)),
+      ...folderIds.map((id) => deleteFolder(id)),
+    ])
+    const total = results.length
+    const failed = results.filter((r) => r.status === 'rejected').length
+    setBulkDeletePending(false)
+    setPendingBulkDelete(false)
+    clearSelection()
+    setSelectionMode(false)
+    queryClient.invalidateQueries({ queryKey: ['folders'] })
+    queryClient.invalidateQueries({ queryKey: ['me'] })
+    queryClient.invalidateQueries({ queryKey: ['storage', 'my-servers'] })
+    if (failed > 0) notify('error', `${total - failed} deleted, ${failed} failed (folders must be empty first)`)
+  }
+
+  function handleBulkDeleteClick() {
+    if (user && readSkipDeleteCookie(user.username)) runBulkDelete()
+    else setPendingBulkDelete(true)
+  }
+
+  // Coalesced favorite/unfavorite: if every selected item is already
+  // favorited, the action removes all of them; otherwise it adds only the
+  // ones that aren't favorited yet (already-favorited selections are left
+  // alone rather than being toggled off).
+  function runBulkFavorite() {
+    const allFavorited =
+      Array.from(selectedFileIds).every((id) => favoriteFileIds.has(id)) &&
+      Array.from(selectedFolderIds).every((id) => favoriteFolderIds.has(id))
+    if (allFavorited) {
+      selectedFileIds.forEach((id) => toggleFile(id))
+      selectedFolderIds.forEach((id) => toggleFolder(id))
+    } else {
+      selectedFileIds.forEach((id) => { if (!favoriteFileIds.has(id)) toggleFile(id) })
+      selectedFolderIds.forEach((id) => { if (!favoriteFolderIds.has(id)) toggleFolder(id) })
+    }
+  }
+
+  const {
+    draggingFileId, draggingFolderId, dragOverFolderId, dragOverBackground,
+    getFileDragHandlers, getFolderDragHandlers, getFolderDropHandlers, getListBackgroundDropHandlers,
+  } = useFileDrag(
+    (fileId, targetFolderId) => moveFileMutation.mutate({ fileId, targetFolderId }),
+    (folderId, targetFolderId) => moveFolderMutation.mutate({ folderId, targetFolderId }),
+    (hoveredFolderId) => openFolder(hoveredFolderId),
+    (id, kind) => {
+      const inSelection = kind === 'file' ? selectedFileIds.has(id) : selectedFolderIds.has(id)
+      if (!inSelection || selectedFileIds.size + selectedFolderIds.size <= 1) return null
+      return { fileIds: Array.from(selectedFileIds), folderIds: Array.from(selectedFolderIds) }
+    },
+    (fileIds, folderIds, targetFolderId) => moveManyTo(fileIds, folderIds, targetFolderId),
+  )
 
   const setAutoUploadMutation = useMutation({
     mutationFn: (folderId: string | null) => updatePreferences(folderId),
@@ -319,8 +591,10 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
   function startCreate(kind: FolderKind) {
     setNewFolderKind(kind)
     setNewFolderName('')
-    const primary = myServers?.find((s) => s.is_primary)
-    setNewFolderDriveId(primary?.drive_id ?? null)
+    // Bind the new folder to the current drive context: the scoped drive at a
+    // drive root, or the parent folder's drive when nested (the backend inherits
+    // the parent's drive for subfolders regardless, so this is just a hint).
+    setNewFolderDriveId(currentDrive?.drive_id ?? myServers?.find((s) => s.is_primary)?.drive_id ?? null)
     setCreatingFolder(true)
   }
 
@@ -341,6 +615,7 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['folders'] })
       queryClient.invalidateQueries({ queryKey: ['me'] })
+      queryClient.invalidateQueries({ queryKey: ['storage', 'my-servers'] })
     },
     onError: () => notify('error', 'Failed to delete folder'),
   })
@@ -350,9 +625,51 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['folders', folderId] })
       queryClient.invalidateQueries({ queryKey: ['me'] })
+      queryClient.invalidateQueries({ queryKey: ['storage', 'my-servers'] })
     },
     onError: () => notify('error', 'Failed to delete file'),
   })
+
+  const renameFileMutation = useMutation({
+    mutationFn: ({ id, name }: { id: string; name: string }) => renameFile(id, name),
+    onSuccess: () => {
+      setRenaming(null)
+      queryClient.invalidateQueries({ queryKey: ['folders', folderId] })
+    },
+    onError: (err) => notify('error', err instanceof ApiError ? err.message : 'Failed to rename file'),
+  })
+
+  const renameFolderMutation = useMutation({
+    mutationFn: ({ id, name }: { id: string; name: string }) => renameFolder(id, name),
+    onSuccess: () => {
+      setRenaming(null)
+      queryClient.invalidateQueries({ queryKey: ['folders', folderId] })
+    },
+    onError: (err) => notify('error', err instanceof ApiError ? err.message : 'Failed to rename folder'),
+  })
+
+  // Files keep their extension locked during rename — only the base name is
+  // editable — since changing it silently would change how the OS/browser
+  // treats the downloaded file. Folders have no extension concept.
+  function startRename(type: 'file' | 'folder', id: string, name: string) {
+    const { base, ext } = type === 'file' ? splitExtension(name) : { base: name, ext: '' }
+    setRenaming({ type, id, ext })
+    setRenameValue(base)
+  }
+
+  function confirmRename() {
+    if (!renaming) return
+    const base = renameValue.trim()
+    if (!base) return
+    const name = base + renaming.ext
+    if (renaming.type === 'file') renameFileMutation.mutate({ id: renaming.id, name })
+    else renameFolderMutation.mutate({ id: renaming.id, name })
+  }
+
+  function cancelRename() {
+    setRenaming(null)
+    setRenameValue('')
+  }
 
   function handleDeleteClick(type: 'file' | 'folder', id: string, name: string) {
     if (user && readSkipDeleteCookie(user.username)) {
@@ -368,12 +685,35 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
   }
 
   function openFile(id: string) {
-    navigate({ to: '/client', search: { file: id, folder: folderId === 'root' ? undefined : folderId } })
+    navigate({
+      to: '/client',
+      search: {
+        file: id,
+        folder: folderId === 'root' ? undefined : folderId,
+        drive: folderId === 'root' ? driveId : undefined,
+      },
+    })
+  }
+
+  // Replace-style navigation used by the media viewer as the user scrolls
+  // between items — keeps the URL in sync without piling up history entries.
+  function navigateToFile(id: string) {
+    navigate({ to: '/client', search: { file: id, folder: folderId === 'root' ? undefined : folderId }, replace: true })
+  }
+
+  function closeFile() {
+    navigate({ to: '/client', search: { file: undefined, folder: folderId === 'root' ? undefined : folderId } })
   }
 
   function goBack() {
     if (folderId === 'root') return
-    navigate({ to: '/client', search: { file: undefined, folder: folder?.parent_id ?? undefined } })
+    if (folder?.parent_id) {
+      navigate({ to: '/client', search: { file: undefined, folder: folder.parent_id } })
+    } else {
+      // Top-level folder → back to its drive's root (or the super level when the
+      // user has a single drive and there's no drive layer to return to).
+      navigate({ to: '/client', search: { file: undefined, drive: currentDrive?.drive_id } })
+    }
   }
 
   if (isLoading) return <p className="text-sm text-gray-500">Loading…</p>
@@ -554,9 +894,12 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
         folder={folder}
         readOnly={readOnly}
         initialRecognitionGroup={recognitionGroup}
+        activeFileId={fileId}
         onBack={goBack}
         onOpenFolder={openFolder}
         onOpenFile={openFile}
+        onNavigateFile={navigateToFile}
+        onCloseFile={closeFile}
       />
     )
   }
@@ -587,17 +930,37 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
     return <EmailBackupView folder={folder} readOnly={readOnly} onBack={goBack} />
   }
 
+  // Previewing a single file inside a regular (non-media) folder still uses
+  // the generic modal-style preview — the full-screen scrolling viewer above
+  // only applies within media collections.
+  if (fileId) {
+    return <FileView fileId={fileId} />
+  }
+
   const subfolders = sortedFolders(rawSubfolders, sort)
   const files = sortedFiles(rawFiles, sort)
   // null = root upload (no folder); backend accepts absent folder_id for root.
   const uploadFolderId: string | null = folderId === 'root' ? null : folderId
-  const { drive: uploadDrive, isPinned: uploadDriveIsPinned } = resolveDrive(
-    folderId === 'root' ? null : (folder?.drive_id ?? null),
-    myServers,
-  )
+  // Root uploads in a drive view pin to that drive; inside a folder the folder's
+  // own drive governs (resolveDrive falls back to primary when unpinned).
+  const { drive: uploadDrive, isPinned: uploadDriveIsPinned } = folderId === 'root'
+    ? { drive: currentDrive, isPinned: !!currentDrive }
+    : resolveDrive(folder?.drive_id ?? null, myServers)
   const hasContent = rawSubfolders.length > 0 || rawFiles.length > 0 || recognitionGroups.length > 0
   const noResults = search && !isLoading && !hasNextPage && !hasContent
   const viewingUser = impersonatedUser ?? user
+
+  // Selection derived state — the items list feeds both bulk modals (name +
+  // size to display), and allSelectedFavorited drives the toolbar's
+  // Favorite/Unfavorite coalescing (see runBulkFavorite above).
+  const selectionCount = selectedFileIds.size + selectedFolderIds.size
+  const selectedBulkItems: BulkMoveItem[] = [
+    ...subfolders.filter((f) => selectedFolderIds.has(f.id)).map((f) => ({ id: f.id, name: f.name, size_bytes: f.size_bytes, kind: 'folder' as const })),
+    ...files.filter((f) => selectedFileIds.has(f.id)).map((f) => ({ id: f.id, name: f.name, size_bytes: f.size_bytes, kind: 'file' as const })),
+  ]
+  const allSelectedFavorited = selectionCount > 0 &&
+    Array.from(selectedFileIds).every((id) => favoriteFileIds.has(id)) &&
+    Array.from(selectedFolderIds).every((id) => favoriteFolderIds.has(id))
 
   // Photos/videos get silently redirected server-side into the auto-upload
   // folder unless we're already uploading into a media collection — mirrors
@@ -609,39 +972,80 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
 
   return (
     <div>
-      {folderId !== 'root' ? (
-        <div className="mb-2">
-          <div className="flex items-center gap-3">
-            <FilesSidebarToggle />
-            <FolderBreadcrumb
-              folderId={folderId}
-              onNavigate={(id) => navigate({ to: '/client', search: { file: undefined, folder: id } })}
-            />
+      {(() => {
+        // Drive crumb data for the breadcrumb: the drive whose view we're in,
+        // with an "All storage" step back to the super level when the user owns
+        // more than one drive (and isn't impersonating).
+        const multiDrive = !readOnly && (myServers?.length ?? 0) > 1
+        const driveCrumb = !readOnly && currentDrive
+          ? {
+              id: currentDrive.drive_id,
+              label: `${tierLabel(currentDrive.drive_type)} · ${currentDrive.name}`,
+              type: currentDrive.drive_type,
+              showAllStorage: multiDrive,
+            }
+          : undefined
+        const goToDriveRoot = (dId: string) => navigate({ to: '/client', search: { file: undefined, drive: dId } })
+        const goToAllStorage = () => navigate({ to: '/client', search: { file: undefined, drive: DRIVE_OVERVIEW } })
+        return folderId !== 'root' ? (
+          <div className="mb-2">
+            <div className="flex items-center gap-3 mb-5">
+              <FilesSidebarToggle />
+              <FolderBreadcrumb
+                folderId={folderId}
+                onNavigate={(id) => navigate({ to: '/client', search: { file: undefined, folder: id, drive: id ? undefined : currentDrive?.drive_id } })}
+                asUsername={impersonatedUser?.username}
+                drive={driveCrumb}
+                onNavigateDrive={goToDriveRoot}
+                onNavigateAllStorage={goToAllStorage}
+                getFolderDropHandlers={!readOnly ? getFolderDropHandlers : undefined}
+                dragOverFolderId={!readOnly ? dragOverFolderId : null}
+              />
+            </div>
+            {folder && (
+              <div className="flex items-center gap-1">
+                <h2 className="text-lg font-semibold text-gray-900 m-0">{folder.name}</h2>
+                {!readOnly && (
+                  <DriveInfoButton folder={folder} servers={myServers} isAdmin={!!user?.is_admin} align="left" />
+                )}
+              </div>
+            )}
           </div>
-          {folder && (
-            <div className="flex items-center gap-1">
-              <h2 className="text-lg font-semibold text-gray-900 m-0">{folder.name}</h2>
-              {!readOnly && (
-                <DriveInfoButton folder={folder} servers={myServers} isAdmin={!!user?.is_admin} align="left" />
+        ) : !readOnly && currentDrive ? (
+          <div className="mb-5">
+            {driveCrumb?.showAllStorage && (
+              <button
+                onClick={goToAllStorage}
+                className="inline-flex items-center gap-1 text-sm text-blue-600 hover:underline bg-transparent border-0 p-0 cursor-pointer mb-2"
+              >
+                <MdArrowBack className="text-base" /> All storage
+              </button>
+            )}
+            <div className="flex items-center gap-3">
+              <FilesSidebarToggle />
+              <h2 className="text-lg font-semibold text-gray-900 mt-0 mb-0 flex items-center gap-1.5">
+                <TierIcon type={currentDrive.drive_type} /> {tierLabel(currentDrive.drive_type)} · {currentDrive.name}
+              </h2>
+              {(user?.is_premium || user?.is_admin) && (
+                <AccountBadges user={user} className="text-[10px]" />
               )}
             </div>
-          )}
-        </div>
-      ) : (
-        <div className="flex items-center gap-3 mb-5">
-          <FilesSidebarToggle />
-          <h2 className="text-lg font-semibold text-gray-900 mt-0 mb-0">
-            {readOnly ? `${impersonatedUser!.username}'s Files` : 'My Files'}
-          </h2>
-          <DriveInfoButton folder={null} servers={myServers} isAdmin={!!user?.is_admin} align="left" />
-          {(user?.is_premium || user?.is_admin) && (
-            <AccountBadges user={user} className="text-[10px]" />
-          )}
-        </div>
-      )}
+          </div>
+        ) : (
+          <div className="flex items-center gap-3 mb-5">
+            {/* The sidebar drawer is a file-browsing/actions tool — not applicable
+                on the storage-preview (root) screen, so it's not rendered here at
+                all (subfolder headers above still show it). */}
+            <h2 className="text-lg font-semibold text-gray-900 mt-0 mb-0">
+              {readOnly ? `${impersonatedUser!.username}'s Storage` : 'My Storage'}
+            </h2>
+            <DriveInfoButton folder={null} servers={myServers} isAdmin={!!user?.is_admin} align="left" />
+          </div>
+        )
+      })()}
 
       {!readOnly && (
-        <div className="flex gap-2 mb-4">
+        <div className={`gap-2 mb-4 ${folderId === 'root' ? 'hidden sm:flex' : 'flex'}`}>
           <input
             ref={fileRef}
             type="file"
@@ -659,6 +1063,19 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
           >
             <MdUploadFile className="text-base" /> Upload
           </button>
+          {hasContent && (
+            <button
+              onClick={toggleSelectionMode}
+              title={selectionMode ? 'Exit selection mode' : 'Select multiple files and folders'}
+              className={`inline-flex items-center gap-1.5 px-3 py-2 text-sm rounded-lg font-medium cursor-pointer border transition-colors ${
+                selectionMode
+                  ? 'bg-blue-50 text-blue-600 border-blue-200'
+                  : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'
+              }`}
+            >
+              <MdChecklist className="text-base" /> Select
+            </button>
+          )}
           {showGoogleBackup && googleLoading && (
             <button
               onClick={handleCancelGoogleLoading}
@@ -671,7 +1088,17 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
         </div>
       )}
 
-      {viewingUser && (
+      {/* Granular quota bar: the current drive's own used/quota when we're in a
+          drive view (own account), else the account-wide aggregate (used while
+          impersonating or when drives haven't loaded). */}
+      {currentDrive && !readOnly ? (
+        <QuotaBar
+          used={currentDrive.used_bytes}
+          quota={currentDrive.quota_bytes}
+          label={`${tierLabel(currentDrive.drive_type)} · ${currentDrive.name}`}
+          onAddStorage={showStorageButtons ? () => setStorageModalReason('open') : undefined}
+        />
+      ) : viewingUser && (
         <QuotaBar
           used={viewingUser.storage_used_bytes}
           quota={viewingUser.storage_quota_bytes}
@@ -737,6 +1164,25 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
 
       <SearchBar value={search} onChange={setSearch} />
 
+      {/* The whole list area — including empty space below/around the rows —
+          is a drop target: dropping anywhere here that isn't a specific
+          subfolder row moves the dragged item(s) up to the parent folder (a
+          much bigger, closer target than the breadcrumb crumb that already
+          does the same thing). Generous padding + a min-height keep that
+          target comfortably sized even when the folder is nearly empty. */}
+      <div
+        {...(!readOnly ? getListBackgroundDropHandlers(folder?.parent_id ?? null) : {})}
+        className={`relative rounded-xl p-4 min-h-52 border-2 transition-colors ${
+          dragOverBackground ? 'bg-blue-50/40 border-dashed border-blue-300' : 'border-transparent'
+        }`}
+      >
+        {dragOverBackground && (
+          <div className="pointer-events-none absolute inset-x-0 top-1 flex justify-center">
+            <span className="px-3 py-1 rounded-full bg-blue-600 text-white text-xs font-medium shadow">
+              Drop to move to the parent folder
+            </span>
+          </div>
+        )}
       {!search && !hasContent && (
         <p className="text-sm text-gray-400 mt-4">
           {folderId === 'root' ? 'No files yet. Upload something to get started.' : 'This folder is empty.'}
@@ -803,27 +1249,15 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
                   placeholder={newFolderKind === 'media' ? 'Collection name' : 'Folder name'}
                   className="flex-1 bg-transparent border-0 outline-none text-sm text-gray-800 placeholder-gray-400"
                 />
-                {myServers && myServers.length > 0 && (() => {
-                  const selected = myServers.find((s) => s.drive_id === newFolderDriveId)
-                  const tier = selected?.drive_type ?? myServers.find((s) => s.is_primary)?.drive_type ?? 'nvme'
-                  const hasBothTiers = myServers.some((s) => s.drive_type === 'nvme') && myServers.some((s) => s.drive_type === 'hdd')
-                  const serversInTier = myServers.filter((s) => s.drive_type === tier)
-                  function handleTierChange(t: 'nvme' | 'hdd') {
-                    const inTier = myServers!.filter((s) => s.drive_type === t)
-                    const primaryInTier = inTier.find((s) => s.is_primary)
-                    setNewFolderDriveId(primaryInTier?.drive_id ?? inTier[0]?.drive_id ?? null)
-                  }
-                  return (
-                    <>
-                      {hasBothTiers
-                        ? <TierToggle value={tier} onChange={handleTierChange} />
-                        : <span className="text-xs text-gray-500 shrink-0">{tierLabel(tier)} tier</span>}
-                      {serversInTier.length > 1
-                        ? <ServerDropdown servers={serversInTier} value={newFolderDriveId ?? ''} onChange={setNewFolderDriveId} />
-                        : serversInTier[0] && <span className="text-xs text-gray-500 shrink-0">{serversInTier[0].name}</span>}
-                    </>
-                  )
-                })()}
+                {/* The new folder is bound to the current drive context (the
+                    drive whose view this is, or the parent folder's drive for a
+                    subfolder). It's fixed, not a chooser — a folder subtree can
+                    never straddle tiers — so we just show where it will land. */}
+                {currentDrive && (
+                  <span className="inline-flex items-center gap-1 text-xs text-gray-500 shrink-0">
+                    <TierIcon type={currentDrive.drive_type} /> {tierLabel(currentDrive.drive_type)} · {currentDrive.name}
+                  </span>
+                )}
                 <button
                   onClick={confirmNewFolder}
                   disabled={!newFolderName.trim() || createFolderMutation.isPending}
@@ -846,41 +1280,118 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
                 key={f.id}
                 {...(!readOnly ? getFolderDragHandlers(f) : {})}
                 {...(!readOnly ? getFolderDropHandlers(f) : {})}
-                className={`flex items-center gap-2 px-2 py-1.5 rounded-lg transition-colors ${
-                  !readOnly ? 'cursor-grab' : ''
+                className={`flex items-center gap-2 px-3 py-2 rounded-lg transition-colors hover:shadow-sm ${
+                  !readOnly ? (selectionMode ? 'cursor-pointer' : 'cursor-grab') : ''
                 } ${
                   dragOverFolderId === f.id
                     ? 'bg-blue-50 ring-2 ring-blue-300 ring-inset'
                     : 'hover:bg-gray-50'
                 } ${draggingFolderId === f.id ? 'opacity-40' : ''}`}
               >
-                <button
-                  onClick={() => openFolder(f.id)}
-                  className="flex-1 flex items-center gap-2 bg-transparent border-0 cursor-pointer text-left text-sm text-gray-800 hover:text-gray-900 p-0 min-w-0"
-                >
-                  {f.kind === 'media'
-                    ? <MdPhotoLibrary className="text-purple-400 text-lg shrink-0" />
-                    : f.kind === 'email'
-                      ? <MdAlternateEmail className="text-teal-500 text-lg shrink-0" title="Email backup" />
-                      : <MdFolder className="text-blue-400 text-lg shrink-0" />}
-                  <span className="truncate">{f.name}</span>
-                </button>
-                <span className="text-xs text-gray-400 shrink-0 hidden sm:inline">
-                  {new Date(f.created_at).toLocaleDateString()}
-                </span>
-                <span className="text-xs text-gray-400 shrink-0">{formatSize(f.size_bytes)}</span>
-                {!readOnly && (
+                {selectionMode && (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); toggleSelectFolder(f.id) }}
+                    aria-label={selectedFolderIds.has(f.id) ? 'Deselect folder' : 'Select folder'}
+                    className="shrink-0 cursor-pointer bg-transparent border-0 p-0.5 text-blue-500 hover:text-blue-600"
+                  >
+                    {selectedFolderIds.has(f.id) ? <MdCheckBox className="text-lg" /> : <MdCheckBoxOutlineBlank className="text-lg text-gray-300" />}
+                  </button>
+                )}
+                {renaming?.type === 'folder' && renaming.id === f.id ? (
                   <>
-                    {f.kind === 'media' && (
-                      <AutoUploadButton
-                        active={autoUploadTargetId === f.id}
-                        onClick={() => toggleAutoUploadTarget(f.id)}
-                      />
+                    {f.kind === 'media'
+                      ? <MdPhotoLibrary className="text-purple-400 text-lg shrink-0" />
+                      : f.kind === 'email'
+                        ? <MdAlternateEmail className="text-teal-500 text-lg shrink-0" title="Email backup" />
+                        : <MdFolder className="text-blue-400 text-lg shrink-0" />}
+                    <input
+                      autoFocus
+                      type="text"
+                      value={renameValue}
+                      onChange={(e) => setRenameValue(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') confirmRename()
+                        if (e.key === 'Escape') cancelRename()
+                      }}
+                      className="flex-1 min-w-0 bg-transparent border-0 outline-none text-sm text-gray-800"
+                    />
+                    <button
+                      onClick={confirmRename}
+                      disabled={!renameValue.trim() || renameFolderMutation.isPending}
+                      title="Save"
+                      className="text-green-500 hover:text-green-700 disabled:opacity-30 cursor-pointer bg-transparent border-0 p-0.5 transition-colors"
+                    >
+                      <MdCheck className="text-lg" />
+                    </button>
+                    <button
+                      onClick={cancelRename}
+                      title="Cancel"
+                      className="text-gray-400 hover:text-gray-600 cursor-pointer bg-transparent border-0 p-0.5 transition-colors"
+                    >
+                      <MdClose className="text-lg" />
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <button
+                      onClick={() => selectionMode ? toggleSelectFolder(f.id) : openFolder(f.id)}
+                      className="flex-1 flex items-center gap-2 bg-transparent border-0 cursor-pointer text-left text-sm text-gray-800 hover:text-gray-900 p-0 min-w-0"
+                    >
+                      {f.kind === 'media'
+                        ? <MdPhotoLibrary className="text-purple-400 text-lg shrink-0" />
+                        : f.kind === 'email'
+                          ? <MdAlternateEmail className="text-teal-500 text-lg shrink-0" title="Email backup" />
+                          : <MdFolder className="text-blue-400 text-lg shrink-0" />}
+                      <span className="truncate">{f.name}</span>
+                    </button>
+                    <span className="text-xs text-gray-400 shrink-0 hidden sm:inline">
+                      {new Date(f.created_at).toLocaleDateString()}
+                    </span>
+                    <span className="text-xs text-gray-400 shrink-0">{formatSize(f.size_bytes)}</span>
+                    {!readOnly && !selectionMode && (
+                      <>
+                        <div className="hidden sm:flex items-center gap-0.5 shrink-0">
+                          {f.kind === 'media' && (
+                            <AutoUploadButton
+                              active={autoUploadTargetId === f.id}
+                              onClick={() => toggleAutoUploadTarget(f.id)}
+                            />
+                          )}
+                          <StarButton active={favoriteFolderIds.has(f.id)} onClick={() => toggleFolder(f.id)} title={favoriteFolderIds.has(f.id) ? 'Remove from favorites' : 'Add to favorites'} />
+                          <RenameButton onClick={() => startRename('folder', f.id, f.name)} title="Rename folder" />
+                          <ShareButton onClick={() => setPendingShare({ type: 'folder', id: f.id, name: f.name })} title="Share folder" />
+                          <DriveInfoButton folder={f} servers={myServers} isAdmin={!!user?.is_admin} />
+                          <DeleteButton onClick={() => handleDeleteClick('folder', f.id, f.name)} title="Delete folder" />
+                        </div>
+                        <div className="sm:hidden">
+                          <RowActionsMenu>
+                            {f.kind === 'media' && (
+                              <MenuRow label={autoUploadTargetId === f.id ? 'Auto-upload target' : 'Set auto-upload target'}>
+                                <AutoUploadButton
+                                  active={autoUploadTargetId === f.id}
+                                  onClick={() => toggleAutoUploadTarget(f.id)}
+                                />
+                              </MenuRow>
+                            )}
+                            <MenuRow label={favoriteFolderIds.has(f.id) ? 'Remove from favorites' : 'Add to favorites'}>
+                              <StarButton active={favoriteFolderIds.has(f.id)} onClick={() => toggleFolder(f.id)} title={favoriteFolderIds.has(f.id) ? 'Remove from favorites' : 'Add to favorites'} />
+                            </MenuRow>
+                            <MenuRow label="Rename folder">
+                              <RenameButton onClick={() => startRename('folder', f.id, f.name)} title="Rename folder" />
+                            </MenuRow>
+                            <MenuRow label="Share folder">
+                              <ShareButton onClick={() => setPendingShare({ type: 'folder', id: f.id, name: f.name })} title="Share folder" />
+                            </MenuRow>
+                            <MenuRow label="Storage location">
+                              <DriveInfoButton folder={f} servers={myServers} isAdmin={!!user?.is_admin} />
+                            </MenuRow>
+                            <MenuRow label="Delete folder">
+                              <DeleteButton onClick={() => handleDeleteClick('folder', f.id, f.name)} title="Delete folder" />
+                            </MenuRow>
+                          </RowActionsMenu>
+                        </div>
+                      </>
                     )}
-                    <StarButton active={favoriteFolderIds.has(f.id)} onClick={() => toggleFolder(f.id)} title={favoriteFolderIds.has(f.id) ? 'Remove from favorites' : 'Add to favorites'} />
-                    <ShareButton onClick={() => setPendingShare({ type: 'folder', id: f.id, name: f.name })} title="Share folder" />
-                    <DriveInfoButton folder={f} servers={myServers} isAdmin={!!user?.is_admin} />
-                    <DeleteButton onClick={() => handleDeleteClick('folder', f.id, f.name)} title="Delete folder" />
                   </>
                 )}
               </li>
@@ -897,24 +1408,89 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
               <li
                 key={f.id}
                 {...(!readOnly ? getFileDragHandlers(f) : {})}
-                className={`flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-gray-50 transition-colors ${!readOnly ? 'cursor-grab' : ''} ${draggingFileId === f.id ? 'opacity-40' : ''}`}
+                className={`flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-gray-50 hover:shadow-sm transition-colors ${
+                  !readOnly ? (selectionMode ? 'cursor-pointer' : 'cursor-grab') : ''
+                } ${draggingFileId === f.id ? 'opacity-40' : ''}`}
               >
-                <button
-                  onClick={() => openFile(f.id)}
-                  className="flex-1 flex items-center gap-2 bg-transparent border-0 cursor-pointer text-left text-sm text-gray-800 hover:text-gray-900 p-0 min-w-0"
-                >
-                  <MdInsertDriveFile className="text-gray-400 text-lg shrink-0" />
-                  <span className="truncate">{f.name}</span>
-                </button>
-                <span className="text-xs text-gray-400 shrink-0 hidden sm:inline">
-                  {new Date(f.created_at).toLocaleDateString()}
-                </span>
-                <span className="text-xs text-gray-400 shrink-0">{formatSize(f.size_bytes)}</span>
-                {!readOnly && (
+                {selectionMode && (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); toggleSelectFile(f.id) }}
+                    aria-label={selectedFileIds.has(f.id) ? 'Deselect file' : 'Select file'}
+                    className="shrink-0 cursor-pointer bg-transparent border-0 p-0.5 text-blue-500 hover:text-blue-600"
+                  >
+                    {selectedFileIds.has(f.id) ? <MdCheckBox className="text-lg" /> : <MdCheckBoxOutlineBlank className="text-lg text-gray-300" />}
+                  </button>
+                )}
+                {renaming?.type === 'file' && renaming.id === f.id ? (
                   <>
-                    <StarButton active={favoriteFileIds.has(f.id)} onClick={() => toggleFile(f.id)} title={favoriteFileIds.has(f.id) ? 'Remove from favorites' : 'Add to favorites'} />
-                    <ShareButton onClick={() => setPendingShare({ type: 'file', id: f.id, name: f.name })} title="Share file" />
-                    <DeleteButton onClick={() => handleDeleteClick('file', f.id, f.name)} title="Delete file" />
+                    <MdInsertDriveFile className="text-gray-400 text-lg shrink-0" />
+                    <input
+                      autoFocus
+                      type="text"
+                      value={renameValue}
+                      onChange={(e) => setRenameValue(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') confirmRename()
+                        if (e.key === 'Escape') cancelRename()
+                      }}
+                      className="flex-1 min-w-0 bg-transparent border-0 outline-none text-sm text-gray-800"
+                    />
+                    {renaming.ext && <span className="text-sm text-gray-400 shrink-0" title="File extension can't be changed">{renaming.ext}</span>}
+                    <button
+                      onClick={confirmRename}
+                      disabled={!renameValue.trim() || renameFileMutation.isPending}
+                      title="Save"
+                      className="text-green-500 hover:text-green-700 disabled:opacity-30 cursor-pointer bg-transparent border-0 p-0.5 transition-colors"
+                    >
+                      <MdCheck className="text-lg" />
+                    </button>
+                    <button
+                      onClick={cancelRename}
+                      title="Cancel"
+                      className="text-gray-400 hover:text-gray-600 cursor-pointer bg-transparent border-0 p-0.5 transition-colors"
+                    >
+                      <MdClose className="text-lg" />
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <button
+                      onClick={() => selectionMode ? toggleSelectFile(f.id) : openFile(f.id)}
+                      className="flex-1 flex items-center gap-2 bg-transparent border-0 cursor-pointer text-left text-sm text-gray-800 hover:text-gray-900 p-0 min-w-0"
+                    >
+                      <MdInsertDriveFile className="text-gray-400 text-lg shrink-0" />
+                      <span className="truncate">{f.name}</span>
+                    </button>
+                    <span className="text-xs text-gray-400 shrink-0 hidden sm:inline">
+                      {new Date(f.created_at).toLocaleDateString()}
+                    </span>
+                    <span className="text-xs text-gray-400 shrink-0">{formatSize(f.size_bytes)}</span>
+                    {!readOnly && !selectionMode && (
+                      <>
+                        <div className="hidden sm:flex items-center gap-0.5 shrink-0">
+                          <StarButton active={favoriteFileIds.has(f.id)} onClick={() => toggleFile(f.id)} title={favoriteFileIds.has(f.id) ? 'Remove from favorites' : 'Add to favorites'} />
+                          <RenameButton onClick={() => startRename('file', f.id, f.name)} title="Rename file" />
+                          <ShareButton onClick={() => setPendingShare({ type: 'file', id: f.id, name: f.name })} title="Share file" />
+                          <DeleteButton onClick={() => handleDeleteClick('file', f.id, f.name)} title="Delete file" />
+                        </div>
+                        <div className="sm:hidden">
+                          <RowActionsMenu>
+                            <MenuRow label={favoriteFileIds.has(f.id) ? 'Remove from favorites' : 'Add to favorites'}>
+                              <StarButton active={favoriteFileIds.has(f.id)} onClick={() => toggleFile(f.id)} title={favoriteFileIds.has(f.id) ? 'Remove from favorites' : 'Add to favorites'} />
+                            </MenuRow>
+                            <MenuRow label="Rename file">
+                              <RenameButton onClick={() => startRename('file', f.id, f.name)} title="Rename file" />
+                            </MenuRow>
+                            <MenuRow label="Share file">
+                              <ShareButton onClick={() => setPendingShare({ type: 'file', id: f.id, name: f.name })} title="Share file" />
+                            </MenuRow>
+                            <MenuRow label="Delete file">
+                              <DeleteButton onClick={() => handleDeleteClick('file', f.id, f.name)} title="Delete file" />
+                            </MenuRow>
+                          </RowActionsMenu>
+                        </div>
+                      </>
+                    )}
                   </>
                 )}
               </li>
@@ -932,22 +1508,37 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
           {isFetchingNextPage ? 'Loading…' : 'Load more'}
         </button>
       )}
+      </div>
 
       {pendingFiles.length > 0 && user && !readOnly && (
         <UploadModal
           files={pendingFiles}
           folderName={folderId === 'root' ? 'root' : (folder?.name ?? 'This folder')}
-          location={uploadDrive ? { name: uploadDrive.name, tier: uploadDrive.drive_type, isPinned: uploadDriveIsPinned } : undefined}
+          location={uploadDrive ? {
+            name: uploadDrive.name,
+            tier: uploadDrive.drive_type,
+            isPinned: uploadDriveIsPinned,
+            serverId: uploadDrive.server_id,
+            usedBytes: uploadDrive.used_bytes,
+            quotaBytes: uploadDrive.quota_bytes,
+          } : undefined}
           redirectFolderName={uploadRedirectFolderName}
           user={user}
-          onAddStorage={showStorageButtons ? () => setStorageModalReason('open') : undefined}
+          onAddStorage={showStorageButtons ? () => {
+            setStorageModalPreselect(uploadDrive ? { serverId: uploadDrive.server_id, tier: uploadDrive.drive_type } : null)
+            setStorageModalReason('open')
+          } : undefined}
+          onViewBreakdown={() => setShowStorageBreakdown(true)}
           onConfirm={(ignoreRedirectIndices) => {
             const filesToUpload = pendingFiles
             setPendingFiles([])
+            // Pin root uploads to the drive whose view we're in; inside a folder
+            // the folder's own drive governs (pass undefined).
             startUpload(filesToUpload, uploadFolderId, () => {
               queryClient.invalidateQueries({ queryKey: ['folders', folderId] })
               queryClient.invalidateQueries({ queryKey: ['me'] })
-            }, ignoreRedirectIndices)
+              queryClient.invalidateQueries({ queryKey: ['storage', 'my-servers'] })
+            }, ignoreRedirectIndices, folderId === 'root' ? driveId : undefined)
           }}
           onCancel={() => setPendingFiles([])}
         />
@@ -958,7 +1549,15 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
       {storageModalReason && !readOnly && (
         <StorageUpgradeModal
           promptReason={storageModalReason === 'open' ? null : storageModalReason}
-          onClose={() => setStorageModalReason(null)}
+          initialSelection={storageModalPreselect}
+          onClose={() => { setStorageModalReason(null); setStorageModalPreselect(null) }}
+        />
+      )}
+
+      {showStorageBreakdown && (
+        <StorageBreakdownModal
+          servers={myServers ?? []}
+          onClose={() => setShowStorageBreakdown(false)}
         />
       )}
 
@@ -1054,13 +1653,48 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
         />
       )}
 
+      {!readOnly && (
+        <SelectionToolbar
+          count={selectionCount}
+          allFavorited={allSelectedFavorited}
+          onMove={() => setPendingBulkMove(true)}
+          onDelete={handleBulkDeleteClick}
+          onToggleFavorite={runBulkFavorite}
+          onClose={clearSelection}
+        />
+      )}
+
+      {pendingBulkMove && currentDrive && (
+        <BulkMoveModal
+          items={selectedBulkItems}
+          driveId={currentDrive.drive_id}
+          includeUnassigned={currentDrive.is_primary}
+          isPending={bulkMovePending}
+          onConfirm={runBulkMove}
+          onClose={() => setPendingBulkMove(false)}
+        />
+      )}
+
+      {pendingBulkDelete && (
+        <BulkDeleteConfirmModal
+          items={selectedBulkItems}
+          username={user?.username ?? ''}
+          usedBytes={currentDrive ? currentDrive.used_bytes : (viewingUser?.storage_used_bytes ?? 0)}
+          quotaBytes={currentDrive ? currentDrive.quota_bytes : (viewingUser?.storage_quota_bytes ?? 0)}
+          quotaLabel={currentDrive ? `${tierLabel(currentDrive.drive_type)} · ${currentDrive.name}` : undefined}
+          isPending={bulkDeletePending}
+          onConfirm={runBulkDelete}
+          onCancel={() => setPendingBulkDelete(false)}
+        />
+      )}
+
       {isDragging && !readOnly && (
         <div className="fixed inset-0 bg-blue-500/10 border-4 border-dashed border-blue-400 flex items-center justify-center z-999 pointer-events-none">
           <div className="bg-white/95 rounded-2xl px-12 py-6 text-center shadow-xl">
             <MdFolderOpen className="text-5xl text-blue-500 mx-auto mb-2" />
             <div className="text-lg font-semibold text-blue-600">Drop files to upload</div>
             <div className="text-sm text-gray-400 mt-1">
-              to {folderId === 'root' ? 'My Files' : (folder?.name ?? 'this folder')}
+              to {folderId === 'root' ? 'My Storage' : (folder?.name ?? 'this folder')}
             </div>
           </div>
         </div>
@@ -1071,7 +1705,7 @@ function FolderView({ folderId }: { folderId: string | 'root' }) {
 
 // ── Shared components ─────────────────────────────────────────────────────────
 
-function QuotaBar({ used, quota, onAddStorage }: { used: number; quota: number; onAddStorage?: () => void }) {
+function QuotaBar({ used, quota, onAddStorage, label }: { used: number; quota: number; onAddStorage?: () => void; label?: string }) {
   const pct = quota > 0 ? (used / quota) * 100 : 0
   const color =
     pct >= 90 ? 'bg-red-500' :
@@ -1080,7 +1714,7 @@ function QuotaBar({ used, quota, onAddStorage }: { used: number; quota: number; 
   return (
     <div className="mb-4">
       <div className="flex justify-between text-xs text-gray-400 mb-1">
-        <span>{formatSize(used)} used</span>
+        <span>{label ? `${label} — ` : ''}{formatSize(used)} used</span>
         <span className="flex items-center gap-1">
           {formatSize(quota)} quota
           {onAddStorage && (
@@ -1133,6 +1767,18 @@ function ShareButton({ onClick, title }: { onClick: () => void; title: string })
       className="cursor-pointer bg-transparent border-0 p-0.5 text-gray-300 hover:text-blue-500 transition-colors"
     >
       <MdShare className="text-lg" />
+    </button>
+  )
+}
+
+function RenameButton({ onClick, title }: { onClick: () => void; title: string }) {
+  return (
+    <button
+      onClick={onClick}
+      title={title}
+      className="cursor-pointer bg-transparent border-0 p-0.5 text-gray-300 hover:text-emerald-500 transition-colors"
+    >
+      <MdEdit className="text-lg" />
     </button>
   )
 }
@@ -1197,24 +1843,6 @@ function TierToggle({ value, onChange }: { value: 'nvme' | 'hdd'; onChange: (tie
         <MdStorage className="text-sm" /> Standard
       </button>
     </div>
-  )
-}
-
-// ServerDropdown is a plain native <select> — there's no existing reusable
-// dropdown component elsewhere in this codebase to prefer over one.
-function ServerDropdown({
-  servers, value, onChange,
-}: { servers: MyServer[]; value: string; onChange: (driveId: string) => void }) {
-  return (
-    <select
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      className="text-xs border border-gray-200 rounded-md px-1.5 py-1 text-gray-700 bg-white cursor-pointer"
-    >
-      {servers.map((s) => (
-        <option key={s.drive_id} value={s.drive_id}>{s.name}</option>
-      ))}
-    </select>
   )
 }
 
@@ -1367,6 +1995,9 @@ function DriveChangePopover({
 
   const [selectedServerId, setSelectedServerId] = useState(() => current?.server_id ?? '')
   const [selectedTier, setSelectedTier] = useState<'nvme' | 'hdd'>(() => current?.drive_type ?? 'nvme')
+  // Destination folder on the target drive (null = the drive's root). Reset
+  // whenever the target drive changes (below, once driveId is known).
+  const [destParentId, setDestParentId] = useState<string | null>(null)
 
   // When preview mode toggles (or the infra listing loads), the option set
   // changes — re-validate the current selection against it.
@@ -1389,9 +2020,16 @@ function DriveChangePopover({
 
   const selectedOption = tiersForSelectedServer.find((o) => o.drive_type === selectedTier) ?? tiersForSelectedServer[0]
   const driveId = selectedOption?.drive_id ?? ''
+  const selectedDriveIsPrimary = servers?.find((s) => s.drive_id === driveId)?.is_primary ?? false
+
+  // A different target drive means a different destination tree — reset the
+  // chosen destination folder back to the drive's root.
+  useEffect(() => {
+    setDestParentId(null)
+  }, [driveId])
 
   const migrateMutation = useMutation({
-    mutationFn: () => requestDriveMigration(folder.id, driveId),
+    mutationFn: () => requestDriveMigration(folder.id, driveId, destParentId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['folders', folder.id, 'drive-migration'] })
     },
@@ -1469,6 +2107,19 @@ function DriveChangePopover({
             </p>
           )}
 
+          {hasChange && !previewMode && driveId && (
+            <div className="mb-2">
+              <p className="text-[11px] text-gray-500 mb-1">Move into which folder on the destination?</p>
+              <DriveDestinationPicker
+                driveId={driveId}
+                includeUnassigned={selectedDriveIsPrimary}
+                excludeFolderId={folder.id}
+                value={destParentId}
+                onSelect={(id) => setDestParentId(id)}
+              />
+            </div>
+          )}
+
           {hasChange && (
             <button
               onClick={() => migrateMutation.mutate()}
@@ -1486,6 +2137,15 @@ function DriveChangePopover({
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+// splitExtension separates a file name into its editable base and its
+// extension (including the leading dot). Leading-dot dotfiles (".gitignore")
+// and names with no dot are treated as having no extension.
+function splitExtension(name: string): { base: string; ext: string } {
+  const dot = name.lastIndexOf('.')
+  if (dot <= 0 || dot === name.length - 1) return { base: name, ext: '' }
+  return { base: name.slice(0, dot), ext: name.slice(dot) }
+}
 
 function formatSize(bytes: number): string {
   if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GB`

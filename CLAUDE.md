@@ -121,6 +121,7 @@ All secrets live in `.env` (never commit this file). Key groups:
 | `SFS_API_KEY_PEPPER` | Pepper mixed into argon2id API key hashes |
 | `RECOGNITION_*` | AI recognition sidecar: shared token, CPU/RAM pool limits, clustering thresholds (see `docs/ai_recognition_setup.md`) |
 | `VITE_MS_CLIENT_ID` | Azure AD app (client) ID for the email backup's Microsoft sign-in. Build-time only: deploy.sh passes it to the frontend image build (`--build-arg`), where Vite inlines it into the bundle |
+| `TZ` | IANA time zone (e.g. `America/New_York`) for the `api` container's local clock. Used by the daily MinIO/Postgres reconciliation heartbeat, which fires at 4am in this zone — see `docs/storage_reconciliation.md`. Defaults to UTC if unset |
 
 ## Networking and Public Access
 
@@ -146,3 +147,6 @@ Docker logging uses the JSON file driver with rotation (10 MB max, 3 files). Ngi
 - `docs/ai_recognition_setup.md` — premium AI recognition (models, resource pool, GPU enablement)
 - `docs/sfs_api.md` — SFS public API reference
 - `docs/file_server_links.md` — premium WebDAV mount links (file server feature)
+- `docs/storage_reconciliation.md` — MinIO <-> Postgres reconciliation: drift sources, the daily 4am-local heartbeat, and the admin endpoints for it
+- `docs/drive_benchmark_setup.md` — on-demand fast (NVMe) vs standard (HDD) drive speed benchmark: how the trigger reaches node-agent, the writable scratch-directory host setup, and the promo blog post/cards it feeds
+- `docs/upload_bandwidth_fairness.md` — fair per-user upload speed cap: budget derived automatically from the periodic WAN speed test (no manual config), the live reserve/user-count split, "clean sample" gating against active uploads, and where it hooks into the request body

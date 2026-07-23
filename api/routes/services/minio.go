@@ -111,6 +111,40 @@ func (s *MinIOService) StatObject(ctx context.Context, key string) (minio.Object
 	return info, nil
 }
 
+// ListObjects returns every object (key, size, last-modified) currently in the
+// bucket. Used by the reconciliation scanner to diff bucket contents against
+// DB rows — there is no other caller today, so this always lists the whole
+// bucket rather than a prefix.
+func (s *MinIOService) ListObjects(ctx context.Context) ([]minio.ObjectInfo, error) {
+	var out []minio.ObjectInfo
+	for obj := range s.core.Client.ListObjects(ctx, s.bucket, minio.ListObjectsOptions{Recursive: true}) {
+		if obj.Err != nil {
+			return nil, fmt.Errorf("minio: list objects in %q: %w", s.bucket, obj.Err)
+		}
+		out = append(out, obj)
+	}
+	return out, nil
+}
+
+// ListIncompleteMultipartUploads returns every in-progress (not yet completed
+// or aborted) multipart upload in the bucket, paginating internally.
+func (s *MinIOService) ListIncompleteMultipartUploads(ctx context.Context) ([]minio.ObjectMultipartInfo, error) {
+	var out []minio.ObjectMultipartInfo
+	keyMarker, uploadIDMarker := "", ""
+	for {
+		res, err := s.core.ListMultipartUploads(ctx, s.bucket, "", keyMarker, uploadIDMarker, "", 1000)
+		if err != nil {
+			return nil, fmt.Errorf("minio: list multipart uploads in %q: %w", s.bucket, err)
+		}
+		out = append(out, res.Uploads...)
+		if !res.IsTruncated {
+			break
+		}
+		keyMarker, uploadIDMarker = res.NextKeyMarker, res.NextUploadIDMarker
+	}
+	return out, nil
+}
+
 // ── Multipart upload ──────────────────────────────────────────────────────────
 
 // CreateMultipartUpload initiates a server-side multipart upload and returns

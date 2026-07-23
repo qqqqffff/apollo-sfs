@@ -59,6 +59,11 @@ type AdminQuerier interface {
 	AutoSyncDriveCapacities(ctx context.Context, capacityBytes int64) error
 	ListAllNodeDisks(ctx context.Context) ([]models.NodeDisk, error)
 
+	// Drive benchmark
+	RequestBenchmarkOnAllNodes(ctx context.Context) error
+	CountPendingBenchmarkRequests(ctx context.Context) (int, error)
+	ListNodeDiskBenchmarks(ctx context.Context) ([]db.NodeDiskBenchmarkRow, error)
+
 	// Nodes (storage-node layer between servers and drives)
 	GetNodeSummaries(ctx context.Context) ([]models.NodeSummary, error)
 	GetNode(ctx context.Context, id uuid.UUID) (*models.Node, error)
@@ -98,6 +103,15 @@ type AdminQuerier interface {
 	// Feedback review
 	ListFeedback(ctx context.Context, status string, in db.PageInput) (*db.PageResult[models.Feedback], error)
 	UpdateFeedbackStatus(ctx context.Context, id uuid.UUID, status string) (*models.Feedback, error)
+
+	// MinIO <-> Postgres reconciliation
+	GetLatestReconciliationRun(ctx context.Context) (*models.ReconciliationRun, error)
+	ListReconciliationFindings(ctx context.Context, runID *uuid.UUID, limit int) ([]models.ReconciliationFinding, error)
+
+	// Test-runner sidecar run history
+	CreateTestRun(ctx context.Context, version, branch string, report models.TestRunReport, passed bool) (*models.TestRun, error)
+	GetLatestTestRunForBranch(ctx context.Context, branch string) (*models.TestRun, error)
+	GetLatestTestRun(ctx context.Context) (*models.TestRun, error)
 }
 
 // AdminInviteService is the subset of *services.InviteService used by admin handlers.

@@ -38,3 +38,11 @@ if (!('size' in URLSearchParams.prototype)) {
     },
   })
 }
+
+// Stub a 2D canvas context — jsdom has no real canvas backend without the
+// optional `canvas` package. PdfViewer only needs a truthy context object;
+// actual page drawing happens inside pdf.js's render(), which tests mock out.
+const nativeGetContext = HTMLCanvasElement.prototype.getContext
+HTMLCanvasElement.prototype.getContext = function (this: HTMLCanvasElement, ...args: unknown[]) {
+  return (nativeGetContext as any)?.apply(this, args) ?? {}
+} as typeof HTMLCanvasElement.prototype.getContext

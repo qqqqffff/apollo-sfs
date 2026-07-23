@@ -6,6 +6,7 @@ import {
   uploadChunkPresigned,
   completeChunkedUploadPresigned,
   CHUNK_SIZE,
+  MAX_CONCURRENT_CHUNKS,
 } from '../api/files'
 
 export type UploadStatus = 'idle' | 'uploading' | 'complete' | 'partial' | 'allFailed'
@@ -93,16 +94,18 @@ export function useFileUpload() {
     liveRef.current = { ...liveRef.current, items, loadedBytes }
   }
 
-  // Upload a single file using the presigned URL flow.
+  // Upload a single file using the presigned URL flow. driveId pins a root
+  // upload (folderId null) to the drive whose view the user is in.
   async function uploadSingleFile(
     file: globalThis.File,
     folderId: string | null,
     itemIndex: number,
     ignoreRedirect: boolean,
+    driveId: string | null,
   ): Promise<void> {
     if (file.size <= CHUNK_SIZE) {
       // ── Presigned single-file upload ───────────────────────────────────────
-      const { url } = await presignUpload(file.name, file.size, folderId, ignoreRedirect)
+      const { url } = await presignUpload(file.name, file.size, folderId, ignoreRedirect, driveId)
       await uploadFilePresigned(url, file, (xhrLoaded, xhrTotal) => {
         const scaled = xhrTotal > 0
           ? Math.min(Math.round((xhrLoaded / xhrTotal) * file.size), file.size)
@@ -113,6 +116,12 @@ export function useFileUpload() {
     }
 
     // ── Presigned chunked upload ───────────────────────────────────────────
+    // Chunks upload through a small worker pool rather than one at a time: the
+    // backend accepts them out of order (each is dispatched to its own goroutine
+    // and completed as an independently numbered MinIO multipart part), so
+    // serializing them client-side only wastes round-trip latency — with one
+    // chunk in flight, per-file throughput is capped at CHUNK_SIZE / RTT instead
+    // of the user's actual link speed.
     const totalChunks = Math.ceil(file.size / CHUNK_SIZE)
     const { upload_id, session_token } = await presignChunkedUpload(
       file.name,
@@ -120,21 +129,43 @@ export function useFileUpload() {
       file.size,
       folderId,
       ignoreRedirect,
+      driveId,
     )
 
-    for (let ci = 0; ci < totalChunks; ci++) {
-      const start = ci * CHUNK_SIZE
-      const chunk = file.slice(start, start + CHUNK_SIZE)
-      const chunkSize = chunk.size
-      const completedBytes = ci * CHUNK_SIZE
-
-      await uploadChunkPresigned(upload_id, session_token, ci, chunk, (xhrLoaded, xhrTotal) => {
-        const chunkLoaded = xhrTotal > 0
-          ? Math.min(Math.round((xhrLoaded / xhrTotal) * chunkSize), chunkSize)
-          : xhrLoaded
-        patchItem(itemIndex, { loaded: completedBytes + chunkLoaded })
-      })
+    const chunkLoaded = new Array<number>(totalChunks).fill(0)
+    function reportChunkProgress(ci: number, loaded: number) {
+      chunkLoaded[ci] = loaded
+      patchItem(itemIndex, { loaded: chunkLoaded.reduce((a, b) => a + b, 0) })
     }
+
+    let nextChunk = 0
+    let firstError: unknown = null
+
+    async function chunkWorker() {
+      while (firstError === null) {
+        const ci = nextChunk++
+        if (ci >= totalChunks) return
+        const start = ci * CHUNK_SIZE
+        const chunk = file.slice(start, start + CHUNK_SIZE)
+        const chunkSize = chunk.size
+        try {
+          await uploadChunkPresigned(upload_id, session_token, ci, chunk, (xhrLoaded, xhrTotal) => {
+            const loaded = xhrTotal > 0
+              ? Math.min(Math.round((xhrLoaded / xhrTotal) * chunkSize), chunkSize)
+              : xhrLoaded
+            reportChunkProgress(ci, loaded)
+          })
+          reportChunkProgress(ci, chunkSize)
+        } catch (err) {
+          if (firstError === null) firstError = err
+          return
+        }
+      }
+    }
+
+    const workerCount = Math.min(MAX_CONCURRENT_CHUNKS, totalChunks)
+    await Promise.all(Array.from({ length: workerCount }, () => chunkWorker()))
+    if (firstError !== null) throw firstError
 
     await completeChunkedUploadPresigned(upload_id, session_token)
   }
@@ -144,6 +175,7 @@ export function useFileUpload() {
     folderId: string | null,
     onAnySuccess: () => void,
     ignoreRedirectIndices?: Set<number>,
+    driveId?: string | null,
   ) => {
     const items: FileUploadItem[] = files.map((f) => ({
       name: f.name,
@@ -170,7 +202,7 @@ export function useFileUpload() {
           await sleep(RETRY_DELAYS_MS[attempt - 1])
         }
         try {
-          await uploadSingleFile(file, folderId, i, ignoreRedirectIndices?.has(i) ?? false)
+          await uploadSingleFile(file, folderId, i, ignoreRedirectIndices?.has(i) ?? false, driveId ?? null)
           patchItem(i, { loaded: file.size, status: 'done' })
           succeededCount++
           liveRef.current = { ...liveRef.current, succeeded: succeededCount }

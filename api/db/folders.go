@@ -202,6 +202,47 @@ func (q *Queries) ListRootFolders(ctx context.Context, userID uuid.UUID, in Page
 	}, nil
 }
 
+// ListRootFoldersOnDrive is ListRootFolders filtered to a single drive:
+// top-level folders (parent_id IS NULL) whose drive_id is driveID. When
+// includeUnassigned is true it also returns rows with a NULL drive_id — used
+// when viewing the user's PRIMARY drive, since a NULL drive_id resolves to the
+// primary at read time (see migration 055). Backs the tier-first browser's
+// per-drive root view.
+func (q *Queries) ListRootFoldersOnDrive(ctx context.Context, userID, driveID uuid.UUID, includeUnassigned bool, in PageInput) (*PageResult[models.Folder], error) {
+	limit := clampLimit(in.Limit)
+	offset, err := decodeOffsetCursor(in.Cursor)
+	if err != nil {
+		return nil, fmt.Errorf("ListRootFoldersOnDrive: %w", err)
+	}
+
+	rows, err := q.db.QueryContext(ctx, folderListSelect+`
+		WHERE f.user_id = $1 AND f.parent_id IS NULL
+		  AND (f.drive_id = $2 OR ($3 AND f.drive_id IS NULL))
+		ORDER BY f.name ASC
+		LIMIT $4 OFFSET $5
+	`, userID, driveID, includeUnassigned, limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("ListRootFoldersOnDrive: %w", err)
+	}
+	defer rows.Close()
+
+	folders := make([]models.Folder, 0)
+	for rows.Next() {
+		f, err := scanFolderListRow(rows)
+		if err != nil {
+			return nil, fmt.Errorf("ListRootFoldersOnDrive scan: %w", err)
+		}
+		folders = append(folders, *f)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("ListRootFoldersOnDrive: %w", err)
+	}
+	return &PageResult[models.Folder]{
+		Items:     folders,
+		NextToken: offsetNextToken(len(folders), limit, offset),
+	}, nil
+}
+
 // SearchFoldersByUser returns a page of folders owned by userID whose name
 // contains term (case-insensitive), ordered by name. Searches across all
 // folders regardless of parent — intended for the global search endpoint.
@@ -341,6 +382,27 @@ func (q *Queries) SetFolderDriveID(ctx context.Context, id, driveID uuid.UUID) e
 	return nil
 }
 
+// SetFolderSubtreeDriveID sets drive_id on folderID and every descendant folder
+// (recursive) to driveID. Finalizes a tier-first drive migration, where a whole
+// folder subtree is relocated to one drive and must share that drive to satisfy
+// the subfolder-inherits-parent's-drive invariant. RLS keeps the recursion and
+// update scoped to the current user.
+func (q *Queries) SetFolderSubtreeDriveID(ctx context.Context, folderID, driveID uuid.UUID) error {
+	_, err := q.db.ExecContext(ctx, `
+		WITH RECURSIVE d(id) AS (
+			SELECT $1::uuid
+			UNION ALL
+			SELECT cf.id FROM folders cf JOIN d ON cf.parent_id = d.id
+		)
+		UPDATE folders SET drive_id = $2, updated_at = NOW()
+		WHERE id IN (SELECT id FROM d)
+	`, folderID, driveID)
+	if err != nil {
+		return fmt.Errorf("SetFolderSubtreeDriveID %s: %w", folderID, err)
+	}
+	return nil
+}
+
 // GetFolderAncestors returns the chain of folders from root → leaf ending at
 // folderID, owned by userID. Used by the breadcrumb UI and by SFS path
 // resolution. A single recursive CTE call replaces N round-trips that walking
@@ -349,14 +411,14 @@ func (q *Queries) SetFolderDriveID(ctx context.Context, id, driveID uuid.UUID) e
 func (q *Queries) GetFolderAncestors(ctx context.Context, userID, folderID uuid.UUID) ([]models.Folder, error) {
 	rows, err := q.db.QueryContext(ctx, `
 		WITH RECURSIVE chain AS (
-			SELECT id, user_id, parent_id, drive_id, name, kind, created_at, updated_at, 0 AS depth
+			SELECT id, user_id, parent_id, drive_id, name, kind, ai_recognition_enabled, created_at, updated_at, 0 AS depth
 			FROM folders WHERE id = $2 AND user_id = $1
 			UNION ALL
-			SELECT f.id, f.user_id, f.parent_id, f.drive_id, f.name, f.kind, f.created_at, f.updated_at, c.depth + 1
+			SELECT f.id, f.user_id, f.parent_id, f.drive_id, f.name, f.kind, f.ai_recognition_enabled, f.created_at, f.updated_at, c.depth + 1
 			FROM folders f JOIN chain c ON f.id = c.parent_id
 			WHERE f.user_id = $1
 		)
-		SELECT id, user_id, parent_id, drive_id, name, kind, created_at, updated_at
+		SELECT `+folderColumns+`
 		FROM chain ORDER BY depth DESC
 	`, userID, folderID)
 	if err != nil {

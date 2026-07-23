@@ -47,12 +47,16 @@ regardless of what the token looks like.
   Attempting to create a second link for the same drive returns the existing
   one; a server exposing both a fast and standard tier to a user allows one
   link per tier.
-- **Reported capacity matches the drive.** The mount root reports RFC 4331
-  `quota-used-bytes`/`quota-available-bytes` computed from that specific
-  drive's physical capacity and the user's own usage on it (the same figures
-  shown on the storage page) — so a fast-tier and standard-tier mount on the
+- **Reported capacity matches the user's quota on the drive.** The mount root
+  reports RFC 4331 `quota-used-bytes`/`quota-available-bytes` computed from
+  the user's own per-drive `quota_bytes` allocation and their own usage on it
+  (the same figures the storage page shows and that upload enforcement gates
+  against) — never the drive's shared physical capacity, which other users'
+  data also lives on. This means a fast-tier and standard-tier mount on the
   same server correctly show different capacities in Windows/macOS drive
-  properties instead of both echoing one account-wide number.
+  properties instead of both echoing one account-wide number, and the
+  reported free space always matches what the mount will actually accept
+  before returning 507.
 - **Destroyed on premium loss or deletion.** Deleting a link removes the row
   (locations cascade); the auth middleware's premium sync and the payment
   refund path both destroy all of a user's links when premium lapses. Every

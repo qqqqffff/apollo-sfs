@@ -8,6 +8,7 @@ import {
   MdClose,
   MdCreateNewFolder,
   MdInfoOutline,
+  MdMenu,
   MdMovie,
   MdInsertDriveFile,
   MdPhotoLibrary,
@@ -18,16 +19,26 @@ import {
 import { getMediaFolder, createFolder } from '../api/folders'
 import { hideFile, unhideFile, previewUrl, streamUrl } from '../api/files'
 import { copyToCollection, removeFromCollection } from '../api/collections'
+import { listDevices } from '../api/devices'
 import { meQueryOptions } from '../api/me'
 import { recognitionStatusQueryOptions } from '../api/recognition'
 import { listMyServers, resolveDrive } from '../api/storage'
 import { useNotification } from '../context/NotificationContext'
 import { useFileUpload } from '../hooks/useFileUpload'
+import { useFavorites } from '../hooks/useFavorites'
 import { CollectionInfoModal } from './CollectionInfoModal'
+import { MediaViewerPage } from './MediaViewerPage'
 import { RecognitionGroupsModal } from './RecognitionGroupsModal'
 import { UploadModal } from './UploadModal'
+import { StorageBreakdownModal } from './StorageBreakdownModal'
 import { UploadToast } from './UploadToast'
-import type { File, Folder, HiddenMode, MediaSort } from '../types/api'
+import type { Device, File, Folder, HiddenMode, MediaSort } from '../types/api'
+
+// Items-per-row control: keeps grid tiles from shrinking below 100x100px —
+// matches the grid's Tailwind gap-3 (0.75rem = 12px).
+const GRID_GAP_PX = 12
+const MIN_TILE_PX = 100
+const GRID_COLS_STORAGE_KEY = 'apollo-sfs:media-grid-cols'
 
 interface Props {
   folderId: string
@@ -35,9 +46,16 @@ interface Props {
   readOnly: boolean
   // Deep link from a search result: auto-open the groups modal on this group.
   initialRecognitionGroup?: string
+  // Set when a file search param names an item in this collection — renders
+  // the full-screen viewer in place of the generic single-file preview.
+  activeFileId?: string
   onBack: () => void
   onOpenFolder: (id: string) => void
   onOpenFile: (id: string) => void
+  // Replace-style navigation fired as the viewer scrolls between items, and
+  // the handler that closes it back to the grid.
+  onNavigateFile: (id: string) => void
+  onCloseFile: () => void
 }
 
 // useInfiniteMedia paginates a media collection's files (and first-page subfolders).
@@ -61,13 +79,18 @@ function useInfiniteMedia(folderId: string, sort: MediaSort, hidden: HiddenMode)
   }
 }
 
-export function MediaCollectionView({ folderId, folder, readOnly, initialRecognitionGroup, onBack, onOpenFolder, onOpenFile }: Props) {
+export function MediaCollectionView({
+  folderId, folder, readOnly, initialRecognitionGroup, activeFileId,
+  onBack, onOpenFolder, onOpenFile, onNavigateFile, onCloseFile,
+}: Props) {
   const queryClient = useQueryClient()
   const { notify } = useNotification()
   const { data: user } = useQuery(meQueryOptions)
+  const { data: devicesData } = useQuery({ queryKey: ['devices'], queryFn: listDevices })
   const isPremium = !!(user?.is_premium || user?.is_admin)
   const { data: myServers } = useQuery({ queryKey: ['storage', 'my-servers'], queryFn: listMyServers })
   const { drive: uploadDrive, isPinned: uploadDriveIsPinned } = resolveDrive(folder.drive_id, myServers)
+  const { favoriteFileIds, toggleFile: toggleFavoriteFile } = useFavorites()
   const [sort, setSort] = useState<MediaSort>('taken_at')
   const [hidden, setHidden] = useState<HiddenMode>('hide')
   const [creating, setCreating] = useState(false)
@@ -77,7 +100,55 @@ export function MediaCollectionView({ folderId, folder, readOnly, initialRecogni
   const [showGroups, setShowGroups] = useState(!!initialRecognitionGroup)
   const fileRef = useRef<HTMLInputElement>(null)
   const [pendingFiles, setPendingFiles] = useState<globalThis.File[]>([])
+  const [showStorageBreakdown, setShowStorageBreakdown] = useState(false)
   const { progress, startUpload, dismiss } = useFileUpload()
+
+  // Below `lg` the controls row becomes a slide-in drawer (same pattern as
+  // the files page's side control panel) instead of a wrapping toolbar.
+  const [controlsOpen, setControlsOpen] = useState(false)
+
+  useEffect(() => {
+    if (!controlsOpen) return
+    const prev = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    function handleKey(e: KeyboardEvent) { if (e.key === 'Escape') setControlsOpen(false) }
+    document.addEventListener('keydown', handleKey)
+    return () => {
+      document.body.style.overflow = prev
+      document.removeEventListener('keydown', handleKey)
+    }
+  }, [controlsOpen])
+
+  // Items-per-row: measure the grid's actual rendered width and cap the
+  // column count so tiles never shrink below 100x100px.
+  const gridRef = useRef<HTMLDivElement>(null)
+  const [gridWidth, setGridWidth] = useState(0)
+
+  useEffect(() => {
+    const el = gridRef.current
+    if (!el) return
+    const observer = new ResizeObserver((entries) => {
+      const width = entries[0]?.contentRect.width
+      if (width) setGridWidth(width)
+    })
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [])
+
+  const maxCols = gridWidth > 0 ? Math.max(1, Math.floor((gridWidth + GRID_GAP_PX) / (MIN_TILE_PX + GRID_GAP_PX))) : 4
+  const colOptions = Array.from({ length: maxCols }, (_, i) => i + 1)
+
+  const [colsPref, setColsPref] = useState<number | null>(() => {
+    const raw = localStorage.getItem(GRID_COLS_STORAGE_KEY)
+    const n = raw ? Number(raw) : NaN
+    return Number.isFinite(n) && n > 0 ? n : null
+  })
+  const cols = Math.min(colsPref ?? Math.min(4, maxCols), maxCols)
+
+  function setCols(n: number) {
+    setColsPref(n)
+    localStorage.setItem(GRID_COLS_STORAGE_KEY, String(n))
+  }
 
   // Polls while indexing is active; disabled entirely for non-premium users.
   const { data: recognitionStatus } = useQuery(recognitionStatusQueryOptions(folderId, isPremium))
@@ -140,10 +211,39 @@ export function MediaCollectionView({ folderId, folder, readOnly, initialRecogni
         >
           <MdInfoOutline className="text-lg" />
         </button>
+        <button
+          onClick={() => setControlsOpen(true)}
+          aria-label="Open collection controls"
+          className="lg:hidden inline-flex items-center justify-center w-9 h-9 shrink-0 rounded-lg border border-gray-200 text-gray-500 hover:text-gray-900 hover:bg-gray-100 cursor-pointer bg-white transition-colors ml-auto"
+        >
+          <MdMenu className="text-lg" />
+        </button>
       </div>
 
-      {/* Controls */}
-      <div className="flex flex-wrap items-center gap-2 mb-4">
+      {/* Controls — a static wrapping toolbar at `lg` and up; below that it
+          becomes a slide-in drawer (same pattern as the files page's side
+          control panel), opened via the button in the header above. */}
+      {controlsOpen && (
+        <div
+          onClick={() => setControlsOpen(false)}
+          aria-hidden="true"
+          className="lg:hidden fixed inset-0 z-[55] bg-black/40"
+        />
+      )}
+      <div
+        className={`fixed inset-y-0 left-0 z-[60] w-72 max-w-[80vw] overflow-y-auto bg-white p-4 shadow-xl transition-transform duration-200 ease-in-out flex flex-col gap-3 ${controlsOpen ? 'translate-x-0' : '-translate-x-full'} lg:static lg:z-auto lg:w-auto lg:max-w-none lg:translate-x-0 lg:overflow-visible lg:bg-transparent lg:p-0 lg:shadow-none lg:flex-row lg:flex-wrap lg:items-center lg:gap-2 mb-4`}
+      >
+        <div className="flex items-center justify-between mb-1 lg:hidden">
+          <span className="text-sm font-semibold text-gray-900">Collection controls</span>
+          <button
+            onClick={() => setControlsOpen(false)}
+            aria-label="Close collection controls"
+            className="text-gray-400 hover:text-gray-600 cursor-pointer bg-transparent border-0 p-0.5"
+          >
+            <MdClose className="text-xl" />
+          </button>
+        </div>
+
         <select
           value={sort}
           onChange={(e) => setSort(e.target.value as MediaSort)}
@@ -154,6 +254,18 @@ export function MediaCollectionView({ folderId, folder, readOnly, initialRecogni
           <option value="name">Name</option>
         </select>
 
+        <select
+          value={cols}
+          onChange={(e) => setCols(Number(e.target.value))}
+          title="Items per row"
+          aria-label="Items per row"
+          className="border border-gray-200 rounded-lg px-2.5 py-1.5 text-xs text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer"
+        >
+          {colOptions.map((n) => (
+            <option key={n} value={n}>{n} per row</option>
+          ))}
+        </select>
+
         <div className="flex rounded-lg border border-gray-200 overflow-hidden text-xs">
           <ToggleBtn active={hidden === 'hide'} onClick={() => setHidden('hide')} label="Visible" />
           <ToggleBtn active={hidden === 'show'} onClick={() => setHidden('show')} label="Show hidden" />
@@ -162,7 +274,7 @@ export function MediaCollectionView({ folderId, folder, readOnly, initialRecogni
 
         {recognitionStatus?.enabled && (
           <button
-            onClick={() => setShowGroups(true)}
+            onClick={() => { setShowGroups(true); setControlsOpen(false) }}
             className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs border border-amber-200 bg-amber-50 rounded-lg text-amber-700 hover:bg-amber-100 cursor-pointer transition-colors"
             title="Browse recognized people, pets, and objects"
           >
@@ -173,7 +285,7 @@ export function MediaCollectionView({ folderId, folder, readOnly, initialRecogni
         {!readOnly && (
           <>
             <button
-              onClick={() => { setCreating(true); setNewName('') }}
+              onClick={() => { setCreating(true); setNewName(''); setControlsOpen(false) }}
               disabled={creating}
               className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs border border-gray-200 rounded-lg text-gray-700 hover:bg-gray-50 cursor-pointer transition-colors disabled:opacity-40"
             >
@@ -192,7 +304,7 @@ export function MediaCollectionView({ folderId, folder, readOnly, initialRecogni
               }}
             />
             <button
-              onClick={() => fileRef.current?.click()}
+              onClick={() => { fileRef.current?.click(); setControlsOpen(false) }}
               className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium cursor-pointer transition-colors"
             >
               <MdUploadFile className="text-sm" /> Upload
@@ -255,7 +367,11 @@ export function MediaCollectionView({ folderId, folder, readOnly, initialRecogni
           {hidden === 'only' ? 'No hidden media.' : 'No media in this collection yet.'}
         </p>
       ) : (
-        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">
+        <div
+          ref={gridRef}
+          className="grid gap-3"
+          style={{ gridTemplateColumns: `repeat(${cols}, minmax(${MIN_TILE_PX}px, 1fr))` }}
+        >
           {files.map((f) => (
             <MediaTile
               key={f.id}
@@ -291,8 +407,16 @@ export function MediaCollectionView({ folderId, folder, readOnly, initialRecogni
         <UploadModal
           files={pendingFiles}
           folderName={folder.name}
-          location={uploadDrive ? { name: uploadDrive.name, tier: uploadDrive.drive_type, isPinned: uploadDriveIsPinned } : undefined}
+          location={uploadDrive ? {
+            name: uploadDrive.name,
+            tier: uploadDrive.drive_type,
+            isPinned: uploadDriveIsPinned,
+            serverId: uploadDrive.server_id,
+            usedBytes: uploadDrive.used_bytes,
+            quotaBytes: uploadDrive.quota_bytes,
+          } : undefined}
           user={user}
+          onViewBreakdown={() => setShowStorageBreakdown(true)}
           onConfirm={() => {
             const filesToUpload = pendingFiles
             setPendingFiles([])
@@ -305,9 +429,16 @@ export function MediaCollectionView({ folderId, folder, readOnly, initialRecogni
         />
       )}
 
+      {showStorageBreakdown && (
+        <StorageBreakdownModal
+          servers={myServers ?? []}
+          onClose={() => setShowStorageBreakdown(false)}
+        />
+      )}
+
       <UploadToast progress={progress} onDismiss={dismiss} />
 
-      {infoFile && <MediaInfoModal file={infoFile} onClose={() => setInfoFile(null)} />}
+      {infoFile && <MediaInfoModal file={infoFile} devices={devicesData?.items} onClose={() => setInfoFile(null)} />}
 
       {showCollectionInfo && (
         <CollectionInfoModal
@@ -325,6 +456,34 @@ export function MediaCollectionView({ folderId, folder, readOnly, initialRecogni
           onOpenFile={onOpenFile}
           onClose={() => setShowGroups(false)}
         />
+      )}
+
+      {activeFileId && (
+        files.some((f) => f.id === activeFileId) ? (
+          <MediaViewerPage
+            files={files}
+            activeFileId={activeFileId}
+            hasNextPage={hasNextPage}
+            isFetchingNextPage={isFetchingNextPage}
+            onFetchNextPage={fetchNextPage}
+            favoriteFileIds={favoriteFileIds}
+            onToggleFavorite={toggleFavoriteFile}
+            onNavigate={onNavigateFile}
+            onClose={onCloseFile}
+          />
+        ) : (
+          <div className="fixed inset-0 z-50 bg-black/90 flex flex-col items-center justify-center gap-3 text-white">
+            <p className="text-sm text-white/70">
+              {isLoading || isFetchingNextPage ? 'Loading…' : 'That item isn’t in the current view (try clearing filters).'}
+            </p>
+            <button
+              onClick={onCloseFile}
+              className="px-4 py-2 text-sm rounded-lg border border-white/30 text-white hover:bg-white/10 cursor-pointer transition-colors"
+            >
+              Back to collection
+            </button>
+          </div>
+        )
       )}
     </div>
   )
@@ -397,7 +556,10 @@ function MediaTile({
         <span className="absolute top-1 left-1 bg-black/60 text-white text-[10px] px-1.5 py-0.5 rounded">Hidden</span>
       )}
 
-      <div className="absolute top-1 right-1 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+      {/* Visible by default (touch devices below `sm` have no hover state to
+          reveal these on); from `sm` up, fade in on hover/focus so the grid
+          stays visually quiet on pointer-driven layouts. */}
+      <div className="absolute top-1 right-1 flex gap-1 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100 transition-opacity">
         <button
           onClick={onShowInfo}
           title="File info"
@@ -462,10 +624,41 @@ function formatBytes(bytes: number): string {
   return `${bytes} B`
 }
 
+// uploadSourceLabel turns a file's device_id/source into a human-readable
+// origin. A registered device (mobile app upload/sync) takes priority since
+// it's the most specific signal; otherwise falls back to the source string.
+function uploadSourceLabel(file: File, devices: Device[] | undefined): string {
+  if (file.device_id) {
+    const device = devices?.find((d) => d.id === file.device_id)
+    if (device) {
+      const platform = device.platform === 'ios' ? 'iOS' : device.platform === 'android' ? 'Android' : device.platform
+      return `${device.name} (${platform} app)`
+    }
+    return 'Mobile app (device removed)'
+  }
+  switch (file.source) {
+    case 'google_drive':
+      return 'Google Drive backup'
+    case 'google_photos':
+      return 'Google Photos backup'
+    case 'email_backup_gmail':
+      return 'Gmail backup'
+    case 'email_backup_microsoft':
+      return 'Microsoft email backup'
+    case 'file_server':
+      return 'File Server (WebDAV)'
+    case 'device':
+      return 'Mobile app'
+    case 'web':
+    default:
+      return 'Web upload'
+  }
+}
+
 // MediaInfoModal shows a media file's metadata: capture date (EXIF/container,
 // as extracted server-side into taken_at), upload/modified dates, type, size,
-// visibility, and — measured from the loaded preview — pixel dimensions.
-function MediaInfoModal({ file, onClose }: { file: File; onClose: () => void }) {
+// visibility, origin, and — measured from the loaded preview — pixel dimensions.
+function MediaInfoModal({ file, devices, onClose }: { file: File; devices?: Device[]; onClose: () => void }) {
   const [dimensions, setDimensions] = useState<{ w: number; h: number } | null>(null)
   const isImage = file.mime_type.startsWith('image/')
   const isVideo = file.mime_type.startsWith('video/')
@@ -517,6 +710,7 @@ function MediaInfoModal({ file, onClose }: { file: File; onClose: () => void }) 
         <dl className="m-0 px-5 py-2 divide-y divide-gray-50">
           <InfoRow label="Date taken" value={file.taken_at ? new Date(file.taken_at).toLocaleString() : 'Not available'} muted={!file.taken_at} />
           <InfoRow label="Uploaded" value={new Date(file.created_at).toLocaleString()} />
+          <InfoRow label="Uploaded from" value={uploadSourceLabel(file, devices)} />
           <InfoRow label="Modified" value={new Date(file.updated_at).toLocaleString()} />
           <InfoRow label="Type" value={file.mime_type} />
           <InfoRow label="Size" value={formatBytes(file.size_bytes)} />

@@ -49,6 +49,42 @@ func (h *Handler) IngestNodeMetrics(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not ingest node metrics"})
 		return
 	}
+
+	// Ride this same push to tell the agent whether an admin has requested a
+	// drive benchmark on this node — node-agent has no inbound listener, so
+	// this response is the only channel available (see
+	// docs/drive_benchmark_setup.md). A failure here just means the agent
+	// misses this tick's request; it will be consumed on the agent's next push.
+	runBenchmark, err := h.ingest.ConsumeBenchmarkRequest(c.Request.Context(), payload.Hostname)
+	if err != nil {
+		runBenchmark = false
+	}
+	c.JSON(http.StatusAccepted, gin.H{"status": "accepted", "run_benchmark": runBenchmark})
+}
+
+// IngestBenchmarkResult handles POST /api/v1/internal/node-benchmark-result.
+// A per-node agent posts here once, after finishing a requested benchmark
+// run, with one entry per physical disk it tested.
+func (h *Handler) IngestBenchmarkResult(c *gin.Context) {
+	if !h.authorized(c.GetHeader("X-Internal-Token")) {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	var batch models.BenchmarkResultBatch
+	if err := c.ShouldBindJSON(&batch); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if batch.Hostname == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "hostname is required"})
+		return
+	}
+
+	if err := h.ingest.RecordBenchmarkResults(c.Request.Context(), &batch); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not record benchmark results"})
+		return
+	}
 	c.JSON(http.StatusAccepted, gin.H{"status": "accepted"})
 }
 

@@ -1,5 +1,5 @@
 import { del, get, patch, post, put } from './client'
-import type { AuditLog, BannedIP, Feedback, FeedbackStatus, FavoriteList, FolderContents, Invitation, InterestSubmission, InterestFormSettings, PageResult, ServerExpansionRequest, User, UserBan } from '../types/api'
+import type { AuditLog, BannedIP, Feedback, FeedbackStatus, FavoriteList, Folder, FolderContents, Invitation, InterestSubmission, InterestFormSettings, PageResult, ServerExpansionRequest, User, UserBan } from '../types/api'
 
 // ── Admin user file browsing ───────────────────────────────────────────────────
 
@@ -25,6 +25,10 @@ export function adminListUserRoot(username: string, p: AdminFolderParams = {}) {
 
 export function adminGetUserFolder(username: string, folderId: string, p: AdminFolderParams = {}) {
   return get<FolderContents>(`/admin/users/${encodeURIComponent(username)}/folders/${folderId}${adminFolderQS(p)}`)
+}
+
+export function adminGetUserAncestors(username: string, folderId: string) {
+  return get<{ ancestors: Folder[] }>(`/admin/users/${encodeURIComponent(username)}/folders/${folderId}/ancestors`)
 }
 
 export function adminGetUserFavorites(username: string) {
@@ -611,13 +615,75 @@ export const speedTestQueryOptions = {
   queryFn: getSpeedTest,
 }
 
+// ── Drive benchmark ──────────────────────────────────────────────────────────
+
+export interface TierBenchmarkStat {
+  write_mbps: number
+  read_mbps: number
+  disk_count: number
+  tested_at: string
+}
+
+export interface NodeDiskBenchmarkRow {
+  node_id: string
+  hostname: string
+  label: string
+  write_mbps?: number
+  read_mbps?: number
+  size_bytes: number
+  error?: string
+  tested_at: string
+  drive_type: string
+}
+
+export interface DriveBenchmarkDetail {
+  /** True while a triggered run hasn't been picked up/reported by every node yet. */
+  pending: boolean
+  disks: NodeDiskBenchmarkRow[]
+  fast?: TierBenchmarkStat
+  standard?: TierBenchmarkStat
+}
+
+export function getDriveBenchmark() {
+  return get<DriveBenchmarkDetail>('/admin/system/drives/benchmark')
+}
+
+export function triggerDriveBenchmark() {
+  return post<{ status: string }>('/admin/system/drives/benchmark')
+}
+
+export const driveBenchmarkQueryOptions = {
+  queryKey: ['admin', 'drive-benchmark'] as const,
+  queryFn: getDriveBenchmark,
+}
+
 // ── Test runner ────────────────────────────────────────────────────────────────
+
+export interface TestCase {
+  name: string
+  passed: boolean
+  duration_ms?: number
+  /** Failure output — only present when passed is false. */
+  message?: string
+}
+
+export interface CoverageStat {
+  lines_pct?: number
+  branches_pct?: number
+}
 
 export interface SuiteResult {
   passed: boolean
   exit_code: number
   output: string
   duration_ms: number
+  num_tests: number
+  num_passed: number
+  num_failed: number
+  /** Per-test breakdown, when the runner sidecar could parse one. */
+  tests?: TestCase[]
+  /** Absent for suites with no meaningful coverage concept (Playwright E2E). */
+  coverage?: CoverageStat
 }
 
 export interface TestSuiteEntry {
@@ -626,7 +692,7 @@ export interface TestSuiteEntry {
   message?: string
 }
 
-export interface TestRunResponse {
+export interface TestRunReport {
   backend: TestSuiteEntry
   frontend: TestSuiteEntry
   frontend_e2e: TestSuiteEntry
@@ -634,8 +700,49 @@ export interface TestRunResponse {
   recognition: TestSuiteEntry
 }
 
+export interface TestRun {
+  id: string
+  deployment_version: string
+  git_branch: string
+  report: TestRunReport
+  passed: boolean
+  created_at: string
+}
+
+export interface LatestTestRunResponse {
+  /** null when no test run has ever been recorded. */
+  run: TestRun | null
+  /** false when `run` is a fallback from a different branch (no run yet for current_branch). */
+  matched_branch: boolean
+  current_branch: string
+  current_version: string
+}
+
 export function runTests() {
-  return post<TestRunResponse>('/admin/system/tests')
+  return post<TestRun>('/admin/system/tests')
+}
+
+export function getLatestTestRun() {
+  return get<LatestTestRunResponse>('/admin/system/tests/latest')
+}
+
+export const latestTestRunQueryOptions = {
+  queryKey: ['admin', 'tests', 'latest'] as const,
+  queryFn: getLatestTestRun,
+}
+
+export interface TestProgressResponse {
+  running: boolean
+  /** Suite key currently executing (e.g. "frontend_e2e"), absent when nothing is running. */
+  current_suite?: string
+  /** Execution order of every suite key, so pending ones (not yet in `completed`) can be listed. */
+  order?: string[]
+  /** Suites that have finished so far, keyed by suite name — same shape as TestRunReport's fields. */
+  completed: Record<string, TestSuiteEntry>
+}
+
+export function getTestProgress() {
+  return get<TestProgressResponse>('/admin/system/tests/progress')
 }
 
 // ── Kill switch ────────────────────────────────────────────────────────────────

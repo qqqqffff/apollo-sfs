@@ -3,6 +3,13 @@ import type { File, UploadResponse } from '../types/api'
 
 export const CHUNK_SIZE = 5 * 1024 * 1024 // 5 MB
 
+// How many chunks of a single large file may be in flight at once. The backend
+// dispatches each chunk to its own goroutine and uploads it as an independently
+// numbered MinIO multipart part (see UploadSession in the API), so chunks may
+// complete out of order — this only needs to stay low enough that one file
+// doesn't monopolize the connection pool other concurrent uploads share.
+export const MAX_CONCURRENT_CHUNKS = 4
+
 // ── Chunked upload (cookie auth) ──────────────────────────────────────────────
 
 export function initChunkedUpload(
@@ -97,17 +104,21 @@ export interface PresignUploadResponse {
   expires_at: string
 }
 
-/** Request a presigned single-file upload URL. */
+/** Request a presigned single-file upload URL. driveId pins a ROOT upload
+ * (folderId null) to a specific drive (the tier-first browser's current drive);
+ * ignored when a folder is targeted. */
 export function presignUpload(
   name: string,
   size: number,
   folderId: string | null,
   ignoreRedirect?: boolean,
+  driveId?: string | null,
 ): Promise<PresignUploadResponse> {
   return post<PresignUploadResponse>('/files/upload/presign', {
     name,
     size,
     folder_id: folderId ?? undefined,
+    drive_id: folderId ? undefined : (driveId ?? undefined),
     ignore_redirect: ignoreRedirect || undefined,
   })
 }
@@ -118,19 +129,22 @@ export interface PresignChunkedUploadResponse {
   expires_at: string
 }
 
-/** Request a presigned session token for a chunked upload. */
+/** Request a presigned session token for a chunked upload. driveId pins a ROOT
+ * upload (folderId null) to a specific drive; ignored when a folder is targeted. */
 export function presignChunkedUpload(
   name: string,
   totalChunks: number,
   totalSize: number,
   folderId: string | null,
   ignoreRedirect?: boolean,
+  driveId?: string | null,
 ): Promise<PresignChunkedUploadResponse> {
   return post<PresignChunkedUploadResponse>('/files/upload/presign/init', {
     name,
     total_chunks: totalChunks,
     total_size: totalSize,
     folder_id: folderId ?? undefined,
+    drive_id: folderId ? undefined : (driveId ?? undefined),
     ignore_redirect: ignoreRedirect || undefined,
   })
 }

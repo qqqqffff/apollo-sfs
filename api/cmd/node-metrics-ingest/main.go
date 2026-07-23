@@ -56,6 +56,7 @@ func main() {
 	r.Use(gin.Recovery())
 	r.GET("/healthz", func(c *gin.Context) { c.Status(http.StatusOK) })
 	r.POST("/internal/node-metrics", handler.IngestNodeMetrics)
+	r.POST("/internal/node-benchmark-result", handler.IngestBenchmarkResult)
 
 	srv := &http.Server{
 		Addr:              ":" + port,

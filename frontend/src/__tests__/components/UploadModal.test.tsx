@@ -140,4 +140,55 @@ describe('UploadModal', () => {
     renderModal()
     expect(screen.getByRole('button', { name: /upload 2 files/i })).not.toBeDisabled()
   })
+
+  test('shows the drive-specific quota, not the account-wide total, when location is set', () => {
+    // Account total is 20 GB used of 30 GB (across two drives), but this
+    // upload targets a specific 10 GB drive with only 2 GB used on it.
+    const user = makeUser({ storage_used_bytes: 20 * GB, storage_quota_bytes: 30 * GB })
+    render(
+      <UploadModal
+        files={defaultFiles}
+        folderName="My Folder"
+        user={user}
+        location={{ name: 'Fast Drive', tier: 'nvme', isPinned: true, serverId: 's1', usedBytes: 2 * GB, quotaBytes: 10 * GB }}
+        onConfirm={onConfirm}
+        onCancel={onCancel}
+      />,
+    )
+    expect(screen.getByText(/2\.00 GB of 10\.00 GB used/)).toBeInTheDocument()
+  })
+
+  test('falls back to the account-wide total when location is not yet known', () => {
+    const user = makeUser({ storage_used_bytes: 1 * GB, storage_quota_bytes: 10 * GB })
+    renderModal(defaultFiles, user)
+    expect(screen.getByText(/1\.00 GB of 10\.00 GB used/)).toBeInTheDocument()
+  })
+
+  test('no storage dropdown when neither onAddStorage nor onViewBreakdown is given', () => {
+    renderModal()
+    expect(screen.queryByTitle('Storage actions')).not.toBeInTheDocument()
+  })
+
+  test('storage dropdown offers Add storage and View detailed breakdown, wired to their callbacks', () => {
+    const onAddStorage = jest.fn()
+    const onViewBreakdown = jest.fn()
+    render(
+      <UploadModal
+        files={defaultFiles}
+        folderName="My Folder"
+        user={makeUser()}
+        onAddStorage={onAddStorage}
+        onViewBreakdown={onViewBreakdown}
+        onConfirm={onConfirm}
+        onCancel={onCancel}
+      />,
+    )
+    fireEvent.click(screen.getByTitle('Storage actions'))
+    fireEvent.click(screen.getByText('Add storage'))
+    expect(onAddStorage).toHaveBeenCalledTimes(1)
+
+    fireEvent.click(screen.getByTitle('Storage actions'))
+    fireEvent.click(screen.getByText('View detailed breakdown'))
+    expect(onViewBreakdown).toHaveBeenCalledTimes(1)
+  })
 })

@@ -12,7 +12,7 @@ export function readSkipDeleteCookie(username: string): boolean {
 }
 
 // Stores the username as the cookie value (session cookie — no max-age).
-function setSkipDeleteCookie(username: string) {
+export function setSkipDeleteCookie(username: string) {
   document.cookie = `${COOKIE_KEY}=${encodeURIComponent(username)}; path=/; SameSite=Strict`
 }
 

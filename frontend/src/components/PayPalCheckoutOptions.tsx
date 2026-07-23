@@ -28,6 +28,12 @@ interface Props {
   amount: () => string
   canPay: boolean
   onChooseCard: () => void
+  // Apple Pay is a live-only funding source — PayPal's sandbox doesn't
+  // support it end to end. Defaults to true; callers that can be reached in
+  // a sandbox-payments context (e.g. the admin's sandbox pass through the
+  // account-request form) pass false to keep from accidentally taking a real
+  // Apple Pay charge.
+  showApplePay?: boolean
 }
 
 // The wallet-checkout step shared by every payment surface (storage/premium
@@ -36,7 +42,7 @@ interface Props {
 // that hands off to HostedCardFields. Kept as one component so all four stay
 // pixel- and behavior-identical instead of drifting copy to copy.
 export function PayPalCheckoutOptions({
-  clientId, currency, environment, getClientToken, createOrder, getApprovalUrl, onApprove, onError, amount, canPay, onChooseCard,
+  clientId, currency, environment, getClientToken, createOrder, getApprovalUrl, onApprove, onError, amount, canPay, onChooseCard, showApplePay = true,
 }: Props) {
   return (
     <div className={`flex flex-col gap-2 ${canPay ? '' : 'opacity-50 pointer-events-none'}`}>
@@ -45,16 +51,18 @@ export function PayPalCheckoutOptions({
           PayPalScriptProvider below, which only the Google Pay button still
           needs. The v6 core coexists with the legacy SDK by attaching as
           window.paypal.v6. */}
-      <PayPalApplePayButton
-        environment={environment}
-        currencyCode={currency}
-        amount={amount}
-        getClientToken={getClientToken}
-        createOrder={createOrder}
-        onApprove={onApprove}
-        onError={onError}
-        enabled={canPay}
-      />
+      {showApplePay && (
+        <PayPalApplePayButton
+          environment={environment}
+          currencyCode={currency}
+          amount={amount}
+          getClientToken={getClientToken}
+          createOrder={createOrder}
+          onApprove={onApprove}
+          onError={onError}
+          enabled={canPay}
+        />
+      )}
       <PayPalScriptProvider
         options={{
           clientId,

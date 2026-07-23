@@ -20,13 +20,24 @@ const INITIAL_PARAM: PageParam = {
   fileDone: false,
 }
 
-function fetchPage(folderId: string | 'root', search: string, param: PageParam, asUsername?: string) {
+// DriveScope scopes a ROOT listing to a single drive (server & tier).
+// includeUnassigned is set only for the user's primary drive, since NULL-drive
+// rows resolve to the primary. Ignored for non-root folders and search.
+export interface DriveScope {
+  driveId: string
+  includeUnassigned: boolean
+}
+
+function fetchPage(folderId: string | 'root', search: string, param: PageParam, asUsername?: string, drive?: DriveScope) {
   const p = {
     folderCursor: param.folderDone ? undefined : param.folderCursor,
     fileCursor: param.fileDone ? undefined : param.fileCursor,
     // limit=0 tells the backend to skip that list (no DB query)
     folderLimit: param.folderDone ? 0 : undefined,
     fileLimit: param.fileDone ? 0 : undefined,
+    // Only the virtual root is drive-scoped.
+    drive: folderId === 'root' ? drive?.driveId : undefined,
+    includeUnassigned: folderId === 'root' ? drive?.includeUnassigned : undefined,
   }
   if (asUsername) {
     return folderId === 'root'
@@ -68,11 +79,13 @@ export function useInfiniteFolderContents(
   folderId: string | 'root',
   search: string,
   asUsername?: string,
+  drive?: DriveScope,
 ): InfiniteFolderContents {
   const query = useInfiniteQuery({
-    // Key includes asUsername so impersonated browsing is isolated from own data
-    queryKey: ['folders', folderId, 'contents', search, asUsername ?? ''],
-    queryFn: ({ pageParam }) => fetchPage(folderId, search, pageParam as PageParam, asUsername),
+    // Key includes asUsername (impersonation isolation) and the drive scope so
+    // switching drives at the root refetches the correct slice.
+    queryKey: ['folders', folderId, 'contents', search, asUsername ?? '', drive?.driveId ?? ''],
+    queryFn: ({ pageParam }) => fetchPage(folderId, search, pageParam as PageParam, asUsername, drive),
     initialPageParam: INITIAL_PARAM as PageParam,
     getNextPageParam: (lastPage, _allPages, lastPageParam) =>
       nextParam(lastPage, lastPageParam as PageParam),

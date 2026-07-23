@@ -89,6 +89,45 @@ The API maintains connections to two MinIO instances:
 
 Routing logic in `routes/storage/` determines which MinIO instance receives each upload based on the user's assigned tier.
 
+## Fair Upload Bandwidth Cap
+
+`services.BandwidthManager` (`routes/services/bandwidth.go`) keeps one user's
+large upload from saturating the server's link and starving everyone else,
+without a manually configured speed limit: the budget is derived live from
+the periodic WAN speed test (`routes/admin/speedtest.go`, Cloudflare probe,
+every 30 min) — `(measured speed − reserve) ÷ number of users currently
+mid-upload`, where reserve is `min(100 Mbps, 15% of measured speed)`. A lone
+uploader gets the whole budget; concurrent uploaders split it evenly, live,
+as they start and finish (`Acquire`/`release`, keyed by user ID so a user's
+several parallel chunk requests count once).
+
+To avoid the obvious feedback loop — uploads competing with the speed test
+for the same link would make it under-report capacity, shrinking the budget
+based on a reading the uploads themselves suppressed — only a probe with zero
+active uploads both immediately before and immediately after it ran is
+trusted to feed the budget (`Handler.runAndRecordSpeedTest`,
+`Handler.CleanNetworkSpeedMbps` implementing `services.NetworkSpeedSource`).
+Every probe still updates the existing display/alarm-facing result
+regardless; only the budget-feeding "clean" cache is gated. No cap is applied
+at all until a clean sample exists.
+
+A hard cap (`maxConsecutiveUncleanSpeedTests = 48`, ~24h at the 30-min loop
+cadence) prevents an always-busy server from going indefinitely without a
+budget update: `recordSpeedTestSample` tracks a streak of unclean/failed
+probes plus the least-loaded successful one seen in it, and once the streak
+hits 48 forces a promotion regardless — the least-dirty candidate (tier 1),
+or, if every probe in the streak errored outright, a flat assumed
+`fallbackBudgetMbps = 900` reading (tier 2). Either fallback promotion is
+tagged with `SpeedTestResult.FallbackReason` and logged, so it's visible
+that the budget came from a fallback rather than a genuinely clean
+measurement.
+
+The throttle wraps `http.Request.Body` (`Handler.throttleUploadBody`,
+`routes/files.go`) before Gin's `FormFile`/`PostForm` parse it — parsing is
+what actually pulls bytes off the socket, so throttling anything after that
+point wouldn't affect real network throughput. See
+`docs/upload_bandwidth_fairness.md` for the full design.
+
 ## Row-Level Security
 
 All `files` and `folders` queries are executed after calling `db.Queries.ForUser(userID)`, which sets the `app.current_user_id` session variable. PostgreSQL RLS policies on those tables reject any row not owned by the current user, preventing cross-user data leakage even if there is a bug in the application query.
@@ -110,6 +149,24 @@ cluster-assigns embeddings into `recognition_groups` via incremental centroid
 matching (`recognition_cluster.go`, embeddings as BYTEA — no pgvector).
 Endpoints are premium-gated in `routes/recognition.go`; lifecycle events audit
 to `audit_logs`. See `docs/ai_recognition_setup.md`.
+
+## Storage Reconciliation
+
+MinIO and Postgres are updated as two separate steps on every upload/delete
+(never one atomic transaction), so a crash or partial failure between them can
+leave an object orphaned in MinIO or a DB row pointing at a since-deleted
+object ("ghost files"). `services.ReconciliationService`
+(`routes/services/reconciliation.go`) is the safety net: once a day at 4am
+server-local time (`DailyLoop`, started from `cmd/main.go`; also reachable
+on demand via `POST /admin/system/reconciliation`), it lists every active
+drive's MinIO bucket, diffs it against `files`/`video_variants`/
+`recognition_detections`, and auto-repairs what it finds — deleting orphan
+objects, deleting ghost rows (a ghost `files` row goes through the normal
+`FileService.Delete` path so the quota refund matches a real delete), and
+aborting abandoned incomplete multipart uploads. Every action is recorded in
+`reconciliation_runs`/`reconciliation_findings` (`GET /admin/system/reconciliation`
+shows the latest run). See `docs/storage_reconciliation.md` for the full design,
+including why variant/crop objects are diffed fleet-wide rather than per-drive.
 
 ## Real-Time Metrics
 

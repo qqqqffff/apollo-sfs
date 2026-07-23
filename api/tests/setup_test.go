@@ -127,7 +127,7 @@ func (s *stubQuerier) GetUserPreferences(_ context.Context, userID string) (*mod
 func (s *stubQuerier) SetMediaAutouploadFolder(_ context.Context, userID string, folderID *uuid.UUID) (*models.UserPreferences, error) {
 	return &models.UserPreferences{UserID: userID, MediaAutouploadFolderID: folderID}, nil
 }
-func (s *stubQuerier) SetStorageUIPreferences(_ context.Context, userID string, showButtons, promptEnabled *bool) (*models.UserPreferences, error) {
+func (s *stubQuerier) SetStorageUIPreferences(_ context.Context, userID string, showButtons, promptEnabled, hideBenchmarkPromo *bool) (*models.UserPreferences, error) {
 	p := &models.UserPreferences{UserID: userID, ShowStorageButtons: true, StoragePromptEnabled: true}
 	if showButtons != nil {
 		p.ShowStorageButtons = *showButtons
@@ -135,7 +135,19 @@ func (s *stubQuerier) SetStorageUIPreferences(_ context.Context, userID string, 
 	if promptEnabled != nil {
 		p.StoragePromptEnabled = *promptEnabled
 	}
+	if hideBenchmarkPromo != nil {
+		p.HideBenchmarkPromo = *hideBenchmarkPromo
+	}
 	return p, nil
+}
+func (s *stubQuerier) ListNodeDiskBenchmarks(_ context.Context) ([]db.NodeDiskBenchmarkRow, error) {
+	return nil, nil
+}
+func (s *stubQuerier) SetDefaultDrive(_ context.Context, userID string, driveID *uuid.UUID) (*models.UserPreferences, error) {
+	return &models.UserPreferences{UserID: userID, DefaultDriveID: driveID}, nil
+}
+func (s *stubQuerier) GetUserDrives(_ context.Context, _, _ string) ([]db.UserDriveInfo, error) {
+	return nil, nil
 }
 func (s *stubQuerier) CountActiveExpansionRequests(_ context.Context, _ string) (int, error) {
 	return 0, nil
@@ -303,6 +315,9 @@ func (s *stubQuerier) UpdateDeviceLastSeen(_ context.Context, _ uuid.UUID, _ *st
 	return nil
 }
 func (s *stubQuerier) DeleteDevice(_ context.Context, _ uuid.UUID) error { return nil }
+func (s *stubQuerier) ListDevicesByUser(_ context.Context, _ uuid.UUID) ([]db.Device, error) {
+	return []db.Device{}, nil
+}
 func (s *stubQuerier) DeltaSyncFiles(_ context.Context, _ uuid.UUID, _ time.Time) ([]models.File, error) {
 	return []models.File{}, nil
 }
@@ -370,6 +385,13 @@ type stubAdminQuerier struct {
 	feedbackErr          error
 	updateFeedbackErr    error
 	setFeedbackAccessErr error
+	// test-runner run history fields
+	createdTestRuns           []models.TestRun
+	createTestRunErr          error
+	latestTestRunForBranch    map[string]*models.TestRun
+	latestTestRunForBranchErr error
+	latestTestRunOverall      *models.TestRun
+	latestTestRunOverallErr   error
 }
 
 func (s *stubAdminQuerier) ListUsers(_ context.Context, _ db.PageInput) (*db.PageResult[models.User], error) {
@@ -501,6 +523,15 @@ func (s *stubAdminQuerier) ListAllNodeDisks(_ context.Context) ([]models.NodeDis
 	return nil, nil
 }
 
+// Drive benchmark
+func (s *stubAdminQuerier) RequestBenchmarkOnAllNodes(_ context.Context) error { return nil }
+func (s *stubAdminQuerier) CountPendingBenchmarkRequests(_ context.Context) (int, error) {
+	return 0, nil
+}
+func (s *stubAdminQuerier) ListNodeDiskBenchmarks(_ context.Context) ([]db.NodeDiskBenchmarkRow, error) {
+	return nil, nil
+}
+
 // Nodes
 func (s *stubAdminQuerier) GetNodeSummaries(_ context.Context) ([]models.NodeSummary, error) {
 	return []models.NodeSummary{}, nil
@@ -597,6 +628,38 @@ func (s *stubAdminQuerier) UpdateFeedbackStatus(_ context.Context, id uuid.UUID,
 	return &models.Feedback{ID: id, Status: status}, nil
 }
 
+func (s *stubAdminQuerier) GetLatestReconciliationRun(_ context.Context) (*models.ReconciliationRun, error) {
+	return nil, nil
+}
+func (s *stubAdminQuerier) ListReconciliationFindings(_ context.Context, _ *uuid.UUID, _ int) ([]models.ReconciliationFinding, error) {
+	return nil, nil
+}
+
+func (s *stubAdminQuerier) CreateTestRun(_ context.Context, version, branch string, report models.TestRunReport, passed bool) (*models.TestRun, error) {
+	if s.createTestRunErr != nil {
+		return nil, s.createTestRunErr
+	}
+	run := models.TestRun{
+		ID:                uuid.New(),
+		DeploymentVersion: version,
+		GitBranch:         branch,
+		Report:            report,
+		Passed:            passed,
+		CreatedAt:         time.Now(),
+	}
+	s.createdTestRuns = append(s.createdTestRuns, run)
+	return &run, nil
+}
+func (s *stubAdminQuerier) GetLatestTestRunForBranch(_ context.Context, branch string) (*models.TestRun, error) {
+	if s.latestTestRunForBranchErr != nil {
+		return nil, s.latestTestRunForBranchErr
+	}
+	return s.latestTestRunForBranch[branch], nil
+}
+func (s *stubAdminQuerier) GetLatestTestRun(_ context.Context) (*models.TestRun, error) {
+	return s.latestTestRunOverall, s.latestTestRunOverallErr
+}
+
 // ── Stub AdminInviteService ───────────────────────────────────────────────────
 
 type stubAdminInviteService struct {
@@ -684,7 +747,7 @@ func (s *stubFileService) FinalizeChunkedUpload(_ context.Context, _ *services.U
 	return s.file, s.fileErr
 }
 func (s *stubFileService) AdminDeleteAllFiles(_ context.Context, _ string) error { return s.fileErr }
-func (s *stubFileService) RequestDriveMigration(_ context.Context, _ uuid.UUID, _ string, _, _ uuid.UUID) (*models.FolderDriveMigration, error) {
+func (s *stubFileService) RequestDriveMigration(_ context.Context, _ uuid.UUID, _ string, _, _ uuid.UUID, _ *uuid.UUID) (*models.FolderDriveMigration, error) {
 	return s.migration, s.fileErr
 }
 func (s *stubFileService) GetLatestDriveMigration(_ context.Context, _, _ uuid.UUID) (*services.DriveMigrationStatus, error) {
@@ -699,7 +762,7 @@ type stubFolderService struct {
 	contents  *services.FolderContents
 }
 
-func (s *stubFolderService) ListRoot(_ context.Context, _ uuid.UUID, _, _ db.PageInput) (*services.FolderContents, error) {
+func (s *stubFolderService) ListRoot(_ context.Context, _ uuid.UUID, _, _ db.PageInput, _ *services.DriveFilter) (*services.FolderContents, error) {
 	if s.contents != nil {
 		return s.contents, nil
 	}
@@ -740,7 +803,7 @@ func (s *stubFolderService) Create(_ context.Context, _ uuid.UUID, _ *uuid.UUID,
 func (s *stubFolderService) Rename(_ context.Context, _, _ uuid.UUID, _ string) (*models.Folder, error) {
 	return s.folder, s.folderErr
 }
-func (s *stubFolderService) Move(_ context.Context, _, _, _ uuid.UUID) (*models.Folder, error) {
+func (s *stubFolderService) Move(_ context.Context, _, _, _ uuid.UUID, _ string) (*models.Folder, error) {
 	return s.folder, s.folderErr
 }
 func (s *stubFolderService) Delete(_ context.Context, _, _ uuid.UUID) error {

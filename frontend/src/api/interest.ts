@@ -69,3 +69,32 @@ export const publicConfigQueryOptions = {
   queryFn: getPublicConfig,
   staleTime: Infinity,
 }
+
+// ── Drive tier benchmark (public summary) ────────────────────────────────────
+// Fast-vs-standard write/read comparison shown on the home page, registration,
+// and Add Storage modal promo cards — see docs/drive_benchmark_setup.md. The
+// admin metrics page uses the richer per-disk admin.ts version instead.
+
+export interface PublicTierBenchmarkStat {
+  write_mbps: number
+  read_mbps: number
+  disk_count: number
+  tested_at: string
+}
+
+export interface PublicDriveBenchmarkSummary {
+  /** False until the first admin-triggered benchmark run has ever completed. */
+  available: boolean
+  fast?: PublicTierBenchmarkStat
+  standard?: PublicTierBenchmarkStat
+}
+
+export function getPublicDriveBenchmark() {
+  return get<PublicDriveBenchmarkSummary>('/drive-benchmark')
+}
+
+export const publicDriveBenchmarkQueryOptions = {
+  queryKey: ['public', 'drive-benchmark'] as const,
+  queryFn: getPublicDriveBenchmark,
+  staleTime: 5 * 60 * 1000,
+}

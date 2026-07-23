@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"strings"
 )
 
 type Config struct {
@@ -134,6 +135,15 @@ type Config struct {
 	// accepts during token exchange. Set via GOOGLE_WEB_CLIENT_ID / GOOGLE_WEB_CLIENT_SECRET.
 	GoogleWebClientID     string
 	GoogleWebClientSecret string
+
+	// AppVersion / AppGitBranch identify what's actually running — baked into
+	// the api image at build time from deploy.sh's image tag and the git
+	// branch it was built from (see api/Dockerfile). Used only to label test
+	// runs stored by the admin metrics page's test-runner card so a run can be
+	// matched back to the deployment/branch it ran against. Empty outside a
+	// deploy.sh build (e.g. local `go run`/`docker build` with no --build-arg).
+	AppVersion   string
+	AppGitBranch string
 }
 
 func loadConfig() Config {
@@ -179,7 +189,7 @@ func loadConfig() Config {
 		MailFrom:            requireEnv("MAIL_FROM"),
 		MailDomain:          requireEnv("MAIL_DOMAIN"),
 
-		AppBaseURL: requireEnv("APP_BASE_URL"),
+		AppBaseURL: requireHTTPSURL("APP_BASE_URL"),
 
 		KeyEncryptionKey:         requireEnv("KEY_ENCRYPTION_KEY"),
 		QuotaWarningThresholdPct: quotaPct,
@@ -225,6 +235,9 @@ func loadConfig() Config {
 
 		GoogleWebClientID:     getEnv("GOOGLE_WEB_CLIENT_ID", ""),
 		GoogleWebClientSecret: getEnv("GOOGLE_WEB_CLIENT_SECRET", ""),
+
+		AppVersion:   getEnv("APP_VERSION", ""),
+		AppGitBranch: getEnv("APP_GIT_BRANCH", ""),
 	}
 }
 
@@ -234,6 +247,18 @@ func requireEnv(key string) string {
 		log.Fatalf("required environment variable %q is not set", key)
 	}
 	return v
+}
+
+// requireHTTPSURL is requireEnv plus a scheme check. It guards every link
+// built from this value (invite/reset/share emails, OIDC redirect URIs) so a
+// misconfigured value can never produce a scheme-less or http:// URL that
+// browsers/mail clients treat as unsafe or resolve as a relative link.
+func requireHTTPSURL(key string) string {
+	v := requireEnv(key)
+	if !strings.HasPrefix(v, "https://") {
+		log.Fatalf("environment variable %q must be an absolute https:// URL, got %q", key, v)
+	}
+	return strings.TrimRight(v, "/")
 }
 
 func getEnv(key, fallback string) string {

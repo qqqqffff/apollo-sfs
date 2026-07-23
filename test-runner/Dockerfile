@@ -70,11 +70,14 @@ RUN cd mobile && npm ci
 
 # ── Recognition deps — Debian bookworm's system Python is "externally
 # managed" (PEP 668), so installs go into a dedicated venv rather than
-# fighting apt's pip. ──
+# fighting apt's pip. pytest-json-report/pytest-cov are sidecar-only tooling
+# (structured per-test + coverage output for the admin metrics page's
+# test-runner card), not part of recognition/'s own requirements-test.txt. ──
 COPY recognition/requirements.txt recognition/requirements-test.txt ./recognition/
 RUN python3 -m venv /opt/recognition-venv \
     && /opt/recognition-venv/bin/pip install --no-cache-dir \
-         -r recognition/requirements.txt -r recognition/requirements-test.txt
+         -r recognition/requirements.txt -r recognition/requirements-test.txt \
+         pytest-json-report==1.5.0 pytest-cov==5.0.0
 
 # Now the full source trees.
 COPY api ./api

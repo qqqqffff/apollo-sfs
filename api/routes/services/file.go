@@ -53,7 +53,8 @@ type UploadInput struct {
 	// web uploads. Stored on the file row for "synced from this device" display.
 	DeviceID *uuid.UUID
 	// Source is the upload origin: "web" | "device" | "google_drive" |
-	// "google_photos". Blank is normalized to "web" when stored.
+	// "google_photos" | "email_backup_gmail" | "email_backup_microsoft" |
+	// "file_server". Blank is normalized to "web" when stored.
 	Source string
 	// Reader is the raw plaintext byte stream (multipart file reader).
 	// The service reads it fully into memory before encrypting; this is required
@@ -65,6 +66,13 @@ type UploadInput struct {
 	// one of the user's active allocations or lacks room. Used by file-server
 	// (WebDAV) mounts, which are scoped to a single storage server.
 	RequireDriveID *uuid.UUID
+	// RootDriveID is the tier-first browser's soft drive pin for a ROOT upload:
+	// the drive (server & tier) whose view the user is uploading into. It applies
+	// only when the file ultimately lands at root (FolderID nil after any media
+	// auto-upload redirect) — a redirect into a media folder keeps that folder's
+	// own drive. Soft, exactly like a folder pin: if the drive is full/inactive
+	// the upload falls back to the primary/least-full drive rather than failing.
+	RootDriveID *uuid.UUID
 }
 
 // ── Service ───────────────────────────────────────────────────────────────────
@@ -458,6 +466,11 @@ func (s *FileService) Upload(ctx context.Context, in UploadInput) (*models.File,
 			if folder, err := s.queries.GetFolderByID(ctx, *in.FolderID); err == nil {
 				folderDriveID = folder.DriveID
 			}
+		} else {
+			// Root upload: honor the drive whose view the user is uploading into
+			// (tier-first browser). Soft pin — resolveUploadDrive falls back to the
+			// primary/least-full drive if this one is full or inactive.
+			folderDriveID = in.RootDriveID
 		}
 		var err error
 		storage, driveID, err = s.resolveUploadDrive(ctx, in.Username, in.UserID, fileSize, folderDriveID)
@@ -1319,6 +1332,9 @@ func (s *FileService) BeginChunkedUpload(ctx context.Context, sess *UploadSessio
 		if folder, err := s.queries.GetFolderByID(ctx, *sess.FolderID); err == nil {
 			folderDriveID = folder.DriveID
 		}
+	} else {
+		// Root upload: honor the drive whose view the user is uploading into.
+		folderDriveID = sess.RootDriveID
 	}
 	storage, driveID, err := s.resolveUploadDrive(ctx, sess.Username, sess.UserID, sess.TotalSize, folderDriveID)
 	if err != nil {

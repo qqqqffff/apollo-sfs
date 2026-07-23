@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"time"
 
@@ -14,6 +15,21 @@ import (
 )
 
 const speedTestBlobBytes = 32 * 1024 * 1024 // 32 MB — enough to saturate most links without OOM on a Pi
+
+// maxConsecutiveUncleanSpeedTests hard-caps how long the "clean" (budget-
+// feeding) sample is allowed to go stale while every probe keeps overlapping
+// active uploads. At the 30-minute loop cadence this is ~24h — long enough
+// that a brief-but-constant trickle of uploads doesn't force the fallback,
+// short enough that a genuinely always-busy server still gets a fresh budget
+// input daily rather than running forever on one old reading (or none).
+const maxConsecutiveUncleanSpeedTests = 48
+
+// fallbackBudgetMbps is the assumed link speed used only when the hard cap
+// above is hit AND not even one successful (if unclean) probe landed in that
+// entire window — i.e. every attempt errored. A conservative placeholder so
+// the upload cap has something to work with rather than staying unbounded
+// indefinitely on a server whose speed test can't run at all.
+const fallbackBudgetMbps = 900.0
 
 // Cloudflare's public speed-test endpoints (the same ones speed.cloudflare.com
 // itself uses) — unauthenticated, free, and built exactly for measuring a
@@ -37,6 +53,13 @@ type SpeedTestResult struct {
 	SizeBytes    int64     `json:"size_bytes"`
 	TestedAt     time.Time `json:"tested_at"`
 	Error        string    `json:"error,omitempty"`
+	// FallbackReason is set only when this result was promoted to
+	// latestCleanSpeedTest by the maxConsecutiveUncleanSpeedTests hard cap
+	// rather than by being a genuinely clean (zero-active-upload) probe —
+	// see recordSpeedTestSample. Empty for every ordinary probe result,
+	// including latestSpeedTest's copy of a promoted one (that field always
+	// holds the raw probe as measured).
+	FallbackReason string `json:"fallback_reason,omitempty"`
 }
 
 // LatestSpeedTestMbps returns max(upload, download) from the most recent speed
@@ -90,17 +113,42 @@ func (h *Handler) TriggerSpeedTest(c *gin.Context) {
 		return
 	}
 
-	result := h.runSpeedTest(ctx)
-
-	h.speedTestMu.Lock()
-	h.latestSpeedTest = result
-	h.speedTestMu.Unlock()
+	result := h.runAndRecordSpeedTest(ctx)
 
 	status := http.StatusOK
 	if result.Error != "" {
 		status = http.StatusInternalServerError
 	}
 	c.JSON(status, result)
+}
+
+// CleanNetworkSpeedMbps implements services.NetworkSpeedSource: the most
+// recent WAN speed test known not to have overlapped active uploads (see
+// hasActiveUploads and runAndRecordSpeedTest), so services.BandwidthManager
+// never sizes the fair upload cap off a reading that uploads themselves
+// dragged down. ok is false until at least one such clean probe has run.
+func (h *Handler) CleanNetworkSpeedMbps() (float64, bool) {
+	h.speedTestMu.RLock()
+	defer h.speedTestMu.RUnlock()
+	result := h.latestCleanSpeedTest
+	if result == nil || result.Error != "" {
+		return 0, false
+	}
+	if result.UploadMbps > result.DownloadMbps {
+		return result.UploadMbps, true
+	}
+	return result.DownloadMbps, true
+}
+
+// activeUploadCount reports how many distinct users currently have an upload
+// request in flight, per the fair bandwidth manager. A nil manager
+// (bandwidth cap not wired up — only happens in tests) reports 0, so probes
+// are always considered clean.
+func (h *Handler) activeUploadCount() int {
+	if h.bandwidthMgr == nil {
+		return 0
+	}
+	return h.bandwidthMgr.ActiveUsers()
 }
 
 // LatestSpeedTestResult returns the most recent speed test result for inclusion
@@ -136,13 +184,93 @@ func (h *Handler) SpeedTestLoop(ctx context.Context) {
 				continue
 			}
 			if h.speedTestRunning.CompareAndSwap(false, true) {
-				result := h.runSpeedTest(ctx)
+				h.runAndRecordSpeedTest(ctx)
 				h.speedTestRunning.Store(false)
-				h.speedTestMu.Lock()
-				h.latestSpeedTest = result
-				h.speedTestMu.Unlock()
 			}
 		}
+	}
+}
+
+// runAndRecordSpeedTest runs one probe and caches it as latestSpeedTest for
+// display/alarms (LatestSpeedTestMbps, LatestSpeedTestResult) regardless of
+// outcome. dirtiness — the larger of the active-upload count immediately
+// before and immediately after the probe — feeds recordSpeedTestSample,
+// which decides whether (and what) to promote as latestCleanSpeedTest, the
+// sample services.BandwidthManager computes the fair upload cap from (see
+// CleanNetworkSpeedMbps). A probe overlapping uploads still updates
+// latestSpeedTest as usual; only the budget-feeding cache is gated.
+func (h *Handler) runAndRecordSpeedTest(ctx context.Context) *SpeedTestResult {
+	startCount := h.activeUploadCount()
+	result := h.runSpeedTest(ctx)
+	dirtiness := max(startCount, h.activeUploadCount())
+
+	h.speedTestMu.Lock()
+	h.latestSpeedTest = result
+	newState, promote := recordSpeedTestSample(h.cleanSampleFallback, result, dirtiness)
+	h.cleanSampleFallback = newState
+	if promote != nil {
+		h.latestCleanSpeedTest = promote
+	}
+	h.speedTestMu.Unlock()
+
+	if promote != nil && promote.FallbackReason != "" {
+		log.Printf("upload bandwidth budget: %s", promote.FallbackReason)
+	}
+	return result
+}
+
+// cleanSampleState is the fallback bookkeeping recordSpeedTestSample carries
+// between calls: how many probes in a row have failed to be genuinely clean,
+// and the least-loaded (if any) successful probe seen in that streak — the
+// tier-1 fallback candidate if the hard cap is hit before a clean one lands.
+type cleanSampleState struct {
+	consecutiveUnclean int
+	leastDirty         *SpeedTestResult
+	leastDirtyCount    int
+}
+
+// recordSpeedTestSample decides what one new probe result does to the
+// clean-sample fallback state, and whether it should be promoted as the new
+// budget-feeding sample. Pure/deterministic (given dirtiness, computed by the
+// caller from live upload-manager state) so it's unit-testable without a
+// real network probe.
+//
+// dirtiness is the number of uploads active around the probe (0 = genuinely
+// clean). A clean, successful probe is always promoted immediately, resetting
+// the streak. Otherwise it becomes a fallback candidate (kept only if it beats
+// the current least-dirty one) and the streak advances; reaching
+// maxConsecutiveUncleanSpeedTests forces a promotion regardless — the
+// least-dirty candidate seen in the streak, or, if every probe in it errored
+// (no candidate at all), a synthetic flat fallbackBudgetMbps reading.
+func recordSpeedTestSample(state cleanSampleState, result *SpeedTestResult, dirtiness int) (newState cleanSampleState, promote *SpeedTestResult) {
+	if result.Error == "" && dirtiness == 0 {
+		return cleanSampleState{}, result
+	}
+
+	state.consecutiveUnclean++
+	if result.Error == "" && (state.leastDirty == nil || dirtiness < state.leastDirtyCount) {
+		state.leastDirty = result
+		state.leastDirtyCount = dirtiness
+	}
+
+	if state.consecutiveUnclean < maxConsecutiveUncleanSpeedTests {
+		return state, nil
+	}
+
+	if state.leastDirty != nil {
+		promoted := *state.leastDirty
+		promoted.FallbackReason = fmt.Sprintf(
+			"no clean sample in %d attempts — using the least-loaded reading observed (%d concurrent upload(s))",
+			maxConsecutiveUncleanSpeedTests, state.leastDirtyCount)
+		return cleanSampleState{}, &promoted
+	}
+	return cleanSampleState{}, &SpeedTestResult{
+		UploadMbps:   fallbackBudgetMbps,
+		DownloadMbps: fallbackBudgetMbps,
+		TestedAt:     time.Now(),
+		FallbackReason: fmt.Sprintf(
+			"no successful speed test in %d attempts — assuming a flat %.0f Mbps budget",
+			maxConsecutiveUncleanSpeedTests, fallbackBudgetMbps),
 	}
 }
 

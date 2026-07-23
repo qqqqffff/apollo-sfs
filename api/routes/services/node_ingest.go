@@ -112,3 +112,40 @@ func (s *NodeIngestService) UpdateNodeMetrics(ctx context.Context, p *models.Nod
 
 	return nil
 }
+
+// ConsumeBenchmarkRequest atomically checks-and-clears a pending
+// admin-triggered benchmark request for the given hostname, returning true if
+// one was pending. Called on every metrics push so the response can tell the
+// agent to run a benchmark now (see cmd/node-agent's push loop).
+func (s *NodeIngestService) ConsumeBenchmarkRequest(ctx context.Context, hostname string) (bool, error) {
+	return s.queries.ConsumeBenchmarkRequest(ctx, hostname)
+}
+
+// RecordBenchmarkResults persists every disk result in a benchmark batch
+// pushed by a node's agent. Pushes from unregistered hostnames are logged and
+// ignored, mirroring UpdateNodeMetrics.
+func (s *NodeIngestService) RecordBenchmarkResults(ctx context.Context, batch *models.BenchmarkResultBatch) error {
+	node, err := s.queries.GetNodeByHostname(ctx, batch.Hostname)
+	if err != nil {
+		return err
+	}
+	if node == nil {
+		log.Printf("node-ingest: benchmark result from unknown hostname %q (ignored)", batch.Hostname)
+		return nil
+	}
+
+	for _, r := range batch.Results {
+		err := s.queries.UpsertNodeDiskBenchmark(ctx, db.UpsertNodeDiskBenchmarkParams{
+			NodeID:    node.ID,
+			Label:     r.Label,
+			WriteMbps: r.WriteMbps,
+			ReadMbps:  r.ReadMbps,
+			SizeBytes: r.SizeBytes,
+			Error:     r.Error,
+		})
+		if err != nil {
+			log.Printf("node-ingest: upsert disk benchmark %q: %v", r.Label, err)
+		}
+	}
+	return nil
+}

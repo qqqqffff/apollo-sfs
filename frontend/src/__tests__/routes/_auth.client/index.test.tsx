@@ -48,9 +48,11 @@ jest.mock('../../../hooks/useFileDrag', () => ({
     draggingFileId: null,
     draggingFolderId: null,
     dragOverFolderId: null,
+    dragOverBackground: false,
     getFileDragHandlers:   () => ({}),
     getFolderDragHandlers: () => ({}),
     getFolderDropHandlers: () => ({}),
+    getListBackgroundDropHandlers: () => ({}),
   }),
 }))
 jest.mock('../../../hooks/useSort', () => ({
@@ -204,9 +206,9 @@ describe('Client Files (index) page', () => {
     mockImpersonatedUser = null
   })
 
-  test('renders My Files heading at root', () => {
+  test('renders My Storage heading at root', () => {
     setup()
-    expect(screen.getByRole('heading', { name: /my files/i })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: /my storage/i })).toBeInTheDocument()
   })
 
   test('shows loading state', () => {
@@ -300,7 +302,7 @@ describe('Client Files (index) page', () => {
   test('in read-only mode heading shows impersonated username', () => {
     mockImpersonatedUser = { username: 'bob', email: 'bob@example.com', storage_used_bytes: 0, storage_quota_bytes: 10 * 1024 ** 3 }
     setup()
-    expect(screen.getByRole('heading', { name: /bob's files/i })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: /bob's storage/i })).toBeInTheDocument()
   })
 
   test('in read-only mode upload and new folder buttons are hidden', () => {

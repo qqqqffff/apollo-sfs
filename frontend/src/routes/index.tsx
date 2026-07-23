@@ -1,5 +1,5 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
-import { MdFolder, MdLock, MdInsertDriveFile, MdPeople, MdBarChart, MdStar, MdTimer } from 'react-icons/md'
+import { MdFolder, MdLock, MdInsertDriveFile, MdPeople, MdBarChart, MdStar, MdTimer, MdSpeed } from 'react-icons/md'
 import { FaGem } from "react-icons/fa";
 import { IconType } from 'react-icons';
 
@@ -108,6 +108,35 @@ function RouteComponent() {
             </div>
           ))}
         </div>
+      </section>
+
+      {/* Drive speed benchmark */}
+      <section className="max-w-4xl mx-auto px-6 pb-16">
+        <article className="bg-white rounded-xl border border-gray-200 px-8 py-8">
+          <div className="flex items-start gap-4">
+            <div className="w-10 h-10 rounded-lg bg-blue-50 flex items-center justify-center shrink-0">
+              <MdSpeed className="text-blue-600 text-xl" />
+            </div>
+            <div>
+              <span className="text-xs font-semibold uppercase tracking-widest text-blue-600">
+                From our blog
+              </span>
+              <h2 className="text-xl font-bold text-gray-900 mt-1 mb-3">
+                How fast is Apollo SFS storage, really?
+              </h2>
+              <p className="text-sm text-gray-500 leading-relaxed max-w-2xl mb-4">
+                We benchmark both storage tiers directly on our own hardware — see the real write/read
+                numbers for the fast NVMe tier vs. the standard HDD tier, and which one fits your files best.
+              </p>
+              <Link
+                to="/blog/drive-speed-benchmark"
+                className="inline-block px-6 py-2.5 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold rounded-xl no-underline transition-colors shadow-sm"
+              >
+                Read the benchmark
+              </Link>
+            </div>
+          </div>
+        </article>
       </section>
 
       {/* Math game reference */}

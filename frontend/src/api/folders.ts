@@ -6,6 +6,11 @@ export interface FolderPageParams {
   fileCursor?: string
   folderLimit?: number
   fileLimit?: number
+  // Tier-first browser: scope the virtual root to a single drive (server &
+  // tier). Only honored by listRoot. includeUnassigned should be set only when
+  // that drive is the user's primary — NULL-drive rows resolve to the primary.
+  drive?: string
+  includeUnassigned?: boolean
 }
 
 function buildQS(p: FolderPageParams): string {
@@ -14,6 +19,8 @@ function buildQS(p: FolderPageParams): string {
   if (p.fileCursor) params.set('file_cursor', p.fileCursor)
   if (p.folderLimit !== undefined) params.set('folder_limit', String(p.folderLimit))
   if (p.fileLimit !== undefined) params.set('file_limit', String(p.fileLimit))
+  if (p.drive) params.set('drive', p.drive)
+  if (p.includeUnassigned) params.set('include_unassigned', 'true')
   return params.size ? `?${params}` : ''
 }
 
@@ -100,11 +107,15 @@ export async function resolvePathToFolder(path: string): Promise<Folder | null> 
   return match
 }
 
-// requestDriveMigration kicks off a background job moving a folder's direct
-// files to a different drive (potentially a different tier/server). Returns
+// requestDriveMigration kicks off a background job moving a folder's whole
+// subtree to a different drive (server & tier) and reparenting it under
+// destParentId there (omit/undefined = the destination drive's root). Returns
 // the created migration row (202 Accepted — the move runs asynchronously).
-export function requestDriveMigration(folderId: string, driveId: string) {
-  return post<FolderDriveMigration>(`/folders/${folderId}/drive-migrations`, { drive_id: driveId })
+export function requestDriveMigration(folderId: string, driveId: string, destParentId?: string | null) {
+  return post<FolderDriveMigration>(`/folders/${folderId}/drive-migrations`, {
+    drive_id: driveId,
+    dest_parent_id: destParentId ?? null,
+  })
 }
 
 // getLatestDriveMigration returns the most recent migration for a folder

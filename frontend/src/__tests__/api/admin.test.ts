@@ -25,6 +25,8 @@ import {
   getSpeedTest,
   triggerSpeedTest,
   runTests,
+  getLatestTestRun,
+  getTestProgress,
   shutdownServer,
   infrastructureQueryOptions,
   capacityQueryOptions,
@@ -437,15 +439,54 @@ describe('capacityQueryOptions', () => {
 describe('runTests', () => {
   it('POSTs to /admin/system/tests', async () => {
     mockFetch(200, {
-      backend: { enabled: true, result: { passed: true, exit_code: 0, output: '', duration_ms: 100 } },
-      frontend: { enabled: false, message: 'disabled' },
-      frontend_e2e: { enabled: false, message: 'disabled' },
+      id: 'run-1',
+      deployment_version: 'abc1234',
+      git_branch: 'release-1.2.2',
+      passed: true,
+      created_at: '2026-07-20T00:00:00Z',
+      report: {
+        backend: { enabled: true, result: { passed: true, exit_code: 0, output: '', duration_ms: 100, num_tests: 1, num_passed: 1, num_failed: 0 } },
+        frontend: { enabled: false, message: 'disabled' },
+        frontend_e2e: { enabled: false, message: 'disabled' },
+        mobile: { enabled: false, message: 'disabled' },
+        recognition: { enabled: false, message: 'disabled' },
+      },
     })
     const result = await runTests()
     expect(lastUrl()).toBe('/api/v1/admin/system/tests')
     expect(lastInit().method).toBe('POST')
-    expect(result.backend.enabled).toBe(true)
-    expect(result.frontend_e2e.enabled).toBe(false)
+    expect(result.report.backend.enabled).toBe(true)
+    expect(result.report.frontend_e2e.enabled).toBe(false)
+    expect(result.deployment_version).toBe('abc1234')
+    expect(result.git_branch).toBe('release-1.2.2')
+  })
+})
+
+describe('getLatestTestRun', () => {
+  it('GETs /admin/system/tests/latest', async () => {
+    mockFetch(200, { run: null, matched_branch: false, current_branch: 'release-1.2.2', current_version: 'abc1234' })
+    const result = await getLatestTestRun()
+    expect(lastUrl()).toBe('/api/v1/admin/system/tests/latest')
+    expect(result.run).toBeNull()
+    expect(result.current_branch).toBe('release-1.2.2')
+  })
+})
+
+describe('getTestProgress', () => {
+  it('GETs /admin/system/tests/progress', async () => {
+    mockFetch(200, {
+      running: true,
+      current_suite: 'frontend_e2e',
+      order: ['backend', 'frontend', 'frontend_e2e', 'mobile', 'recognition'],
+      completed: {
+        backend: { enabled: true, result: { passed: true, exit_code: 0, output: '', duration_ms: 100, num_tests: 1, num_passed: 1, num_failed: 0 } },
+      },
+    })
+    const result = await getTestProgress()
+    expect(lastUrl()).toBe('/api/v1/admin/system/tests/progress')
+    expect(result.running).toBe(true)
+    expect(result.current_suite).toBe('frontend_e2e')
+    expect(result.completed.backend.enabled).toBe(true)
   })
 })
 

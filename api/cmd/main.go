@@ -284,11 +284,21 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	routes.SetMathGameService(h, services.NewMathGameService(queries))
 	routes.SetShareService(h, services.NewShareService(queries, emailSvc, cfg.AppBaseURL))
 	routes.SetRecognitionService(h, recogSvc)
+	// Fair upload bandwidth cap: budget is derived automatically from the WAN
+	// speed test below (services.BandwidthManager.SetSpeedSource), not a
+	// manually configured number — see docs/upload_bandwidth_fairness.md.
+	bandwidthMgr := services.NewBandwidthManager()
+	routes.SetBandwidthManager(h, bandwidthMgr)
 	authHandler := auth.NewHandler(authSvc, cfg.CookieDomain, cfg.CookieSecure, cfg.TurnstileSecretKey)
 	adminHandler := admin.NewHandler(queries, inviteSvc, metricsSvc, authSvc, fileSvc, registry, geoReader, cfg.DiskStatsPath, cfg.DiskStatsDriveLabel, cfg.TestRunnerURL, cfg.AppDir, shutdownCh)
 	adminHandler.SetDeploymentInfo(cfg.AppVersion, cfg.AppGitBranch)
 	adminHandler.SetDiscountMailer(emailSvc)
 	adminHandler.SetReconciliationService(reconcileSvc)
+	// The speed test (below) needs to know about active uploads to avoid
+	// caching a probe result that overlapped real upload traffic as the
+	// "clean" sample the budget above is computed from.
+	adminHandler.SetBandwidthManager(bandwidthMgr)
+	bandwidthMgr.SetSpeedSource(adminHandler)
 	// Configure the on-demand infrastructure sync (POST /system/sync): discover
 	// swarm nodes via the Docker socket and drives/capacity via the MinIO admin API.
 	adminHandler.ConfigureInfraSync(admin.InfraSyncConfig{

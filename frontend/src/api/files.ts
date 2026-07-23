@@ -3,6 +3,13 @@ import type { File, UploadResponse } from '../types/api'
 
 export const CHUNK_SIZE = 5 * 1024 * 1024 // 5 MB
 
+// How many chunks of a single large file may be in flight at once. The backend
+// dispatches each chunk to its own goroutine and uploads it as an independently
+// numbered MinIO multipart part (see UploadSession in the API), so chunks may
+// complete out of order — this only needs to stay low enough that one file
+// doesn't monopolize the connection pool other concurrent uploads share.
+export const MAX_CONCURRENT_CHUNKS = 4
+
 // ── Chunked upload (cookie auth) ──────────────────────────────────────────────
 
 export function initChunkedUpload(

@@ -6,6 +6,7 @@ import {
   uploadChunkPresigned,
   completeChunkedUploadPresigned,
   CHUNK_SIZE,
+  MAX_CONCURRENT_CHUNKS,
 } from '../api/files'
 
 export type UploadStatus = 'idle' | 'uploading' | 'complete' | 'partial' | 'allFailed'
@@ -115,6 +116,12 @@ export function useFileUpload() {
     }
 
     // ── Presigned chunked upload ───────────────────────────────────────────
+    // Chunks upload through a small worker pool rather than one at a time: the
+    // backend accepts them out of order (each is dispatched to its own goroutine
+    // and completed as an independently numbered MinIO multipart part), so
+    // serializing them client-side only wastes round-trip latency — with one
+    // chunk in flight, per-file throughput is capped at CHUNK_SIZE / RTT instead
+    // of the user's actual link speed.
     const totalChunks = Math.ceil(file.size / CHUNK_SIZE)
     const { upload_id, session_token } = await presignChunkedUpload(
       file.name,
@@ -125,19 +132,40 @@ export function useFileUpload() {
       driveId,
     )
 
-    for (let ci = 0; ci < totalChunks; ci++) {
-      const start = ci * CHUNK_SIZE
-      const chunk = file.slice(start, start + CHUNK_SIZE)
-      const chunkSize = chunk.size
-      const completedBytes = ci * CHUNK_SIZE
-
-      await uploadChunkPresigned(upload_id, session_token, ci, chunk, (xhrLoaded, xhrTotal) => {
-        const chunkLoaded = xhrTotal > 0
-          ? Math.min(Math.round((xhrLoaded / xhrTotal) * chunkSize), chunkSize)
-          : xhrLoaded
-        patchItem(itemIndex, { loaded: completedBytes + chunkLoaded })
-      })
+    const chunkLoaded = new Array<number>(totalChunks).fill(0)
+    function reportChunkProgress(ci: number, loaded: number) {
+      chunkLoaded[ci] = loaded
+      patchItem(itemIndex, { loaded: chunkLoaded.reduce((a, b) => a + b, 0) })
     }
+
+    let nextChunk = 0
+    let firstError: unknown = null
+
+    async function chunkWorker() {
+      while (firstError === null) {
+        const ci = nextChunk++
+        if (ci >= totalChunks) return
+        const start = ci * CHUNK_SIZE
+        const chunk = file.slice(start, start + CHUNK_SIZE)
+        const chunkSize = chunk.size
+        try {
+          await uploadChunkPresigned(upload_id, session_token, ci, chunk, (xhrLoaded, xhrTotal) => {
+            const loaded = xhrTotal > 0
+              ? Math.min(Math.round((xhrLoaded / xhrTotal) * chunkSize), chunkSize)
+              : xhrLoaded
+            reportChunkProgress(ci, loaded)
+          })
+          reportChunkProgress(ci, chunkSize)
+        } catch (err) {
+          if (firstError === null) firstError = err
+          return
+        }
+      }
+    }
+
+    const workerCount = Math.min(MAX_CONCURRENT_CHUNKS, totalChunks)
+    await Promise.all(Array.from({ length: workerCount }, () => chunkWorker()))
+    if (firstError !== null) throw firstError
 
     await completeChunkedUploadPresigned(upload_id, session_token)
   }

@@ -5,6 +5,7 @@ import { useFileUpload } from '../../hooks/useFileUpload'
 
 jest.mock('../../api/files', () => ({
   CHUNK_SIZE:                     5 * 1024 * 1024,
+  MAX_CONCURRENT_CHUNKS:          4,
   presignUpload:                  jest.fn(),
   uploadFilePresigned:            jest.fn(),
   presignChunkedUpload:           jest.fn(),
@@ -201,6 +202,54 @@ describe('useFileUpload — chunked upload', () => {
     )
     expect(mockUploadChunkPresigned).toHaveBeenCalled()
     expect(mockCompleteChunkedUploadPresigned).toHaveBeenCalledWith('up-1', 'sess.tok')
+  })
+
+  it('uploads every chunk exactly once, out of order, via the worker pool', async () => {
+    const HUGE_FILE = makeFile('huge.bin', CHUNK_SIZE * 9) // 9 chunks, > MAX_CONCURRENT_CHUNKS (4)
+    mockPresignChunkedUpload.mockResolvedValue({
+      upload_id: 'up-2',
+      session_token: 'sess.tok',
+      expires_at: '2099-01-01T00:00:00Z',
+    })
+    // Resolve chunks in reverse-ish order to prove completion order doesn't matter.
+    mockUploadChunkPresigned.mockImplementation(async (_id, _tok, chunkIndex: number) => {
+      await Promise.resolve()
+      return { chunk_index: chunkIndex, dispatched: 1, total: 9 }
+    })
+    mockCompleteChunkedUploadPresigned.mockResolvedValue({ file: { id: 'f1' } })
+    const { result } = renderHook(() => useFileUpload())
+    await act(async () => {
+      await result.current.startUpload([HUGE_FILE], null, jest.fn())
+    })
+
+    expect(mockUploadChunkPresigned).toHaveBeenCalledTimes(9)
+    const seenIndices = mockUploadChunkPresigned.mock.calls.map((c) => c[2]).sort((a, b) => a - b)
+    expect(seenIndices).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8])
+    expect(mockCompleteChunkedUploadPresigned).toHaveBeenCalledWith('up-2', 'sess.tok')
+    expect(result.current.progress.status).toBe('complete')
+  })
+
+  it('fails the file (after retries) when one chunk keeps failing, without hanging', async () => {
+    jest.useFakeTimers()
+    const MULTI_CHUNK_FILE = makeFile('multi.bin', CHUNK_SIZE * 3)
+    mockPresignChunkedUpload.mockResolvedValue({
+      upload_id: 'up-3',
+      session_token: 'sess.tok',
+      expires_at: '2099-01-01T00:00:00Z',
+    })
+    mockUploadChunkPresigned.mockImplementation(async (_id, _tok, chunkIndex: number) => {
+      if (chunkIndex === 1) throw new Error('chunk failed')
+      return { chunk_index: chunkIndex, dispatched: 1, total: 3 }
+    })
+    const { result } = renderHook(() => useFileUpload())
+    await act(async () => {
+      const p = result.current.startUpload([MULTI_CHUNK_FILE], null, jest.fn())
+      await jest.advanceTimersByTimeAsync(20_000)
+      await p
+    })
+    expect(result.current.progress.status).toBe('allFailed')
+    expect(mockCompleteChunkedUploadPresigned).not.toHaveBeenCalled()
+    jest.useRealTimers()
   })
 })
 

@@ -31,12 +31,32 @@ type uploadResponse struct {
 	FolderID  *string `json:"folder_id"`
 }
 
+// throttleUploadBody applies the fair per-user upload bandwidth cap (see
+// services.BandwidthManager) to this request's body. It must be called
+// before any code touches c.Request.Body — directly or via c.FormFile /
+// c.PostForm, both of which parse the entire multipart body on first use —
+// otherwise the bytes throttling is meant to pace will already have been
+// read off the network at full speed. Safe to call with an unconfigured
+// (nil) bandwidth manager: it then does nothing. The returned func must run
+// once (defer immediately) so the user's slot is released promptly.
+func (h *Handler) throttleUploadBody(c *gin.Context, userID string) func() {
+	if h.bandwidth == nil {
+		return func() {}
+	}
+	limiter, release := h.bandwidth.Acquire(userID)
+	c.Request.Body = services.NewThrottledBody(c.Request.Body, c.Request.Context(), limiter)
+	return release
+}
+
 // UploadFile handles POST /api/v1/files/upload.
 // Expects a multipart form with:
 //   - "file"      — the binary file field
 //   - "folder_id" — UUID of the destination folder
 //   - "name"      — optional display name; defaults to the original filename
 func (h *Handler) UploadFile(c *gin.Context) {
+	release := h.throttleUploadBody(c, c.GetString("userID"))
+	defer release()
+
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
 		if errors.Is(err, http.ErrMissingFile) {
@@ -665,6 +685,9 @@ func (h *Handler) UploadChunk(c *gin.Context) {
 		return
 	}
 
+	release := h.throttleUploadBody(c, userID.String())
+	defer release()
+
 	index, err := strconv.Atoi(c.PostForm("chunk_index"))
 	if err != nil || index < 0 || index >= sess.TotalChunks {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid chunk_index"})
@@ -982,6 +1005,9 @@ func (h *Handler) UploadFilePresigned(c *gin.Context) {
 		return
 	}
 
+	release := h.throttleUploadBody(c, claim.UserID)
+	defer release()
+
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
 		if errors.Is(err, http.ErrMissingFile) {
@@ -1223,6 +1249,9 @@ func (h *Handler) UploadChunkPresigned(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid presigned token"})
 		return
 	}
+
+	release := h.throttleUploadBody(c, claim.UserID)
+	defer release()
 
 	index, err := strconv.Atoi(c.PostForm("chunk_index"))
 	if err != nil || index < 0 || index >= sess.TotalChunks {

@@ -149,3 +149,4 @@ Docker logging uses the JSON file driver with rotation (10 MB max, 3 files). Ngi
 - `docs/file_server_links.md` — premium WebDAV mount links (file server feature)
 - `docs/storage_reconciliation.md` — MinIO <-> Postgres reconciliation: drift sources, the daily 4am-local heartbeat, and the admin endpoints for it
 - `docs/drive_benchmark_setup.md` — on-demand fast (NVMe) vs standard (HDD) drive speed benchmark: how the trigger reaches node-agent, the writable scratch-directory host setup, and the promo blog post/cards it feeds
+- `docs/upload_bandwidth_fairness.md` — fair per-user upload speed cap: budget derived automatically from the periodic WAN speed test (no manual config), the live reserve/user-count split, "clean sample" gating against active uploads, and where it hooks into the request body

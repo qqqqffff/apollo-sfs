@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { MdAddCircleOutline, MdFolder, MdLock, MdLockOpen } from 'react-icons/md'
+import { useEffect, useRef, useState } from 'react'
+import { MdAddCircleOutline, MdFolder, MdLock, MdLockOpen, MdMoreVert, MdPieChart } from 'react-icons/md'
 import type { User } from '../types/api'
 import { TierIcon } from './TierIcon'
 
@@ -7,6 +7,11 @@ interface UploadLocation {
   name: string
   tier: 'nvme' | 'hdd'
   isPinned: boolean
+  serverId: string
+  // This drive's own used/quota bytes — the storage bar shows this tier's
+  // allocation, not the account-wide total across every drive the user owns.
+  usedBytes: number
+  quotaBytes: number
 }
 
 interface Props {
@@ -20,10 +25,13 @@ interface Props {
   // policy is active for this upload (i.e. it would silently move any
   // image/video in this batch there). Null/undefined when no policy applies.
   redirectFolderName?: string | null
-  // When set, renders a "+" button beside the storage bar that opens the
-  // storage upgrade modal. Omitted when the user disabled the plus buttons
-  // in their profile preferences.
+  // When set, offers an "Add storage" action in the storage dropdown that
+  // opens the storage upgrade modal. Omitted when the user disabled the plus
+  // buttons in their profile preferences.
   onAddStorage?: () => void
+  // When set, offers a "View detailed breakdown" action in the storage
+  // dropdown, showing the user's full per-drive (server & tier) breakdown.
+  onViewBreakdown?: () => void
   onConfirm: (ignoreRedirectIndices: Set<number>) => void
   onCancel: () => void
 }
@@ -39,10 +47,13 @@ function isMediaFile(f: globalThis.File): boolean {
   return f.type.startsWith('image/') || f.type.startsWith('video/')
 }
 
-export function UploadModal({ files, folderName, user, location, redirectFolderName, onAddStorage, onConfirm, onCancel }: Props) {
+export function UploadModal({ files, folderName, user, location, redirectFolderName, onAddStorage, onViewBreakdown, onConfirm, onCancel }: Props) {
   const totalBytes = files.reduce((sum, f) => sum + f.size, 0)
-  const usedBytes = user.storage_used_bytes
-  const quotaBytes = user.storage_quota_bytes
+  // Prefer the specific drive this upload will land on so the bar reflects
+  // that tier's own quota, not the account-wide total across every drive —
+  // fall back to the account aggregate only while the drive hasn't resolved.
+  const usedBytes = location ? location.usedBytes : user.storage_used_bytes
+  const quotaBytes = location ? location.quotaBytes : user.storage_quota_bytes
   const afterBytes = usedBytes + totalBytes
   const exceedsQuota = afterBytes > quotaBytes
 
@@ -182,15 +193,8 @@ export function UploadModal({ files, folderName, user, location, redirectFolderN
           <div className="flex justify-between text-xs text-gray-500">
             <span className="flex items-center gap-1">
               Storage
-              {onAddStorage && (
-                <button
-                  type="button"
-                  onClick={onAddStorage}
-                  title="Add storage"
-                  className="flex items-center bg-transparent border-0 p-0 text-blue-500 hover:text-blue-700 cursor-pointer transition-colors"
-                >
-                  <MdAddCircleOutline className="text-sm" />
-                </button>
+              {(onAddStorage || onViewBreakdown) && (
+                <StorageActionsMenu onAddStorage={onAddStorage} onViewBreakdown={onViewBreakdown} />
               )}
             </span>
             <span>{formatSize(usedBytes)} of {formatSize(quotaBytes)} used</span>
@@ -242,6 +246,63 @@ export function UploadModal({ files, folderName, user, location, redirectFolderN
           </button>
         </div>
       </div>
+    </div>
+  )
+}
+
+// Small dropdown behind the storage bar's actions, replacing what used to be
+// a single "Add storage" button — offers that plus a detailed per-drive
+// breakdown, without crowding the bar with two separate icon buttons.
+function StorageActionsMenu({ onAddStorage, onViewBreakdown }: { onAddStorage?: () => void; onViewBreakdown?: () => void }) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    function handleOutsideClick(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    function handleKey(e: KeyboardEvent) { if (e.key === 'Escape') setOpen(false) }
+    document.addEventListener('mousedown', handleOutsideClick)
+    document.addEventListener('keydown', handleKey)
+    return () => {
+      document.removeEventListener('mousedown', handleOutsideClick)
+      document.removeEventListener('keydown', handleKey)
+    }
+  }, [open])
+
+  return (
+    <div ref={ref} className="relative flex items-center">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        title="Storage actions"
+        className="flex items-center bg-transparent border-0 p-0 text-blue-500 hover:text-blue-700 cursor-pointer transition-colors"
+      >
+        <MdMoreVert className="text-sm" />
+      </button>
+      {open && (
+        <div className="absolute left-0 top-full mt-1 z-20 bg-white rounded-lg shadow-lg border border-gray-200 py-1 min-w-48">
+          {onAddStorage && (
+            <button
+              type="button"
+              onClick={() => { setOpen(false); onAddStorage() }}
+              className="flex items-center gap-2 w-full px-3 py-1.5 bg-transparent border-0 text-xs text-gray-700 hover:bg-gray-50 cursor-pointer text-left transition-colors"
+            >
+              <MdAddCircleOutline className="text-sm text-blue-500" /> Add storage
+            </button>
+          )}
+          {onViewBreakdown && (
+            <button
+              type="button"
+              onClick={() => { setOpen(false); onViewBreakdown() }}
+              className="flex items-center gap-2 w-full px-3 py-1.5 bg-transparent border-0 text-xs text-gray-700 hover:bg-gray-50 cursor-pointer text-left transition-colors"
+            >
+              <MdPieChart className="text-sm text-gray-500" /> View detailed breakdown
+            </button>
+          )}
+        </div>
+      )}
     </div>
   )
 }

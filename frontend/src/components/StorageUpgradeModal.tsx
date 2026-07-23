@@ -91,11 +91,16 @@ interface Props {
   // Set when the modal was auto-opened because an upload would exceed the
   // quota (or push it past 75%); shows an explanatory banner.
   promptReason?: 'upload-near-quota' | 'upload-over-quota' | null
+  // Set when opened from a specific server/tier context (e.g. the upload
+  // modal's "Add storage" action) — preselects that server and tier instead
+  // of defaulting to fast/first-available, so the flow lands where the user
+  // was already working.
+  initialSelection?: { serverId: string; tier: StorageType } | null
 }
 
 type Phase = 'select' | 'purchased' | 'expansion_requested' | 'custom_submitted'
 
-export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Props) {
+export function StorageUpgradeModal({ onClose, onPurchased, promptReason, initialSelection }: Props) {
   const queryClient = useQueryClient()
   const navigate = useNavigate()
   const { data: user } = useQuery(meQueryOptions)
@@ -136,10 +141,12 @@ export function StorageUpgradeModal({ onClose, onPurchased, promptReason }: Prop
     queryFn: listMyExpansionRequests,
   })
 
-  const [storageType, setStorageType] = useState<StorageType>('nvme')
+  const [storageType, setStorageType] = useState<StorageType>(initialSelection?.tier ?? 'nvme')
   const [selectedPlanId, setSelectedPlanId] = useState<string | null>(null)
   const [customStopIdx, setCustomStopIdx] = useState(0)
-  const [selectedServerKey, setSelectedServerKey] = useState<string | null>(null)
+  const [selectedServerKey, setSelectedServerKey] = useState<string | null>(
+    initialSelection ? `${initialSelection.serverId}:${initialSelection.tier}` : null,
+  )
   const [serverListOpen, setServerListOpen] = useState(false)
   const [phase, setPhase] = useState<Phase>('select')
   const [showCardForm, setShowCardForm] = useState(false)

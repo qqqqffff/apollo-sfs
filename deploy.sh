@@ -24,7 +24,8 @@
 # USAGE
 #   ./deploy.sh                                  interactive checklist (TTY only)
 #                                                 (press 'a' in the checklist to select every
-#                                                 service and deploy immediately, no confirmation)
+#                                                 service + DB migrations and deploy immediately,
+#                                                 no confirmation)
 #   ./deploy.sh --services frontend,api           non-interactive
 #   ./deploy.sh --registry 192.168.68.57:5000 --tag v1.2.0
 #   ./deploy.sh --deploy-only                     redeploy with no image changes (reapply stack config)
@@ -167,9 +168,10 @@ run() {
 
 # ── Interactive checklist ─────────────────────────────────────────────────────
 # ↑/↓ (or j/k) move, space toggles the highlighted item, enter confirms (must
-# have at least one selected), a selects every service and deploys immediately
-# (skipping the y/n confirmation below — see ALL_SERVICES_NO_CONFIRM), q
-# cancels. Populates SELECTED (parallel to OPTIONS) in place.
+# have at least one selected), a selects every option (all services + DB
+# migrations) and deploys immediately (skipping the y/n confirmation below —
+# see ALL_SERVICES_NO_CONFIRM), q cancels. Populates SELECTED (parallel to
+# OPTIONS) in place.
 declare -a OPTIONS=("migrate" "${ORDER[@]}")
 declare -a OPTION_LABELS=("Run DB migrations (db/apply-migrations.sh)" "${ORDER[@]}")
 # One slot per option, all off — sized from OPTIONS so adding a service to
@@ -177,9 +179,8 @@ declare -a OPTION_LABELS=("Run DB migrations (db/apply-migrations.sh)" "${ORDER[
 declare -a SELECTED=()
 for _ in "${OPTIONS[@]}"; do SELECTED+=(0); done
 CURSOR=0
-# Set by select_services when 'a' is pressed — deliberately does NOT cover
-# "migrate", since silently running DB migrations on a no-confirm fast path
-# would be surprising; migrate stays an explicit opt-in via its own checkbox.
+# Set by select_services when 'a' is pressed (selects every option, including
+# "migrate", and deploys immediately — see ALL_SERVICES_NO_CONFIRM below).
 ALL_SERVICES_NO_CONFIRM=0
 
 select_services() {
@@ -216,7 +217,7 @@ select_services() {
       ' ') SELECTED[$CURSOR]=$(( 1 - SELECTED[$CURSOR] )) ;;
       a|A)
         local i
-        for i in "${!ORDER[@]}"; do SELECTED[$((i+1))]=1; done
+        for i in "${!OPTIONS[@]}"; do SELECTED[$i]=1; done
         ALL_SERVICES_NO_CONFIRM=1
         break
         ;;

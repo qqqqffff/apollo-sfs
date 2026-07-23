@@ -30,6 +30,7 @@ import { CollectionInfoModal } from './CollectionInfoModal'
 import { MediaViewerPage } from './MediaViewerPage'
 import { RecognitionGroupsModal } from './RecognitionGroupsModal'
 import { UploadModal } from './UploadModal'
+import { StorageBreakdownModal } from './StorageBreakdownModal'
 import { UploadToast } from './UploadToast'
 import type { Device, File, Folder, HiddenMode, MediaSort } from '../types/api'
 
@@ -99,6 +100,7 @@ export function MediaCollectionView({
   const [showGroups, setShowGroups] = useState(!!initialRecognitionGroup)
   const fileRef = useRef<HTMLInputElement>(null)
   const [pendingFiles, setPendingFiles] = useState<globalThis.File[]>([])
+  const [showStorageBreakdown, setShowStorageBreakdown] = useState(false)
   const { progress, startUpload, dismiss } = useFileUpload()
 
   // Below `lg` the controls row becomes a slide-in drawer (same pattern as
@@ -405,8 +407,16 @@ export function MediaCollectionView({
         <UploadModal
           files={pendingFiles}
           folderName={folder.name}
-          location={uploadDrive ? { name: uploadDrive.name, tier: uploadDrive.drive_type, isPinned: uploadDriveIsPinned } : undefined}
+          location={uploadDrive ? {
+            name: uploadDrive.name,
+            tier: uploadDrive.drive_type,
+            isPinned: uploadDriveIsPinned,
+            serverId: uploadDrive.server_id,
+            usedBytes: uploadDrive.used_bytes,
+            quotaBytes: uploadDrive.quota_bytes,
+          } : undefined}
           user={user}
+          onViewBreakdown={() => setShowStorageBreakdown(true)}
           onConfirm={() => {
             const filesToUpload = pendingFiles
             setPendingFiles([])
@@ -416,6 +426,13 @@ export function MediaCollectionView({
             })
           }}
           onCancel={() => setPendingFiles([])}
+        />
+      )}
+
+      {showStorageBreakdown && (
+        <StorageBreakdownModal
+          servers={myServers ?? []}
+          onClose={() => setShowStorageBreakdown(false)}
         />
       )}
 

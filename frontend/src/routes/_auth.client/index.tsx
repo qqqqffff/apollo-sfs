@@ -39,6 +39,7 @@ import { MediaCollectionView } from '../../components/MediaCollectionView'
 import type { Folder, FolderKind } from '../../types/api'
 import { UploadModal } from '../../components/UploadModal'
 import { StorageUpgradeModal, STORAGE_PROMPT_THRESHOLD } from '../../components/StorageUpgradeModal'
+import { StorageBreakdownModal } from '../../components/StorageBreakdownModal'
 import { ShareModal } from '../../components/ShareModal'
 import { DeleteConfirmModal, readSkipDeleteCookie } from '../../components/DeleteConfirmModal'
 import { FolderBreadcrumb } from '../../components/FolderBreadcrumb'
@@ -320,6 +321,12 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
   const storagePromptEnabled = prefs?.storage_prompt_enabled ?? true
   const [storageModalReason, setStorageModalReason] =
     useState<'open' | 'upload-near-quota' | 'upload-over-quota' | null>(null)
+  // Server/tier to preselect in the storage upgrade modal, set when it's
+  // opened from a specific drive context (e.g. the upload modal's "Add
+  // storage" action) so the flow lands where the user was already working.
+  const [storageModalPreselect, setStorageModalPreselect] =
+    useState<{ serverId: string; tier: 'nvme' | 'hdd' } | null>(null)
+  const [showStorageBreakdown, setShowStorageBreakdown] = useState(false)
   const { data: myServers } = useQuery({
     queryKey: ['storage', 'my-servers'],
     queryFn: listMyServers,
@@ -481,6 +488,7 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['folders'] })
       queryClient.invalidateQueries({ queryKey: ['me'] })
+      queryClient.invalidateQueries({ queryKey: ['storage', 'my-servers'] })
     },
     onError: () => notify('error', 'Failed to delete folder'),
   })
@@ -490,6 +498,7 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['folders', folderId] })
       queryClient.invalidateQueries({ queryKey: ['me'] })
+      queryClient.invalidateQueries({ queryKey: ['storage', 'my-servers'] })
     },
     onError: () => notify('error', 'Failed to delete file'),
   })
@@ -1313,10 +1322,21 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
         <UploadModal
           files={pendingFiles}
           folderName={folderId === 'root' ? 'root' : (folder?.name ?? 'This folder')}
-          location={uploadDrive ? { name: uploadDrive.name, tier: uploadDrive.drive_type, isPinned: uploadDriveIsPinned } : undefined}
+          location={uploadDrive ? {
+            name: uploadDrive.name,
+            tier: uploadDrive.drive_type,
+            isPinned: uploadDriveIsPinned,
+            serverId: uploadDrive.server_id,
+            usedBytes: uploadDrive.used_bytes,
+            quotaBytes: uploadDrive.quota_bytes,
+          } : undefined}
           redirectFolderName={uploadRedirectFolderName}
           user={user}
-          onAddStorage={showStorageButtons ? () => setStorageModalReason('open') : undefined}
+          onAddStorage={showStorageButtons ? () => {
+            setStorageModalPreselect(uploadDrive ? { serverId: uploadDrive.server_id, tier: uploadDrive.drive_type } : null)
+            setStorageModalReason('open')
+          } : undefined}
+          onViewBreakdown={() => setShowStorageBreakdown(true)}
           onConfirm={(ignoreRedirectIndices) => {
             const filesToUpload = pendingFiles
             setPendingFiles([])
@@ -1337,7 +1357,15 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
       {storageModalReason && !readOnly && (
         <StorageUpgradeModal
           promptReason={storageModalReason === 'open' ? null : storageModalReason}
-          onClose={() => setStorageModalReason(null)}
+          initialSelection={storageModalPreselect}
+          onClose={() => { setStorageModalReason(null); setStorageModalPreselect(null) }}
+        />
+      )}
+
+      {showStorageBreakdown && (
+        <StorageBreakdownModal
+          servers={myServers ?? []}
+          onClose={() => setShowStorageBreakdown(false)}
         />
       )}
 

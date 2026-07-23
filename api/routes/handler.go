@@ -111,6 +111,11 @@ type Handler struct {
 	fileServerLinks *services.FileServerLinkService
 	emailBackup     *services.EmailBackupService
 	recognition     RecognitionServicer
+	// bandwidth enforces the fair per-user upload rate cap (see
+	// services.BandwidthManager). Nil is tolerated and means the operator
+	// hasn't configured UPLOAD_BANDWIDTH_BUDGET_MBPS — upload handlers skip
+	// throttling entirely rather than failing closed.
+	bandwidth       *services.BandwidthManager
 	turnstileSecret string
 	// paypal is used for the interest-form deposit (nil is tolerated and
 	// causes the deposit endpoints to return 503).
@@ -158,6 +163,14 @@ func SetAPIKeyService(h *Handler, svc *services.APIKeyService) {
 // causes the share endpoints to return 503 (configured, not crash).
 func SetShareService(h *Handler, svc *services.ShareService) {
 	h.shares = svc
+}
+
+// SetBandwidthManager installs the fair upload-bandwidth limiter on an
+// existing Handler. Wired from main once UPLOAD_BANDWIDTH_BUDGET_MBPS is
+// parsed; nil is tolerated (feature unconfigured) and upload handlers skip
+// throttling entirely.
+func SetBandwidthManager(h *Handler, mgr *services.BandwidthManager) {
+	h.bandwidth = mgr
 }
 
 // SetRecognitionService installs the AI recognition service on an existing

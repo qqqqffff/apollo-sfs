@@ -3,6 +3,7 @@ import { useLayoutEffect, useRef, useState } from 'react'
 import { MdChevronRight, MdStorage } from 'react-icons/md'
 import { ancestorsQueryOptions } from '../api/folders'
 import { adminGetUserAncestors } from '../api/admin'
+import { TierIcon } from './TierIcon'
 import type { Folder } from '../types/api'
 
 type FolderDropHandlers = {
@@ -25,8 +26,9 @@ interface Props {
   // Tier-first browser: when set, the leading crumb is this drive (server &
   // tier) rather than a generic "root", with an "All storage" step before it
   // for multi-drive users. onNavigateDrive goes to the drive's root; onNavigate-
-  // AllStorage goes to the super-level drive picker.
-  drive?: { id: string; label: string; type: 'nvme' | 'hdd'; showAllStorage: boolean }
+  // AllStorage goes to the super-level drive picker. The tier renders as a
+  // colored TierIcon rather than a "Fast"/"Standard" text label.
+  drive?: { id: string; name: string; type: 'nvme' | 'hdd'; showAllStorage: boolean }
   onNavigateDrive?: (driveId: string) => void
   onNavigateAllStorage?: () => void
   // Drag-to-move: dropping a file/folder being dragged (elsewhere in the
@@ -36,6 +38,12 @@ interface Props {
   // drop targets (useFileDrag) so hover-to-open behaves identically in both.
   getFolderDropHandlers?: (folder: Folder) => FolderDropHandlers
   dragOverFolderId?: string | null
+  // Drop target for the current folder itself (§3): unlike the ancestor
+  // crumbs above, dropping here never navigates — it's already where we are
+  // — so it stays a live target even after a drag hover-navigated in via a
+  // folder row or another crumb and left nothing else to drop onto.
+  currentDropHandlers?: FolderDropHandlers
+  dragOverCurrent?: boolean
 }
 
 // FolderBreadcrumb renders the clickable path from root → current folder.
@@ -44,7 +52,7 @@ interface Props {
 // button that navigates to the immediate parent of the current folder.
 export function FolderBreadcrumb({
   folderId, onNavigate, trailing, asUsername, drive, onNavigateDrive, onNavigateAllStorage,
-  getFolderDropHandlers, dragOverFolderId,
+  getFolderDropHandlers, dragOverFolderId, currentDropHandlers, dragOverCurrent,
 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const [containerWidth, setContainerWidth] = useState<number>(0)
@@ -129,8 +137,9 @@ export function FolderBreadcrumb({
       )}
       {drive ? (
         <Crumb
-          label={drive.label}
-          title={drive.label}
+          icon={<TierIcon type={drive.type} />}
+          label={drive.name}
+          title={drive.name}
           clickable={!isRoot}
           onClick={() => onNavigateDrive?.(drive.id)}
           current={isRoot}
@@ -164,10 +173,10 @@ export function FolderBreadcrumb({
             <Sep />
             <Crumb
               label={f.name}
-              title={f.name}
+              title={isCurrent ? `Drop here to move into "${f.name}"` : f.name}
               clickable={!isCurrent}
-              dropHandlers={!isCurrent ? getFolderDropHandlers?.(f) : undefined}
-              dragOver={!isCurrent && dragOverFolderId === f.id}
+              dropHandlers={isCurrent ? currentDropHandlers : getFolderDropHandlers?.(f)}
+              dragOver={isCurrent ? !!dragOverCurrent : dragOverFolderId === f.id}
               onClick={() => onNavigate(f.id)}
               current={isCurrent}
             />
@@ -181,8 +190,9 @@ export function FolderBreadcrumb({
 }
 
 function Crumb({
-  label, title, onClick, clickable, current, dropHandlers, dragOver,
+  icon, label, title, onClick, clickable, current, dropHandlers, dragOver,
 }: {
+  icon?: React.ReactNode
   label: string
   title: string
   onClick: () => void
@@ -195,9 +205,13 @@ function Crumb({
     return (
       <span
         title={title}
-        className={`truncate ${current ? 'font-semibold text-gray-900' : 'text-gray-500'}`}
+        {...dropHandlers}
+        className={`inline-flex items-center gap-1 truncate ${current ? 'font-semibold text-gray-900' : 'text-gray-500'} ${
+          dragOver ? 'rounded px-1 -mx-1 bg-blue-50 ring-2 ring-blue-300 ring-inset' : ''
+        }`}
       >
-        {label}
+        {icon}
+        <span className="truncate">{label}</span>
       </span>
     )
   }
@@ -206,11 +220,12 @@ function Crumb({
       onClick={onClick}
       title={title}
       {...dropHandlers}
-      className={`truncate bg-transparent border-0 p-0 cursor-pointer text-blue-600 hover:underline ${
+      className={`inline-flex items-center gap-1 truncate bg-transparent border-0 p-0 cursor-pointer text-blue-600 hover:underline ${
         dragOver ? 'rounded px-1 -mx-1 bg-blue-50 ring-2 ring-blue-300 ring-inset' : ''
       }`}
     >
-      {label}
+      {icon}
+      <span className="truncate">{label}</span>
     </button>
   )
 }

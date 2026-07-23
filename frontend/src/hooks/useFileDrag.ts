@@ -64,6 +64,11 @@ export function useFileDrag(
   // Highlights the list's own background (§2) — a fallback drop target for
   // "move to parent" when the pointer isn't over a more specific folder row.
   const [dragOverBackground, setDragOverBackground] = useState<boolean>(false)
+  // Highlights the "drop into current folder" target (§3) — a standing target
+  // for the folder actually being viewed, so a drag that hover-navigated
+  // there (via a folder row or breadcrumb crumb's spring-load timer) still
+  // has somewhere to land once the row/crumb it started over is gone.
+  const [dragOverCurrent, setDragOverCurrent] = useState<boolean>(false)
   const hoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const hoverFolderIdRef = useRef<string | null>(null)
 
@@ -258,14 +263,60 @@ export function useFileDrag(
     }
   }
 
+  // getCurrentFolderDropHandlers is the standing "drop into this folder"
+  // target for the folder actually being viewed (§3). Unlike
+  // getFolderDropHandlers it never schedules a hover-open — we're already
+  // here — so it's safe to keep mounted (in the breadcrumb's current crumb,
+  // and in a small persistent drop banner) for the whole time a drag is over
+  // the page, including after a hover-navigate elsewhere left no more specific
+  // row or crumb to drop the item onto.
+  function getCurrentFolderDropHandlers(folderId: string) {
+    return {
+      onDragEnter(e: React.DragEvent) {
+        const hasFile = e.dataTransfer.types.includes(FILE_DRAG_TYPE)
+        const hasFolder = e.dataTransfer.types.includes(FOLDER_DRAG_TYPE)
+        const hasSelection = e.dataTransfer.types.includes(SELECTION_DRAG_TYPE)
+        if (!hasFile && !hasFolder && !hasSelection) return
+        if (hasFolder && !hasSelection && draggingFolderId === folderId) return
+        e.preventDefault()
+        setDragOverCurrent(true)
+        setDragOverFolderId(null)
+        setDragOverBackground(false)
+        clearHoverTimer()
+      },
+      onDragOver(e: React.DragEvent) {
+        const hasFile = e.dataTransfer.types.includes(FILE_DRAG_TYPE)
+        const hasFolder = e.dataTransfer.types.includes(FOLDER_DRAG_TYPE)
+        const hasSelection = e.dataTransfer.types.includes(SELECTION_DRAG_TYPE)
+        if (!hasFile && !hasFolder && !hasSelection) return
+        if (hasFolder && !hasSelection && draggingFolderId === folderId) return
+        e.preventDefault()
+        e.dataTransfer.dropEffect = 'move'
+      },
+      onDragLeave(e: React.DragEvent) {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+          setDragOverCurrent(false)
+        }
+      },
+      onDrop(e: React.DragEvent) {
+        e.preventDefault()
+        setDragOverCurrent(false)
+        const payload = resolvePayload(e.dataTransfer, folderId)
+        if (payload) runMove(payload, folderId)
+      },
+    }
+  }
+
   return {
     draggingFileId,
     draggingFolderId,
     dragOverFolderId,
     dragOverBackground,
+    dragOverCurrent,
     getFileDragHandlers,
     getFolderDragHandlers,
     getFolderDropHandlers,
     getListBackgroundDropHandlers,
+    getCurrentFolderDropHandlers,
   }
 }

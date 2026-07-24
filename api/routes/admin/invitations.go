@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -26,6 +27,11 @@ type createInvitationRequest struct {
 	GrantAdmin        bool       `json:"grant_admin"`
 	GrantPremium      bool       `json:"grant_premium"`
 	InitialDriveID    *uuid.UUID `json:"initial_drive_id"`
+	// PremiumExpiresAt is an optional RFC3339 Premium trial expiry, only
+	// meaningful alongside GrantPremium (and ignored when GrantAdmin is also
+	// set — InviteService.Create normalizes this). Nil/omitted grants
+	// permanent Premium.
+	PremiumExpiresAt *string `json:"premium_expires_at"`
 }
 
 // CreateInvitation handles POST /api/v1/admin/invitations.
@@ -55,7 +61,21 @@ func (h *Handler) CreateInvitation(c *gin.Context) {
 		}
 	}
 
-	inv, err := h.invites.Create(c.Request.Context(), userID, invitedByUsername.(string), req.Email, req.InitialQuotaBytes, req.GrantAdmin, req.GrantPremium, req.InitialDriveID)
+	var premiumExpiresAt *time.Time
+	if req.PremiumExpiresAt != nil && strings.TrimSpace(*req.PremiumExpiresAt) != "" {
+		t, err := time.Parse(time.RFC3339, strings.TrimSpace(*req.PremiumExpiresAt))
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "premium_expires_at must be an RFC3339 timestamp"})
+			return
+		}
+		if !t.After(time.Now()) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "premium_expires_at must be in the future"})
+			return
+		}
+		premiumExpiresAt = &t
+	}
+
+	inv, err := h.invites.Create(c.Request.Context(), userID, invitedByUsername.(string), req.Email, req.InitialQuotaBytes, req.GrantAdmin, req.GrantPremium, req.InitialDriveID, premiumExpiresAt)
 	if err != nil {
 		if errors.Is(err, services.ErrInviteAlreadyPending) {
 			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})

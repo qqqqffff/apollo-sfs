@@ -87,6 +87,11 @@ func (h *Handler) CreateSubscription(c *gin.Context) {
 	ctx := c.Request.Context()
 	sandbox := middleware.SandboxEnabled(c)
 
+	if user.PremiumPurchaseBlocked {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "premium purchases are restricted on this account"})
+		return
+	}
+
 	subscribed, err := h.queries.HasActivePremiumSubscription(ctx, user.Username)
 	if err != nil {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "check subscription"})

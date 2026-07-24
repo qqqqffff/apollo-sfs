@@ -300,6 +300,7 @@ export async function listMyOrders(): Promise<UserOrder[]> {
 export type NotificationKind =
   | 'capacity_provisioned' | 'payment_required' | 'action_pending' | 'share_received'
   | 'subscription_cancelled' | 'quota_changed' | 'email_backup_completed' | 'backup_stale'
+  | 'role_changed'
   // Admin-only categories (empty for non-admin users).
   | 'invitation_accepted' | 'order_received' | 'email_received' | 'alarm_triggered'
 

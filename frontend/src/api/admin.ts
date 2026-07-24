@@ -172,13 +172,14 @@ export function listInvitations(cursor?: string) {
   return get<PageResult<Invitation>>(`/admin/invitations${qs}`)
 }
 
-export function createInvitation(email: string, initialQuotaBytes: number, grantAdmin = false, grantPremium = false, initialDriveId?: string) {
+export function createInvitation(email: string, initialQuotaBytes: number, grantAdmin = false, grantPremium = false, initialDriveId?: string, premiumExpiresAt?: string) {
   return post<Invitation>('/admin/invitations', {
     email,
     initial_quota_bytes: initialQuotaBytes,
     grant_admin: grantAdmin,
     grant_premium: grantPremium,
     ...(initialDriveId ? { initial_drive_id: initialDriveId } : {}),
+    ...(premiumExpiresAt ? { premium_expires_at: premiumExpiresAt } : {}),
   })
 }
 
@@ -524,6 +525,23 @@ export function suspendUser(username: string, violationCode: string, comments: s
 
 export function pardonUser(username: string) {
   return post<{ message: string }>(`/admin/users/${encodeURIComponent(username)}/pardon`)
+}
+
+// ── Role editor / account deletion ────────────────────────────────────────────
+
+export interface UpdateUserRoleBody {
+  role: 'admin' | 'premium' | 'user'
+  reason: string
+  premium_expires_at?: string | null
+  block_future_premium?: boolean
+}
+
+export function updateUserRole(username: string, body: UpdateUserRoleBody) {
+  return patch<{ message: string }>(`/admin/users/${encodeURIComponent(username)}/role`, body)
+}
+
+export function deleteAdminUser(username: string, reason: string) {
+  return del<{ message: string }>(`/admin/users/${encodeURIComponent(username)}`, { reason })
 }
 
 export function listUserBans(status: BanStatus, cursor?: string, limit?: number) {

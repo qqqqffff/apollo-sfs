@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 
@@ -36,7 +37,7 @@ type Handler struct {
 	minioStandardEndpoint string
 	// minioEndpoint / minioUseSSL describe the primary (fast) MinIO instance, used
 	// by the sync to register/refresh its server row.
-	minioEndpoint string
+	minioEndpoint  string
 	minioAccessKey string
 	minioSecretKey string
 	minioUseSSL    bool
@@ -107,6 +108,50 @@ type Handler struct {
 	// reconcile drives the MinIO <-> Postgres reconciliation heartbeat (see
 	// SetReconciliationService); nil causes the endpoints to 503.
 	reconcile *services.ReconciliationService
+
+	// emailSvc sends the mandatory role-change/account-deletion notices (see
+	// SetEmailService); nil skips them (local dev without SMTP configured).
+	emailSvc *services.EmailService
+	// paypalClients resolves the live/sandbox PayPal client for cancelling a
+	// user's real subscription when their role changes away from Premium or
+	// their account is deleted (see SetPayPalClients).
+	paypalClients services.PayPalClients
+	// paymentSvc applies the local premium-teardown side effects (KC group,
+	// API keys) alongside a role change or deletion (see SetPaymentService).
+	paymentSvc PremiumRevoker
+}
+
+// PremiumRevoker is the subset of *services.PaymentService used by the role
+// editor and delete-user endpoints to tear down premium access. Mirrors
+// routes/orders.PremiumRevoker (kept separate so this package doesn't import
+// routes/orders just for the interface).
+type PremiumRevoker interface {
+	RevokeSubscription(ctx context.Context, subscriptionID, status, reason string) error
+	RevokePremiumAllocation(ctx context.Context, username string) error
+}
+
+// Compile-time check: *services.PaymentService satisfies PremiumRevoker.
+var _ PremiumRevoker = (*services.PaymentService)(nil)
+
+// SetEmailService installs the mailer used to send the mandatory
+// role-change/account-deletion notices. Wired from main once constructed;
+// nil is tolerated and simply skips sending (logged by the caller).
+func (h *Handler) SetEmailService(svc *services.EmailService) {
+	h.emailSvc = svc
+}
+
+// SetPayPalClients installs the live/sandbox PayPal clients used to cancel a
+// real subscription on a role change away from Premium or an account
+// deletion. Wired from main once constructed.
+func (h *Handler) SetPayPalClients(pc services.PayPalClients) {
+	h.paypalClients = pc
+}
+
+// SetPaymentService installs the premium-teardown side-effect applier used
+// by the role editor and delete-user endpoints. Wired from main once
+// constructed.
+func (h *Handler) SetPaymentService(svc PremiumRevoker) {
+	h.paymentSvc = svc
 }
 
 // SetDeploymentInfo installs the deployment version/git branch labels

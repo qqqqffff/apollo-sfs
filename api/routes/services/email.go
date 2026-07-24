@@ -383,6 +383,49 @@ func (s *EmailService) SendExpansionCancellation(
 	)
 }
 
+// SendPremiumRoleCancelled notifies a user that an admin removed their
+// Premium access via the admin Users page's role editor. hadPaypalSubscription
+// is true when a real PayPal subscription existed and was cancelled;
+// blockedFuturePurchase is true when the admin also blocked future Premium
+// purchases (only meaningful on a demotion to a regular user). Mandatory —
+// always called, regardless of user notification preferences, whenever an
+// active Premium membership is changed away.
+func (s *EmailService) SendPremiumRoleCancelled(
+	ctx context.Context,
+	toEmail, reason string,
+	hadPaypalSubscription, blockedFuturePurchase bool,
+) error {
+	return s.enqueue(ctx, toEmail,
+		fmt.Sprintf("Your Premium access was removed — %s", s.appName),
+		"role_premium_cancelled",
+		map[string]any{
+			"AppName":               s.appName,
+			"AppURL":                s.appURL,
+			"Email":                 toEmail,
+			"Reason":                reason,
+			"HadPaypalSubscription": hadPaypalSubscription,
+			"BlockedFuturePurchase": blockedFuturePurchase,
+		},
+	)
+}
+
+// SendAccountDeleted notifies a user that an admin permanently deleted their
+// account and all files via the admin Users page's delete action. Mandatory —
+// always called. Must be enqueued before the users row is deleted since
+// toEmail is the only copy of the address kept around afterward.
+func (s *EmailService) SendAccountDeleted(ctx context.Context, toEmail, reason string) error {
+	return s.enqueue(ctx, toEmail,
+		fmt.Sprintf("Your account has been deleted — %s", s.appName),
+		"account_deleted",
+		map[string]any{
+			"AppName": s.appName,
+			"AppURL":  s.appURL,
+			"Email":   toEmail,
+			"Reason":  reason,
+		},
+	)
+}
+
 // SendExpansionInvoice emails a custom-capacity invoice to the user, attaching
 // the invoice PDF when provided. reviewURL is empty when the admin chose not
 // to include the website review link.

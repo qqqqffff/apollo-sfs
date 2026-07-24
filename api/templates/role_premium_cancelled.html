@@ -1,0 +1,64 @@
+{{/*
+  Template name : "role_premium_cancelled"
+  Trigger       : Admin changes a user's role away from Premium (to Admin or
+                  User) via the admin Users page's role editor
+  Data fields   :
+    AppName             string
+    AppURL              string
+    Email               string
+    Reason              string  — admin's required reason
+    HadPaypalSubscription bool  — true when a real PayPal subscription existed
+    BlockedFuturePurchase bool  — true when the admin also blocked future purchases
+*/}}
+{{define "role_premium_cancelled"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <title>Your Premium access was removed — {{.AppName}}</title>
+</head>
+<body>
+  <div class="email-wrapper">
+    <div class="email-card">
+
+      {{template "header" .}}
+
+      <div class="email-body">
+        <h1>Premium access removed</h1>
+        <p>
+          Your Premium access on <strong>{{.AppName}}</strong> has been removed by an administrator.
+        </p>
+
+        <table style="width:100%;border-collapse:collapse;margin:20px 0;">
+          <tr>
+            <td style="padding:8px 12px;font-weight:600;color:#374151;width:40%;vertical-align:top;border-bottom:1px solid #e5e7eb;">Reason</td>
+            <td style="padding:8px 12px;color:#111827;border-bottom:1px solid #e5e7eb;">{{.Reason}}</td>
+          </tr>
+          {{if .HadPaypalSubscription}}
+          <tr>
+            <td style="padding:8px 12px;font-weight:600;color:#374151;vertical-align:top;{{if .BlockedFuturePurchase}}border-bottom:1px solid #e5e7eb;{{end}}">PayPal subscription</td>
+            <td style="padding:8px 12px;color:#111827;{{if .BlockedFuturePurchase}}border-bottom:1px solid #e5e7eb;{{end}}">Your subscription has been cancelled and you will not be charged again.</td>
+          </tr>
+          {{end}}
+          {{if .BlockedFuturePurchase}}
+          <tr>
+            <td style="padding:8px 12px;font-weight:600;color:#374151;vertical-align:top;">Future purchases</td>
+            <td style="padding:8px 12px;color:#111827;">You have also been restricted from purchasing a new Premium subscription.</td>
+          </tr>
+          {{end}}
+        </table>
+
+        <p style="font-size:14px;color:#6b7280;">
+          If you have questions about this decision, please contact support.
+        </p>
+      </div>
+
+      {{template "footer" .}}
+
+    </div>
+  </div>
+</body>
+</html>
+{{end}}

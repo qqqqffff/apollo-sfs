@@ -67,7 +67,11 @@ func NewInviteService(q *db.Queries, emailSvc *EmailService, appURL string, toke
 // invitedByUserID is the Keycloak sub UUID of the admin creating the invite.
 // invitedByUsername is used in the email copy ("X invited you to apollo-sfs").
 // initialDriveID pins the user to a specific drive on registration; nil means
-// auto-select via SelectDriveForQuota.
+// auto-select via SelectDriveForQuota. premiumExpiresAt is an optional
+// Premium "trial" expiry applied to the invited user at registration time
+// (see AuthService.provisionInvitedAppUser) — meaningful only alongside
+// grantPremium (and ignored when grantAdmin is also set, since an admin's
+// premium is implicit, not a real trial); nil means a permanent grant.
 //
 // Returns ErrInviteAlreadyPending if a pending invite for this email already exists.
 func (s *InviteService) Create(
@@ -79,6 +83,7 @@ func (s *InviteService) Create(
 	grantAdmin bool,
 	grantPremium bool,
 	initialDriveID *uuid.UUID,
+	premiumExpiresAt *time.Time,
 ) (*models.Invitation, error) {
 	token, err := generateInviteToken()
 	if err != nil {
@@ -91,6 +96,12 @@ func (s *InviteService) Create(
 
 	expiresAt := time.Now().UTC().Add(s.tokenTTL)
 
+	// A trial expiry only makes sense alongside a plain premium grant — an
+	// admin's premium is implicit, not a real trial that can lapse.
+	if !grantPremium || grantAdmin {
+		premiumExpiresAt = nil
+	}
+
 	inv := &models.Invitation{
 		InvitedByUserID:   invitedByUserID,
 		Email:             email,
@@ -100,6 +111,7 @@ func (s *InviteService) Create(
 		GrantAdmin:        grantAdmin,
 		GrantPremium:      grantPremium,
 		InitialDriveID:    initialDriveID,
+		PremiumExpiresAt:  premiumExpiresAt,
 	}
 
 	if err := s.queries.CreateInvitation(ctx, inv); err != nil {

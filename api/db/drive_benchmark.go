@@ -20,25 +20,36 @@ import (
 // pushing hostname on every /internal/node-metrics call and tells the agent
 // to run the benchmark in its response.
 
-// RequestBenchmarkOnAllNodes marks every active node as due for a benchmark run.
+// RequestBenchmarkOnAllNodes marks every active node as due for a benchmark
+// run. Also clears any leftover live-progress state from a prior run (e.g.
+// one where the final result POST never made it — see ClearBenchmarkProgress)
+// so a fresh trigger never shows stale "currently benchmarking" info.
 func (q *Queries) RequestBenchmarkOnAllNodes(ctx context.Context) error {
-	_, err := q.db.ExecContext(ctx,
-		`UPDATE nodes SET benchmark_requested_at = NOW() WHERE is_active = true`)
+	_, err := q.db.ExecContext(ctx, `
+		UPDATE nodes
+		SET benchmark_requested_at = NOW(), benchmark_current_label = NULL, benchmark_current_step = NULL
+		WHERE is_active = true
+	`)
 	if err != nil {
 		return fmt.Errorf("RequestBenchmarkOnAllNodes: %w", err)
 	}
 	return nil
 }
 
-// CountPendingBenchmarkRequests returns how many nodes still have an
-// unconsumed benchmark request, so the trigger endpoint can refuse to start a
-// second run while one is already in flight.
-func (q *Queries) CountPendingBenchmarkRequests(ctx context.Context) (int, error) {
+// CountInFlightBenchmarkNodes returns how many active nodes are still part of
+// an in-flight run — either they haven't yet picked up the trigger
+// (benchmark_requested_at still set) or they have and are actively working
+// through a disk (benchmark_current_step set, reported by SetBenchmarkProgress).
+// Used both to refuse a second trigger while one is running and, paired with
+// CountActiveNodes, to compute the admin page's completed/total progress.
+func (q *Queries) CountInFlightBenchmarkNodes(ctx context.Context) (int, error) {
 	var n int
-	err := q.db.QueryRowContext(ctx,
-		`SELECT count(*) FROM nodes WHERE benchmark_requested_at IS NOT NULL`).Scan(&n)
+	err := q.db.QueryRowContext(ctx, `
+		SELECT count(*) FROM nodes
+		WHERE benchmark_requested_at IS NOT NULL OR benchmark_current_step IS NOT NULL
+	`).Scan(&n)
 	if err != nil {
-		return 0, fmt.Errorf("CountPendingBenchmarkRequests: %w", err)
+		return 0, fmt.Errorf("CountInFlightBenchmarkNodes: %w", err)
 	}
 	return n, nil
 }
@@ -61,10 +72,11 @@ func (q *Queries) ConsumeBenchmarkRequest(ctx context.Context, hostname string) 
 }
 
 // CountActiveNodes returns how many nodes are active — i.e. how many benchmark
-// requests a triggered run fans out to. Paired with CountPendingBenchmarkRequests
+// requests a triggered run fans out to. Paired with CountInFlightBenchmarkNodes
 // this lets the admin page show real completed/total progress (one node's
-// result arrives in a single atomic push, so per-node is the finest-grained
-// progress signal available) rather than a purely time-based estimate.
+// result arrives in a single atomic push, so per-node is the coarsest-grained
+// signal; SetBenchmarkProgress/ListRunningBenchmarkNodes below add the
+// finer-grained "which disk, which step" detail within that).
 func (q *Queries) CountActiveNodes(ctx context.Context) (int, error) {
 	var n int
 	err := q.db.QueryRowContext(ctx,
@@ -73,6 +85,76 @@ func (q *Queries) CountActiveNodes(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("CountActiveNodes: %w", err)
 	}
 	return n, nil
+}
+
+// ── Live benchmark progress ─────────────────────────────────────────────────
+//
+// Ephemeral, best-effort "which disk, which step is running right now" state,
+// reported by node-agent (POST /internal/node-benchmark-progress) right
+// before it starts each step of each disk. Not part of the recorded result —
+// just live telemetry for the admin page's progress bar while a run is in
+// flight.
+
+// SetBenchmarkProgress records the disk label and step a node's agent is
+// currently executing.
+func (q *Queries) SetBenchmarkProgress(ctx context.Context, nodeID uuid.UUID, label, step string) error {
+	_, err := q.db.ExecContext(ctx,
+		`UPDATE nodes SET benchmark_current_label = $2, benchmark_current_step = $3 WHERE id = $1`,
+		nodeID, label, step)
+	if err != nil {
+		return fmt.Errorf("SetBenchmarkProgress: %w", err)
+	}
+	return nil
+}
+
+// ClearBenchmarkProgress clears a node's live progress state once its result
+// batch has been recorded (see RecordBenchmarkResults).
+func (q *Queries) ClearBenchmarkProgress(ctx context.Context, nodeID uuid.UUID) error {
+	_, err := q.db.ExecContext(ctx,
+		`UPDATE nodes SET benchmark_current_label = NULL, benchmark_current_step = NULL WHERE id = $1`,
+		nodeID)
+	if err != nil {
+		return fmt.Errorf("ClearBenchmarkProgress: %w", err)
+	}
+	return nil
+}
+
+// NodeBenchmarkProgress is one node's current disk/step, for nodes actively
+// mid-run right now.
+type NodeBenchmarkProgress struct {
+	Hostname  string
+	Label     string
+	Step      string
+	DriveType string
+}
+
+// ListRunningBenchmarkNodes returns every node currently executing a
+// benchmark step, for the admin page's live "what's happening right now"
+// display. DriveType is resolved the same way as ListNodeDiskBenchmarks.
+func (q *Queries) ListRunningBenchmarkNodes(ctx context.Context) ([]NodeBenchmarkProgress, error) {
+	rows, err := q.db.QueryContext(ctx, `
+		SELECT n.hostname, COALESCE(n.benchmark_current_label, ''), n.benchmark_current_step, COALESCE(d.drive_type, '')
+		FROM nodes n
+		LEFT JOIN LATERAL (
+			SELECT drive_type FROM drives WHERE node_id = n.id LIMIT 1
+		) d ON true
+		WHERE n.benchmark_current_step IS NOT NULL
+		ORDER BY n.hostname
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("ListRunningBenchmarkNodes: %w", err)
+	}
+	defer rows.Close()
+
+	var out []NodeBenchmarkProgress
+	for rows.Next() {
+		var r NodeBenchmarkProgress
+		if err := rows.Scan(&r.Hostname, &r.Label, &r.Step, &r.DriveType); err != nil {
+			return nil, fmt.Errorf("ListRunningBenchmarkNodes scan: %w", err)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
 
 // ── Disk benchmark results ──────────────────────────────────────────────────

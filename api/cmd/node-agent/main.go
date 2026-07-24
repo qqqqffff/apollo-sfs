@@ -48,6 +48,7 @@ func main() {
 
 	metricsEndpoint := ingestURL + "/internal/node-metrics"
 	benchmarkResultEndpoint := ingestURL + "/internal/node-benchmark-result"
+	benchmarkProgressEndpoint := ingestURL + "/internal/node-benchmark-progress"
 	// Benchmarks can take several seconds per disk (256 MiB write+fsync+read on
 	// a spinning HDD); the shared 10s client timeout is too tight for that leg.
 	client := &http.Client{Timeout: 10 * time.Second}
@@ -83,7 +84,14 @@ func main() {
 			// regular metrics push by however long the benchmark takes is an
 			// acceptable trade-off for a background collector loop.
 			log.Print("node-agent: benchmark requested, running now")
-			results := runBenchmarks()
+			results := runBenchmarks(func(label, step string) {
+				// Fire-and-forget: a dropped progress post just means the
+				// admin page's live display lags until the next step (or the
+				// final result, which always lands via postBenchmarkResults).
+				if err := postBenchmarkProgress(ctx, client, benchmarkProgressEndpoint, token, hostname, label, step); err != nil {
+					log.Printf("node-agent: post benchmark progress: %v", err)
+				}
+			})
 			if err := postBenchmarkResults(ctx, benchmarkClient, benchmarkResultEndpoint, token, hostname, results); err != nil {
 				log.Printf("node-agent: post benchmark results: %v", err)
 			}
@@ -133,6 +141,34 @@ func postBenchmarkResults(ctx context.Context, client *http.Client, endpoint, to
 	}
 	payload := models.BenchmarkResultBatch{Hostname: hostname, Results: results}
 
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-Token", token)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return errStatus(resp.StatusCode)
+	}
+	return nil
+}
+
+// postBenchmarkProgress tells node-metrics-ingest which disk/step is about to
+// run, so the admin page's progress bar can show live detail instead of just
+// a coarse per-node pending flag. Best-effort — the caller logs and moves on
+// if this fails; it never blocks or aborts the benchmark run itself.
+func postBenchmarkProgress(ctx context.Context, client *http.Client, endpoint, token, hostname, label, step string) error {
+	payload := models.BenchmarkProgressPayload{Hostname: hostname, Label: label, Step: step}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return err

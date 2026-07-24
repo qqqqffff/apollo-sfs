@@ -88,6 +88,35 @@ func (h *Handler) IngestBenchmarkResult(c *gin.Context) {
 	c.JSON(http.StatusAccepted, gin.H{"status": "accepted"})
 }
 
+// IngestBenchmarkProgress handles POST /api/v1/internal/node-benchmark-progress.
+// A per-node agent posts here right before it starts each step of each disk
+// in a benchmark run, so the admin page can show live "which disk, which
+// step" progress instead of just a coarse per-node pending flag (see
+// cmd/node-agent/benchmark.go). Best-effort: unlike the result batch, a
+// failure here doesn't affect the run itself.
+func (h *Handler) IngestBenchmarkProgress(c *gin.Context) {
+	if !h.authorized(c.GetHeader("X-Internal-Token")) {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	var payload models.BenchmarkProgressPayload
+	if err := c.ShouldBindJSON(&payload); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if payload.Hostname == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "hostname is required"})
+		return
+	}
+
+	if err := h.ingest.SetBenchmarkProgress(c.Request.Context(), payload.Hostname, payload.Label, payload.Step); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not record benchmark progress"})
+		return
+	}
+	c.JSON(http.StatusAccepted, gin.H{"status": "accepted"})
+}
+
 // authorized constant-time-compares the presented token to the configured one.
 // An empty configured token always fails (ingest disabled / fail closed).
 func (h *Handler) authorized(presented string) bool {

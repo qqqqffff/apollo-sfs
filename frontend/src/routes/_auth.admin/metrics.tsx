@@ -26,7 +26,7 @@ import {
   triggerSpeedTest,
   upsertAlarmSubscription,
 } from '../../api/admin'
-import type { AlarmType, DiskFrame, DriveFrame, DriveStat, DriveSummary, LatestTestRunResponse, MetricsFrame, NodeDisk, NodeFrame, NodeSummary, TestCase, TestProgressResponse, TestRun, TestRunReport, TestSuiteEntry, TierBenchmarkStat } from '../../api/admin'
+import type { AlarmType, BenchmarkNodeProgress, BenchmarkStep, DiskFrame, DriveFrame, DriveStat, DriveSummary, LatestTestRunResponse, MetricsFrame, NodeDisk, NodeFrame, NodeSummary, TestCase, TestProgressResponse, TestRun, TestRunReport, TestSuiteEntry, TierBenchmarkStat } from '../../api/admin'
 import { ApiError } from '../../api/client'
 import { useMetricsStream } from '../../hooks/useMetricsStream'
 import { LineGraph } from '../../components/LineGraph'
@@ -994,7 +994,11 @@ function RouteComponent() {
             <p className="text-sm text-gray-400 m-0">Loading…</p>
           )}
           {benchmarkRunning && (
-            <BenchmarkProgress completed={driveBenchmark?.completed_nodes ?? 0} total={driveBenchmark?.total_nodes ?? 0} />
+            <BenchmarkProgress
+              completed={driveBenchmark?.completed_nodes ?? 0}
+              total={driveBenchmark?.total_nodes ?? 0}
+              running={driveBenchmark?.running ?? []}
+            />
           )}
           {!driveBenchmarkLoading && !benchmarkRunning && !driveBenchmark?.fast && !driveBenchmark?.standard && (
             <p className="text-sm text-gray-400 m-0">None — no benchmark has been run yet. Click "Run benchmark" to test both tiers.</p>
@@ -1238,10 +1242,26 @@ function SpeedTestCard({ result, onRun, pending, selected, onClick }: {
 // ── Drive benchmark progress ─────────────────────────────────────────────────
 // Determinate progress: a node's whole disk batch (sequential + random pass,
 // every configured disk) arrives in one atomic push (see
-// docs/drive_benchmark_setup.md), so completed/total nodes is the finest real
-// progress signal the server can offer — usually just 0/2 → 1/2 → 2/2 for the
-// manager + Pi 5 topology, but it's honest rather than a fake timer-based fill.
-function BenchmarkProgress({ completed, total }: { completed: number; total: number }) {
+// docs/drive_benchmark_setup.md), so completed/total nodes is the coarse fill
+// — usually just 0/2 → 1/2 → 2/2 for the manager + Pi 5 topology, but it's
+// honest rather than a fake timer-based fill. `running` fills in the detail
+// within that: node-agent reports its current disk/step live, so we can show
+// exactly what's executing right now rather than a generic "benchmarking…".
+
+const BENCHMARK_STEP_LABELS: Record<BenchmarkStep, string> = {
+  seq_write: 'sequential write',
+  seq_read: 'sequential read',
+  random_write: 'random write (4K)',
+  random_read: 'random read (4K)',
+}
+
+function tierLabel(driveType: string): string {
+  if (driveType === 'nvme') return 'Fast (NVMe)'
+  if (driveType === 'hdd') return 'Standard (HDD)'
+  return driveType || 'Unknown tier'
+}
+
+function BenchmarkProgress({ completed, total, running }: { completed: number; total: number; running: BenchmarkNodeProgress[] }) {
   const pct = total > 0 ? Math.min(100, (completed / total) * 100) : 0
   return (
     <div>
@@ -1257,6 +1277,19 @@ function BenchmarkProgress({ completed, total }: { completed: number; total: num
           style={{ width: `${Math.max(pct, 6)}%` }}
         />
       </div>
+      {running.length > 0 && (
+        <ul className="flex flex-col gap-1 pl-0 list-none mt-2.5">
+          {running.map((r) => (
+            <li key={r.hostname} className="flex items-center gap-2 text-xs">
+              <span className="w-1.5 h-1.5 rounded-full bg-blue-500 shrink-0 animate-pulse" />
+              <span className="text-gray-600">{tierLabel(r.drive_type)}</span>
+              <span className="text-gray-400">·</span>
+              <span className="text-gray-600 font-medium">{r.label}</span>
+              <span className="text-gray-400">— {BENCHMARK_STEP_LABELS[r.step] ?? r.step}</span>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   )
 }

@@ -645,13 +645,24 @@ export interface NodeDiskBenchmarkRow {
   drive_type: string
 }
 
+export type BenchmarkStep = 'seq_write' | 'seq_read' | 'random_write' | 'random_read'
+
+export interface BenchmarkNodeProgress {
+  hostname: string
+  label: string
+  step: BenchmarkStep
+  drive_type: string
+}
+
 export interface DriveBenchmarkDetail {
   /** True while a triggered run hasn't been picked up/reported by every node yet. */
   pending: boolean
   /** Active nodes that have reported back since the last trigger (or since always, when nothing is pending). */
   completed_nodes: number
-  /** Every active node a triggered run fans out to — a node's whole disk batch arrives in one atomic push, so this is the finest progress granularity available. */
+  /** Every active node a triggered run fans out to — a node's whole disk batch arrives in one atomic push, so this is the coarsest progress granularity available. */
   total_nodes: number
+  /** Finer-grained detail within that: which disk/step each still-in-flight node is executing right now. */
+  running?: BenchmarkNodeProgress[]
   disks: NodeDiskBenchmarkRow[]
   fast?: TierBenchmarkStat
   standard?: TierBenchmarkStat

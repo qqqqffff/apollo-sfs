@@ -2,6 +2,29 @@ package models
 
 import "time"
 
+// Benchmark step identifiers, shared between node-agent (which reports them
+// via BenchmarkProgressPayload as it works through each disk) and the admin
+// page (which shows them in the progress bar). One physical disk goes through
+// all four, in this order, before node-agent moves to the next disk.
+const (
+	BenchmarkStepSeqWrite    = "seq_write"
+	BenchmarkStepSeqRead     = "seq_read"
+	BenchmarkStepRandomWrite = "random_write"
+	BenchmarkStepRandomRead  = "random_read"
+)
+
+// BenchmarkProgressPayload is what node-agent POSTs to
+// /internal/node-benchmark-progress right before starting each step of a
+// benchmark run, so the admin page can show live "which disk, which step"
+// progress instead of just a coarse per-node pending flag. Fire-and-forget:
+// node-agent doesn't retry a failed post, since the next step's post (or the
+// final result batch) supersedes it anyway — see cmd/node-agent/benchmark.go.
+type BenchmarkProgressPayload struct {
+	Hostname string `json:"hostname"`
+	Label    string `json:"label"`
+	Step     string `json:"step"`
+}
+
 // BenchmarkResultPayload is one physical disk's result within the batch
 // node-agent POSTs to /internal/node-benchmark-result after running its local
 // benchmark (see cmd/node-agent/benchmark.go): a sequential ("same sector")

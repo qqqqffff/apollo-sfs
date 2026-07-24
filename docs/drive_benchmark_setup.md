@@ -23,7 +23,8 @@ to tell a specific node "run a benchmark now."
 Instead, the request rides that same push:
 
 1. `POST /admin/system/drives/benchmark` sets `nodes.benchmark_requested_at =
-   NOW()` on every active node (409 if a run is already pending).
+   NOW()` on every active node (409 if a run is already in flight — see
+   `CountInFlightBenchmarkNodes` below).
 2. The next time that node's agent pushes its metrics sample,
    `node-metrics-ingest`'s `POST /internal/node-metrics` handler
    atomically checks-and-clears the column for that hostname and replies
@@ -39,11 +40,35 @@ Because of this, a trigger doesn't complete in one HTTP round-trip like the
 network speed test does — the admin metrics page polls `GET
 /admin/system/drives/benchmark` every few seconds after clicking "Run
 benchmark" until fresh results show up (same shape as the "Run tests"
-progress polling). That same response carries `completed_nodes`/`total_nodes`
-(`nodes.benchmark_requested_at` cleared vs. every active node), which is the
-finest-grained real progress signal the server can offer — a node's whole
-disk batch arrives in one atomic push, so progress only ever advances in
-per-node steps — and is what drives the progress bar on that card.
+progress polling).
+
+### Progress: per-node fill, per-disk/per-step detail
+
+`benchmark_requested_at` is cleared the moment a node's agent picks up the
+trigger — i.e. *before* it starts running, not after it finishes — so it alone
+can't distinguish "actively benchmarking" from "done." A node counts as
+in-flight (`CountInFlightBenchmarkNodes`) if either `benchmark_requested_at`
+is still set (hasn't picked up the trigger yet) or `benchmark_current_step` is
+set (picked it up and is actively working through a disk — see below); this
+is also what the trigger endpoint's 409-conflict check uses, so a second
+click can't stack a request on top of nodes that are still running. The admin
+response's `completed_nodes`/`total_nodes` (`total_nodes` minus that in-flight
+count) is the progress bar's fill — a node's whole disk batch arrives in one
+atomic push, so this alone only ever advances in coarse per-node steps.
+
+For the finer "which disk, which step" detail, `node-agent` POSTs to a second
+best-effort endpoint, `POST /internal/node-benchmark-progress`
+(`{hostname, label, step}`, `step` one of `seq_write`/`seq_read`/
+`random_write`/`random_read`), right before it starts each of the four steps
+on each disk — populating `nodes.benchmark_current_label`/
+`benchmark_current_step`. The admin response's `running` array
+(`ListRunningBenchmarkNodes`) surfaces this per in-flight node, and is cleared
+the moment that node's real result batch is recorded
+(`RecordBenchmarkResults` → `ClearBenchmarkProgress`) or a fresh trigger is
+issued (`RequestBenchmarkOnAllNodes` also clears it, so a dropped final POST
+from a prior run can never leak stale "currently benchmarking" info into the
+next one). This progress push is fire-and-forget — node-agent doesn't retry a
+failed one, since the next step's push (or the final result) supersedes it.
 
 ## Writable scratch directories (manual host setup required)
 
@@ -130,6 +155,8 @@ cache-inflated rather than presenting them as trustworthy.
 ## Data model
 
 - `nodes.benchmark_requested_at` — pending-trigger flag, see above.
+- `nodes.benchmark_current_label`/`benchmark_current_step` — ephemeral live
+  progress, see above. Not part of the recorded result.
 - `node_disk_benchmarks` — latest result per physical disk (upserted on every
   run, no history — this is an on-demand probe, not a continuous sample):
   `seq_write_mbps`/`seq_read_mbps` (sequential pass), `random_write_mbps`/
@@ -146,7 +173,7 @@ cache-inflated rather than presenting them as trustworthy.
 | Endpoint | Auth | Purpose |
 |---|---|---|
 | `POST /admin/system/drives/benchmark` | Admin | Trigger a run on every active node |
-| `GET /admin/system/drives/benchmark` | Admin | Per-disk results + fast/standard averages, for the metrics page |
+| `GET /admin/system/drives/benchmark` | Admin | Per-disk results + fast/standard averages + live progress (`completed_nodes`/`total_nodes`/`running`), for the metrics page |
 | `GET /api/v1/drive-benchmark` | None | Just the two tier averages (or `{"available": false}` before the first run) — powers the home page, registration, and Add Storage modal promo cards |
 
 ## Blog post

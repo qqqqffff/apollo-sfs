@@ -122,8 +122,9 @@ func (s *NodeIngestService) ConsumeBenchmarkRequest(ctx context.Context, hostnam
 }
 
 // RecordBenchmarkResults persists every disk result in a benchmark batch
-// pushed by a node's agent. Pushes from unregistered hostnames are logged and
-// ignored, mirroring UpdateNodeMetrics.
+// pushed by a node's agent, then clears that node's live progress state (see
+// SetBenchmarkProgress) now that the run has actually finished. Pushes from
+// unregistered hostnames are logged and ignored, mirroring UpdateNodeMetrics.
 func (s *NodeIngestService) RecordBenchmarkResults(ctx context.Context, batch *models.BenchmarkResultBatch) error {
 	node, err := s.queries.GetNodeByHostname(ctx, batch.Hostname)
 	if err != nil {
@@ -152,5 +153,25 @@ func (s *NodeIngestService) RecordBenchmarkResults(ctx context.Context, batch *m
 			log.Printf("node-ingest: upsert disk benchmark %q: %v", r.Label, err)
 		}
 	}
+	if err := s.queries.ClearBenchmarkProgress(ctx, node.ID); err != nil {
+		log.Printf("node-ingest: clear benchmark progress: %v", err)
+	}
 	return nil
+}
+
+// SetBenchmarkProgress records which disk/step a node's agent is currently
+// executing, reported right before it starts each step (see
+// cmd/node-agent/benchmark.go). Pushes from unregistered hostnames are logged
+// and ignored, mirroring UpdateNodeMetrics; a failure here never fails the
+// benchmark run itself — it's purely a live-progress display concern.
+func (s *NodeIngestService) SetBenchmarkProgress(ctx context.Context, hostname, label, step string) error {
+	node, err := s.queries.GetNodeByHostname(ctx, hostname)
+	if err != nil {
+		return err
+	}
+	if node == nil {
+		log.Printf("node-ingest: benchmark progress from unknown hostname %q (ignored)", hostname)
+		return nil
+	}
+	return s.queries.SetBenchmarkProgress(ctx, node.ID, label, step)
 }

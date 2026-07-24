@@ -83,11 +83,14 @@ func configuredBenchmarkMounts() []diskMount {
 // directory isn't writable (e.g. NODE_BENCHMARK_MOUNTS misconfigured, or the
 // host directory wasn't created — see docs/drive_benchmark_setup.md) reports
 // an error for that disk only; the others still run.
-func runBenchmarks() []models.BenchmarkResultPayload {
+// report, if non-nil, is called with (disk label, step) right before each
+// step starts, so the caller can push live progress upstream — see
+// cmd/node-agent/main.go's use of models.BenchmarkProgressPayload.
+func runBenchmarks(report func(label, step string)) []models.BenchmarkResultPayload {
 	mounts := configuredBenchmarkMounts()
 	out := make([]models.BenchmarkResultPayload, 0, len(mounts))
 	for _, m := range mounts {
-		out = append(out, benchmarkDisk(m))
+		out = append(out, benchmarkDisk(m, report))
 	}
 	return out
 }
@@ -111,10 +114,16 @@ func runBenchmarks() []models.BenchmarkResultPayload {
 // O_DIRECT (notably tmpfs); a failed O_DIRECT open falls back to a regular
 // buffered open, and the result's DirectIO flag is cleared so the caller knows
 // that particular disk's numbers may still be cache-inflated.
-func benchmarkDisk(m diskMount) models.BenchmarkResultPayload {
+func benchmarkDisk(m diskMount, report func(label, step string)) models.BenchmarkResultPayload {
 	result := models.BenchmarkResultPayload{Label: m.label, SizeBytes: benchmarkSeqFileSizeBytes, DirectIO: true}
 	path := filepath.Join(m.mount, benchmarkFileName)
 	defer os.Remove(path)
+
+	notify := func(step string) {
+		if report != nil {
+			report(m.label, step)
+		}
+	}
 
 	seqChunk, err := alignedRandomBuffer(benchmarkSeqChunkBytes)
 	if err != nil {
@@ -122,6 +131,7 @@ func benchmarkDisk(m diskMount) models.BenchmarkResultPayload {
 		return result
 	}
 
+	notify(models.BenchmarkStepSeqWrite)
 	seqWriteMbps, directIO, err := benchmarkSeqWrite(path, seqChunk)
 	if err != nil {
 		result.Error = err.Error()
@@ -130,6 +140,7 @@ func benchmarkDisk(m diskMount) models.BenchmarkResultPayload {
 	result.SeqWriteMbps = &seqWriteMbps
 	result.DirectIO = result.DirectIO && directIO
 
+	notify(models.BenchmarkStepSeqRead)
 	seqReadMbps, directIO, err := benchmarkSeqRead(path)
 	if err != nil {
 		result.Error = err.Error()
@@ -138,6 +149,7 @@ func benchmarkDisk(m diskMount) models.BenchmarkResultPayload {
 	result.SeqReadMbps = &seqReadMbps
 	result.DirectIO = result.DirectIO && directIO
 
+	notify(models.BenchmarkStepRandomWrite)
 	randWriteMbps, randWriteIOPS, directIO, err := benchmarkRandomWrite(path)
 	if err != nil {
 		result.Error = err.Error()
@@ -147,6 +159,7 @@ func benchmarkDisk(m diskMount) models.BenchmarkResultPayload {
 	result.RandomWriteIOPS = &randWriteIOPS
 	result.DirectIO = result.DirectIO && directIO
 
+	notify(models.BenchmarkStepRandomRead)
 	randReadMbps, randReadIOPS, directIO, err := benchmarkRandomRead(path)
 	if err != nil {
 		result.Error = err.Error()

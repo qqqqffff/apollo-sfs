@@ -17,12 +17,13 @@ import {
 import { STORAGE_PLANS } from '../../api/billing'
 import { ApiError } from '../../api/client'
 import { useNotification } from '../../context/NotificationContext'
+import { GroupRegistrationSection } from '../../components/GroupRegistrationSection'
 
-type Tab = 'access' | 'invitations'
+type Tab = 'access' | 'invitations' | 'groups'
 
 export const Route = createFileRoute('/_auth/admin/requests')({
   validateSearch: (search: Record<string, unknown>): { tab?: Tab } => {
-    const tab = search.tab === 'access' || search.tab === 'invitations' ? search.tab : undefined
+    const tab = search.tab === 'access' || search.tab === 'invitations' || search.tab === 'groups' ? search.tab : undefined
     return { tab }
   },
   component: RouteComponent,
@@ -53,6 +54,7 @@ function RouteComponent() {
         {([
           { key: 'access',      label: 'Access Requests' },
           { key: 'invitations', label: 'Invitations' },
+          { key: 'groups',      label: 'Group Registration' },
         ] as { key: Tab; label: string }[]).map(({ key, label }) => (
           <button
             key={key}
@@ -71,6 +73,7 @@ function RouteComponent() {
 
       {activeTab === 'access' && <InterestSection />}
       {activeTab === 'invitations' && <InvitationsSection />}
+      {activeTab === 'groups' && <GroupRegistrationSection />}
     </div>
   )
 }

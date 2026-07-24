@@ -179,6 +179,11 @@ func main() {
 
 	inviteSvc := services.NewInviteService(queries, emailSvc, cfg.AppBaseURL, 0)
 
+	// Limited user group registration: admin-configured slot bundles claimed
+	// from the public /group-invite page. The background loop sends the
+	// opt-in "last chance" reminder a day before a group's link expires.
+	regGroupSvc := services.NewRegistrationGroupService(queries, emailSvc, cfg.AppBaseURL)
+
 	metricsSvc := services.NewMetricsService(queries, cfg.DiskStatsPath)
 
 	// Daily MinIO <-> Postgres reconciliation heartbeat (4am server-local time —
@@ -210,9 +215,10 @@ func main() {
 	go emailSvc.Start(context.Background())
 	go recogSvc.Start(context.Background())
 	go reconcileSvc.DailyLoop(context.Background(), 4, 0)
+	go regGroupSvc.ExpiryReminderLoop(context.Background())
 
 	shutdownCh := make(chan struct{})
-	r := setupRouter(cfg, queries, oidcVerifier, authSvc, fileSvc, folderSvc, favSvc, inviteSvc, metricsSvc, registry, geoReader, emailSvc, inboundEmailSvc, recogSvc, reconcileSvc, shutdownCh)
+	r := setupRouter(cfg, queries, oidcVerifier, authSvc, fileSvc, folderSvc, favSvc, inviteSvc, regGroupSvc, metricsSvc, registry, geoReader, emailSvc, inboundEmailSvc, recogSvc, reconcileSvc, shutdownCh)
 
 	addr := ":" + cfg.Port
 	log.Printf("apollo-sfs API listening on %s", addr)
@@ -243,7 +249,7 @@ func main() {
 	log.Println("server stopped")
 }
 
-func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVerifier, authSvc *services.AuthService, fileSvc *services.FileService, folderSvc *services.FolderService, favSvc *services.FavoriteService, inviteSvc *services.InviteService, metricsSvc *services.MetricsService, registry *services.MinIORegistry, geoReader *geoip2.Reader, emailSvc *services.EmailService, inboundEmailSvc *services.InboundEmailService, recogSvc *services.RecognitionService, reconcileSvc *services.ReconciliationService, shutdownCh chan struct{}) *gin.Engine {
+func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVerifier, authSvc *services.AuthService, fileSvc *services.FileService, folderSvc *services.FolderService, favSvc *services.FavoriteService, inviteSvc *services.InviteService, regGroupSvc *services.RegistrationGroupService, metricsSvc *services.MetricsService, registry *services.MinIORegistry, geoReader *geoip2.Reader, emailSvc *services.EmailService, inboundEmailSvc *services.InboundEmailService, recogSvc *services.RecognitionService, reconcileSvc *services.ReconciliationService, shutdownCh chan struct{}) *gin.Engine {
 	r := gin.New()
 	r.Use(gin.Logger())
 	r.Use(gin.Recovery())
@@ -283,6 +289,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	routes.SetAPIKeyService(h, apiKeySvc)
 	routes.SetMathGameService(h, services.NewMathGameService(queries))
 	routes.SetShareService(h, services.NewShareService(queries, emailSvc, cfg.AppBaseURL))
+	routes.SetRegistrationGroupService(h, regGroupSvc)
 	routes.SetRecognitionService(h, recogSvc)
 	// Fair upload bandwidth cap: budget is derived automatically from the WAN
 	// speed test below (services.BandwidthManager.SetSpeedSource), not a
@@ -292,6 +299,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	authHandler := auth.NewHandler(authSvc, cfg.CookieDomain, cfg.CookieSecure, cfg.TurnstileSecretKey)
 	adminHandler := admin.NewHandler(queries, inviteSvc, metricsSvc, authSvc, fileSvc, registry, geoReader, cfg.DiskStatsPath, cfg.DiskStatsDriveLabel, cfg.TestRunnerURL, cfg.AppDir, shutdownCh)
 	adminHandler.SetDeploymentInfo(cfg.AppVersion, cfg.AppGitBranch)
+	adminHandler.SetRegistrationGroupService(regGroupSvc)
 	adminHandler.SetDiscountMailer(emailSvc)
 	adminHandler.SetReconciliationService(reconcileSvc)
 	// The speed test (below) needs to know about active uploads to avoid
@@ -419,6 +427,13 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	// docs/drive_benchmark_setup.md.
 	v1.GET("/drive-benchmark", h.GetPublicDriveBenchmark)
 	v1.GET("/invitations/:token", h.ValidateInvitationToken)
+	// Limited user group registration — public slot-picker page + the 10-min
+	// slot reservations the register page consumes. Reads are unauthenticated
+	// (the link id is the credential); writes share the auth rate limiter.
+	v1.GET("/group-invites/reservations/:token", h.GetSlotReservation)
+	v1.DELETE("/group-invites/reservations/:token", mw.RateLimit(), h.ReleaseSlotReservation)
+	v1.GET("/group-invites/:link_id", h.GetGroupInvite)
+	v1.POST("/group-invites/:link_id/reservations", mw.RateLimit(), h.ReserveGroupSlot)
 	v1.POST("/interest", h.SubmitInterestForm)
 	// Native-app account request form: no Turnstile (the app cannot render
 	// it) — the captured deposit plus the daily/per-IP caps remain.
@@ -474,6 +489,9 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	{
 		authGroup.POST("/login", authHandler.Login)
 		authGroup.POST("/register", authHandler.Register)
+		// Email availability probe for the group-registration form's email
+		// field (validated on blur — see /register?reservation=...).
+		authGroup.POST("/check-email", authHandler.CheckEmail)
 		authGroup.POST("/logout", mw.RequireAuth(), authHandler.Logout)
 		authGroup.POST("/refresh", authHandler.Refresh)
 		authGroup.POST("/forgot_password", authHandler.ForgotPassword)
@@ -739,6 +757,14 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 			adminGroup.GET("/invitations", adminHandler.GetInvitations)
 			adminGroup.POST("/invitations/:id/resend", adminHandler.ResendInvitation)
 			adminGroup.DELETE("/invitations/:id", adminHandler.RevokeInvitation)
+
+			// Limited user group registration (requests page → group registration tab)
+			adminGroup.POST("/registration-groups", adminHandler.CreateRegistrationGroup)
+			adminGroup.GET("/registration-groups", adminHandler.ListRegistrationGroups)
+			adminGroup.GET("/registration-groups/capacity", adminHandler.GetRegistrationCapacity)
+			adminGroup.GET("/registration-groups/:id", adminHandler.GetRegistrationGroup)
+			adminGroup.POST("/registration-groups/:id/deactivate", adminHandler.DeactivateRegistrationGroup)
+			adminGroup.DELETE("/registration-groups/:id", adminHandler.DeleteRegistrationGroup)
 
 			adminGroup.GET("/system/metrics", adminHandler.GetMetrics)
 			adminGroup.GET("/system/metrics/history", adminHandler.GetMetricsHistory)

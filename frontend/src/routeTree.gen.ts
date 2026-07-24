@@ -16,6 +16,7 @@ import { Route as PrivacyRouteImport } from './routes/privacy'
 import { Route as MathGameRouteImport } from './routes/math-game'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as InterestRouteImport } from './routes/interest'
+import { Route as GroupInviteRouteImport } from './routes/group-invite'
 import { Route as AboutRouteImport } from './routes/about'
 import { Route as AuthRouteImport } from './routes/_auth'
 import { Route as IndexRouteImport } from './routes/index'
@@ -44,6 +45,7 @@ import { Route as AuthAdminBannedIpsRouteImport } from './routes/_auth.admin/ban
 import { Route as AuthAdminAlarmRouteImport } from './routes/_auth.admin/alarm'
 import { Route as AuthClientSharedIndexRouteImport } from './routes/_auth.client/shared.index'
 import { Route as AuthClientSharedShareIdRouteImport } from './routes/_auth.client/shared.$shareId'
+import { Route as AuthAdminGroupRegistrationCreateRouteImport } from './routes/_auth.admin/group-registration.create'
 
 const TermsRoute = TermsRouteImport.update({
   id: '/terms',
@@ -78,6 +80,11 @@ const LoginRoute = LoginRouteImport.update({
 const InterestRoute = InterestRouteImport.update({
   id: '/interest',
   path: '/interest',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const GroupInviteRoute = GroupInviteRouteImport.update({
+  id: '/group-invite',
+  path: '/group-invite',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AboutRoute = AboutRouteImport.update({
@@ -220,10 +227,17 @@ const AuthClientSharedShareIdRoute = AuthClientSharedShareIdRouteImport.update({
   path: '/client/shared/$shareId',
   getParentRoute: () => AuthRoute,
 } as any)
+const AuthAdminGroupRegistrationCreateRoute =
+  AuthAdminGroupRegistrationCreateRouteImport.update({
+    id: '/admin/group-registration/create',
+    path: '/admin/group-registration/create',
+    getParentRoute: () => AuthRoute,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/about': typeof AboutRoute
+  '/group-invite': typeof GroupInviteRoute
   '/interest': typeof InterestRoute
   '/login': typeof LoginRoute
   '/math-game': typeof MathGameRoute
@@ -254,12 +268,14 @@ export interface FileRoutesByFullPath {
   '/settings/api-keys': typeof AuthSettingsApiKeysRoute
   '/share/$token': typeof AuthShareTokenRoute
   '/client/': typeof AuthClientIndexRoute
+  '/admin/group-registration/create': typeof AuthAdminGroupRegistrationCreateRoute
   '/client/shared/$shareId': typeof AuthClientSharedShareIdRoute
   '/client/shared/': typeof AuthClientSharedIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/about': typeof AboutRoute
+  '/group-invite': typeof GroupInviteRoute
   '/interest': typeof InterestRoute
   '/login': typeof LoginRoute
   '/math-game': typeof MathGameRoute
@@ -290,6 +306,7 @@ export interface FileRoutesByTo {
   '/settings/api-keys': typeof AuthSettingsApiKeysRoute
   '/share/$token': typeof AuthShareTokenRoute
   '/client': typeof AuthClientIndexRoute
+  '/admin/group-registration/create': typeof AuthAdminGroupRegistrationCreateRoute
   '/client/shared/$shareId': typeof AuthClientSharedShareIdRoute
   '/client/shared': typeof AuthClientSharedIndexRoute
 }
@@ -298,6 +315,7 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/_auth': typeof AuthRouteWithChildren
   '/about': typeof AboutRoute
+  '/group-invite': typeof GroupInviteRoute
   '/interest': typeof InterestRoute
   '/login': typeof LoginRoute
   '/math-game': typeof MathGameRoute
@@ -328,6 +346,7 @@ export interface FileRoutesById {
   '/_auth/settings/api-keys': typeof AuthSettingsApiKeysRoute
   '/_auth/share/$token': typeof AuthShareTokenRoute
   '/_auth/client/': typeof AuthClientIndexRoute
+  '/_auth/admin/group-registration/create': typeof AuthAdminGroupRegistrationCreateRoute
   '/_auth/client/shared/$shareId': typeof AuthClientSharedShareIdRoute
   '/_auth/client/shared/': typeof AuthClientSharedIndexRoute
 }
@@ -336,6 +355,7 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/about'
+    | '/group-invite'
     | '/interest'
     | '/login'
     | '/math-game'
@@ -366,12 +386,14 @@ export interface FileRouteTypes {
     | '/settings/api-keys'
     | '/share/$token'
     | '/client/'
+    | '/admin/group-registration/create'
     | '/client/shared/$shareId'
     | '/client/shared/'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
     | '/about'
+    | '/group-invite'
     | '/interest'
     | '/login'
     | '/math-game'
@@ -402,6 +424,7 @@ export interface FileRouteTypes {
     | '/settings/api-keys'
     | '/share/$token'
     | '/client'
+    | '/admin/group-registration/create'
     | '/client/shared/$shareId'
     | '/client/shared'
   id:
@@ -409,6 +432,7 @@ export interface FileRouteTypes {
     | '/'
     | '/_auth'
     | '/about'
+    | '/group-invite'
     | '/interest'
     | '/login'
     | '/math-game'
@@ -439,6 +463,7 @@ export interface FileRouteTypes {
     | '/_auth/settings/api-keys'
     | '/_auth/share/$token'
     | '/_auth/client/'
+    | '/_auth/admin/group-registration/create'
     | '/_auth/client/shared/$shareId'
     | '/_auth/client/shared/'
   fileRoutesById: FileRoutesById
@@ -447,6 +472,7 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AuthRoute: typeof AuthRouteWithChildren
   AboutRoute: typeof AboutRoute
+  GroupInviteRoute: typeof GroupInviteRoute
   InterestRoute: typeof InterestRoute
   LoginRoute: typeof LoginRoute
   MathGameRoute: typeof MathGameRoute
@@ -507,6 +533,13 @@ declare module '@tanstack/react-router' {
       path: '/interest'
       fullPath: '/interest'
       preLoaderRoute: typeof InterestRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/group-invite': {
+      id: '/group-invite'
+      path: '/group-invite'
+      fullPath: '/group-invite'
+      preLoaderRoute: typeof GroupInviteRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/about': {
@@ -705,6 +738,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthClientSharedShareIdRouteImport
       parentRoute: typeof AuthRoute
     }
+    '/_auth/admin/group-registration/create': {
+      id: '/_auth/admin/group-registration/create'
+      path: '/admin/group-registration/create'
+      fullPath: '/admin/group-registration/create'
+      preLoaderRoute: typeof AuthAdminGroupRegistrationCreateRouteImport
+      parentRoute: typeof AuthRoute
+    }
   }
 }
 
@@ -730,6 +770,7 @@ interface AuthRouteChildren {
   AuthSettingsApiKeysRoute: typeof AuthSettingsApiKeysRoute
   AuthShareTokenRoute: typeof AuthShareTokenRoute
   AuthClientIndexRoute: typeof AuthClientIndexRoute
+  AuthAdminGroupRegistrationCreateRoute: typeof AuthAdminGroupRegistrationCreateRoute
   AuthClientSharedShareIdRoute: typeof AuthClientSharedShareIdRoute
   AuthClientSharedIndexRoute: typeof AuthClientSharedIndexRoute
 }
@@ -756,6 +797,7 @@ const AuthRouteChildren: AuthRouteChildren = {
   AuthSettingsApiKeysRoute: AuthSettingsApiKeysRoute,
   AuthShareTokenRoute: AuthShareTokenRoute,
   AuthClientIndexRoute: AuthClientIndexRoute,
+  AuthAdminGroupRegistrationCreateRoute: AuthAdminGroupRegistrationCreateRoute,
   AuthClientSharedShareIdRoute: AuthClientSharedShareIdRoute,
   AuthClientSharedIndexRoute: AuthClientSharedIndexRoute,
 }
@@ -766,6 +808,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AuthRoute: AuthRouteWithChildren,
   AboutRoute: AboutRoute,
+  GroupInviteRoute: GroupInviteRoute,
   InterestRoute: InterestRoute,
   LoginRoute: LoginRoute,
   MathGameRoute: MathGameRoute,

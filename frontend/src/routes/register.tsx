@@ -4,8 +4,9 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { PayPalScriptProvider, PayPalButtons } from '@paypal/react-paypal-js'
 import { Turnstile } from '@marsidev/react-turnstile'
 import type { TurnstileInstance } from '@marsidev/react-turnstile'
-import { MdCloud, MdRocketLaunch, MdCheckCircle, MdSpeed, MdCheck, MdClose } from 'react-icons/md'
-import { register, validateInviteToken } from '../api/auth'
+import { MdCloud, MdRocketLaunch, MdCheckCircle, MdSpeed, MdCheck, MdClose, MdHourglassTop } from 'react-icons/md'
+import { register, registerWithReservation, validateInviteToken } from '../api/auth'
+import { checkEmail, getSlotReservation } from '../api/registrationGroups'
 import { ApiError } from '../api/client'
 import { publicConfigQueryOptions } from '../api/interest'
 import { createPremiumSubscription, confirmPremiumSubscription, type PremiumPlan } from '../api/payments'
@@ -52,6 +53,10 @@ function InlinePayPalSubscribeButton({
 
 interface RegisterParams {
   token: string
+  // Group-registration slot reservation token (see /group-invite). Presence of
+  // `reservation` (and absence of an invite token) switches the form into the
+  // reservation flow: the email field is user-editable and validated.
+  reservation: string
 }
 
 interface PasswordChecks {
@@ -83,22 +88,33 @@ export const Route = createFileRoute('/register')({
   component: RouteComponent,
   validateSearch: (search: Record<string, unknown>): RegisterParams => ({
     token: typeof search.token === 'string' ? search.token : '',
+    reservation: typeof search.reservation === 'string' ? search.reservation : '',
   }),
   beforeLoad: ({ search }) => search,
   loader: ({ context }) => {
-    return { token: context.token }
+    return { token: context.token, reservation: context.reservation }
   },
 })
 
 function RouteComponent() {
   const queryClient = useQueryClient()
-  const { token } = Route.useLoaderData()
+  const { token, reservation } = Route.useLoaderData()
   const navigate = useNavigate()
+
+  // Reservation flow (group registration) vs invite flow: an invite token
+  // always wins so existing invite links keep their locked-email behavior.
+  const isReservationFlow = !token && !!reservation
 
   const { data: invite } = useQuery({
     queryKey: ['invite', token],
     queryFn: () => validateInviteToken(token),
     enabled: !!token,
+    retry: false,
+  })
+  const { data: slotReservation, error: reservationError } = useQuery({
+    queryKey: ['slot-reservation', reservation],
+    queryFn: () => getSlotReservation(reservation),
+    enabled: isReservationFlow,
     retry: false,
   })
   const { data: config } = useQuery(publicConfigQueryOptions)
@@ -119,6 +135,56 @@ function RouteComponent() {
   useEffect(() => {
     if (invite?.email) setEmail(invite.email)
   }, [invite?.email])
+
+  // Reservation flow: user-supplied email, validated on blur (format locally,
+  // existence via the check-email endpoint).
+  const [emailStatus, setEmailStatus] = useState<'unknown' | 'checking' | 'ok' | 'taken' | 'invalid'>('unknown')
+  const [sessionExpired, setSessionExpired] = useState(false)
+
+  async function handleEmailBlur() {
+    if (!isReservationFlow) return
+    const value = email.trim()
+    if (!value) {
+      setEmailStatus('unknown')
+      return
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) {
+      setEmailStatus('invalid')
+      return
+    }
+    setEmailStatus('checking')
+    try {
+      const res = await checkEmail(value)
+      if (!res.valid) setEmailStatus('invalid')
+      else setEmailStatus(res.available ? 'ok' : 'taken')
+    } catch {
+      // Network hiccup — don't block registration on the probe; the backend
+      // re-checks on submit anyway.
+      setEmailStatus('unknown')
+    }
+  }
+
+  // The 10-minute slot hold: when it lapses (or the backend reports the hold
+  // gone) show the session-expired modal with the way back to the group page.
+  const reservationExpiresAt = slotReservation?.status === 'active' ? slotReservation.expires_at : null
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    if (!isReservationFlow || !reservationExpiresAt) return
+    const tick = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(tick)
+  }, [isReservationFlow, reservationExpiresAt])
+
+  const reservationMsLeft = reservationExpiresAt ? new Date(reservationExpiresAt).getTime() - now : null
+  useEffect(() => {
+    if (isReservationFlow && reservationMsLeft !== null && reservationMsLeft <= 0) {
+      setSessionExpired(true)
+    }
+  }, [isReservationFlow, reservationMsLeft])
+  useEffect(() => {
+    if (isReservationFlow && (slotReservation?.status === 'expired' || reservationError)) {
+      setSessionExpired(true)
+    }
+  }, [isReservationFlow, slotReservation?.status, reservationError])
 
   const passwordChecks = getPasswordChecks(password)
   const captchaRequired = !!config?.turnstile_site_key
@@ -169,19 +235,29 @@ function RouteComponent() {
   }
 
   const mutation = useMutation({
-    mutationFn: () => register(username, email, password, token, captchaToken!),
+    mutationFn: () => isReservationFlow
+      ? registerWithReservation(username, email.trim(), password, reservation, captchaToken!)
+      : register(username, email, password, token, captchaToken!),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ['me'] })
       setStep('plan')
     },
     onError: (err) => {
+      if (err instanceof ApiError && err.status === 410) {
+        // The hold lapsed server-side (or was raced away) before submit landed.
+        setSessionExpired(true)
+        return
+      }
+      if (err instanceof ApiError && err.status === 409) {
+        setEmailStatus('taken')
+      }
       setError(err instanceof ApiError ? err.message : 'Registration failed')
       turnstileRef.current?.reset()
       setCaptchaToken(null)
     },
   })
 
-  if (!token) {
+  if (!token && !reservation) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-start sm:items-center justify-center px-4 py-8">
         <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-8 text-sm text-gray-600">
@@ -191,8 +267,81 @@ function RouteComponent() {
     )
   }
 
+  // A reservation that finished registering elsewhere (e.g. the URL revisited
+  // after success) — not an expiry, point at the login page instead. Skipped
+  // while this very session just completed (mutation.isSuccess → plan step).
+  if (isReservationFlow && slotReservation?.status === 'completed' && !mutation.isSuccess) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-start sm:items-center justify-center px-4 py-8">
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-8 max-w-md text-center">
+          <MdCheckCircle className="text-4xl text-green-500 mx-auto mb-3" />
+          <h1 className="text-lg font-semibold text-gray-900 m-0">Registration already completed</h1>
+          <p className="text-sm text-gray-500 mt-2 mb-4">This registration slot has already been used to create an account.</p>
+          <button
+            onClick={() => navigate({ to: '/login', search: { social_error: undefined, link_provider: undefined, link_email: undefined, link_username: undefined } })}
+            className="px-5 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium cursor-pointer transition-colors"
+          >
+            Go to login
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  // Session-expired modal: the 10-minute hold lapsed before registration
+  // finished — the slot is free for someone else, offer the way back.
+  if (isReservationFlow && sessionExpired && step === 'form' && !mutation.isSuccess) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-start sm:items-center justify-center px-4 py-8">
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-8 max-w-md text-center">
+          <MdHourglassTop className="text-4xl text-amber-500 mx-auto mb-3" />
+          <h1 className="text-lg font-semibold text-gray-900 m-0">Your registration session has expired</h1>
+          <p className="text-sm text-gray-500 mt-2 mb-4">
+            Slots are only held for 10 minutes so everyone gets a fair chance. Your slot has been
+            released — head back to the invite page to pick a slot again.
+          </p>
+          {slotReservation?.group_link_id ? (
+            <Link
+              to="/group-invite"
+              search={{ id: slotReservation.group_link_id }}
+              className="inline-block px-5 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium no-underline transition-colors"
+            >
+              Back to the invite page
+            </Link>
+          ) : (
+            <p className="text-xs text-gray-400 m-0">Use the original invite link to start over.</p>
+          )}
+        </div>
+      </div>
+    )
+  }
+
   if (step === 'plan') {
     const goToLogin = () => navigate({ to: '/login', search: { social_error: undefined, link_provider: undefined, link_email: undefined, link_username: undefined } })
+
+    // Premium slots already include Premium — no plan to pick, no checkout.
+    if (isReservationFlow && slotReservation?.account_status === 'premium') {
+      return (
+        <div className="min-h-screen bg-gray-50 flex items-start sm:items-center justify-center px-4 py-8">
+          <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-10 max-w-md w-full text-center">
+            <MdCheckCircle className="text-5xl text-green-500 mx-auto mb-3" />
+            <h1 className="text-xl font-semibold text-gray-900 m-0">Welcome aboard — Premium included.</h1>
+            <p className="text-sm text-gray-500 mt-2">
+              Your account slot came with Premium
+              {slotReservation.premium_expires_at
+                ? ` until ${new Date(slotReservation.premium_expires_at).toLocaleDateString()}`
+                : ''}. Log in to start using the SFS API and create per-directory API keys.
+            </p>
+            <button
+              onClick={goToLogin}
+              className="mt-6 px-5 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium cursor-pointer transition-colors"
+            >
+              Go to login
+            </button>
+          </div>
+        </div>
+      )
+    }
 
     if (paid) {
       return (
@@ -296,14 +445,36 @@ function RouteComponent() {
   return (
     <div className="min-h-screen bg-gray-50 flex items-start sm:items-center justify-center px-4 py-8">
       <div className="w-full max-w-sm bg-white rounded-xl border border-gray-200 shadow-sm p-6 sm:p-8">
-        <div className="flex items-center gap-2 mb-6">
+        <div className="flex items-center gap-2 mb-2">
           <h1 className="text-xl font-semibold text-gray-900">Create account</h1>
           {invite?.grant_admin && (
             <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800">
               Admin
             </span>
           )}
+          {isReservationFlow && slotReservation?.account_status === 'premium' && (
+            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800">
+              Premium
+            </span>
+          )}
         </div>
+        {isReservationFlow && slotReservation?.status === 'active' && (
+          <div className="mb-4 rounded-lg bg-blue-50 border border-blue-100 px-3 py-2 flex flex-col gap-0.5">
+            <span className="text-xs text-blue-800 font-medium">
+              {slotReservation.group_name}: {(slotReservation.quota_bytes / 1024 ** 3) >= 1024
+                ? `${(slotReservation.quota_bytes / 1024 ** 4).toFixed(slotReservation.quota_bytes % 1024 ** 4 === 0 ? 0 : 1)} TB`
+                : `${(slotReservation.quota_bytes / 1024 ** 3).toFixed(slotReservation.quota_bytes % 1024 ** 3 === 0 ? 0 : 1)} GB`}{' '}
+              {slotReservation.drive_type === 'nvme' ? 'fast (NVMe)' : 'standard'} storage on {slotReservation.server_name}
+            </span>
+            {reservationMsLeft !== null && reservationMsLeft > 0 && (
+              <span className="text-xs text-blue-600 inline-flex items-center gap-1">
+                <MdHourglassTop />
+                Slot held for {Math.floor(reservationMsLeft / 60000)}:{String(Math.floor((reservationMsLeft % 60000) / 1000)).padStart(2, '0')}
+              </span>
+            )}
+          </div>
+        )}
+        {!isReservationFlow && <div className="mb-4" />}
         <form
           onSubmit={(e) => {
             e.preventDefault()
@@ -324,25 +495,54 @@ function RouteComponent() {
           </label>
           <label className="flex flex-col gap-1">
             <span className="text-sm font-medium text-gray-700">Email</span>
-            <input
-              type="email"
-              value={email}
-              readOnly
-              autoComplete="email"
-              required
-              className="border border-gray-300 rounded-lg px-3 py-2 text-sm bg-gray-50 text-gray-500 cursor-not-allowed focus:outline-none"
-            />
-            <span className="text-xs text-gray-400">
-              This invitation is tied to the email above and can't be changed here. If this is not
-              the correct email please contact us at{' '}
-              <a
-                href="mailto:support@apollo-sfs.com"
-                className="text-blue-600 hover:text-blue-800 transition-colors"
-              >
-                Apollo SFS support
-              </a>
-              .
-            </span>
+            {isReservationFlow ? (
+              <>
+                <input
+                  type="email"
+                  value={email}
+                  onChange={(e) => { setEmail(e.target.value); setEmailStatus('unknown') }}
+                  onBlur={handleEmailBlur}
+                  autoComplete="email"
+                  required
+                  className={`border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:border-transparent ${
+                    emailStatus === 'taken' || emailStatus === 'invalid'
+                      ? 'border-red-300 focus:ring-red-400'
+                      : 'border-gray-300 focus:ring-blue-500'
+                  }`}
+                />
+                {emailStatus === 'checking' && (
+                  <span className="text-xs text-gray-400">Checking availability…</span>
+                )}
+                {emailStatus === 'invalid' && (
+                  <span className="text-xs text-red-500">Enter a valid email address.</span>
+                )}
+                {emailStatus === 'taken' && (
+                  <span className="text-xs text-red-500">An account with this email already exists.</span>
+                )}
+              </>
+            ) : (
+              <>
+                <input
+                  type="email"
+                  value={email}
+                  readOnly
+                  autoComplete="email"
+                  required
+                  className="border border-gray-300 rounded-lg px-3 py-2 text-sm bg-gray-50 text-gray-500 cursor-not-allowed focus:outline-none"
+                />
+                <span className="text-xs text-gray-400">
+                  This invitation is tied to the email above and can't be changed here. If this is not
+                  the correct email please contact us at{' '}
+                  <a
+                    href="mailto:support@apollo-sfs.com"
+                    className="text-blue-600 hover:text-blue-800 transition-colors"
+                  >
+                    Apollo SFS support
+                  </a>
+                  .
+                </span>
+              </>
+            )}
           </label>
           <label className="flex flex-col gap-1">
             <span className="text-sm font-medium text-gray-700">Password</span>
@@ -405,7 +605,10 @@ function RouteComponent() {
           {error && <p className="text-sm text-red-500">{error}</p>}
           <button
             type="submit"
-            disabled={mutation.isPending || !agreedToTerms || (captchaRequired && !captchaToken)}
+            disabled={
+              mutation.isPending || !agreedToTerms || (captchaRequired && !captchaToken) ||
+              (isReservationFlow && (emailStatus === 'taken' || emailStatus === 'invalid' || emailStatus === 'checking'))
+            }
             className="mt-1 bg-blue-600 hover:bg-blue-700 text-white rounded-lg py-2 text-sm font-medium disabled:opacity-50 cursor-pointer transition-colors"
           >
             {mutation.isPending ? 'Creating account…' : 'Create account'}

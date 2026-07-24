@@ -300,14 +300,17 @@ func (q *Queries) SyncDriveCapacitiesByType(ctx context.Context, driveType strin
 
 // GetDriveAvailableBytes returns the unallocated capacity on a drive:
 // capacity_bytes − SUM(quota_bytes) of every user_drive_allocations row on
-// this drive. The result is the maximum additional quota that can be
+// this drive − the quota pre-reserved by unconsumed registration slots of
+// active groups. The result is the maximum additional quota that can be
 // allocated here.
 func (q *Queries) GetDriveAvailableBytes(ctx context.Context, driveID uuid.UUID) (int64, error) {
 	var avail int64
 	err := q.db.QueryRowContext(ctx, `
-		SELECT d.capacity_bytes - COALESCE(SUM(uda.quota_bytes), 0)
+		SELECT d.capacity_bytes - COALESCE(SUM(uda.quota_bytes), 0) - COALESCE(MAX(res.reserved), 0)
 		FROM drives d
 		LEFT JOIN user_drive_allocations uda ON uda.drive_id = d.id
+		LEFT JOIN (`+reservedSlotBytesSubquery+`
+		) res ON res.drive_id = d.id
 		WHERE d.id = $1
 		GROUP BY d.capacity_bytes
 	`, driveID).Scan(&avail)
@@ -322,17 +325,21 @@ func (q *Queries) GetDriveAvailableBytes(ctx context.Context, driveID uuid.UUID)
 
 // SelectDriveForQuota finds the best-fit active drive that can accommodate
 // quotaBytes of additional allocation (smallest remaining capacity that still
-// fits). Returns ErrNoCapacity if no drive qualifies.
+// fits). Capacity pre-reserved by unconsumed registration slots of active
+// groups is unavailable here, so ordinary invitations cannot claim space a
+// registration group holds. Returns ErrNoCapacity if no drive qualifies.
 func (q *Queries) SelectDriveForQuota(ctx context.Context, quotaBytes int64) (*models.Drive, error) {
 	row := q.db.QueryRowContext(ctx, `
 		SELECT`+driveColumns+`
 		FROM drives d
 		JOIN servers s ON s.id = d.server_id
 		LEFT JOIN user_drive_allocations uda ON uda.drive_id = d.id
+		LEFT JOIN (`+reservedSlotBytesSubquery+`
+		) res ON res.drive_id = d.id
 		WHERE d.is_active = true AND s.is_active = true
 		GROUP BY d.id
-		HAVING d.capacity_bytes - COALESCE(SUM(uda.quota_bytes), 0) >= $1
-		ORDER BY (d.capacity_bytes - COALESCE(SUM(uda.quota_bytes), 0)) ASC
+		HAVING d.capacity_bytes - COALESCE(SUM(uda.quota_bytes), 0) - COALESCE(MAX(res.reserved), 0) >= $1
+		ORDER BY (d.capacity_bytes - COALESCE(SUM(uda.quota_bytes), 0) - COALESCE(MAX(res.reserved), 0)) ASC
 		LIMIT 1
 	`, quotaBytes)
 	d, err := scanDrive(row)
@@ -346,11 +353,12 @@ func (q *Queries) SelectDriveForQuota(ctx context.Context, quotaBytes int64) (*m
 }
 
 // GetMaxAvailableQuota returns the largest quota that could currently be
-// allocated to a single new user (= most available space on any single drive).
+// allocated to a single new user (= most available space on any single drive,
+// after subtracting registration-slot pre-reservations).
 func (q *Queries) GetMaxAvailableQuota(ctx context.Context) (int64, error) {
 	var max int64
 	err := q.db.QueryRowContext(ctx, `
-		SELECT COALESCE(MAX(GREATEST(d.capacity_bytes - COALESCE(sub.allocated, 0), 0)), 0)
+		SELECT COALESCE(MAX(GREATEST(d.capacity_bytes - COALESCE(sub.allocated, 0) - COALESCE(res.reserved, 0), 0)), 0)
 		FROM drives d
 		JOIN servers s ON s.id = d.server_id
 		LEFT JOIN (
@@ -358,6 +366,8 @@ func (q *Queries) GetMaxAvailableQuota(ctx context.Context) (int64, error) {
 			FROM user_drive_allocations uda
 			GROUP BY uda.drive_id
 		) sub ON sub.drive_id = d.id
+		LEFT JOIN (`+reservedSlotBytesSubquery+`
+		) res ON res.drive_id = d.id
 		WHERE d.is_active = true AND s.is_active = true
 	`).Scan(&max)
 	if err != nil {

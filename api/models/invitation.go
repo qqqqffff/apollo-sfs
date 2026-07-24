@@ -23,4 +23,9 @@ type Invitation struct {
 	GrantAdmin        bool       `json:"grant_admin" db:"grant_admin"`
 	GrantPremium      bool       `json:"grant_premium" db:"grant_premium"`
 	InitialDriveID    *uuid.UUID `json:"initial_drive_id,omitempty" db:"initial_drive_id"`
+	// PremiumExpiresAt is an optional Premium "trial" expiry applied to the
+	// invited user's users.premium_expires_at at registration time (see
+	// AuthService.provisionInvitedAppUser). Meaningful only when GrantPremium
+	// is true and GrantAdmin is false; nil means a permanent grant.
+	PremiumExpiresAt *time.Time `json:"premium_expires_at,omitempty" db:"premium_expires_at"`
 }

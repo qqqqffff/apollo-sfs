@@ -283,6 +283,10 @@ export interface Invitation {
   initial_quota_bytes: number
   grant_admin: boolean
   grant_premium: boolean
+  // Optional Premium trial expiry applied at registration time — meaningful
+  // only alongside grant_premium (and ignored when grant_admin is also set).
+  // Null/absent means a permanent grant.
+  premium_expires_at?: string | null
   invitation_url?: string
 }
 

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -488,6 +489,16 @@ func (s *AuthService) provisionInvitedAppUser(
 	}
 	if err := s.queries.AllocateUserToDrive(ctx, username, drive.ID, quotaBytes); err != nil {
 		return fmt.Errorf("allocate drive: %w", err)
+	}
+
+	// Apply the invitation's optional Premium trial expiry. Only meaningful
+	// for a plain premium grant (not admin, whose premium is implicit) — see
+	// InviteService.Create, which already normalizes this, but the check is
+	// repeated here since it's the field that actually takes effect.
+	if inv.GrantPremium && !inv.GrantAdmin && inv.PremiumExpiresAt != nil {
+		if err := s.queries.SetPremiumExpiry(ctx, username, inv.PremiumExpiresAt); err != nil {
+			log.Printf("provision invited user: set premium expiry for %q: %v", username, err)
+		}
 	}
 
 	// Accept invitation. Non-fatal: the account already exists.

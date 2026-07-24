@@ -692,7 +692,7 @@ type stubAdminInviteService struct {
 	revokeErr error
 }
 
-func (s *stubAdminInviteService) Create(_ context.Context, _ uuid.UUID, _, _ string, _ int64, _ bool, _ bool, _ *uuid.UUID) (*models.Invitation, error) {
+func (s *stubAdminInviteService) Create(_ context.Context, _ uuid.UUID, _, _ string, _ int64, _ bool, _ bool, _ *uuid.UUID, _ *time.Time) (*models.Invitation, error) {
 	return s.inv, s.invErr
 }
 func (s *stubAdminInviteService) List(_ context.Context, _ db.PageInput) (*db.PageResult[models.Invitation], error) {

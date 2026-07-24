@@ -35,6 +35,10 @@ jest.mock('../../../context/NotificationContext', () => ({
   useNotification: () => ({ notify: jest.fn() }),
 }))
 
+jest.mock('../../../context/OnboardingGuideContext', () => ({
+  useOnboardingGuide: () => ({ openGuide: jest.fn() }),
+}))
+
 jest.mock('../../../api/folders', () => ({
   listRoot: jest.fn(),
 }))

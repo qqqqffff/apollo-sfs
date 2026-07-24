@@ -12,6 +12,7 @@ import { useNotification } from '../context/NotificationContext'
 import { BanSuspendModal } from '../components/BanSuspendModal'
 import { AccountBadges } from '../components/GroupBadge'
 import { NotificationBell } from '../components/NotificationBell'
+import { OnboardingGuideProvider } from '../context/OnboardingGuideContext'
 import type { UserBan } from '../types/api'
 
 export const Route = createFileRoute('/_auth')({
@@ -130,6 +131,7 @@ function RouteComponent() {
   const isImpersonatedSuspended = activeBan?.ban_type === 'suspended'
 
   return (
+    <OnboardingGuideProvider>
     <div className="min-h-screen bg-gray-50">
       <div className="sticky top-0 z-50">
       <nav className="bg-white border-b border-gray-200 px-4 sm:px-6 h-14 flex items-center justify-between gap-3">
@@ -306,6 +308,7 @@ function RouteComponent() {
         />
       )}
     </div>
+    </OnboardingGuideProvider>
   )
 }
 

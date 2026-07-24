@@ -66,6 +66,11 @@ jest.mock('../../components/BanSuspendModal', () => ({
   BanSuspendModal: () => null,
 }))
 
+jest.mock('../../context/OnboardingGuideContext', () => ({
+  OnboardingGuideProvider: ({ children }: { children: React.ReactNode }) => children,
+  useOnboardingGuide: () => ({ openGuide: jest.fn() }),
+}))
+
 import { Route } from '../../routes/_auth'
 
 const Nav = Route.options.component as React.ComponentType

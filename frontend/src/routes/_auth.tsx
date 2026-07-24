@@ -138,7 +138,7 @@ function RouteComponent() {
 
         {/* Left: brand + desktop nav */}
         <div className="flex items-center gap-5 min-w-0">
-          <div className="flex items-center gap-2 shrink-0">
+          <div className="flex items-center gap-2 shrink-0" data-tour="brand">
             <AppIcon size={26} />
             <span className="font-semibold text-gray-900 text-sm tracking-tight whitespace-nowrap">
               Apollo SFS
@@ -147,9 +147,9 @@ function RouteComponent() {
           <div className="hidden xl:flex items-center gap-1">
             {/* Favorites and Shared moved into the files page's side control
                 panel — they are sub-pages of Files now, not top-level tabs. */}
-            <NavLink to="/client" onClick={closeMenu}>Files</NavLink>
+            <NavLink to="/client" onClick={closeMenu} tourId="nav-files">Files</NavLink>
             {(user?.is_premium || user?.is_admin) && (
-              <NavLink to={'/settings/api-keys' as never} onClick={closeMenu}>API Keys</NavLink>
+              <NavLink to={'/settings/api-keys' as never} onClick={closeMenu} tourId="nav-api-keys">API Keys</NavLink>
             )}
             {user?.is_admin && (
               <div className="relative" ref={adminMenuRef}>
@@ -232,6 +232,7 @@ function RouteComponent() {
           )}
           <Link
             to="/client/profile"
+            data-tour="profile-chip"
             className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-700 hover:bg-gray-200 transition-colors truncate max-w-28 sm:max-w-44 xl:max-w-40 2xl:max-w-56"
           >
             <MdPerson className="text-sm shrink-0" />
@@ -317,14 +318,17 @@ interface NavLinkProps {
   exact?: boolean
   onClick?: () => void
   children: React.ReactNode
+  // Marks this link as a spotlight-tour target — see OnboardingSpotlightTour.
+  tourId?: string
 }
 
-function NavLink({ to, exact, onClick, children }: NavLinkProps) {
+function NavLink({ to, exact, onClick, children, tourId }: NavLinkProps) {
   return (
     <Link
       to={to}
       activeOptions={{ exact: !!exact }}
       onClick={onClick}
+      data-tour={tourId}
       className="px-3 py-1.5 rounded-md text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-100 transition-colors"
       activeProps={{ className: 'px-3 py-1.5 rounded-md text-sm text-blue-600 bg-blue-50 font-medium' }}
     >

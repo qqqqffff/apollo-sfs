@@ -62,7 +62,7 @@ function RouteComponent() {
       <div className="bg-white border border-gray-200 rounded-xl divide-y divide-gray-100">
         <UsernameRow currentUsername={user.username} />
         <Row label="Email" value={user.email} />
-        <div className="flex items-center justify-between px-5 py-3.5">
+        <div className="flex items-center justify-between px-5 py-3.5" data-tour="account-type">
           <span className="text-sm text-gray-500">Account type</span>
           <AccountBadges user={user} />
         </div>
@@ -78,7 +78,7 @@ function RouteComponent() {
             ? new Date(user.last_seen_at).toLocaleString()
             : '—'}
         />
-        <div className="px-5 py-4">
+        <div className="px-5 py-4" data-tour="storage-bar">
           <div className="flex justify-between text-sm mb-2">
             <span className="text-gray-500">Storage</span>
             <span className="text-gray-700 font-medium">
@@ -133,7 +133,9 @@ function RouteComponent() {
       />
       {showUpgradeModal && <PremiumUpgradeModal onClose={() => setShowUpgradeModal(false)} />}
 
-      {(user.is_premium || user.is_admin) && <FileServerLinksCard />}
+      {(user.is_premium || user.is_admin) && (
+        <div data-tour="file-server-links"><FileServerLinksCard /></div>
+      )}
 
       <StorageUIPreferences />
 
@@ -141,7 +143,9 @@ function RouteComponent() {
 
       <MediaAutoUpload />
 
-      {(user.is_premium || user.is_admin) && <BackupReminderCard />}
+      {(user.is_premium || user.is_admin) && (
+        <div data-tour="backup-reminder"><BackupReminderCard /></div>
+      )}
 
       {user.is_admin && (
         <SandboxPaymentsToggle
@@ -671,7 +675,7 @@ function GuidesCard({ isPremium }: { isPremium: boolean }) {
   const { openGuide } = useOnboardingGuide()
 
   return (
-    <div className="bg-white border border-gray-200 rounded-xl px-5 py-4">
+    <div className="bg-white border border-gray-200 rounded-xl px-5 py-4" data-tour="guides-card">
       <h3 className="text-sm font-semibold text-gray-800 mb-1 flex items-center gap-1.5">
         <MdSchool className="text-gray-500" /> Guides
       </h3>

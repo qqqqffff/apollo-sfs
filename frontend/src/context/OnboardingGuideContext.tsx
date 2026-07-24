@@ -2,7 +2,7 @@ import { createContext, useContext, useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { meQueryOptions } from '../api/me'
-import { OnboardingGuideModal } from '../components/OnboardingGuideModal'
+import { OnboardingSpotlightTour } from '../components/OnboardingSpotlightTour'
 import { BASE_GUIDE_STEPS, PREMIUM_GUIDE_STEPS } from '../data/onboardingGuides'
 
 export type GuideKind = 'base' | 'premium'
@@ -74,14 +74,14 @@ export function OnboardingGuideProvider({ children }: { children: ReactNode }) {
     <OnboardingGuideContext.Provider value={{ openGuide }}>
       {children}
       {activeGuide === 'base' && (
-        <OnboardingGuideModal
+        <OnboardingSpotlightTour
           eyebrow="Getting started"
           steps={BASE_GUIDE_STEPS}
           onClose={() => closeGuide('base')}
         />
       )}
       {activeGuide === 'premium' && (
-        <OnboardingGuideModal
+        <OnboardingSpotlightTour
           eyebrow="Premium features"
           steps={PREMIUM_GUIDE_STEPS}
           onClose={() => closeGuide('premium')}

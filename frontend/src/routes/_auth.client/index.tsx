@@ -1059,6 +1059,7 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
           />
           <button
             onClick={() => fileRef.current?.click()}
+            data-tour="upload-button"
             className="inline-flex items-center gap-1.5 px-3 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium cursor-pointer transition-colors"
           >
             <MdUploadFile className="text-base" /> Upload
@@ -1162,7 +1163,9 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
         </div>
       )}
 
-      <SearchBar value={search} onChange={setSearch} />
+      <div data-tour="search-bar">
+        <SearchBar value={search} onChange={setSearch} />
+      </div>
 
       {/* The whole list area — including empty space below/around the rows —
           is a drop target: dropping anywhere here that isn't a specific

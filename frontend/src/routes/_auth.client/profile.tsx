@@ -1,7 +1,7 @@
 import { createFileRoute, useNavigate, Link } from '@tanstack/react-router'
 import { useEffect, useRef, useCallback, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { MdAddCircleOutline, MdArrowForward, MdAssignment, MdCheck, MdClose, MdEdit, MdFeedback, MdHistory, MdPhotoLibrary, MdRocketLaunch, MdShield, MdStorage, MdBolt, MdRefresh, MdScience } from 'react-icons/md'
+import { MdAddCircleOutline, MdArrowForward, MdAssignment, MdCheck, MdClose, MdEdit, MdFeedback, MdHistory, MdPhotoLibrary, MdRocketLaunch, MdShield, MdStorage, MdBolt, MdRefresh, MdReplay, MdSchool, MdScience } from 'react-icons/md'
 import { FaApple } from 'react-icons/fa'
 import { meQueryOptions, updateUsername, preferencesQueryOptions, updatePreferences, updateStorageUIPreferences, updateDefaultDrive, updateSandboxPayments, updateExpansionOverride, unlinkProvider, lastBackupSyncQueryOptions, updateBackupReminderPreference } from '../../api/me'
 import { formatTimeSince } from '../../components/LastSyncNote'
@@ -13,6 +13,7 @@ import { PremiumUpgradeModal } from '../../components/PremiumUpgradeModal'
 import { AccountBadges } from '../../components/GroupBadge'
 import { FileServerLinksCard } from '../../components/FileServerLinksCard'
 import { useNotification } from '../../context/NotificationContext'
+import { useOnboardingGuide } from '../../context/OnboardingGuideContext'
 import { formatCents, listMyExpansionRequests, type ExpansionRequest } from '../../api/billing'
 import { useBillingConfig } from '../../hooks/useBillingConfig'
 import { cancelPremiumSubscription } from '../../api/payments'
@@ -61,7 +62,7 @@ function RouteComponent() {
       <div className="bg-white border border-gray-200 rounded-xl divide-y divide-gray-100">
         <UsernameRow currentUsername={user.username} />
         <Row label="Email" value={user.email} />
-        <div className="flex items-center justify-between px-5 py-3.5">
+        <div className="flex items-center justify-between px-5 py-3.5" data-tour="account-type">
           <span className="text-sm text-gray-500">Account type</span>
           <AccountBadges user={user} />
         </div>
@@ -77,7 +78,7 @@ function RouteComponent() {
             ? new Date(user.last_seen_at).toLocaleString()
             : '—'}
         />
-        <div className="px-5 py-4">
+        <div className="px-5 py-4" data-tour="storage-bar">
           <div className="flex justify-between text-sm mb-2">
             <span className="text-gray-500">Storage</span>
             <span className="text-gray-700 font-medium">
@@ -132,13 +133,19 @@ function RouteComponent() {
       />
       {showUpgradeModal && <PremiumUpgradeModal onClose={() => setShowUpgradeModal(false)} />}
 
-      {(user.is_premium || user.is_admin) && <FileServerLinksCard />}
+      {(user.is_premium || user.is_admin) && (
+        <div data-tour="file-server-links"><FileServerLinksCard /></div>
+      )}
 
       <StorageUIPreferences />
 
+      <GuidesCard isPremium={user.is_premium || user.is_admin} />
+
       <MediaAutoUpload />
 
-      {(user.is_premium || user.is_admin) && <BackupReminderCard />}
+      {(user.is_premium || user.is_admin) && (
+        <div data-tour="backup-reminder"><BackupReminderCard /></div>
+      )}
 
       {user.is_admin && (
         <SandboxPaymentsToggle
@@ -656,6 +663,40 @@ function StorageUIPreferences() {
           Hide the drive speed benchmark promo in the Add Storage dialog
         </label>
         {error && <p className="text-xs text-red-500 m-0">{error}</p>}
+      </div>
+    </div>
+  )
+}
+
+// GuidesCard replays the first-time onboarding tours on demand. Both guides
+// otherwise only auto-open once per account (see OnboardingGuideContext) —
+// this is the way back in after that.
+function GuidesCard({ isPremium }: { isPremium: boolean }) {
+  const { openGuide } = useOnboardingGuide()
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-xl px-5 py-4" data-tour="guides-card">
+      <h3 className="text-sm font-semibold text-gray-800 mb-1 flex items-center gap-1.5">
+        <MdSchool className="text-gray-500" /> Guides
+      </h3>
+      <p className="text-xs text-gray-400 mb-4">
+        Replay the first-time walkthroughs whenever you want a refresher.
+      </p>
+      <div className="flex flex-col gap-2 items-start">
+        <button
+          onClick={() => openGuide('base')}
+          className="inline-flex items-center gap-1.5 text-sm text-blue-600 hover:text-blue-700 bg-transparent border-0 p-0 cursor-pointer font-medium transition-colors"
+        >
+          <MdReplay className="text-sm" /> Replay getting-started guide
+        </button>
+        {isPremium && (
+          <button
+            onClick={() => openGuide('premium')}
+            className="inline-flex items-center gap-1.5 text-sm text-blue-600 hover:text-blue-700 bg-transparent border-0 p-0 cursor-pointer font-medium transition-colors"
+          >
+            <MdReplay className="text-sm" /> Replay premium features guide
+          </button>
+        )}
       </div>
     </div>
   )

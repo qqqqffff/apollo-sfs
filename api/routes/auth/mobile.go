@@ -2,6 +2,7 @@ package auth
 
 import (
 	"errors"
+	"log"
 	"net/http"
 	"strings"
 
@@ -130,6 +131,13 @@ func (h *Handler) MobileSession(c *gin.Context) {
 	if err := h.svc.ProvisionBrokeredUser(c.Request.Context(), token, req.InviteToken); err != nil {
 		if errors.Is(err, services.ErrInvitationRequired) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "a valid invitation is required to register"})
+			return
+		}
+		if errors.Is(err, services.ErrRoleProvisioningFailed) {
+			log.Printf("mobile session: role provisioning failed, invitation left unconsumed: %v", err)
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"error": "account setup could not be completed — please try accepting your invitation again in a few minutes",
+			})
 			return
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "session provisioning failed"})

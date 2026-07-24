@@ -525,8 +525,14 @@ func (s *stubAdminQuerier) ListAllNodeDisks(_ context.Context) ([]models.NodeDis
 
 // Drive benchmark
 func (s *stubAdminQuerier) RequestBenchmarkOnAllNodes(_ context.Context) error { return nil }
-func (s *stubAdminQuerier) CountPendingBenchmarkRequests(_ context.Context) (int, error) {
+func (s *stubAdminQuerier) CountInFlightBenchmarkNodes(_ context.Context) (int, error) {
 	return 0, nil
+}
+func (s *stubAdminQuerier) CountActiveNodes(_ context.Context) (int, error) {
+	return 0, nil
+}
+func (s *stubAdminQuerier) ListRunningBenchmarkNodes(_ context.Context) ([]db.NodeBenchmarkProgress, error) {
+	return nil, nil
 }
 func (s *stubAdminQuerier) ListNodeDiskBenchmarks(_ context.Context) ([]db.NodeDiskBenchmarkRow, error) {
 	return nil, nil

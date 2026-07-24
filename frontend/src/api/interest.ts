@@ -76,8 +76,12 @@ export const publicConfigQueryOptions = {
 // admin metrics page uses the richer per-disk admin.ts version instead.
 
 export interface PublicTierBenchmarkStat {
-  write_mbps: number
-  read_mbps: number
+  seq_write_mbps: number
+  seq_read_mbps: number
+  random_write_mbps: number
+  random_write_iops: number
+  random_read_mbps: number
+  random_read_iops: number
   disk_count: number
   tested_at: string
 }

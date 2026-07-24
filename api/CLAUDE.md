@@ -42,9 +42,9 @@ api/
 │   ├── devices.go       # Mobile device registration
 │   ├── sync.go          # Mobile sync endpoint
 │   └── api_keys.go      # SFS API key management
-├── models/              # 24 data model structs (file, folder, user, server, node, …)
+├── models/              # 39 data model structs (file, folder, user, server, node, …)
 ├── db/                  # Database connection, query helpers, RLS session setup
-├── migrations/          # 20 versioned SQL migration files (run on startup)
+├── migrations/          # 58 versioned SQL migration files (run on startup)
 ├── templates/           # HTML email templates
 ├── sanitize/            # Input validation and sanitization helpers
 ├── tests/               # Unit and integration tests
@@ -73,6 +73,16 @@ Every protected route goes through the JWT middleware in `routes/middleware/`. T
 - Sets `app.current_user_id` on the PostgreSQL session so Row-Level Security applies
 
 Social login (Google, Apple) goes through `routes/auth/social_callback.go`, which exchanges the IdP token via Keycloak's identity-provider brokering API.
+
+Invite acceptance (`routes/auth/register.go`, `routes/auth/mobile.go`) grants the invitation's realm roles (admin/premium) in Keycloak *before* writing any app DB state or marking the invitation accepted. If that grant fails, `provisionInvitedAppUser` (`routes/services/auth.go`) returns `ErrRoleProvisioningFailed` and the whole request aborts — the invitation stays valid so the recipient can just retry, rather than silently completing with fewer privileges than promised.
+
+## Admin Role Management & Account Deletion
+
+The admin Users page can reassign a user's role or permanently delete their account:
+
+- **`PATCH /admin/users/:user_id/role`** (`routes/admin/users_role.go`) moves a user between exactly one of `admin`/`premium`/`user`. Keycloak is the source of truth — `SetAdminRealmRole`/`AddUserToGroupByName`/`RemoveUserFromGroupByName("premium")` grant or revoke the underlying realm role or group — with the `users` table's `is_admin`/`is_premium` columns set alongside for immediate read consistency (the auth middleware resyncs both from the JWT on every request regardless, so a DB-only change would just be overwritten). Demoting a real subscriber away from `premium` cancels their PayPal subscription first — aborting the whole request on a PayPal failure before any Keycloak/DB write lands — and sends a mandatory cancellation email; demoting straight to `user` can also set `block_future_premium` to stop them from immediately re-purchasing. Promoting to `premium` can set an optional `premium_expires_at` for an admin-granted trial. Every change requires a `reason` string, recorded in `role_change_notifications` (`db/role_change_notifications.go`) and surfaced to the affected user as a `role_changed` notification-bell item.
+- **`DELETE /admin/users/:user_id`** (`routes/admin/users_delete.go`) permanently removes an account: cancels any real PayPal subscription, sends the mandatory deletion email (before the row is gone — `email_queue` keeps its own copy of the address), purges files and folders, deletes the Keycloak identity, then deletes the `users` row. Every step but the final row deletion is best-effort/logged rather than a hard failure, mirroring `BanUser`'s tolerance for partial failure.
+- **Premium trial expiry**: `PaymentService.PremiumExpiryLoop` (`routes/services/payment.go`), started from `cmd/main.go` alongside the other background loops, sweeps `premium_expires_at` every 15 minutes and revokes access the same way a manual demotion would once a trial lapses.
 
 ## Encryption Model
 

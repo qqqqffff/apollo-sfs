@@ -211,6 +211,7 @@ function Crumb({
         }`}
       >
         {icon}
+        {icon && <span className="text-gray-300 shrink-0" aria-hidden="true">&bull;</span>}
         <span className="truncate">{label}</span>
       </span>
     )
@@ -225,6 +226,7 @@ function Crumb({
       }`}
     >
       {icon}
+      {icon && <span className="text-gray-300 shrink-0" aria-hidden="true">&bull;</span>}
       <span className="truncate">{label}</span>
     </button>
   )

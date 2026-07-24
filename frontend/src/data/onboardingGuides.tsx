@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { MdBolt, MdKey, MdLink, MdPhotoLibrary, MdRocketLaunch, MdStar, MdSync } from 'react-icons/md'
+import { MdAlternateEmail, MdBolt, MdKey, MdLink, MdPhotoLibrary, MdRocketLaunch, MdStar, MdSync } from 'react-icons/md'
 
 export interface TourStep {
   title: string
@@ -13,6 +13,10 @@ export interface TourStep {
   // something on a page other than wherever the tour was opened from. Omit
   // when the target is on every authenticated page (e.g. the nav bar).
   route?: string
+  // The target lives inside the files control panel, which collapses into a
+  // slide-in drawer below the `lg` breakpoint — see OnboardingSpotlightTour,
+  // which opens it via the sidebar toggle before locating this target.
+  needsSidebar?: boolean
 }
 
 // BASE_GUIDE_STEPS walks every account through the features available on
@@ -120,20 +124,53 @@ export const PREMIUM_GUIDE_STEPS: TourStep[] = [
     ),
   },
   {
+    target: 'sidebar-email-backup',
+    route: '/client',
+    needsSidebar: true,
+    title: 'Back up automatically',
+    body: (
+      <p className="m-0 flex items-start gap-2">
+        <MdAlternateEmail className="text-amber-500 shrink-0 mt-0.5" />
+        <span>
+          Turn on Email Backup here to pull attachments straight into your storage, or Google Backup
+          if you&rsquo;ve linked a Google account — both run automatically once set up.
+        </span>
+      </p>
+    ),
+  },
+  {
+    target: 'sidebar-new-collection',
+    route: '/client',
+    needsSidebar: true,
+    title: 'Media collections',
+    body: (
+      <p className="m-0 flex items-start gap-2">
+        <MdPhotoLibrary className="text-amber-500 shrink-0 mt-0.5" />
+        <span>
+          Create a collection here to group your photos and videos together — the source folder for
+          slideshow-style browsing, and for the AI recognition feature covered next.
+        </span>
+      </p>
+    ),
+  },
+  {
     target: 'nav-files',
     title: 'AI-powered recognition',
     body: (
       <p className="m-0 flex items-start gap-2">
         <MdPhotoLibrary className="text-amber-500 shrink-0 mt-0.5" />
         <span>
-          Premium accounts get automatic people, pet, and object recognition inside their photo and
-          video folders — files are grouped so you can browse by who or what is in them.
+          Premium accounts can turn on automatic people, pet, and object recognition for any media
+          collection — files get grouped so you can browse by who or what is in them.{' '}
+          <span className="font-medium">It&rsquo;s opt-in per collection, off by default</span> —
+          turn it on from that collection&rsquo;s info panel whenever you&rsquo;re ready.
         </span>
       </p>
     ),
   },
   {
-    target: 'nav-api-keys',
+    target: 'api-keys-list',
+    route: '/settings/api-keys',
     title: 'API keys for programmatic access',
     body: (
       <p className="m-0 flex items-start gap-2">

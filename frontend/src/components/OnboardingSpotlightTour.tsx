@@ -8,11 +8,22 @@ const VIEWPORT_MARGIN = 12
 const TOOLBAR_RESERVE = 96 // approx height of the fixed bottom toolbar + its margin
 const LOCATE_RETRY_MS = 100
 const LOCATE_MAX_ATTEMPTS = 40 // ~4s
+// Matches the files control panel's `lg` breakpoint (see FilesSidebar.tsx),
+// below which it collapses into a slide-in drawer instead of a static column.
+const SIDEBAR_BREAKPOINT = 1024
 
 interface Props {
   eyebrow: string
   steps: TourStep[]
   onClose: () => void
+}
+
+// A found element can still be unusable as a spotlight target: zero-sized,
+// or off-screen because it's inside the files sidebar drawer mid-transition
+// (or not yet opened at all — see needsSidebar above).
+function isRectVisible(r: DOMRect): boolean {
+  return r.width > 0 && r.height > 0 && r.right > 0 && r.bottom > 0 &&
+    r.left < window.innerWidth && r.top < window.innerHeight
 }
 
 // OnboardingSpotlightTour is a guided, stepped tour that dims the screen and
@@ -48,8 +59,18 @@ export function OnboardingSpotlightTour({ eyebrow, steps, onClose }: Props) {
 
     function tryLocate() {
       if (cancelled) return
+      // The target lives inside the files control panel, which is a
+      // slide-in drawer (hidden off-screen, not unmounted) below the `lg`
+      // breakpoint — open it first so the highlight lands somewhere visible.
+      if (step.needsSidebar && window.innerWidth < SIDEBAR_BREAKPOINT) {
+        document.querySelector<HTMLElement>('[data-tour="sidebar-toggle"]')?.click()
+      }
       const el = document.querySelector<HTMLElement>(`[data-tour="${step.target}"]`)
-      if (el) {
+      // The files control panel's drawer content is always mounted, just
+      // translated off-screen while closed — so a found element still needs
+      // a visibility check, both for that case and for the sidebar's ~200ms
+      // open transition still being mid-flight.
+      if (el && isRectVisible(el.getBoundingClientRect())) {
         el.scrollIntoView({ block: 'center', behavior: 'smooth' })
         requestAnimationFrame(() => {
           if (cancelled) return
@@ -140,12 +161,15 @@ export function OnboardingSpotlightTour({ eyebrow, steps, onClose }: Props) {
     <>
       {/* Blocks interaction with the real page underneath while the tour is
           active — the dim/highlight visuals themselves come from the
-          spotlight box below, which is pointer-events-none. */}
-      <div className="fixed inset-0 z-40" />
+          spotlight box below, which is pointer-events-none. z-[65]+ (rather
+          than the z-40/z-50 most of the app's overlays use) so the tour still
+          renders on top of the files sidebar drawer (z-[55]/z-[60]) when a
+          step opens it — see needsSidebar. */}
+      <div className="fixed inset-0 z-[65]" />
 
       {found && rect ? (
         <div
-          className="fixed z-40 rounded-lg pointer-events-none transition-all duration-200 ease-out"
+          className="fixed z-[65] rounded-lg pointer-events-none transition-all duration-200 ease-out"
           style={{
             top: rect.top - SPOTLIGHT_PAD,
             left: rect.left - SPOTLIGHT_PAD,
@@ -157,12 +181,12 @@ export function OnboardingSpotlightTour({ eyebrow, steps, onClose }: Props) {
           }}
         />
       ) : (
-        <div className="fixed inset-0 z-40 bg-black/65 pointer-events-none" />
+        <div className="fixed inset-0 z-[65] bg-black/65 pointer-events-none" />
       )}
 
       <div
         ref={tooltipRef}
-        className="fixed z-40 bg-white rounded-xl shadow-xl border border-gray-200 w-[min(22rem,calc(100vw-1.5rem))] p-4"
+        className="fixed z-[65] bg-white rounded-xl shadow-xl border border-gray-200 w-[min(22rem,calc(100vw-1.5rem))] p-4"
         style={tooltipPos ? { top: tooltipPos.top, left: tooltipPos.left } : { visibility: 'hidden', top: 0, left: 0 }}
       >
         <div className="flex items-start justify-between gap-3 mb-2">
@@ -183,7 +207,7 @@ export function OnboardingSpotlightTour({ eyebrow, steps, onClose }: Props) {
         <div className="text-sm text-gray-700 leading-relaxed">{step.body}</div>
       </div>
 
-      <div className="fixed bottom-0 inset-x-0 z-50 flex justify-center px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pointer-events-none">
+      <div className="fixed bottom-0 inset-x-0 z-[70] flex justify-center px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pointer-events-none">
         <div className="pointer-events-auto flex items-center gap-1 bg-gray-900 text-white rounded-xl shadow-2xl pl-3 pr-1.5 py-1.5 max-w-full">
           <span className="text-sm font-medium whitespace-nowrap pr-2.5 mr-1 border-r border-white/20">
             Step {stepIndex + 1} of {steps.length}

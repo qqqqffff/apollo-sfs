@@ -1,0 +1,68 @@
+{{/*
+  Template name : "group_invite_notification"
+  Trigger       : Admin creates a registration group with notify addresses
+  Data fields   :
+    AppName        string
+    AppURL         string
+    Email          string — the recipient's address
+    GroupName      string — the registration group's display name
+    AvailableSlots int    — number of registerable account slots
+    InviteURL      string — full public group-invite URL
+    ExpiresAt      string — pre-formatted expiry, "" when the link never expires
+*/}}
+{{define "group_invite_notification"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <title>You&#39;re invited to register on {{.AppName}}</title>
+</head>
+<body>
+  <div class="email-wrapper">
+    <div class="email-card">
+
+      {{template "header" .}}
+
+      <div class="email-body">
+        <h1>You&#39;re invited to register</h1>
+        <p>
+          A group registration for <strong>{{.GroupName}}</strong> has been opened on
+          <strong>{{.AppName}}</strong> — a private, end-to-end encrypted file
+          storage service.
+        </p>
+        <p>
+          There {{if eq .AvailableSlots 1}}is <strong>1 account slot</strong>{{else}}are
+          <strong>{{.AvailableSlots}} account slots</strong>{{end}} available. Pick the
+          one that suits you and create your account — slots are first come,
+          first served.
+        </p>
+        {{if .ExpiresAt}}
+        <p>
+          This registration link expires on <strong>{{.ExpiresAt}}</strong>.
+        </p>
+        {{end}}
+
+        <div class="btn-wrapper">
+          <a href="{{.InviteURL}}" class="btn-primary">Choose your account slot</a>
+        </div>
+
+        <p>If the button does not work, copy and paste this link into your browser:</p>
+        <div class="token-block">{{.InviteURL}}</div>
+
+        <hr class="email-divider" />
+
+        <p>
+          If you were not expecting this invitation or do not wish to join,
+          you can safely ignore this email.
+        </p>
+      </div>
+
+      {{template "footer" .}}
+
+    </div>
+  </div>
+</body>
+</html>
+{{end}}

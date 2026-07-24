@@ -117,6 +117,9 @@ type Handler struct {
 	// throttling entirely rather than failing closed.
 	bandwidth       *services.BandwidthManager
 	turnstileSecret string
+	// regGroups backs the public group-invite endpoints (nil is tolerated and
+	// causes them to return 503).
+	regGroups *services.RegistrationGroupService
 	// paypal is used for the interest-form deposit (nil is tolerated and
 	// causes the deposit endpoints to return 503).
 	paypal *services.PayPalClient
@@ -204,6 +207,14 @@ func SetInviteService(h *Handler, svc InviteService) {
 // tests that need to bypass real Keycloak API calls.
 func SetKcIDResolver(h *Handler, fn func(ctx context.Context, username string) (uuid.UUID, error)) {
 	h.resolveKcID = fn
+}
+
+// SetRegistrationGroupService installs the limited-user-group-registration
+// service on an existing Handler. Wired from main once the service is
+// constructed; nil is tolerated and causes the public group-invite endpoints
+// to return 503 (configured, not crash).
+func SetRegistrationGroupService(h *Handler, svc *services.RegistrationGroupService) {
+	h.regGroups = svc
 }
 
 // InterestDepositConfig holds the PayPal redirect URLs for the interest-form

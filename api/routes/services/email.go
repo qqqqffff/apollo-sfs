@@ -132,6 +132,70 @@ func (s *EmailService) SendInvitation(
 	)
 }
 
+// SendGroupInviteNotification enqueues the group-registration announcement to
+// every address in recipients when an admin creates a registration group.
+// availableSlots is the number of registerable account slots; inviteURL is the
+// full public group-invite link; expiresAt is a pre-formatted expiry ("" when
+// the link never expires).
+func (s *EmailService) SendGroupInviteNotification(
+	ctx context.Context,
+	recipients []string,
+	groupName string,
+	availableSlots int,
+	inviteURL string,
+	expiresAt string,
+) error {
+	for _, to := range recipients {
+		if err := s.enqueue(ctx, to,
+			fmt.Sprintf("You're invited to register on %s", s.appName),
+			"group_invite_notification",
+			map[string]any{
+				"AppName":        s.appName,
+				"AppURL":         s.appURL,
+				"Email":          to,
+				"GroupName":      groupName,
+				"AvailableSlots": availableSlots,
+				"InviteURL":      inviteURL,
+				"ExpiresAt":      expiresAt,
+			},
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SendGroupInviteLastChance enqueues the opt-in follow-up sent one day before
+// a registration group's link expires, with the updated count of slots still
+// available and a "last chance" note.
+func (s *EmailService) SendGroupInviteLastChance(
+	ctx context.Context,
+	recipients []string,
+	groupName string,
+	availableSlots int,
+	inviteURL string,
+	expiresAt string,
+) error {
+	for _, to := range recipients {
+		if err := s.enqueue(ctx, to,
+			fmt.Sprintf("Last chance — %d account slot(s) left on %s", availableSlots, s.appName),
+			"group_invite_last_chance",
+			map[string]any{
+				"AppName":        s.appName,
+				"AppURL":         s.appURL,
+				"Email":          to,
+				"GroupName":      groupName,
+				"AvailableSlots": availableSlots,
+				"InviteURL":      inviteURL,
+				"ExpiresAt":      expiresAt,
+			},
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // SendShareNotification enqueues an email telling a recipient that ownerEmail
 // shared a file or folder with them. itemType is "file" or "folder";
 // permissionLabel is a human-readable summary e.g. "view and download";

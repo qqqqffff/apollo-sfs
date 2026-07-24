@@ -611,6 +611,128 @@ func (s *AuthService) Register(ctx context.Context, username, email, password, i
 	return tokens, nil
 }
 
+// ErrRegistrationSessionExpired is returned by RegisterWithReservation when
+// the reservation token no longer holds its slot (expired, released, raced
+// away, or its group was deactivated). The handler maps it to 410 so the
+// register page can show the session-expired modal.
+var ErrRegistrationSessionExpired = errors.New("your registration session has expired — please return to the invite page and pick a slot again")
+
+// ErrEmailTaken is returned when a registration email already belongs to an
+// existing account.
+var ErrEmailTaken = errors.New("an account with this email address already exists")
+
+// EmailInUse reports whether an app account already exists for the given email.
+func (s *AuthService) EmailInUse(ctx context.Context, email string) (bool, error) {
+	_, err := s.queries.GetUserByEmail(ctx, email)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return false, fmt.Errorf("email in use: %w", err)
+}
+
+// RegisterWithReservation creates an account from a group-registration slot
+// reservation (see RegistrationGroupService). Unlike Register, the email is
+// user-supplied — the reservation carries no email — so it is checked against
+// existing accounts here. The slot dictates quota, drive, and account status
+// (base or premium with an optional trial expiry; never admin).
+//
+// Mirrors Register's ordering guarantees: the premium role grant is fatal
+// BEFORE any app DB state is written or the slot consumed, so a failed grant
+// leaves the reservation valid for a retry.
+func (s *AuthService) RegisterWithReservation(ctx context.Context, username, email, password, reservationToken string) (*TokenPair, error) {
+	// Sweep expired holds so the validity check below is accurate.
+	if _, err := s.queries.ReleaseExpiredSlotReservations(ctx); err != nil {
+		log.Printf("register with reservation: sweep: %v", err)
+	}
+
+	info, err := s.queries.GetSlotReservationByToken(ctx, reservationToken)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrRegistrationSessionExpired
+		}
+		return nil, fmt.Errorf("register with reservation: %w", err)
+	}
+	if info.Reservation.CompletedAt != nil || info.Reservation.ReleasedAt != nil ||
+		time.Now().After(info.Reservation.ExpiresAt) ||
+		info.Slot.ConsumedAt != nil || !info.GroupUsable {
+		return nil, ErrRegistrationSessionExpired
+	}
+
+	inUse, err := s.EmailInUse(ctx, email)
+	if err != nil {
+		return nil, fmt.Errorf("register with reservation: %w", err)
+	}
+	if inUse {
+		return nil, ErrEmailTaken
+	}
+
+	adminToken, err := s.adminToken(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("register with reservation: get admin token: %w", err)
+	}
+	kcUserID, err := s.kcCreateUser(ctx, adminToken, username, email, password)
+	if err != nil {
+		return nil, fmt.Errorf("register with reservation: create keycloak user: %w", err)
+	}
+
+	// Premium slots grant the realm role first, and fatally — same contract as
+	// provisionInvitedAppUser: nothing below is written on failure, so the
+	// reservation stays claimable for a retry.
+	if info.Slot.AccountStatus == "premium" {
+		role, roleErr := s.kcGetRealmRole(ctx, adminToken, "premium")
+		if roleErr != nil {
+			return nil, fmt.Errorf("%w: look up role premium: %v", ErrRoleProvisioningFailed, roleErr)
+		}
+		if grantErr := s.kcGrantRealmRoles(ctx, adminToken, kcUserID, []kcRoleRef{*role}); grantErr != nil {
+			return nil, fmt.Errorf("%w: grant premium role: %v", ErrRoleProvisioningFailed, grantErr)
+		}
+	}
+
+	if s.ProvisionUserKey == nil {
+		return nil, fmt.Errorf("encryption service not wired")
+	}
+	encKey, nonce, masterKeyVer, err := s.ProvisionUserKey(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("register with reservation: provision key: %w", err)
+	}
+
+	if err := s.queries.CreateUser(ctx, &models.User{
+		Username:          username,
+		Email:             email,
+		EncryptedKey:      encKey,
+		KeyNonce:          nonce,
+		MasterKeyVersion:  masterKeyVer,
+		StorageUsedBytes:  0,
+		StorageQuotaBytes: info.Slot.QuotaBytes,
+	}); err != nil {
+		return nil, fmt.Errorf("register with reservation: create db user: %w", err)
+	}
+	if err := s.queries.AllocateUserToDrive(ctx, username, info.Slot.DriveID, info.Slot.QuotaBytes); err != nil {
+		return nil, fmt.Errorf("register with reservation: allocate drive: %w", err)
+	}
+	if info.Slot.AccountStatus == "premium" && info.Slot.PremiumExpiresAt != nil {
+		if err := s.queries.SetPremiumExpiry(ctx, username, info.Slot.PremiumExpiresAt); err != nil {
+			log.Printf("register with reservation: set premium expiry for %q: %v", username, err)
+		}
+	}
+
+	// Consume the slot. Non-fatal: the account already exists — a failure here
+	// (a rare race against the sweep) is logged loudly rather than stranding
+	// the user, mirroring AcceptInvitation's tolerance.
+	if err := s.queries.CompleteSlotReservation(ctx, info.Reservation.ID, info.Slot.ID, username); err != nil {
+		log.Printf("register with reservation: consume slot %s for %q: %v", info.Slot.ID, username, err)
+	}
+
+	tokens, err := s.Login(ctx, username, password)
+	if err != nil {
+		return nil, fmt.Errorf("register with reservation: auto-login: %w", err)
+	}
+	return tokens, nil
+}
+
 // Logout revokes the refresh token at Keycloak, invalidating the session.
 // Session cookie clearing is handled by the caller (handler layer).
 func (s *AuthService) Logout(ctx context.Context, refreshToken string) error {

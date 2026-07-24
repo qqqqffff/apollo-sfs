@@ -22,6 +22,19 @@ export function register(
   return post<RegisterResponse>('/auth/register', { username, email, password, invite_token, captcha_token })
 }
 
+// registerWithReservation registers via a group-registration slot reservation
+// (see /group-invite) instead of an admin invitation — the email is
+// user-supplied rather than locked to an invite.
+export function registerWithReservation(
+  username: string,
+  email: string,
+  password: string,
+  reservation_token: string,
+  captcha_token: string,
+) {
+  return post<RegisterResponse>('/auth/register', { username, email, password, reservation_token, captcha_token })
+}
+
 export function logout() {
   return post<void>('/auth/logout')
 }

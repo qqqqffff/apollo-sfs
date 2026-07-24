@@ -112,6 +112,9 @@ type Handler struct {
 	// emailSvc sends the mandatory role-change/account-deletion notices (see
 	// SetEmailService); nil skips them (local dev without SMTP configured).
 	emailSvc *services.EmailService
+	// regGroups backs the limited-user-group-registration endpoints (see
+	// SetRegistrationGroupService); nil causes them to 503.
+	regGroups *services.RegistrationGroupService
 	// paypalClients resolves the live/sandbox PayPal client for cancelling a
 	// user's real subscription when their role changes away from Premium or
 	// their account is deleted (see SetPayPalClients).

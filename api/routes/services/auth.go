@@ -390,6 +390,15 @@ func (s *AuthService) ensureUserProvisioned(ctx context.Context, accessToken str
 // for an invite, distinct from a 500 on an internal failure.
 var ErrInvitationRequired = errors.New("a valid invitation is required")
 
+// ErrRoleProvisioningFailed is returned by provisionInvitedAppUser when the
+// invitation requested realm roles (admin/premium) that could not be resolved
+// or granted in Keycloak. It is returned before any app DB state is written
+// or the invitation is marked accepted, so the invitation stays valid and the
+// recipient can retry. Handlers map it to a distinct response telling the
+// user to try accepting the invitation again shortly, rather than a plain
+// success that silently hands them a lesser account.
+var ErrRoleProvisioningFailed = errors.New("invited role could not be provisioned")
+
 // validateInvitation looks up a pending invitation by token and verifies it
 // matches the email and has not expired. Shared by password registration and
 // brokered (social) first-login.
@@ -412,13 +421,20 @@ func (s *AuthService) validateInvitation(ctx context.Context, token, email strin
 // been validated and whose Keycloak account (kcUserID) already exists. It grants
 // the invitation's realm roles, provisions the encryption key, selects and
 // allocates a drive, creates the app DB record, and marks the invitation accepted.
+//
+// Role granting runs first and is fatal on failure (see ErrRoleProvisioningFailed):
+// nothing below it — the DB user, the drive allocation, or the invitation's
+// accepted flag — is written, so a failed grant leaves the invitation valid for
+// the caller to retry instead of silently completing with a downgraded account.
 func (s *AuthService) provisionInvitedAppUser(
 	ctx context.Context,
 	adminToken, kcUserID, username, email, inviteToken string,
 	inv *models.Invitation,
 ) error {
-	// Grant realm roles requested by the invitation. Non-fatal — the account is
-	// still usable and an admin can grant roles manually.
+	// Grant realm roles requested by the invitation. Fatal: this runs before any
+	// app DB state is written or the invitation is accepted (below), so on
+	// failure we return here and leave the invitation unconsumed rather than
+	// silently handing out an account with fewer privileges than promised.
 	if inv.GrantAdmin || inv.GrantPremium {
 		var names []string
 		if inv.GrantAdmin {
@@ -429,18 +445,16 @@ func (s *AuthService) provisionInvitedAppUser(
 			// grant it explicitly so the Keycloak JWT carries the role.
 			names = append(names, "premium")
 		}
-		var rolesToGrant []kcRoleRef
+		rolesToGrant := make([]kcRoleRef, 0, len(names))
 		for _, roleName := range names {
 			role, roleErr := s.kcGetRealmRole(ctx, adminToken, roleName)
 			if roleErr != nil {
-				continue
+				return fmt.Errorf("%w: look up role %q: %v", ErrRoleProvisioningFailed, roleName, roleErr)
 			}
 			rolesToGrant = append(rolesToGrant, *role)
 		}
-		if len(rolesToGrant) > 0 {
-			if grantErr := s.kcGrantRealmRoles(ctx, adminToken, kcUserID, rolesToGrant); grantErr != nil {
-				_ = grantErr // non-fatal
-			}
+		if grantErr := s.kcGrantRealmRoles(ctx, adminToken, kcUserID, rolesToGrant); grantErr != nil {
+			return fmt.Errorf("%w: grant roles %v: %v", ErrRoleProvisioningFailed, names, grantErr)
 		}
 	}
 

@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"errors"
 	"log"
 	"net/http"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"apollo-sfs.com/api/routes/middleware"
+	"apollo-sfs.com/api/routes/services"
 )
 
 type registerRequest struct {
@@ -54,6 +56,13 @@ func (h *Handler) Register(c *gin.Context) {
 		req.InviteToken,
 	)
 	if err != nil {
+		if errors.Is(err, services.ErrRoleProvisioningFailed) {
+			log.Printf("register: role provisioning failed, invitation left unconsumed: %v", err)
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"error": "account setup could not be completed — please try accepting your invitation again in a few minutes",
+			})
+			return
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}

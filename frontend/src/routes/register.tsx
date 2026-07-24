@@ -132,6 +132,14 @@ function RouteComponent() {
   const [paying, setPaying] = useState(false)
   const [paid, setPaid] = useState(false)
 
+  // Each step/sub-screen renders a differently-sized page. Without this, the
+  // browser keeps whatever scroll offset the previous screen ended at (e.g.
+  // scrolled down to reach the submit button on a small viewport), stranding
+  // the new screen's heading and primary actions off-screen above the fold.
+  useEffect(() => {
+    window.scrollTo(0, 0)
+  }, [step, paid])
+
   const premiumPlans = config?.premium_plans ?? []
   const selectedPriceCents = premiumPlans.find((p) => p.plan === premiumPlan)?.price_cents ?? 0
   const premiumPriceLabel = selectedPriceCents ? `$${(selectedPriceCents / 100).toFixed(2)}` : ''
@@ -175,7 +183,7 @@ function RouteComponent() {
 
   if (!token) {
     return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center px-4">
+      <div className="min-h-screen bg-gray-50 flex items-start sm:items-center justify-center px-4 py-8">
         <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-8 text-sm text-gray-600">
           Invalid or missing invite link.
         </div>
@@ -188,7 +196,7 @@ function RouteComponent() {
 
     if (paid) {
       return (
-        <div className="min-h-screen bg-gray-50 flex items-center justify-center px-4">
+        <div className="min-h-screen bg-gray-50 flex items-start sm:items-center justify-center px-4 py-8">
           <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-10 max-w-md w-full text-center">
             <MdCheckCircle className="text-5xl text-green-500 mx-auto mb-3" />
             <h1 className="text-xl font-semibold text-gray-900 m-0">Premium unlocked.</h1>
@@ -208,7 +216,7 @@ function RouteComponent() {
     }
 
     return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center px-4 py-12">
+      <div className="min-h-screen bg-gray-50 flex items-start sm:items-center justify-center px-4 py-8 sm:py-12">
         <div className="w-full max-w-2xl flex flex-col gap-6">
           <div className="text-center">
             <h1 className="text-2xl font-semibold text-gray-900 m-0">Welcome aboard.</h1>
@@ -286,8 +294,8 @@ function RouteComponent() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50 flex items-center justify-center px-4">
-      <div className="w-full max-w-sm bg-white rounded-xl border border-gray-200 shadow-sm p-8">
+    <div className="min-h-screen bg-gray-50 flex items-start sm:items-center justify-center px-4 py-8">
+      <div className="w-full max-w-sm bg-white rounded-xl border border-gray-200 shadow-sm p-6 sm:p-8">
         <div className="flex items-center gap-2 mb-6">
           <h1 className="text-xl font-semibold text-gray-900">Create account</h1>
           {invite?.grant_admin && (
@@ -378,10 +386,16 @@ function RouteComponent() {
             </span>
           </label>
           {config?.turnstile_site_key && (
-            <div>
+            <div className="flex justify-center">
+              {/* "compact" (150px min-width) instead of the default "normal"
+                  (300px min-width) — the card's content area on narrow phones
+                  (~295px) is narrower than "normal"/"flexible" ever go, which
+                  forced the widget past the card edge and threw the whole
+                  page's horizontal centering off. */}
               <Turnstile
                 ref={turnstileRef}
                 siteKey={config.turnstile_site_key}
+                options={{ size: 'compact' }}
                 onSuccess={(token) => setCaptchaToken(token)}
                 onExpire={() => setCaptchaToken(null)}
                 onError={() => setCaptchaToken(null)}

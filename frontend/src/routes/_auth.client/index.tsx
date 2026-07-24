@@ -544,8 +544,9 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
   }
 
   const {
-    draggingFileId, draggingFolderId, dragOverFolderId, dragOverBackground,
+    draggingFileId, draggingFolderId, dragOverFolderId, dragOverBackground, dragOverCurrent,
     getFileDragHandlers, getFolderDragHandlers, getFolderDropHandlers, getListBackgroundDropHandlers,
+    getCurrentFolderDropHandlers,
   } = useFileDrag(
     (fileId, targetFolderId) => moveFileMutation.mutate({ fileId, targetFolderId }),
     (folderId, targetFolderId) => moveFolderMutation.mutate({ folderId, targetFolderId }),
@@ -980,7 +981,7 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
         const driveCrumb = !readOnly && currentDrive
           ? {
               id: currentDrive.drive_id,
-              label: `${tierLabel(currentDrive.drive_type)} · ${currentDrive.name}`,
+              name: currentDrive.name,
               type: currentDrive.drive_type,
               showAllStorage: multiDrive,
             }
@@ -1000,6 +1001,8 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
                 onNavigateAllStorage={goToAllStorage}
                 getFolderDropHandlers={!readOnly ? getFolderDropHandlers : undefined}
                 dragOverFolderId={!readOnly ? dragOverFolderId : null}
+                currentDropHandlers={!readOnly && folder ? getCurrentFolderDropHandlers(folder.id) : undefined}
+                dragOverCurrent={!readOnly && dragOverCurrent}
               />
             </div>
             {folder && (
@@ -1008,6 +1011,17 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
                 {!readOnly && (
                   <DriveInfoButton folder={folder} servers={myServers} isAdmin={!!user?.is_admin} align="left" />
                 )}
+              </div>
+            )}
+            {!readOnly && folder && (draggingFileId || draggingFolderId) && (
+              <div
+                {...getCurrentFolderDropHandlers(folder.id)}
+                className={`mt-2 flex items-center gap-2 rounded-lg border-2 border-dashed px-3 py-2 text-sm transition-colors ${
+                  dragOverCurrent ? 'bg-blue-50 border-blue-400 text-blue-700' : 'border-gray-200 text-gray-400'
+                }`}
+              >
+                <MdFolderOpen className="text-base shrink-0" />
+                Drop here to move into &ldquo;{folder.name}&rdquo;
               </div>
             )}
           </div>
@@ -1045,7 +1059,7 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
       })()}
 
       {!readOnly && (
-        <div className={`gap-2 mb-4 ${folderId === 'root' ? 'hidden sm:flex' : 'flex'}`}>
+        <div className={`gap-2 mb-4 ${folderId === 'root' && !currentDrive ? 'hidden sm:flex' : 'flex'}`}>
           <input
             ref={fileRef}
             type="file"

@@ -299,6 +299,13 @@ function GroupRow({ group: g, status, open, expanded, copied, onCopy, onToggleDe
         </td>
         <td className="px-4 py-3">
           <div className="flex items-center gap-2 justify-end">
+            <Link
+              to="/admin/group-registration/create"
+              search={{ groupId: g.id }}
+              className="text-xs text-gray-600 hover:text-gray-900 cursor-pointer bg-transparent border border-gray-200 hover:border-gray-400 rounded px-2 py-1 no-underline transition-colors"
+            >
+              Edit
+            </Link>
             {status === 'active' && (
               <button
                 onClick={onDeactivate}
@@ -391,7 +398,7 @@ function SlotTypeRow({ type: t }: { type: RegistrationSlotType }) {
         )}
       </td>
       <td className="px-3 py-2 text-gray-600 whitespace-nowrap">
-        {t.total > 1 ? `${t.total} × identical` : '1'}
+        {t.total > 1 ? `${t.total}x` : '1'}
       </td>
       <td className="px-3 py-2 whitespace-nowrap">
         {t.available > 0 && (

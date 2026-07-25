@@ -5,6 +5,7 @@ import {
   MdAddCircleOutline,
   MdAlternateEmail,
   MdArrowBack,
+  MdArrowUpward,
   MdBolt,
   MdAutoAwesome,
   MdCheck,
@@ -46,6 +47,7 @@ import { StorageBreakdownModal } from '../../components/StorageBreakdownModal'
 import { ShareModal } from '../../components/ShareModal'
 import { DeleteConfirmModal, readSkipDeleteCookie } from '../../components/DeleteConfirmModal'
 import { FolderBreadcrumb } from '../../components/FolderBreadcrumb'
+import { HoverDonut } from '../../components/HoverDonut'
 import { AccountBadges } from '../../components/GroupBadge'
 import { RowActionsMenu, MenuRow } from '../../components/RowActionsMenu'
 import { TierIcon } from '../../components/TierIcon'
@@ -59,7 +61,7 @@ import { BulkMoveModal, type BulkMoveItem } from '../../components/BulkMoveModal
 import { BulkDeleteConfirmModal } from '../../components/BulkDeleteConfirmModal'
 import { useFileUpload } from '../../hooks/useFileUpload'
 import { useDragDrop } from '../../hooks/useDragDrop'
-import { useFileDrag } from '../../hooks/useFileDrag'
+import { useFileDrag, HOVER_OPEN_DELAY_MS } from '../../hooks/useFileDrag'
 import { useSort, sortedFolders, sortedFiles } from '../../hooks/useSort'
 import { useInfiniteFolderContents } from '../../hooks/useInfiniteFolderContents'
 import { useFavorites } from '../../hooks/useFavorites'
@@ -463,6 +465,11 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
       queryClient.invalidateQueries({ queryKey: ['folders'] })
       navigate({ to: '/client', search: { file: undefined, folder: targetFolderId } })
     },
+    // Drag-and-drop had no failure feedback at all — a rejected move (e.g.
+    // the target folder vanished mid-drag) silently did nothing, which reads
+    // to the user as "drag and drop doesn't work" rather than an explained
+    // failure.
+    onError: (err) => notify('error', err instanceof ApiError ? err.message : 'Failed to move file'),
   })
 
   const moveFolderMutation = useMutation({
@@ -472,6 +479,17 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
       queryClient.invalidateQueries({ queryKey: ['folders'] })
       navigate({ to: '/client', search: { file: undefined, folder: targetFolderId } })
     },
+    // Same as moveFileMutation above — and folder moves have a real,
+    // frequently-hit rejection case a silent failure would otherwise hide:
+    // ErrCrossDriveMove (api/routes/services/folder.go) rejects reparenting
+    // a folder onto a target on a different drive/tier (a plain move only
+    // rewrites parent_id — it can't relocate the subtree's bytes between
+    // MinIO instances; that needs the drive-migration flow instead). Since
+    // subfolders inherit their exact parent's drive, this fires whenever a
+    // drag crosses a drive boundary, which is far more reachable once you're
+    // navigating between nested folders than at a single drive's root
+    // listing — previously that just looked like "drop did nothing."
+    onError: (err) => notify('error', err instanceof ApiError ? err.message : 'Failed to move folder'),
   })
 
   // Shared by both bulk-move paths: the toolbar's Move modal (ids come from
@@ -1013,15 +1031,29 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
                 )}
               </div>
             )}
+            {/* Persistent, stacked drop targets — both stay mounted for the
+                whole time a file/folder is being dragged (not just once the
+                pointer happens to be over them), so there's always somewhere
+                obvious to drop regardless of how the drag got here (e.g. a
+                spring-loaded hover-navigate that left no sibling row under
+                the pointer). Each row lights up independently via its own
+                dragOver state when the drag is actually inside it. */}
             {!readOnly && folder && (draggingFileId || draggingFolderId) && (
-              <div
-                {...getCurrentFolderDropHandlers(folder.id)}
-                className={`mt-2 flex items-center gap-2 rounded-lg border-2 border-dashed px-3 py-2 text-sm transition-colors ${
-                  dragOverCurrent ? 'bg-blue-50 border-blue-400 text-blue-700' : 'border-gray-200 text-gray-400'
-                }`}
-              >
-                <MdFolderOpen className="text-base shrink-0" />
-                Drop here to move into &ldquo;{folder.name}&rdquo;
+              <div className="mt-2 flex flex-col gap-1.5">
+                <DropZoneRow
+                  icon={<MdFolderOpen className="text-base shrink-0" />}
+                  label={`Drop here to move into "${folder.name}"`}
+                  active={dragOverCurrent}
+                  handlers={getCurrentFolderDropHandlers(folder.id)}
+                />
+                {folder.parent_id && (
+                  <DropZoneRow
+                    icon={<MdArrowUpward className="text-base shrink-0" />}
+                    label="Drop here to move to the parent folder"
+                    active={dragOverBackground}
+                    handlers={getListBackgroundDropHandlers(folder.parent_id)}
+                  />
+                )}
               </div>
             )}
           </div>
@@ -1181,25 +1213,7 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
         <SearchBar value={search} onChange={setSearch} />
       </div>
 
-      {/* The whole list area — including empty space below/around the rows —
-          is a drop target: dropping anywhere here that isn't a specific
-          subfolder row moves the dragged item(s) up to the parent folder (a
-          much bigger, closer target than the breadcrumb crumb that already
-          does the same thing). Generous padding + a min-height keep that
-          target comfortably sized even when the folder is nearly empty. */}
-      <div
-        {...(!readOnly ? getListBackgroundDropHandlers(folder?.parent_id ?? null) : {})}
-        className={`relative rounded-xl p-4 min-h-52 border-2 transition-colors ${
-          dragOverBackground ? 'bg-blue-50/40 border-dashed border-blue-300' : 'border-transparent'
-        }`}
-      >
-        {dragOverBackground && (
-          <div className="pointer-events-none absolute inset-x-0 top-1 flex justify-center">
-            <span className="px-3 py-1 rounded-full bg-blue-600 text-white text-xs font-medium shadow">
-              Drop to move to the parent folder
-            </span>
-          </div>
-        )}
+      <div className="relative rounded-xl p-4 min-h-52">
       {!search && !hasContent && (
         <p className="text-sm text-gray-400 mt-4">
           {folderId === 'root' ? 'No files yet. Upload something to get started.' : 'This folder is empty.'}
@@ -1360,6 +1374,9 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
                           ? <MdAlternateEmail className="text-teal-500 text-lg shrink-0" title="Email backup" />
                           : <MdFolder className="text-blue-400 text-lg shrink-0" />}
                       <span className="truncate">{f.name}</span>
+                      {!readOnly && dragOverFolderId === f.id && (
+                        <HoverDonut durationMs={HOVER_OPEN_DELAY_MS} className="text-blue-500" />
+                      )}
                     </button>
                     <span className="text-xs text-gray-400 shrink-0 hidden sm:inline">
                       {new Date(f.created_at).toLocaleDateString()}
@@ -1721,6 +1738,37 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
 }
 
 // ── Shared components ─────────────────────────────────────────────────────────
+
+// One row of the persistent stacked drag-and-drop target panel (current
+// folder / parent folder) rendered above the file list while a drag is
+// active — see FolderView. `active` drives the hover highlight; `handlers`
+// come straight from useFileDrag (getCurrentFolderDropHandlers /
+// getListBackgroundDropHandlers).
+function DropZoneRow({
+  icon, label, active, handlers,
+}: {
+  icon: React.ReactNode
+  label: string
+  active: boolean
+  handlers: {
+    onDragEnter: (e: React.DragEvent) => void
+    onDragOver: (e: React.DragEvent) => void
+    onDragLeave: (e: React.DragEvent) => void
+    onDrop: (e: React.DragEvent) => void
+  }
+}) {
+  return (
+    <div
+      {...handlers}
+      className={`flex items-center gap-2 rounded-lg border-2 border-dashed px-3 py-2 text-sm transition-colors ${
+        active ? 'bg-blue-50 border-blue-400 text-blue-700' : 'border-gray-200 text-gray-400'
+      }`}
+    >
+      {icon}
+      {label}
+    </div>
+  )
+}
 
 function QuotaBar({ used, quota, onAddStorage, label }: { used: number; quota: number; onAddStorage?: () => void; label?: string }) {
   const pct = quota > 0 ? (used / quota) * 100 : 0

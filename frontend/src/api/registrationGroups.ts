@@ -1,4 +1,4 @@
-import { del, get, post } from './client'
+import { del, get, patch, post } from './client'
 import type { PageResult } from '../types/api'
 
 // ── Types ──────────────────────────────────────────────────────────────────────
@@ -81,6 +81,18 @@ export function listRegistrationGroups(cursor?: string) {
 
 export function createRegistrationGroup(body: CreateRegistrationGroupBody) {
   return post<RegistrationGroupDetail>('/admin/registration-groups', body)
+}
+
+// Slots aren't editable — they're fixed at creation (see CreateRegistrationGroupBody).
+export interface UpdateRegistrationGroupBody {
+  name: string
+  expires_at?: string
+  notify_emails: string[]
+  send_expiry_reminder: boolean
+}
+
+export function updateRegistrationGroup(id: string, body: UpdateRegistrationGroupBody) {
+  return patch<RegistrationGroupDetail>(`/admin/registration-groups/${id}`, body)
 }
 
 export function getRegistrationGroup(id: string) {

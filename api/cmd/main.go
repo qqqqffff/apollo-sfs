@@ -763,6 +763,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 			adminGroup.GET("/registration-groups", adminHandler.ListRegistrationGroups)
 			adminGroup.GET("/registration-groups/capacity", adminHandler.GetRegistrationCapacity)
 			adminGroup.GET("/registration-groups/:id", adminHandler.GetRegistrationGroup)
+			adminGroup.PATCH("/registration-groups/:id", adminHandler.UpdateRegistrationGroup)
 			adminGroup.POST("/registration-groups/:id/deactivate", adminHandler.DeactivateRegistrationGroup)
 			adminGroup.DELETE("/registration-groups/:id", adminHandler.DeleteRegistrationGroup)
 

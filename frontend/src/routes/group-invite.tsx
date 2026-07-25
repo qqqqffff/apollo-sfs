@@ -4,6 +4,8 @@ import { useMutation, useQuery } from '@tanstack/react-query'
 import { MdCloud, MdRocketLaunch, MdStorage, MdSpeed, MdHourglassTop, MdBlock } from 'react-icons/md'
 import { getGroupInvite, reserveGroupSlot, type RegistrationSlotType } from '../api/registrationGroups'
 import { ApiError } from '../api/client'
+import { useAuth } from '../auth'
+import { AlreadySignedInNotice } from '../components/AlreadySignedInNotice'
 
 interface GroupInviteParams {
   id: string
@@ -26,6 +28,7 @@ function formatQuota(bytes: number): string {
 function RouteComponent() {
   const { id } = Route.useSearch()
   const navigate = useNavigate()
+  const { isAuthenticated, isLoading: authLoading, user } = useAuth()
   const [reserveError, setReserveError] = useState<string | null>(null)
   const [pendingSlotId, setPendingSlotId] = useState<string | null>(null)
 
@@ -61,6 +64,22 @@ function RouteComponent() {
         <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-8 text-sm text-gray-600">
           Invalid or missing group invite link.
         </div>
+      </PublicShell>
+    )
+  }
+
+  if (authLoading) {
+    return (
+      <PublicShell>
+        <p className="text-sm text-gray-500">Loading…</p>
+      </PublicShell>
+    )
+  }
+
+  if (isAuthenticated) {
+    return (
+      <PublicShell>
+        <AlreadySignedInNotice username={user?.username} />
       </PublicShell>
     )
   }

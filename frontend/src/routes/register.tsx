@@ -4,14 +4,16 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { PayPalScriptProvider, PayPalButtons } from '@paypal/react-paypal-js'
 import { Turnstile } from '@marsidev/react-turnstile'
 import type { TurnstileInstance } from '@marsidev/react-turnstile'
-import { MdCloud, MdRocketLaunch, MdCheckCircle, MdSpeed, MdCheck, MdClose, MdHourglassTop } from 'react-icons/md'
+import { MdCloud, MdRocketLaunch, MdCheckCircle, MdSpeed, MdCheck, MdClose, MdHourglassTop, MdArrowBack } from 'react-icons/md'
 import { register, registerWithReservation, validateInviteToken } from '../api/auth'
-import { checkEmail, getSlotReservation } from '../api/registrationGroups'
+import { checkEmail, getSlotReservation, releaseSlotReservation } from '../api/registrationGroups'
 import { ApiError } from '../api/client'
 import { publicConfigQueryOptions } from '../api/interest'
 import { createPremiumSubscription, confirmPremiumSubscription, type PremiumPlan } from '../api/payments'
 import { TermsOfServiceModal } from '../components/TermsOfServiceModal'
 import { PremiumPlanSelector } from '../components/PremiumPlanSelector'
+import { useAuth } from '../auth'
+import { AlreadySignedInNotice } from '../components/AlreadySignedInNotice'
 
 // This inline checkout deliberately keeps the popup-based <PayPalButtons>
 // (rather than PayPalWalletRedirectButton/PayPalSubscribeButton's redirect
@@ -100,6 +102,7 @@ function RouteComponent() {
   const queryClient = useQueryClient()
   const { token, reservation } = Route.useLoaderData()
   const navigate = useNavigate()
+  const { isAuthenticated, isLoading: authLoading, user } = useAuth()
 
   // Reservation flow (group registration) vs invite flow: an invite token
   // always wins so existing invite links keep their locked-email behavior.
@@ -129,6 +132,19 @@ function RouteComponent() {
   const [step, setStep] = useState<'form' | 'plan'>('form')
   const [captchaToken, setCaptchaToken] = useState<string | null>(null)
   const turnstileRef = useRef<TurnstileInstance>(null)
+
+  // Turnstile's "compact" size (150x140) is narrower but much taller than
+  // "normal" (300x65) — needed on phone-width cards (~295px, see below) but
+  // awkwardly tall once there's room for "normal". Switch at the same
+  // viewport width Tailwind's `sm` breakpoint uses.
+  const [captchaSize, setCaptchaSize] = useState<'compact' | 'normal'>(
+    () => (window.innerWidth < 640 ? 'compact' : 'normal'),
+  )
+  useEffect(() => {
+    const updateCaptchaSize = () => setCaptchaSize(window.innerWidth < 640 ? 'compact' : 'normal')
+    window.addEventListener('resize', updateCaptchaSize)
+    return () => window.removeEventListener('resize', updateCaptchaSize)
+  }, [])
 
   // The invited email is authoritative — lock it to whatever the token
   // resolves to rather than letting the user redirect the invite elsewhere.
@@ -257,12 +273,43 @@ function RouteComponent() {
     },
   })
 
+  // Back button (reservation flow only): free the held slot so someone else
+  // (or this same visitor) can pick a different one, then return to the
+  // group page. Best-effort — if the release call fails (e.g. the hold
+  // already lapsed) still navigate back rather than stranding the user here.
+  const backMutation = useMutation({
+    mutationFn: () => releaseSlotReservation(reservation),
+    onSettled: () => {
+      navigate({ to: '/group-invite', search: { id: slotReservation?.group_link_id ?? '' } })
+    },
+  })
+
   if (!token && !reservation) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-start sm:items-center justify-center px-4 py-8">
         <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-8 text-sm text-gray-600">
           Invalid or missing invite link.
         </div>
+      </div>
+    )
+  }
+
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-start sm:items-center justify-center px-4 py-8">
+        <p className="text-sm text-gray-500">Loading…</p>
+      </div>
+    )
+  }
+
+  // Blocks registering a second account while already signed in. Skipped once
+  // this session's own registration has gone through (mutation.isSuccess →
+  // plan step) — by then the "signed in" session IS the account that was just
+  // created, not a stale one to sign out of.
+  if (isAuthenticated && !mutation.isSuccess) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-start sm:items-center justify-center px-4 py-8">
+        <AlreadySignedInNotice username={user?.username} />
       </div>
     )
   }
@@ -445,6 +492,16 @@ function RouteComponent() {
   return (
     <div className="min-h-screen bg-gray-50 flex items-start sm:items-center justify-center px-4 py-8">
       <div className="w-full max-w-sm bg-white rounded-xl border border-gray-200 shadow-sm p-6 sm:p-8">
+        {isReservationFlow && (
+          <button
+            type="button"
+            onClick={() => backMutation.mutate()}
+            disabled={backMutation.isPending || mutation.isPending}
+            className="mb-3 inline-flex items-center gap-1 text-xs text-gray-500 hover:text-gray-800 cursor-pointer bg-transparent border-0 p-0 disabled:opacity-50 transition-colors"
+          >
+            <MdArrowBack /> Back to slot selection
+          </button>
+        )}
         <div className="flex items-center gap-2 mb-2">
           <h1 className="text-xl font-semibold text-gray-900">Create account</h1>
           {invite?.grant_admin && (
@@ -587,15 +644,17 @@ function RouteComponent() {
           </label>
           {config?.turnstile_site_key && (
             <div className="flex justify-center">
-              {/* "compact" (150px min-width) instead of the default "normal"
-                  (300px min-width) — the card's content area on narrow phones
-                  (~295px) is narrower than "normal"/"flexible" ever go, which
-                  forced the widget past the card edge and threw the whole
-                  page's horizontal centering off. */}
+              {/* "compact" below the sm breakpoint — the card's content area
+                  on narrow phones (~295px) is narrower than "normal"/
+                  "flexible" ever go (300px), which forced the widget past the
+                  card edge and threw the whole page's horizontal centering
+                  off. Above that, "normal" is used instead: "compact" is
+                  150x140 (narrow *and* tall), which looks awkwardly tall once
+                  there's enough width for "normal" (300x65). */}
               <Turnstile
                 ref={turnstileRef}
                 siteKey={config.turnstile_site_key}
-                options={{ size: 'compact' }}
+                options={{ size: captchaSize }}
                 onSuccess={(token) => setCaptchaToken(token)}
                 onExpire={() => setCaptchaToken(null)}
                 onError={() => setCaptchaToken(null)}

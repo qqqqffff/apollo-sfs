@@ -126,6 +126,57 @@ func (h *Handler) CreateRegistrationGroup(c *gin.Context) {
 	c.JSON(http.StatusCreated, detail)
 }
 
+type updateRegistrationGroupRequest struct {
+	Name string `json:"name" binding:"required,max=120"`
+	// ExpiresAt is an optional RFC3339 overall registration expiry.
+	ExpiresAt          *string  `json:"expires_at"`
+	NotifyEmails       []string `json:"notify_emails" binding:"omitempty,max=50,dive,email,max=254"`
+	SendExpiryReminder bool     `json:"send_expiry_reminder"`
+}
+
+// UpdateRegistrationGroup handles PATCH /api/v1/admin/registration-groups/:id.
+// Edits the group's name, overall expiry, notify list, and reminder opt-in —
+// slots are immutable once created (see the edit screen's read-only slots
+// list); deactivate or delete the group to change its capacity instead.
+func (h *Handler) UpdateRegistrationGroup(c *gin.Context) {
+	if !h.regGroupsConfigured(c) {
+		return
+	}
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid registration group id"})
+		return
+	}
+	var req updateRegistrationGroupRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "a name is required"})
+		return
+	}
+	expiresAt, ok := parseOptionalRFC3339(req.ExpiresAt)
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "expires_at must be an RFC3339 timestamp"})
+		return
+	}
+	detail, err := h.regGroups.Update(c.Request.Context(), id, services.UpdateRegistrationGroupInput{
+		Name:               req.Name,
+		ExpiresAt:          expiresAt,
+		NotifyEmails:       req.NotifyEmails,
+		SendExpiryReminder: req.SendExpiryReminder,
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, services.ErrGroupNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		case errors.Is(err, services.ErrGroupNameRequired), errors.Is(err, services.ErrGroupExpiryInPast):
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "could not update the registration group"})
+		}
+		return
+	}
+	c.JSON(http.StatusOK, detail)
+}
+
 // registrationGroupRow decorates a summary with the full public invite URL.
 type registrationGroupRow struct {
 	models.RegistrationGroupSummary

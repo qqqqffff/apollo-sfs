@@ -215,6 +215,37 @@ func (s *RegistrationGroupService) Create(ctx context.Context, createdBy uuid.UU
 	return s.Detail(ctx, group.ID)
 }
 
+// UpdateRegistrationGroupInput carries the editable fields from the group
+// edit screen. Slots aren't part of this input — they're immutable once
+// created (see Create's doc comment); create a new group for different slots.
+type UpdateRegistrationGroupInput struct {
+	Name               string
+	ExpiresAt          *time.Time
+	NotifyEmails       []string
+	SendExpiryReminder bool
+}
+
+// Update edits a group's name, overall expiry, notify list, and reminder
+// opt-in. Slots cannot be added, removed, or modified after creation — their
+// capacity is already reserved and may be consumed or actively held by a
+// visitor mid-registration.
+func (s *RegistrationGroupService) Update(ctx context.Context, id uuid.UUID, in UpdateRegistrationGroupInput) (*RegistrationGroupDetail, error) {
+	name := strings.TrimSpace(in.Name)
+	if name == "" {
+		return nil, ErrGroupNameRequired
+	}
+	if in.ExpiresAt != nil && !in.ExpiresAt.After(time.Now()) {
+		return nil, ErrGroupExpiryInPast
+	}
+	if err := s.queries.UpdateRegistrationGroup(ctx, id, name, in.ExpiresAt, normalizeEmails(in.NotifyEmails), in.SendExpiryReminder); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrGroupNotFound
+		}
+		return nil, fmt.Errorf("update registration group: %w", err)
+	}
+	return s.Detail(ctx, id)
+}
+
 // List returns a page of group summaries for the admin table.
 func (s *RegistrationGroupService) List(ctx context.Context, page db.PageInput) (*db.PageResult[models.RegistrationGroupSummary], error) {
 	return s.queries.ListRegistrationGroups(ctx, page)

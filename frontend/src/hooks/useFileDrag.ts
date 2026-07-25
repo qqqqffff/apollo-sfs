@@ -12,7 +12,9 @@ const SELECTION_DRAG_TYPE = 'application/x-apollo-selection'
 // How long a folder must stay hovered mid-drag before it auto-opens (mirrors
 // "spring-loaded folder" behavior in desktop file managers) — long enough
 // that a drag passing through on its way elsewhere doesn't trigger it.
-const HOVER_OPEN_DELAY_MS = 700
+// Exported so the folder row / breadcrumb crumb can size a HoverDonut
+// countdown indicator to match exactly.
+export const HOVER_OPEN_DELAY_MS = 1000
 
 export interface SelectionSnapshot {
   fileIds: string[]

@@ -275,6 +275,31 @@ func (q *Queries) SetRegistrationGroupActive(ctx context.Context, id uuid.UUID, 
 	return nil
 }
 
+// UpdateRegistrationGroup updates a group's editable metadata — name, overall
+// expiry, notify list, and reminder opt-in. Slots are immutable once created
+// (their capacity is already reserved and may be consumed or actively held),
+// so they are untouched here. reminder_sent_at is cleared only when the
+// expiry actually changes, so an unrelated edit doesn't re-arm (and
+// duplicate) a reminder that already went out for the same expiry.
+func (q *Queries) UpdateRegistrationGroup(ctx context.Context, id uuid.UUID, name string, expiresAt *time.Time, notifyEmails []string, sendReminder bool) error {
+	res, err := q.db.ExecContext(ctx, `
+		UPDATE registration_groups
+		SET name = $2,
+		    expires_at = $3,
+		    notify_emails = $4,
+		    send_expiry_reminder = $5,
+		    reminder_sent_at = CASE WHEN expires_at IS DISTINCT FROM $3 THEN NULL ELSE reminder_sent_at END
+		WHERE id = $1
+	`, id, name, expiresAt, pq.Array(notifyEmails), sendReminder)
+	if err != nil {
+		return fmt.Errorf("UpdateRegistrationGroup: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
 // DeleteRegistrationGroup removes a group; its slots and their reservations
 // cascade. Consumed slots' registered accounts are unaffected (their space is
 // tracked by user_drive_allocations, not the slot row).

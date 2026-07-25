@@ -228,6 +228,12 @@ func (s *stubQuerier) ListRecentRoleChangeNotificationsForUser(_ context.Context
 func (s *stubQuerier) ListRecentEmailBackupRunsForUser(_ context.Context, _ string, _ time.Time) ([]models.EmailBackupRun, error) {
 	return nil, nil
 }
+func (s *stubQuerier) ListRecentGoogleBackupRunsForUser(_ context.Context, _ string, _ time.Time) ([]models.GoogleBackupRun, error) {
+	return nil, nil
+}
+func (s *stubQuerier) InsertGoogleBackupRun(_ context.Context, _ *models.GoogleBackupRun) error {
+	return nil
+}
 func (s *stubQuerier) GetLastGoogleBackupSync(_ context.Context, _ uuid.UUID) (*time.Time, error) {
 	return nil, nil
 }

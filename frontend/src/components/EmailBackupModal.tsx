@@ -28,6 +28,7 @@ import {
   type EmailBackupResult,
 } from '../api/emailBackup'
 import { ApiError } from '../api/client'
+import { SettingToggle } from './SettingToggle'
 
 interface Props {
   provider: EmailProvider
@@ -41,6 +42,10 @@ interface Props {
   // Called from the finished screen; folderId lets the caller jump into the
   // new backup folder.
   onDone: (folderId: string | null) => void
+  // Called instead of running the upload inline when "Back up in the
+  // background" is on — mirrors GoogleBackupModal's onStartBackground. The
+  // folder is already created by the time this fires.
+  onStartBackground: (items: ProviderEmailItem[], folder: { id: string }) => void
 }
 
 type Phase = 'pick' | 'uploading' | 'finished'
@@ -63,7 +68,7 @@ function fmtDate(iso: string): string {
 // with per-message progress.
 export function EmailBackupModal({
   provider, accessToken, accountEmail, items, quotaBytes, usedBytes, myServers,
-  onClose, onDone,
+  onClose, onDone, onStartBackground,
 }: Props) {
   const [tab, setTab] = useState<'emails' | 'settings'>('emails')
   const [phase, setPhase] = useState<Phase>('pick')
@@ -182,7 +187,7 @@ export function EmailBackupModal({
     setDriveId(primaryInTier?.drive_id ?? inTier[0]?.drive_id ?? null)
   }
 
-  function updateSettings(patch: Partial<{ deleteAfter: boolean; notify: boolean }>) {
+  function updateSettings(patch: Partial<{ deleteAfter: boolean; notify: boolean; background: boolean }>) {
     setSettings((prev) => {
       const next = { ...prev, ...patch }
       saveEmailBackupSettings(next)
@@ -194,23 +199,27 @@ export function EmailBackupModal({
   async function handleBackUp() {
     if (selectedItems.length === 0 || isOverQuota) return
     setUploadError(null)
-    setPhase('uploading')
-    setStatusMap({})
-    setProgress({ done: 0, total: selectedItems.length })
 
     let folder: { id: string } | null = null
     try {
-      const res = await ensureEmailBackupFolder(accountEmail, driveId)
-      folder = res.folder
-      setFolderId(res.folder.id)
+      const folderRes = await ensureEmailBackupFolder(accountEmail, driveId)
+      folder = folderRes.folder
     } catch (e) {
-      setPhase('pick')
-      setProgress(null)
       setUploadError(
         e instanceof ApiError ? e.message : 'Could not create the backup folder. Please try again.',
       )
       return
     }
+
+    if (settings.background) {
+      onStartBackground(selectedItems, folder)
+      return
+    }
+
+    setPhase('uploading')
+    setFolderId(folder.id)
+    setStatusMap({})
+    setProgress({ done: 0, total: selectedItems.length })
 
     const res = await backupEmailEntries(
       selectedItems, provider, accessToken, folder.id,
@@ -358,8 +367,22 @@ export function EmailBackupModal({
                   )}
                 </div>
               )}
+              {servers.length > 0 && (
+                <div className="mt-3 flex items-center gap-1.5 text-xs font-medium text-gray-600 bg-white rounded-md border border-gray-200 px-2.5 py-1.5 w-fit max-w-full">
+                  {tier === 'nvme' ? <MdBolt className="text-blue-500 shrink-0" /> : <MdStorage className="text-amber-500 shrink-0" />}
+                  <span className="shrink-0">{tier === 'nvme' ? 'Fast' : 'Standard'}</span>
+                  <span className="text-gray-300 shrink-0">›</span>
+                  <span className="truncate">{accountEmail}</span>
+                </div>
+              )}
             </div>
 
+            <SettingToggle
+              title="Back up in the background"
+              desc="Close this window when you start a backup and keep uploading, with progress shown in the toolbar."
+              checked={settings.background}
+              onChange={(v) => updateSettings({ background: v })}
+            />
             <SettingToggle
               title="Delete emails after backup"
               desc={provider === 'gmail'
@@ -624,28 +647,6 @@ function FilterChip({ active, onClick, icon, label }: {
     >
       {icon} {label}
     </button>
-  )
-}
-
-function SettingToggle({ title, desc, checked, onChange }: {
-  title: string; desc: string; checked: boolean; onChange: (v: boolean) => void
-}) {
-  return (
-    <div className="flex items-center justify-between bg-gray-50 rounded-lg p-4">
-      <div className="flex-1 mr-4">
-        <div className="text-sm font-semibold text-gray-900">{title}</div>
-        <div className="text-xs text-gray-500 mt-0.5 leading-relaxed">{desc}</div>
-      </div>
-      <label className="relative inline-flex cursor-pointer shrink-0">
-        <input
-          type="checkbox"
-          className="sr-only peer"
-          checked={checked}
-          onChange={(e) => onChange(e.target.checked)}
-        />
-        <div className="w-10 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-0.5 after:start-0.5 after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600" />
-      </label>
-    </div>
   )
 }
 

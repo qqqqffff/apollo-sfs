@@ -730,6 +730,10 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 			premiumGroup.PATCH("/email-backup/messages/:id/read", h.MarkEmailBackupMessageRead)
 			premiumGroup.DELETE("/email-backup/messages/:id", h.DeleteEmailBackupMessage)
 			premiumGroup.POST("/email-backup/runs", h.CompleteEmailBackupRun)
+
+			// Google backup — completed-run log, backs the "notify me when
+			// complete" setting (mirrors email-backup/runs above).
+			premiumGroup.POST("/google-backup/runs", h.CompleteGoogleBackupRun)
 		}
 
 		// ── Admin — JWT + admin realm role ───────────────────────────────────

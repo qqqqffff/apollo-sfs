@@ -434,15 +434,45 @@ export async function uploadGoogleEntries(
   return { uploaded, duplicates, errors }
 }
 
-// ── Backup settings (localStorage) ───────────────────────────────────────────
+// ── Run completion (notification bell) ───────────────────────────────────────
 
-const BG_KEY = 'apollo_gbackup_background'
-
-export function loadBackupBackground(): boolean {
-  const v = localStorage.getItem(BG_KEY)
-  return v === null ? true : v === 'true'
+export interface GoogleBackupRun {
+  id: string
+  uploaded: number
+  duplicates: number
+  errors: number
+  notify: boolean
+  completed_at: string
 }
 
-export function saveBackupBackground(v: boolean) {
-  localStorage.setItem(BG_KEY, String(v))
+// completeGoogleBackupRun logs a finished run so, when notify is true, it
+// surfaces in the notification bell — mirrors completeEmailBackupRun
+// (api/emailBackup.ts). Called from both the foreground and background
+// upload paths.
+export function completeGoogleBackupRun(run: {
+  uploaded: number
+  duplicates: number
+  errors: number
+  notify: boolean
+}) {
+  return post<GoogleBackupRun>('/google-backup/runs', run)
+}
+
+// ── Backup settings (localStorage) ───────────────────────────────────────────
+// Shape matches loadEmailBackupSettings/saveEmailBackupSettings
+// (api/emailBackup.ts) so both backup flows offer the same settings.
+
+const BG_KEY     = 'apollo_gbackup_background'
+const NOTIFY_KEY = 'apollo_gbackup_notify'
+
+export function loadGoogleBackupSettings(): { background: boolean; notify: boolean } {
+  return {
+    background: localStorage.getItem(BG_KEY) !== 'false',  // default on
+    notify: localStorage.getItem(NOTIFY_KEY) !== 'false',  // default on
+  }
+}
+
+export function saveGoogleBackupSettings(s: { background: boolean; notify: boolean }) {
+  localStorage.setItem(BG_KEY, String(s.background))
+  localStorage.setItem(NOTIFY_KEY, String(s.notify))
 }

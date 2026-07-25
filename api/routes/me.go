@@ -501,6 +501,10 @@ const roleChangeNotificationWindow = 30 * 24 * time.Hour
 // (with notifications enabled) keeps showing in the bell dropdown.
 const emailBackupNotificationWindow = 7 * 24 * time.Hour
 
+// googleBackupNotificationWindow is the Google Drive/Photos backup
+// equivalent of emailBackupNotificationWindow.
+const googleBackupNotificationWindow = 7 * 24 * time.Hour
+
 // backupStaleAfter is how old the most recent Google/email backup may get
 // before the opt-in backup reminder (user_preferences.backup_stale_notify)
 // surfaces a bell warning.
@@ -522,7 +526,7 @@ func notificationCategory(kind string) string {
 		return "Billing"
 	case "share_received":
 		return "Shares"
-	case "email_backup_completed", "backup_stale":
+	case "email_backup_completed", "google_backup_completed", "backup_stale":
 		return "Backups"
 	case "invitation_accepted":
 		return "Invitations"
@@ -712,6 +716,29 @@ func (h *Handler) gatherNotificationItems(ctx context.Context, username, userID 
 			Title:     "Email backup complete",
 			Body:      body,
 			Link:      link,
+			CreatedAt: r.CompletedAt,
+		})
+	}
+
+	// Completed Google backup runs where the user asked to be notified.
+	googleRuns, err := h.queries.ListRecentGoogleBackupRunsForUser(ctx, username, time.Now().Add(-googleBackupNotificationWindow))
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range googleRuns {
+		body := fmt.Sprintf("%d file%s backed up from Google.", r.Uploaded, plural(r.Uploaded))
+		if r.Duplicates > 0 {
+			body += fmt.Sprintf(" %d duplicate%s skipped.", r.Duplicates, plural(r.Duplicates))
+		}
+		if r.Errors > 0 {
+			body += fmt.Sprintf(" %d failed.", r.Errors)
+		}
+		items = append(items, notificationItem{
+			ID:        r.ID.String() + ":google-backup",
+			Kind:      "google_backup_completed",
+			Title:     "Google backup complete",
+			Body:      body,
+			Link:      "/client",
 			CreatedAt: r.CompletedAt,
 		})
 	}

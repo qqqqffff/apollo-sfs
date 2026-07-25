@@ -154,18 +154,25 @@ export async function backupEmailEntries(
 export { deleteProviderMessages }
 
 // ── Backup settings (localStorage) ────────────────────────────────────────────
+// background/notify mirror loadGoogleBackupSettings/saveGoogleBackupSettings
+// (api/googleBackup.ts) so both backup flows offer the same settings;
+// deleteAfter is email-specific (Google can't delete Drive files it doesn't
+// own the trash permission for from a picker selection the same way).
 
 const DELETE_AFTER_KEY = 'apollo_ebackup_delete_after'
 const NOTIFY_KEY = 'apollo_ebackup_notify'
+const BG_KEY = 'apollo_ebackup_background'
 
-export function loadEmailBackupSettings(): { deleteAfter: boolean; notify: boolean } {
+export function loadEmailBackupSettings(): { deleteAfter: boolean; notify: boolean; background: boolean } {
   return {
     deleteAfter: localStorage.getItem(DELETE_AFTER_KEY) === 'true',
     notify: localStorage.getItem(NOTIFY_KEY) !== 'false', // default on
+    background: localStorage.getItem(BG_KEY) !== 'false', // default on
   }
 }
 
-export function saveEmailBackupSettings(s: { deleteAfter: boolean; notify: boolean }) {
+export function saveEmailBackupSettings(s: { deleteAfter: boolean; notify: boolean; background: boolean }) {
   localStorage.setItem(DELETE_AFTER_KEY, String(s.deleteAfter))
   localStorage.setItem(NOTIFY_KEY, String(s.notify))
+  localStorage.setItem(BG_KEY, String(s.background))
 }

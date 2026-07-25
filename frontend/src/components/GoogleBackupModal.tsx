@@ -22,13 +22,15 @@ import {
   drivePreviewUrl,
   photosPreviewBlobUrl,
   uploadGoogleEntries,
-  loadBackupBackground,
-  saveBackupBackground,
+  completeGoogleBackupRun,
+  loadGoogleBackupSettings,
+  saveGoogleBackupSettings,
   type BackupEntry,
   type BackupItemStatus,
   type BackupResult,
   type GoogleBackupItem,
 } from '../api/googleBackup'
+import { SettingToggle } from './SettingToggle'
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -113,7 +115,7 @@ export function GoogleBackupModal({
   const [finished,  setFinished]  = useState(false)
   const [cleanupLoading, setCleanupLoading] = useState(false)
   const [cleanupMsg, setCleanupMsg] = useState<string | null>(null)
-  const [bgEnabled, setBgEnabled] = useState(true)
+  const [settings, setSettings] = useState(loadGoogleBackupSettings)
   const [previewItem, setPreviewItem] = useState<FileEntry | null>(null)
   const [previewUrl,  setPreviewUrl]  = useState<string | null>(null)
   const [previewLoading, setPreviewLoading] = useState(false)
@@ -144,7 +146,7 @@ export function GoogleBackupModal({
     setFinished(false)
     setCleanupLoading(false)
     setCleanupMsg(null)
-    setBgEnabled(loadBackupBackground())
+    setSettings(loadGoogleBackupSettings())
     setPreviewItem(null)
     setPreviewUrl(null)
   }, [items])
@@ -287,7 +289,7 @@ export function GoogleBackupModal({
     const toUpload = entries.filter((_, i) => selected.has(i))
     if (toUpload.length === 0) return
 
-    if (bgEnabled) {
+    if (settings.background) {
       onStartBackground(toUpload, accessToken)
       return
     }
@@ -305,6 +307,16 @@ export function GoogleBackupModal({
     setResult(res)
     setUploading(false)
     setFinished(true)
+
+    // Best effort — the backup itself already succeeded.
+    try {
+      await completeGoogleBackupRun({
+        uploaded: res.uploaded,
+        duplicates: res.duplicates,
+        errors: res.errors,
+        notify: settings.notify,
+      })
+    } catch { /* ignore */ }
   }
 
   // ── Cleanup ────────────────────────────────────────────────────────────────
@@ -403,23 +415,18 @@ export function GoogleBackupModal({
         {tab === 'settings' ? (
           // ── Settings tab ──────────────────────────────────────────────────
           <div className="flex-1 overflow-y-auto p-4 space-y-3">
-            <div className="flex items-center justify-between bg-gray-50 rounded-lg p-4">
-              <div className="flex-1 mr-4">
-                <div className="text-sm font-semibold text-gray-900">Back up in the background</div>
-                <div className="text-xs text-gray-500 mt-0.5 leading-relaxed">
-                  Close this window when you start a backup and keep uploading, with progress shown in the toolbar.
-                </div>
-              </div>
-              <label className="relative inline-flex cursor-pointer shrink-0">
-                <input
-                  type="checkbox"
-                  className="sr-only peer"
-                  checked={bgEnabled}
-                  onChange={(e) => { setBgEnabled(e.target.checked); saveBackupBackground(e.target.checked) }}
-                />
-                <div className="w-10 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-0.5 after:start-0.5 after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600" />
-              </label>
-            </div>
+            <SettingToggle
+              title="Back up in the background"
+              desc="Close this window when you start a backup and keep uploading, with progress shown in the toolbar."
+              checked={settings.background}
+              onChange={(v) => setSettings((s) => { const next = { ...s, background: v }; saveGoogleBackupSettings(next); return next })}
+            />
+            <SettingToggle
+              title="Notify me when the backup completes"
+              desc="Adds a notification to your bell with the backup results."
+              checked={settings.notify}
+              onChange={(v) => setSettings((s) => { const next = { ...s, notify: v }; saveGoogleBackupSettings(next); return next })}
+            />
           </div>
         ) : (
           // ── Files tab ──────────────────────────────────────────────────────

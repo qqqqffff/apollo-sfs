@@ -78,10 +78,13 @@ import {
   listGoogleDriveFiles,
   pickGooglePhotosWeb,
   uploadGoogleEntries,
+  completeGoogleBackupRun,
+  loadGoogleBackupSettings,
   type BackupEntry,
   type GoogleBackupItem,
 } from '../../api/googleBackup'
 import { EmailProviderSelectModal } from '../../components/EmailProviderSelectModal'
+import { EmailRetrievalCriteriaModal } from '../../components/EmailRetrievalCriteriaModal'
 import { EmailBackupModal } from '../../components/EmailBackupModal'
 import { EmailBackupView } from '../../components/EmailBackupView'
 import {
@@ -91,8 +94,15 @@ import {
   requestGmailAccessToken,
   requestMicrosoftAccessToken,
   type EmailProvider,
+  type EmailRetrievalCriteria,
   type ProviderEmailItem,
 } from '../../api/emailProviders'
+import {
+  backupEmailEntries,
+  completeEmailBackupRun,
+  deleteProviderMessages,
+  loadEmailBackupSettings,
+} from '../../api/emailBackup'
 
 export const Route = createFileRoute('/_auth/client/')({
   // All keys optional so navigations to /client elsewhere need not pass every
@@ -400,7 +410,9 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
 
   // ── Email Backup state ─────────────────────────────────────────────────────
   const [emailSelectOpen, setEmailSelectOpen] = useState(false)
+  const [emailCriteriaFor, setEmailCriteriaFor] = useState<EmailProvider | null>(null)
   const [emailLoading, setEmailLoading] = useState(false)
+  const [emailLoadingMsg, setEmailLoadingMsg] = useState('Loading your emails')
   const [emailError, setEmailError] = useState<string | null>(null)
   const [emailBackup, setEmailBackup] = useState<{
     provider: EmailProvider
@@ -409,6 +421,10 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
     items: ProviderEmailItem[]
   } | null>(null)
   const emailCancelRef = useRef<(() => void) | null>(null)
+  const [emailBgBackupState, setEmailBgBackupState] = useState<{
+    running: boolean; done: number; total: number
+    uploaded: number; duplicates: number; errors: number
+  } | null>(null)
 
   // Trigger the action requested from the side control panel (?action=…), then
   // strip the param so refreshes/back-navigation don't re-trigger it. Waits for
@@ -576,6 +592,14 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
     },
     (fileIds, folderIds, targetFolderId) => moveManyTo(fileIds, folderIds, targetFolderId),
   )
+
+  // Snapshot of the row list's data taken the instant a drag starts, held for
+  // as long as the drag is active — see where it's applied to `subfolders`/
+  // `files` below for why. Declared here (not inline there) because it must
+  // be a hook called unconditionally on every render, ahead of this
+  // component's early returns (media collection / single file / email backup
+  // views) further down.
+  const frozenListRef = useRef<{ folders: typeof rawSubfolders; files: typeof rawFiles } | null>(null)
 
   const setAutoUploadMutation = useMutation({
     mutationFn: (folderId: string | null) => updatePreferences(folderId),
@@ -808,9 +832,16 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
 
   // ── Email Backup handlers ──────────────────────────────────────────────────
 
-  async function handleEmailProviderContinue(provider: EmailProvider) {
+  function handleEmailProviderContinue(provider: EmailProvider) {
     setEmailSelectOpen(false)
+    setEmailError(null)
+    setEmailCriteriaFor(provider)
+  }
+
+  async function handleEmailCriteriaContinue(provider: EmailProvider, criteria: EmailRetrievalCriteria) {
+    setEmailCriteriaFor(null)
     setEmailLoading(true)
+    setEmailLoadingMsg('Loading your emails')
     setEmailError(null)
 
     let cancelled = false
@@ -840,11 +871,20 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
         return
       }
 
-      const items = await listProviderMessages(provider, token)
+      // Pages 200 at a time, so a large "amount"/date range/size target can
+      // take a while — keep the loading modal's message live with progress.
+      const { items, truncated } = await listProviderMessages(provider, token, criteria, (fetched) => {
+        if (!cancelled) setEmailLoadingMsg(`Found ${fetched.toLocaleString()} email${fetched === 1 ? '' : 's'} so far`)
+      })
       if (cancelled) return
       if (items.length === 0) {
-        setEmailError('No emails were found in this account.')
+        setEmailError('No emails were found matching your criteria.')
         return
+      }
+      if (truncated) {
+        setEmailError(
+          `Stopped after the ${items.length.toLocaleString()}-email safety limit — your criteria may not be fully covered.`,
+        )
       }
 
       setEmailBackup({ provider, accessToken: token, accountEmail, items })
@@ -871,6 +911,37 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
     }
   }
 
+  function handleStartEmailBackground(items: ProviderEmailItem[], folder: { id: string }) {
+    if (!emailBackup) return
+    const { provider, accessToken, accountEmail } = emailBackup
+    setEmailBackup(null)
+    const settings = loadEmailBackupSettings()
+    setEmailBgBackupState({ running: true, done: 0, total: items.length, uploaded: 0, duplicates: 0, errors: 0 })
+
+    backupEmailEntries(items, provider, accessToken, folder.id, (done, total) =>
+      setEmailBgBackupState((s) => (s ? { ...s, done, total } : s)),
+    ).then(async (res) => {
+      setEmailBgBackupState((s) => (s ? { ...s, running: false, uploaded: res.uploaded, duplicates: res.duplicates, errors: res.errors } : s))
+      queryClient.invalidateQueries({ queryKey: ['folders'] })
+      queryClient.invalidateQueries({ queryKey: ['me'] })
+      queryClient.invalidateQueries({ queryKey: ['email-backup'] })
+
+      if (settings.deleteAfter && res.backedUpIds.length > 0) {
+        await deleteProviderMessages(provider, accessToken, res.backedUpIds)
+      }
+      // Best effort — the backup itself already succeeded.
+      completeEmailBackupRun({
+        folder_id: folder.id,
+        email_address: accountEmail,
+        provider,
+        uploaded: res.uploaded,
+        duplicates: res.duplicates,
+        errors: res.errors,
+        notify: settings.notify,
+      }).catch(() => {})
+    })
+  }
+
   function handleStartBackground(entries: BackupEntry[], token: string) {
     setGoogleBackupItems(null)
     const driveIds = entries.filter((e) => e.googleItem.source === 'drive').map((e) => e.googleItem.id)
@@ -881,6 +952,9 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
       setBgBackupState((s) => (s ? { ...s, running: false, uploaded, duplicates, errors } : s))
       queryClient.invalidateQueries({ queryKey: ['folders', folderId] })
       queryClient.invalidateQueries({ queryKey: ['me'] })
+
+      // Best effort — the backup itself already succeeded.
+      completeGoogleBackupRun({ uploaded, duplicates, errors, notify: loadGoogleBackupSettings().notify }).catch(() => {})
     })
   }
 
@@ -956,8 +1030,32 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
     return <FileView fileId={fileId} />
   }
 
-  const subfolders = sortedFolders(rawSubfolders, sort)
-  const files = sortedFiles(rawFiles, sort)
+  // Freeze the row list to its drag-start snapshot for as long as a drag is
+  // active, instead of letting it track folderId live. Confirmed by direct
+  // testing against real Chromium: once the exact DOM node a native
+  // `dragstart` fired on is unmounted, hidden, or repositioned, the browser
+  // silently and permanently cancels that drag's `drop` — dragenter/dragover
+  // keep firing on other targets throughout (so hover highlights look fine),
+  // but nothing happens on release, with no error of any kind. Hovering a
+  // folder open mid-drag (scheduleHoverOpen in useFileDrag → openFolder)
+  // navigates and re-fetches that folder's contents, which would otherwise
+  // replace this whole list — including whichever row the user physically
+  // grabbed. The breadcrumb and the persistent "drop into current folder"
+  // panel below both still track the live folderId, so the user completes
+  // the drop through those instead of a row inside the newly hover-opened
+  // folder — the frozen list is only ever the drag source's own resting
+  // place, never a drop target the user needs to see update.
+  const dragActive = !!(draggingFileId || draggingFolderId)
+  if (dragActive && !frozenListRef.current) {
+    frozenListRef.current = { folders: rawSubfolders, files: rawFiles }
+  } else if (!dragActive && frozenListRef.current) {
+    frozenListRef.current = null
+  }
+  const listSubfolders = frozenListRef.current?.folders ?? rawSubfolders
+  const listFiles = frozenListRef.current?.files ?? rawFiles
+
+  const subfolders = sortedFolders(listSubfolders, sort)
+  const files = sortedFiles(listFiles, sort)
   // null = root upload (no folder); backend accepts absent folder_id for root.
   const uploadFolderId: string | null = folderId === 'root' ? null : folderId
   // Root uploads in a drive view pin to that drive; inside a folder the folder's
@@ -965,7 +1063,7 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
   const { drive: uploadDrive, isPinned: uploadDriveIsPinned } = folderId === 'root'
     ? { drive: currentDrive, isPinned: !!currentDrive }
     : resolveDrive(folder?.drive_id ?? null, myServers)
-  const hasContent = rawSubfolders.length > 0 || rawFiles.length > 0 || recognitionGroups.length > 0
+  const hasContent = listSubfolders.length > 0 || listFiles.length > 0 || recognitionGroups.length > 0
   const noResults = search && !isLoading && !hasNextPage && !hasContent
   const viewingUser = impersonatedUser ?? user
 
@@ -1203,6 +1301,41 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
                 `${bgBackupState.uploaded} backed up`,
                 bgBackupState.duplicates > 0 ? `${bgBackupState.duplicates} duplicate${bgBackupState.duplicates !== 1 ? 's' : ''}` : null,
                 bgBackupState.errors > 0 ? `${bgBackupState.errors} failed` : null,
+              ].filter(Boolean).join(' · ')}
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* Background Email Backup progress card */}
+      {emailBgBackupState && (
+        <div className="mb-3 px-3 py-2.5 bg-white border border-gray-200 rounded-lg shadow-sm flex flex-col gap-1.5">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-1.5">
+              <MdAlternateEmail className="text-teal-500 text-sm shrink-0" />
+              <span className="text-xs font-semibold text-gray-700">
+                {emailBgBackupState.running ? 'Backing up your email…' : 'Email Backup complete'}
+              </span>
+            </div>
+            {!emailBgBackupState.running && (
+              <button onClick={() => setEmailBgBackupState(null)} className="text-gray-400 hover:text-gray-600 cursor-pointer"><MdClose className="text-sm" /></button>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            <div className="flex-1 h-1.5 bg-gray-200 rounded-full overflow-hidden">
+              <div
+                className={`h-full rounded-full transition-all ${emailBgBackupState.running ? 'bg-blue-500' : emailBgBackupState.errors > 0 ? 'bg-amber-500' : 'bg-green-500'}`}
+                style={{ width: `${emailBgBackupState.total > 0 ? Math.round((emailBgBackupState.done / emailBgBackupState.total) * 100) : 0}%` }}
+              />
+            </div>
+            <span className="text-xs text-gray-500 shrink-0">{emailBgBackupState.done}/{emailBgBackupState.total}</span>
+          </div>
+          {!emailBgBackupState.running && (
+            <p className={`text-xs ${emailBgBackupState.errors > 0 ? 'text-amber-600' : 'text-green-600'}`}>
+              {[
+                `${emailBgBackupState.uploaded} backed up`,
+                emailBgBackupState.duplicates > 0 ? `${emailBgBackupState.duplicates} duplicate${emailBgBackupState.duplicates !== 1 ? 's' : ''}` : null,
+                emailBgBackupState.errors > 0 ? `${emailBgBackupState.errors} failed` : null,
               ].filter(Boolean).join(' · ')}
             </p>
           )}
@@ -1641,10 +1774,19 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
         />
       )}
 
+      {/* Email Backup — retrieval criteria (amount / date / size) */}
+      {emailCriteriaFor && (
+        <EmailRetrievalCriteriaModal
+          provider={emailCriteriaFor}
+          onCancel={() => setEmailCriteriaFor(null)}
+          onContinue={(criteria) => handleEmailCriteriaContinue(emailCriteriaFor, criteria)}
+        />
+      )}
+
       {/* Email Backup — signing in / loading messages */}
       {emailLoading && !emailBackup && (
         <GooglePhotosLoadingModal
-          message="Loading your emails"
+          message={emailLoadingMsg}
           hint="Finish signing in to your email account in the popup, then come back here — your inbox loads automatically."
           onCancel={() => emailCancelRef.current?.()}
         />
@@ -1662,6 +1804,7 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
           myServers={myServers}
           onClose={() => setEmailBackup(null)}
           onDone={handleEmailBackupDone}
+          onStartBackground={handleStartEmailBackground}
         />
       )}
 

@@ -201,12 +201,12 @@ describe('query options', () => {
 describe('email backup settings', () => {
   beforeEach(() => localStorage.clear())
 
-  it('defaults to deleteAfter off, notify on', () => {
-    expect(loadEmailBackupSettings()).toEqual({ deleteAfter: false, notify: true })
+  it('defaults to deleteAfter off, notify on, background on', () => {
+    expect(loadEmailBackupSettings()).toEqual({ deleteAfter: false, notify: true, background: true })
   })
 
   it('round-trips through localStorage', () => {
-    saveEmailBackupSettings({ deleteAfter: true, notify: false })
-    expect(loadEmailBackupSettings()).toEqual({ deleteAfter: true, notify: false })
+    saveEmailBackupSettings({ deleteAfter: true, notify: false, background: false })
+    expect(loadEmailBackupSettings()).toEqual({ deleteAfter: true, notify: false, background: false })
   })
 })

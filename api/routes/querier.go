@@ -42,6 +42,8 @@ type Querier interface {
 	ListRecentQuotaChangeNotificationsForUser(ctx context.Context, username string, since time.Time) ([]db.QuotaChangeNotification, error)
 	ListRecentRoleChangeNotificationsForUser(ctx context.Context, username string, since time.Time) ([]db.RoleChangeNotification, error)
 	ListRecentEmailBackupRunsForUser(ctx context.Context, username string, since time.Time) ([]models.EmailBackupRun, error)
+	ListRecentGoogleBackupRunsForUser(ctx context.Context, username string, since time.Time) ([]models.GoogleBackupRun, error)
+	InsertGoogleBackupRun(ctx context.Context, r *models.GoogleBackupRun) error
 
 	// Backup last-sync times (backup pages + opt-in stale-backup reminder)
 	GetLastGoogleBackupSync(ctx context.Context, userID uuid.UUID) (*time.Time, error)

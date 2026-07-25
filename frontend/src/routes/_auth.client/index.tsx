@@ -1135,9 +1135,20 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
                 obvious to drop regardless of how the drag got here (e.g. a
                 spring-loaded hover-navigate that left no sibling row under
                 the pointer). Each row lights up independently via its own
-                dragOver state when the drag is actually inside it. */}
+                dragOver state when the drag is actually inside it.
+
+                Deliberately `fixed`, not part of the flow. Appearing mid-drag
+                is the whole point of this panel, so anywhere in the document
+                flow it would shove the row list down the instant the drag
+                began — moving the folder the user was already aiming at out
+                from under the pointer, and landing the drop on whichever row
+                slid into its place. (Real-Chromium proof of exactly that
+                mis-drop, from when this was an inline block, is in
+                src/__tests__/e2e/dnd-depth.spec.ts.) Pinned to the viewport it
+                shifts nothing, and it stays reachable without scrolling
+                mid-drag in a long folder. */}
             {!readOnly && folder && (draggingFileId || draggingFolderId) && (
-              <div className="mt-2 flex flex-col gap-1.5">
+              <div className="fixed bottom-5 left-1/2 -translate-x-1/2 z-70 flex w-[min(30rem,92vw)] flex-col gap-1.5">
                 <DropZoneRow
                   icon={<MdFolderOpen className="text-base shrink-0" />}
                   label={`Drop here to move into "${folder.name}"`}
@@ -1883,10 +1894,10 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
 // ── Shared components ─────────────────────────────────────────────────────────
 
 // One row of the persistent stacked drag-and-drop target panel (current
-// folder / parent folder) rendered above the file list while a drag is
-// active — see FolderView. `active` drives the hover highlight; `handlers`
-// come straight from useFileDrag (getCurrentFolderDropHandlers /
-// getListBackgroundDropHandlers).
+// folder / parent folder) floating over the page while a drag is active — see
+// FolderView, including why it floats rather than sitting in the flow.
+// `active` drives the hover highlight; `handlers` come straight from
+// useFileDrag (getCurrentFolderDropHandlers / getListBackgroundDropHandlers).
 function DropZoneRow({
   icon, label, active, handlers,
 }: {
@@ -1903,8 +1914,8 @@ function DropZoneRow({
   return (
     <div
       {...handlers}
-      className={`flex items-center gap-2 rounded-lg border-2 border-dashed px-3 py-2 text-sm transition-colors ${
-        active ? 'bg-blue-50 border-blue-400 text-blue-700' : 'border-gray-200 text-gray-400'
+      className={`flex items-center gap-2 rounded-lg border-2 border-dashed px-3 py-2 text-sm shadow-lg transition-colors ${
+        active ? 'bg-blue-50 border-blue-400 text-blue-700' : 'bg-white/95 border-gray-300 text-gray-500'
       }`}
     >
       {icon}

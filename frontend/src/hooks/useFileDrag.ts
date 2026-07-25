@@ -74,6 +74,63 @@ export function useFileDrag(
   const hoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const hoverFolderIdRef = useRef<string | null>(null)
 
+  // Synchronous mirrors of draggingFileId/draggingFolderId. The state versions
+  // are deliberately one frame behind (see beginDrag), so every guard that has
+  // to be right *during* the drag reads these instead.
+  const draggingFileIdRef = useRef<string | null>(null)
+  const draggingFolderIdRef = useRef<string | null>(null)
+  const startFrameRef = useRef<number | null>(null)
+
+  // A browser finishes setting up a native drag session only after the
+  // dragstart handler returns, and if the source node is moved before that
+  // happens the session is silently abandoned: no drop ever fires and no error
+  // is raised, while dragenter/dragover keep working normally — so the hover
+  // highlights still look perfectly correct and the drag simply does nothing
+  // on release. React flushes state updates from a discrete event like
+  // dragstart before yielding back, so setting dragging state straight from
+  // the handler re-renders *and re-lays-out* the page inside that window; any
+  // UI gated on "a drag is active" that occupies space then shoves the row
+  // list — including the row being dragged — out from under the pointer.
+  //
+  // That is what made drags work at a drive root but die in every subfolder:
+  // only the subfolder view renders something conditional on a drag (the
+  // drop-target panel), so only there did the source move mid-dragstart.
+  //
+  // The panel is `fixed` now, so it no longer takes part in layout at all
+  // (see FolderView) — that's the actual fix. Deferring the state flip by a
+  // frame on top of that is a guard: it keeps this whole class of bug from
+  // coming back the next time something is made to appear during a drag,
+  // since by then the browser owns the drag and a re-render can't disturb it.
+  //
+  // Both halves are covered against real Chromium in
+  // src/__tests__/e2e/dnd-depth.spec.ts. jsdom cannot reproduce any of it —
+  // synthetic events have no native drag session behind them.
+  function beginDrag(kind: 'file' | 'folder', id: string) {
+    if (kind === 'file') draggingFileIdRef.current = id
+    else draggingFolderIdRef.current = id
+    if (startFrameRef.current !== null) cancelAnimationFrame(startFrameRef.current)
+    startFrameRef.current = requestAnimationFrame(() => {
+      startFrameRef.current = null
+      if (kind === 'file') setDraggingFileId(id)
+      else setDraggingFolderId(id)
+    })
+  }
+
+  function endDrag() {
+    if (startFrameRef.current !== null) {
+      cancelAnimationFrame(startFrameRef.current)
+      startFrameRef.current = null
+    }
+    draggingFileIdRef.current = null
+    draggingFolderIdRef.current = null
+    setDraggingFileId(null)
+    setDraggingFolderId(null)
+    setDragOverFolderId(null)
+    setDragOverBackground(false)
+    setDragOverCurrent(false)
+    clearHoverTimer()
+  }
+
   function clearHoverTimer() {
     if (hoverTimerRef.current !== null) {
       clearTimeout(hoverTimerRef.current)
@@ -96,7 +153,7 @@ export function useFileDrag(
     return {
       draggable: true as const,
       onDragStart(e: React.DragEvent) {
-        setDraggingFileId(file.id)
+        beginDrag('file', file.id)
         e.dataTransfer.effectAllowed = 'move'
         e.dataTransfer.setData(FILE_DRAG_TYPE, file.id)
         const selection = getSelectionSnapshot?.(file.id, 'file')
@@ -107,10 +164,7 @@ export function useFileDrag(
         requestAnimationFrame(() => ghost.remove())
       },
       onDragEnd() {
-        setDraggingFileId(null)
-        setDragOverFolderId(null)
-        setDragOverBackground(false)
-        clearHoverTimer()
+        endDrag()
       },
     }
   }
@@ -119,7 +173,7 @@ export function useFileDrag(
     return {
       draggable: true as const,
       onDragStart(e: React.DragEvent) {
-        setDraggingFolderId(folder.id)
+        beginDrag('folder', folder.id)
         e.dataTransfer.effectAllowed = 'move'
         e.dataTransfer.setData(FOLDER_DRAG_TYPE, folder.id)
         const selection = getSelectionSnapshot?.(folder.id, 'folder')
@@ -130,10 +184,7 @@ export function useFileDrag(
         requestAnimationFrame(() => ghost.remove())
       },
       onDragEnd() {
-        setDraggingFolderId(null)
-        setDragOverFolderId(null)
-        setDragOverBackground(false)
-        clearHoverTimer()
+        endDrag()
       },
     }
   }
@@ -188,7 +239,7 @@ export function useFileDrag(
         const hasFolder = e.dataTransfer.types.includes(FOLDER_DRAG_TYPE)
         const hasSelection = e.dataTransfer.types.includes(SELECTION_DRAG_TYPE)
         if (!hasFile && !hasFolder && !hasSelection) return
-        if (hasFolder && !hasSelection && draggingFolderId === folder.id) return
+        if (hasFolder && !hasSelection && draggingFolderIdRef.current === folder.id) return
         e.preventDefault()
         setDragOverFolderId(folder.id)
         setDragOverBackground(false)
@@ -199,7 +250,7 @@ export function useFileDrag(
         const hasFolder = e.dataTransfer.types.includes(FOLDER_DRAG_TYPE)
         const hasSelection = e.dataTransfer.types.includes(SELECTION_DRAG_TYPE)
         if (!hasFile && !hasFolder && !hasSelection) return
-        if (hasFolder && !hasSelection && draggingFolderId === folder.id) return
+        if (hasFolder && !hasSelection && draggingFolderIdRef.current === folder.id) return
         e.preventDefault()
         e.dataTransfer.dropEffect = 'move'
       },
@@ -279,7 +330,7 @@ export function useFileDrag(
         const hasFolder = e.dataTransfer.types.includes(FOLDER_DRAG_TYPE)
         const hasSelection = e.dataTransfer.types.includes(SELECTION_DRAG_TYPE)
         if (!hasFile && !hasFolder && !hasSelection) return
-        if (hasFolder && !hasSelection && draggingFolderId === folderId) return
+        if (hasFolder && !hasSelection && draggingFolderIdRef.current === folderId) return
         e.preventDefault()
         setDragOverCurrent(true)
         setDragOverFolderId(null)
@@ -291,7 +342,7 @@ export function useFileDrag(
         const hasFolder = e.dataTransfer.types.includes(FOLDER_DRAG_TYPE)
         const hasSelection = e.dataTransfer.types.includes(SELECTION_DRAG_TYPE)
         if (!hasFile && !hasFolder && !hasSelection) return
-        if (hasFolder && !hasSelection && draggingFolderId === folderId) return
+        if (hasFolder && !hasSelection && draggingFolderIdRef.current === folderId) return
         e.preventDefault()
         e.dataTransfer.dropEffect = 'move'
       },

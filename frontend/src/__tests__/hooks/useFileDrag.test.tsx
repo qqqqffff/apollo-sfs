@@ -25,6 +25,17 @@ function makeDataTransfer(type?: string, value?: string) {
   }
 }
 
+// beginDrag deliberately defers the draggingFileId/draggingFolderId flip by
+// one animation frame so the browser can finish starting the native drag
+// session before React re-renders (see the long comment on beginDrag in
+// useFileDrag.ts — doing it synchronously silently kills the drop). Tests that
+// assert on that state have to let the frame run first.
+async function flushDragStart() {
+  await act(async () => {
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+  })
+}
+
 // Like makeDataTransfer but carries several types at once — needed to
 // simulate a multi-selection drag, which sets SELECTION_DRAG_TYPE alongside
 // the single-item type of whichever row was actually grabbed.
@@ -68,10 +79,13 @@ describe('getFileDragHandlers', () => {
     expect(handlers.draggable).toBe(true)
   })
 
-  it('sets draggingFileId on dragStart', () => {
+  it('sets draggingFileId on dragStart (one frame later)', async () => {
     const { result } = renderHook(() => useFileDrag(jest.fn(), jest.fn()))
     const e = makeDragEvent()
     act(() => result.current.getFileDragHandlers(FILE).onDragStart(e))
+    // Nothing may re-render inside the dragstart handler itself.
+    expect(result.current.draggingFileId).toBeNull()
+    await flushDragStart()
     expect(result.current.draggingFileId).toBe('f1')
   })
 
@@ -98,9 +112,11 @@ describe('getFolderDragHandlers', () => {
     expect(result.current.getFolderDragHandlers(FOLDER).draggable).toBe(true)
   })
 
-  it('sets draggingFolderId on dragStart', () => {
+  it('sets draggingFolderId on dragStart (one frame later)', async () => {
     const { result } = renderHook(() => useFileDrag(jest.fn(), jest.fn()))
     act(() => result.current.getFolderDragHandlers(FOLDER).onDragStart(makeDragEvent()))
+    expect(result.current.draggingFolderId).toBeNull()
+    await flushDragStart()
     expect(result.current.draggingFolderId).toBe('fold-1')
   })
 

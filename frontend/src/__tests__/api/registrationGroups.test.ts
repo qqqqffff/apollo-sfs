@@ -138,6 +138,6 @@ describe('registrationGroupsInfiniteQueryOptions', () => {
 
   it('getNextPageParam returns next_token or undefined', () => {
     expect(registrationGroupsInfiniteQueryOptions.getNextPageParam({ items: [], next_token: 'n' })).toBe('n')
-    expect(registrationGroupsInfiniteQueryOptions.getNextPageParam({ items: [] })).toBeUndefined()
+    expect(registrationGroupsInfiniteQueryOptions.getNextPageParam({ items: [], next_token: '' })).toBeUndefined()
   })
 })

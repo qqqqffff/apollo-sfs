@@ -6,6 +6,7 @@ import {
   mockAdminInterest,
   mockAdminBannedIPs,
   mockCapacity,
+  mockInfrastructure,
   MOCK_ADMIN_USER,
   GB,
 } from './fixtures'
@@ -33,6 +34,7 @@ test.describe('Admin — Users page (/admin/users)', () => {
   test.beforeEach(async ({ page }) => {
     await mockAuth(page, MOCK_ADMIN_USER)
     await mockAdminUsers(page, USERS)
+    await mockInfrastructure(page)
   })
 
   test('renders user rows from GET /api/v1/admin/users', async ({ page }) => {
@@ -43,26 +45,51 @@ test.describe('Admin — Users page (/admin/users)', () => {
     await expect(page.getByRole('cell', { name: 'bob', exact: true })).toBeVisible()
   })
 
-  test('shows quota in GB for each user', async ({ page }) => {
-    await page.goto('/admin/users')
-    await expect(page.getByText('10 GB')).toBeVisible()
-    await expect(page.getByText('20 GB')).toBeVisible()
-  })
+  // Per-user quota now lives in the expandable storage-details panel (one row
+  // per drive allocation), not a flat column — see StorageDetails in
+  // routes/_auth.admin/users.tsx.
+  const ALICE_STORAGE = {
+    quota_bytes: 10 * GB,
+    used_bytes: 1 * GB,
+    nvme_bytes: 0,
+    hdd_bytes: 10 * GB,
+    active_request_count: 0,
+    allocations: [{
+      server_id: 'srv1', server_name: 'Manager', server_state: 'active',
+      node_id: 'node1', node_hostname: 'manager.local',
+      drive_id: 'drive1', drive_label: 'Manager · Standard', drive_type: 'hdd',
+      capacity_bytes: 100 * GB, quota_bytes: 10 * GB, used_bytes: 1 * GB, is_primary: true,
+    }],
+  }
 
-  test('PATCH /api/v1/admin/users/:username/quota is called when quota is set', async ({ page }) => {
-    await page.route('**/api/v1/admin/users/*/quota', async (route) => {
-      await route.fulfill({ json: { message: 'ok' } })
+  test('shows allocated quota for a user when storage details are expanded', async ({ page }) => {
+    await page.route('**/api/v1/admin/users/alice/storage', async (route) => {
+      await route.fulfill({ json: ALICE_STORAGE })
     })
     await page.goto('/admin/users')
-    // prompt returns GB; component multiplies by GB and sends quota_bytes
-    await page.evaluate(() => { window.prompt = () => '5' })
+    await page.getByTitle('Storage details').first().click()
+    // "10.00 GB" also appears in the per-drive "used of" line, so scope to the summary bar.
+    await expect(page.getByText('Allocated:')).toContainText('10.00 GB')
+  })
 
-    const patchReq = page.waitForRequest(
-      (req) => req.method() === 'PATCH' && req.url().includes('/quota'),
+  test('PUT /api/v1/admin/users/:username/storage/allocations is called when quota is saved', async ({ page }) => {
+    await page.route('**/api/v1/admin/users/alice/storage', async (route) => {
+      await route.fulfill({ json: ALICE_STORAGE })
+    })
+    await page.route('**/api/v1/admin/users/alice/storage/allocations', async (route) => {
+      await route.fulfill({ json: { ...ALICE_STORAGE, quota_bytes: 5 * GB } })
+    })
+    await page.goto('/admin/users')
+    await page.getByTitle('Storage details').first().click()
+    await page.getByRole('button', { name: /^edit$/i }).click()
+    await page.locator('input[inputmode="decimal"]').first().fill('5')
+
+    const putReq = page.waitForRequest(
+      (req) => req.method() === 'PUT' && req.url().includes('/storage/allocations'),
     )
-    await page.getByRole('button', { name: /set quota/i }).first().click()
-    const req = await patchReq
-    expect(req.postDataJSON()).toMatchObject({ quota_bytes: 5 * GB })
+    await page.getByRole('button', { name: /save changes/i }).click()
+    const req = await putReq
+    expect(req.postDataJSON()).toMatchObject({ allocations: [{ drive_id: 'drive1', quota_bytes: 5 * GB }] })
   })
 
   test('edit username input appears when edit button is clicked', async ({ page }) => {
@@ -92,20 +119,21 @@ test.describe('Admin — Users page (/admin/users)', () => {
   })
 })
 
-test.describe('Admin — Invitations page (/admin/invitations)', () => {
+test.describe('Admin — Requests page, Invitations tab (/admin/requests?tab=invitations)', () => {
   test.beforeEach(async ({ page }) => {
     await mockAuth(page, MOCK_ADMIN_USER)
     await mockAdminInvitations(page, INVITATIONS)
     await mockCapacity(page)
+    await mockInfrastructure(page)
   })
 
   test('renders invitation emails from GET /api/v1/admin/invitations', async ({ page }) => {
-    await page.goto('/admin/invitations')
+    await page.goto('/admin/requests?tab=invitations')
     await expect(page.getByText('carol@example.com')).toBeVisible()
   })
 
   test('shows Pending badge for active unexpired invitation', async ({ page }) => {
-    await page.goto('/admin/invitations')
+    await page.goto('/admin/requests?tab=invitations')
     await expect(page.getByText('Pending', { exact: true })).toBeVisible()
   })
 
@@ -117,7 +145,7 @@ test.describe('Admin — Invitations page (/admin/invitations)', () => {
         await route.fulfill({ json: { items: INVITATIONS, next_token: '' } })
       }
     })
-    await page.goto('/admin/invitations')
+    await page.goto('/admin/requests?tab=invitations')
     await page.getByPlaceholder(/email address/i).fill('newuser@example.com')
 
     const postReq = page.waitForRequest(
@@ -132,7 +160,7 @@ test.describe('Admin — Invitations page (/admin/invitations)', () => {
     await page.route('**/api/v1/admin/invitations/inv1', async (route) => {
       await route.fulfill({ json: { message: 'revoked' } })
     })
-    await page.goto('/admin/invitations')
+    await page.goto('/admin/requests?tab=invitations')
 
     // The Revoke button triggers window.confirm — accept it
     page.on('dialog', (dialog) => dialog.accept())
@@ -146,7 +174,7 @@ test.describe('Admin — Invitations page (/admin/invitations)', () => {
   })
 })
 
-test.describe('Admin — Interest submissions page (/admin/interest)', () => {
+test.describe('Admin — Requests page, Access Requests tab (/admin/requests?tab=access)', () => {
   test.beforeEach(async ({ page }) => {
     await mockAuth(page, MOCK_ADMIN_USER)
     await mockAdminInterest(page, SUBMISSIONS)
@@ -154,19 +182,19 @@ test.describe('Admin — Interest submissions page (/admin/interest)', () => {
   })
 
   test('renders submission names from GET /api/v1/admin/interest', async ({ page }) => {
-    await page.goto('/admin/interest')
+    await page.goto('/admin/requests?tab=access')
     // Use role-based selectors to avoid strict-mode collision with dave@example.com cell
     await expect(page.getByRole('cell', { name: 'Dave', exact: true })).toBeVisible()
     await expect(page.getByRole('cell', { name: 'dave@example.com', exact: true })).toBeVisible()
   })
 
   test('shows daily cap value from GET /api/v1/admin/interest/settings', async ({ page }) => {
-    await page.goto('/admin/interest')
+    await page.goto('/admin/requests?tab=access')
     await expect(page.getByText('100')).toBeVisible()
   })
 
   test('shows Pending badge for unprovisioned submission', async ({ page }) => {
-    await page.goto('/admin/interest')
+    await page.goto('/admin/requests?tab=access')
     await expect(page.getByText('Pending', { exact: true })).toBeVisible()
   })
 
@@ -178,7 +206,7 @@ test.describe('Admin — Interest submissions page (/admin/interest)', () => {
         await route.fulfill({ json: { daily_cap: 100, updated_at: '2024-01-01T00:00:00Z' } })
       }
     })
-    await page.goto('/admin/interest')
+    await page.goto('/admin/requests?tab=access')
     await page.getByRole('button', { name: /edit cap/i }).click()
     await page.getByPlaceholder(/new cap/i).fill('50')
 
@@ -191,7 +219,7 @@ test.describe('Admin — Interest submissions page (/admin/interest)', () => {
   })
 
   test('quota picker appears when Provision is clicked', async ({ page }) => {
-    await page.goto('/admin/interest')
+    await page.goto('/admin/requests?tab=access')
     await page.getByRole('button', { name: /provision/i }).click()
     await expect(page.getByText(/choose storage quota/i)).toBeVisible()
   })

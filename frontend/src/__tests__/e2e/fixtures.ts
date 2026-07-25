@@ -10,6 +10,13 @@ export const MOCK_USER = {
   storage_quota_bytes: 10 * GB,
   created_at: '2024-01-01T00:00:00Z',
   last_seen_at: null,
+  is_premium: false,
+  premium_granted_at: null,
+  premium_subscribed: false,
+  linked_providers: [] as string[],
+  sandbox_payments_enabled: false,
+  expansion_override_enabled: false,
+  feedback_access_enabled: false,
 }
 
 export const MOCK_ADMIN_USER = { ...MOCK_USER, is_admin: true }
@@ -24,16 +31,60 @@ export const MOCK_FILES = [
   { id: 'fi2', name: 'note.txt',   size_bytes: 1024,       mime_type: 'text/plain',       folder_id: null, user_id: 'u1', created_at: '2024-01-02T00:00:00Z', updated_at: '2024-01-02T00:00:00Z' },
 ]
 
-/** Intercept /api/v1/me and return the given user so auth checks pass. */
+/**
+ * Intercept /api/v1/me and return the given user so auth checks pass.
+ *
+ * Also pre-seeds the onboarding "seen" flags (see OnboardingGuideContext's
+ * `seenKey`) so its first-time-user spotlight tour doesn't auto-open — its
+ * full-screen blocking overlay would otherwise intercept every click in
+ * tests that aren't exercising onboarding itself, since a fresh Playwright
+ * browser context always has empty localStorage.
+ *
+ * Also stubs GET /api/v1/me/notifications — NotificationBell (rendered in
+ * the shared _auth layout nav, so present on every authenticated page, not
+ * just /client) polls it on mount. Left unmocked it 500s against whatever
+ * dev server backs baseURL, and since an errored query has no cached data,
+ * every remount refetches immediately (no backoff), spamming the endpoint
+ * and destabilizing the whole page (elements shifting under in-flight
+ * clicks) until it eventually blows past the suite timeout.
+ */
 export async function mockAuth(page: Page, user = MOCK_USER) {
   await page.route('**/api/v1/me', (route) =>
     route.fulfill({ json: user }),
   )
+  await page.route('**/api/v1/me/notifications', (route) =>
+    route.fulfill({ json: { items: [], next_token: '' } }),
+  )
+  await page.addInitScript((username: string) => {
+    localStorage.setItem(`apollo_onboarding_base_seen_${username}`, '1')
+    localStorage.setItem(`apollo_onboarding_premium_seen_${username}`, '1')
+  }, user.username)
+}
+
+export const MOCK_SERVER = {
+  server_id: 'srv1',
+  drive_id: 'drive1',
+  name: 'Manager',
+  state: 'active',
+  drive_type: 'hdd' as const,
+  capacity_bytes: 8 * 1024 ** 4,
+  used_bytes: 1 * GB,
+  drive_used_pct: 12.5,
+  quota_bytes: 10 * GB,
+  is_primary: true,
+  ping_url: '',
 }
 
 /**
  * Stub GET /api/v1/folders* with root folder contents.
  * Response shape matches FolderContents: { folder, subfolders: PageResult, files: PageResult }
+ *
+ * Also stubs the other requests the client root page (`RootView` in
+ * _auth.client/index.tsx) fires alongside folder contents — storage/my-servers
+ * (gates the page behind a "Loading…" state; a single server routes straight
+ * into the plain files view instead of the multi-drive picker, matching this
+ * fixture's single-drive assumption), me/preferences, and favorites. Same
+ * unmocked-500-causes-a-refetch-storm hazard as /me/notifications — see mockAuth.
  */
 export async function mockRootFolder(
   page: Page,
@@ -49,6 +100,13 @@ export async function mockRootFolder(
       },
     }),
   )
+  await page.route('**/api/v1/storage/my-servers', (route) =>
+    route.fulfill({ json: { servers: [MOCK_SERVER] } }),
+  )
+  await page.route('**/api/v1/me/preferences', (route) =>
+    route.fulfill({ json: {} }),
+  )
+  await mockFavorites(page)
 }
 
 /** Stub admin paginated list endpoints (PageResult = { items, next_token }). */
@@ -84,6 +142,13 @@ export async function mockAdminBannedIPs(page: Page, bans: object[] = []) {
 export async function mockCapacity(page: Page) {
   await page.route('**/api/v1/admin/capacity', (route) =>
     route.fulfill({ json: null }),
+  )
+}
+
+/** Stub GET /admin/system/infrastructure — pulled in by the Requests page's Invitations tab for its drive picker. */
+export async function mockInfrastructure(page: Page) {
+  await page.route('**/api/v1/admin/system/infrastructure', (route) =>
+    route.fulfill({ json: { nodes: [], drives: [], disks: [] } }),
   )
 }
 

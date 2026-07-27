@@ -233,6 +233,95 @@ func (s *AuthService) LinkSocialAccount(ctx context.Context, existingUsername, p
 	return tokens, nil
 }
 
+// ErrIdentityClaimed means the brokered login resolved to a Keycloak user that
+// already owns an app account — the provider identity belongs to somebody else,
+// so it must not be moved onto the account doing the linking.
+var ErrIdentityClaimed = errors.New("this provider account is already linked to another Apollo SFS account")
+
+// ErrIdentityNotReturned means Keycloak completed the brokered login but the
+// resulting user carries no federated identity for the requested provider,
+// so there is nothing to attach.
+var ErrIdentityNotReturned = errors.New("the provider did not return an identity to link")
+
+// LinkBrokeredIdentity attaches the identity produced by a brokered IdP login
+// to an already-signed-in account. It is the web counterpart of
+// LinkSocialIdentity (which takes a native SDK's ID token, as the mobile apps
+// do): the browser has no provider SDK, so it re-runs the same Keycloak
+// authorization-code flow the sign-in buttons use and this exchanges the
+// resulting code.
+//
+// Three outcomes are possible once the code is exchanged:
+//   - Keycloak resolved the login straight onto currentKcUserID (the provider
+//     was already linked, or Keycloak's own account-linking step ran) — done.
+//   - It landed on a fresh, unclaimed Keycloak user that first-broker-login
+//     created; its federated identity is moved across and that user deleted,
+//     exactly as LinkSocialAccount does for the sign-in email-conflict path.
+//   - It landed on a Keycloak user that already has an app account —
+//     ErrIdentityClaimed, nothing is touched.
+//
+// Unlike AuthCodeExchange this deliberately neither provisions an app user for
+// the brokered identity nor returns tokens: the caller's session must stay on
+// the account that was already signed in.
+func (s *AuthService) LinkBrokeredIdentity(ctx context.Context, currentKcUserID, code, redirectURI, provider string) error {
+	tokens, err := s.tokenRequest(ctx, url.Values{
+		"grant_type":    {"authorization_code"},
+		"client_id":     {s.kcClientID},
+		"client_secret": {s.kcSecret},
+		"code":          {code},
+		"redirect_uri":  {redirectURI},
+	})
+	if err != nil {
+		return fmt.Errorf("link brokered identity: code exchange: %w", err)
+	}
+	// The brokered login opened its own Keycloak session; the app session is
+	// untouched and stays on the current user, so this one is dead weight.
+	defer func() { _ = s.Logout(ctx, tokens.RefreshToken) }()
+
+	claims, err := decodeTokenClaims(tokens.AccessToken)
+	if err != nil {
+		return fmt.Errorf("link brokered identity: %w", err)
+	}
+	if claims.Sub == currentKcUserID {
+		return nil // already linked to this very account
+	}
+
+	if _, err := s.queries.GetUserByUsername(ctx, claims.PreferredUsername); err == nil {
+		return ErrIdentityClaimed
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("link brokered identity: look up brokered user: %w", err)
+	}
+
+	adminToken, err := s.adminToken(ctx)
+	if err != nil {
+		return fmt.Errorf("link brokered identity: admin token: %w", err)
+	}
+	fedIDs, err := s.kcGetFederatedIdentities(ctx, adminToken, claims.Sub)
+	if err != nil {
+		return fmt.Errorf("link brokered identity: fetch federated identities: %w", err)
+	}
+
+	linked := false
+	for _, fid := range fedIDs {
+		if fid.IdentityProvider != provider {
+			continue
+		}
+		if err := s.kcAddFederatedIdentity(ctx, adminToken, currentKcUserID, fid); err != nil {
+			return fmt.Errorf("link brokered identity: add federated identity: %w", err)
+		}
+		linked = true
+	}
+	if !linked {
+		return ErrIdentityNotReturned
+	}
+
+	// Drop the throwaway Keycloak user now that its identity lives on the real
+	// account. Non-fatal, same as LinkSocialAccount: the link already succeeded.
+	if err := s.kcDeleteUser(ctx, adminToken, claims.Sub); err != nil {
+		log.Printf("link brokered identity: warning: could not delete temp KC user %s: %v", claims.Sub, err)
+	}
+	return nil
+}
+
 // GetLinkedProviders returns the list of Keycloak IdP aliases linked to the given user.
 func (s *AuthService) GetLinkedProviders(ctx context.Context, kcUserID string) ([]string, error) {
 	adminToken, err := s.adminToken(ctx)

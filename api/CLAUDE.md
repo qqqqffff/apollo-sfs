@@ -72,7 +72,9 @@ Every protected route goes through the JWT middleware in `routes/middleware/`. T
 - Extracts the Keycloak user UUID (sub claim) and realm roles
 - Sets `app.current_user_id` on the PostgreSQL session so Row-Level Security applies
 
-Social login (Google, Apple) goes through `routes/auth/social_callback.go`, which exchanges the IdP token via Keycloak's identity-provider brokering API.
+Social login (Google, Apple, Microsoft) goes through `routes/auth/social_callback.go`, which exchanges the IdP token via Keycloak's identity-provider brokering API.
+
+Connecting a provider to an account that already exists (profile page → "Linked accounts" → Connect) is `POST /me/social/link`. It takes the identity three ways: a provider ID token (`token` — what the mobile apps' native SDKs return), a Google server auth code (`server_auth_code`), or a Keycloak authorization code (`code`) for the web, which has no provider SDK and so re-runs the same brokered authorization-code flow the sign-in buttons use. `AuthService.LinkBrokeredIdentity` exchanges that code without provisioning an app user or returning tokens — the caller's session must stay on the account already signed in — then moves the federated identity onto it, refusing (`ErrIdentityClaimed`) if the provider account already belongs to another app account. Note the web flow's `redirect_uri` is the **profile page itself**, not an API callback: the session cookie is `SameSite=Strict`, so it isn't sent on the cross-site redirect back from Keycloak and a callback route would arrive unauthenticated; landing on the SPA lets it forward the code over a same-site XHR that does carry the cookie.
 
 Invite acceptance (`routes/auth/register.go`, `routes/auth/mobile.go`) grants the invitation's realm roles (admin/premium) in Keycloak *before* writing any app DB state or marking the invitation accepted. If that grant fails, `provisionInvitedAppUser` (`routes/services/auth.go`) returns `ErrRoleProvisioningFailed` and the whole request aborts — the invitation stays valid so the recipient can just retry, rather than silently completing with fewer privileges than promised.
 

@@ -226,8 +226,8 @@ test.describe('Client — Profile page (/client/profile)', () => {
       await page.getByPlaceholder(/6-digit code/i).fill('123456')
       const inputs = page.locator('input[type="password"]')
       await inputs.nth(0).fill('OldPass1!')
-      await inputs.nth(1).fill('NewPass1!')
-      await inputs.nth(2).fill('NewPass1!')
+      await inputs.nth(1).fill('NewPassword1!')
+      await inputs.nth(2).fill('NewPassword1!')
 
       const patchReq = page.waitForRequest(
         (req) => req.method() === 'POST' && req.url().includes('/me/password') && !req.url().includes('request-code'),
@@ -236,14 +236,14 @@ test.describe('Client — Profile page (/client/profile)', () => {
       const req = await patchReq
       expect(req.postDataJSON()).toMatchObject({
         current_password: 'OldPass1!',
-        new_password: 'NewPass1!',
+        new_password: 'NewPassword1!',
         code: '123456',
       })
     })
 
     test('shows password requirement checklist when typing in new-password field', async ({ page }) => {
       await page.locator('input[type="password"]').nth(1).focus()
-      await expect(page.getByText(/at least 8 characters/i)).toBeVisible()
+      await expect(page.getByText(/at least 12 characters/i)).toBeVisible()
     })
 
     test('Update password button is disabled until all requirements met', async ({ page }) => {

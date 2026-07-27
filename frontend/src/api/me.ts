@@ -23,6 +23,14 @@ export function unlinkProvider(provider: string) {
   return del<{ message: string }>('/me/social/unlink', { provider })
 }
 
+// linkProvider completes the web "Connect" flow: `code` is the Keycloak
+// authorization code the brokered IdP login redirected back to the profile page
+// with (see socialLinkUrl). The backend exchanges it and attaches the resulting
+// identity to the signed-in account.
+export function linkProvider(provider: string, code: string) {
+  return post<{ message: string }>('/me/social/link', { provider, code })
+}
+
 // updateUsername renames the signed-in user's account. The current session's
 // token still carries the old username afterwards, so callers should sign the
 // user out on success to force a fresh login with the new identity.

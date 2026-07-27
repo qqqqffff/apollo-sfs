@@ -316,18 +316,24 @@ build’s style handling.
 
 ---
 
-## 12. Weak password floor on register/reset (Informational)
+## 12. Weak password floor on register/reset (Informational — resolved)
 
-**Where:** `api/routes/auth/register.go:17` (`min=8`), `api/routes/auth/reset_password.go:14`
-(`min=8`).
+**Where:** `api/routes/auth/register.go` (`min=8`), `api/routes/auth/reset_password.go` (`min=8`).
 
-**What’s wrong:** The application enforces only an 8-character minimum with no complexity or
+**What’s wrong:** The application enforced only an 8-character minimum with no complexity or
 breached-password check. Keycloak’s realm password policy is the real enforcement point; if it is
 not configured to match, weak passwords are accepted.
 
 **Recommended fix:** Configure a Keycloak password policy (length, complexity, and the
 `notUsername`/breached-password detectors) as the authoritative control, and align the app-side
 `min` with it. This is primarily a Keycloak realm configuration change.
+
+**Status:** the realm policy is
+`length(12) and upperCase(1) and lowerCase(1) and digits(1) and specialChars(1)`
+(`keycloak/import/realm.json`), and the app-side floors now mirror it at `min=12`. The client-side
+checklists derive from that same policy in one place per app —
+`frontend/src/utils/passwordPolicy.ts` and `mobile/src/utils/passwordPolicy.ts` — so they can’t
+drift back below it silently. The `notUsername`/breached-password detectors are still not enabled.
 
 **Recommended model:** **Claude Haiku 4.5** — small constant change plus a Keycloak realm policy
 note.

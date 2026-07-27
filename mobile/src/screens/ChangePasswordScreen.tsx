@@ -14,21 +14,11 @@ import { useNavigation } from '@react-navigation/native';
 import { ArrowLeft, Check, MailCheck, ShieldCheck, X } from 'lucide-react-native';
 import { changePassword, requestPasswordChangeCode } from '../api/me';
 import { card, colors, radius, spacing } from '../theme';
+import { getPasswordChecks, PASSWORD_CHECK_LABELS } from '../utils/passwordPolicy';
 
-interface PasswordChecks {
-  length: boolean;
-  upper: boolean;
-  number: boolean;
-  symbol: boolean;
-  match: boolean;
-}
-
-function getChecks(newPassword: string, confirm: string): PasswordChecks {
+function getChecks(newPassword: string, confirm: string) {
   return {
-    length: newPassword.length >= 8,
-    upper: /[A-Z]/.test(newPassword),
-    number: /[0-9]/.test(newPassword),
-    symbol: /[^A-Za-z0-9]/.test(newPassword),
+    ...getPasswordChecks(newPassword),
     match: newPassword.length > 0 && newPassword === confirm,
   };
 }
@@ -190,10 +180,9 @@ export default function ChangePasswordScreen() {
 
               {touched && (
                 <View style={{ gap: 3, marginBottom: spacing.sm }}>
-                  <CheckItem ok={checks.length} label="At least 8 characters" />
-                  <CheckItem ok={checks.upper} label="One uppercase letter" />
-                  <CheckItem ok={checks.number} label="One number" />
-                  <CheckItem ok={checks.symbol} label="One symbol" />
+                  {PASSWORD_CHECK_LABELS.map(([key, label]) => (
+                    <CheckItem key={key} ok={checks[key]} label={label} />
+                  ))}
                   <CheckItem ok={checks.match} label="Passwords match" />
                 </View>
               )}

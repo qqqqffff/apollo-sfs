@@ -17,7 +17,9 @@ import (
 type registerRequest struct {
 	Username string `json:"username" binding:"required,max=150"`
 	Email    string `json:"email"    binding:"required,email,max=254"`
-	Password string `json:"password" binding:"required,min=8,max=1024"`
+	// min mirrors the Keycloak realm's length(12) policy — see
+	// keycloak/import/realm.json.
+	Password string `json:"password" binding:"required,min=12,max=1024"`
 	// Exactly one of InviteToken (admin invitation, email locked to the
 	// invite) or ReservationToken (group-registration slot hold, email
 	// user-supplied) must be set.

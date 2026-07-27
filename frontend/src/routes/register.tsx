@@ -14,6 +14,7 @@ import { TermsOfServiceModal } from '../components/TermsOfServiceModal'
 import { PremiumPlanSelector } from '../components/PremiumPlanSelector'
 import { useAuth } from '../auth'
 import { AlreadySignedInNotice } from '../components/AlreadySignedInNotice'
+import { getPasswordChecks, PASSWORD_CHECK_LABELS, PASSWORD_MIN_LENGTH } from '../utils/passwordPolicy'
 
 // This inline checkout deliberately keeps the popup-based <PayPalButtons>
 // (rather than PayPalWalletRedirectButton's redirect
@@ -59,22 +60,6 @@ interface RegisterParams {
   // `reservation` (and absence of an invite token) switches the form into the
   // reservation flow: the email field is user-editable and validated.
   reservation: string
-}
-
-interface PasswordChecks {
-  length: boolean
-  upper: boolean
-  number: boolean
-  symbol: boolean
-}
-
-function getPasswordChecks(password: string): PasswordChecks {
-  return {
-    length: password.length >= 8,
-    upper: /[A-Z]/.test(password),
-    number: /[0-9]/.test(password),
-    symbol: /[^A-Za-z0-9]/.test(password),
-  }
 }
 
 function PasswordCheckItem({ ok, label }: { ok: boolean; label: string }) {
@@ -130,6 +115,9 @@ function RouteComponent() {
   const [showTerms, setShowTerms] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [step, setStep] = useState<'form' | 'plan'>('form')
+  // True once this session's own registration has landed — see the mutation's
+  // onSuccess for why mutation.isSuccess can't be used for that.
+  const [registered, setRegistered] = useState(false)
   const [captchaToken, setCaptchaToken] = useState<string | null>(null)
   const turnstileRef = useRef<TurnstileInstance>(null)
 
@@ -255,6 +243,13 @@ function RouteComponent() {
       ? registerWithReservation(username, email.trim(), password, reservation, captchaToken!)
       : register(username, email, password, token, captchaToken!),
     onSuccess: async () => {
+      // Flag the flow as done *before* awaiting anything. Registration
+      // auto-logs-in, so the `me` refetch below flips isAuthenticated to true
+      // — while react-query only flips mutation.isSuccess after this callback
+      // resolves. Gating the "already signed in" notice on isSuccess alone
+      // therefore rendered the sign-out prompt over the account that was just
+      // created, for as long as the refetch took.
+      setRegistered(true)
       await queryClient.invalidateQueries({ queryKey: ['me'] })
       setStep('plan')
     },
@@ -303,10 +298,10 @@ function RouteComponent() {
   }
 
   // Blocks registering a second account while already signed in. Skipped once
-  // this session's own registration has gone through (mutation.isSuccess →
-  // plan step) — by then the "signed in" session IS the account that was just
+  // this session's own registration has gone through (`registered` → plan
+  // step) — by then the "signed in" session IS the account that was just
   // created, not a stale one to sign out of.
-  if (isAuthenticated && !mutation.isSuccess) {
+  if (isAuthenticated && !registered) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-start sm:items-center justify-center px-4 py-8">
         <AlreadySignedInNotice username={user?.username} />
@@ -316,8 +311,8 @@ function RouteComponent() {
 
   // A reservation that finished registering elsewhere (e.g. the URL revisited
   // after success) — not an expiry, point at the login page instead. Skipped
-  // while this very session just completed (mutation.isSuccess → plan step).
-  if (isReservationFlow && slotReservation?.status === 'completed' && !mutation.isSuccess) {
+  // while this very session just completed (`registered` → plan step).
+  if (isReservationFlow && slotReservation?.status === 'completed' && !registered) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-start sm:items-center justify-center px-4 py-8">
         <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-8 max-w-md text-center">
@@ -337,7 +332,7 @@ function RouteComponent() {
 
   // Session-expired modal: the 10-minute hold lapsed before registration
   // finished — the slot is free for someone else, offer the way back.
-  if (isReservationFlow && sessionExpired && step === 'form' && !mutation.isSuccess) {
+  if (isReservationFlow && sessionExpired && step === 'form' && !registered) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-start sm:items-center justify-center px-4 py-8">
         <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-8 max-w-md text-center">
@@ -610,16 +605,15 @@ function RouteComponent() {
               onFocus={() => setPasswordFocused(true)}
               onBlur={() => setPasswordFocused(false)}
               autoComplete="new-password"
-              minLength={8}
+              minLength={PASSWORD_MIN_LENGTH}
               required
               className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
             />
             {passwordFocused && (
               <ul className="space-y-1 pl-0.5 mt-1">
-                <PasswordCheckItem ok={passwordChecks.length} label="At least 8 characters" />
-                <PasswordCheckItem ok={passwordChecks.upper} label="One uppercase letter" />
-                <PasswordCheckItem ok={passwordChecks.number} label="One number" />
-                <PasswordCheckItem ok={passwordChecks.symbol} label="One symbol" />
+                {PASSWORD_CHECK_LABELS.map(([key, label]) => (
+                  <PasswordCheckItem key={key} ok={passwordChecks[key]} label={label} />
+                ))}
               </ul>
             )}
           </label>

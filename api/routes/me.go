@@ -387,7 +387,22 @@ type socialLinkRequest struct {
 	Provider       string `json:"provider"        binding:"required"`
 	Token          string `json:"token"`
 	ServerAuthCode string `json:"server_auth_code"`
+	// Code is the Keycloak authorization code from the web "Connect" flow —
+	// the browser has no provider SDK to produce Token, so it re-runs the same
+	// brokered authorization-code flow the sign-in buttons use and hands the
+	// code here. See LinkSocial for why the code, not the callback, is what
+	// arrives authenticated.
+	Code string `json:"code"`
 }
+
+// brokeredLinkRedirectPath is the redirect_uri the web "Connect" flow registers
+// with Keycloak, and so the one the code must be exchanged against. It points at
+// the profile page itself rather than an API callback on purpose: the session
+// cookie is SameSite=Strict, so it is not sent on the cross-site redirect back
+// from Keycloak — an API callback would arrive unauthenticated. Landing on the
+// SPA instead lets it forward the code over a normal same-site XHR, which does
+// carry the cookie. Keep in sync with socialLinkUrl in the frontend.
+const brokeredLinkRedirectPath = "/client/profile"
 
 type socialUnlinkRequest struct {
 	Provider string `json:"provider" binding:"required"`
@@ -395,7 +410,10 @@ type socialUnlinkRequest struct {
 
 // LinkSocial handles POST /api/v1/me/social/link.
 // Links an Apple, Google, or Microsoft identity to the authenticated user's
-// account.
+// account. The identity can be presented three ways: a provider ID token
+// (Token — what the mobile apps' native SDKs return), a Google server auth code
+// (ServerAuthCode), or a Keycloak authorization code from the web Connect
+// flow (Code).
 func (h *Handler) LinkSocial(c *gin.Context) {
 	userID := c.GetString("userID")
 	if userID == "" {
@@ -410,6 +428,23 @@ func (h *Handler) LinkSocial(c *gin.Context) {
 	}
 	if req.Provider != "apple" && req.Provider != "google" && req.Provider != "microsoft" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "provider must be apple, google, or microsoft"})
+		return
+	}
+
+	if req.Code != "" {
+		redirectURI := h.auth.AppBaseURL() + brokeredLinkRedirectPath
+		err := h.auth.LinkBrokeredIdentity(c.Request.Context(), userID, req.Code, redirectURI, req.Provider)
+		switch {
+		case err == nil:
+			c.JSON(http.StatusOK, gin.H{"message": "identity linked"})
+		case errors.Is(err, services.ErrIdentityClaimed):
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		case errors.Is(err, services.ErrIdentityNotReturned):
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		default:
+			log.Printf("LinkSocial: brokered link of %s for %s failed: %v", req.Provider, userID, err)
+			c.JSON(http.StatusBadRequest, gin.H{"error": "could not connect the account — please try again"})
+		}
 		return
 	}
 

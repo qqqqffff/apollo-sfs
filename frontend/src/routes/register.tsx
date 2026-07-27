@@ -16,7 +16,7 @@ import { useAuth } from '../auth'
 import { AlreadySignedInNotice } from '../components/AlreadySignedInNotice'
 
 // This inline checkout deliberately keeps the popup-based <PayPalButtons>
-// (rather than PayPalWalletRedirectButton/PayPalSubscribeButton's redirect
+// (rather than PayPalWalletRedirectButton's redirect
 // flow) because it runs on the registration wizard's "plan" step, before the
 // SPA has done its Keycloak login — only the backend session cookie exists
 // at this point (see the comment below). A redirect would land back on

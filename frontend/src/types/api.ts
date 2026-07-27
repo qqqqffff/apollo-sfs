@@ -192,6 +192,13 @@ export interface UserPreferences {
   // Hide the drive-speed-benchmark promo card in the Add Storage modal.
   // Default false.
   hide_benchmark_promo: boolean
+  // Whether the base / premium onboarding spotlight tours have already been
+  // shown to this account. Each auto-plays exactly once — on first login, and
+  // on the first login where premium is active. Stored on the account rather
+  // than in localStorage so a new browser or cleared site data doesn't replay
+  // them. Both default false.
+  onboarding_base_seen: boolean
+  onboarding_premium_seen: boolean
   created_at: string
   updated_at: string
 }

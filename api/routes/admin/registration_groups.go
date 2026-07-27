@@ -177,6 +177,179 @@ func (h *Handler) UpdateRegistrationGroup(c *gin.Context) {
 	c.JSON(http.StatusOK, detail)
 }
 
+type addRegistrationSlotsRequest struct {
+	Slots []createRegistrationSlotSpec `json:"slots" binding:"required,min=1,max=100"`
+}
+
+// AddRegistrationSlots handles POST /api/v1/admin/registration-groups/:id/slots.
+// Appends new slots to an already-existing group — existing slots (and their
+// consumed/reserved status) are untouched.
+func (h *Handler) AddRegistrationSlots(c *gin.Context) {
+	if !h.regGroupsConfigured(c) {
+		return
+	}
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid registration group id"})
+		return
+	}
+	var req addRegistrationSlotsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "at least one valid slot is required"})
+		return
+	}
+	specs := make([]services.RegistrationSlotSpecInput, len(req.Slots))
+	for i, s := range req.Slots {
+		premiumExpiresAt, ok := parseOptionalRFC3339(s.PremiumExpiresAt)
+		if !ok {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "premium_expires_at must be an RFC3339 timestamp"})
+			return
+		}
+		specs[i] = services.RegistrationSlotSpecInput{
+			ServerID:         s.ServerID,
+			DriveType:        s.DriveType,
+			QuotaBytes:       s.QuotaBytes,
+			AccountStatus:    s.AccountStatus,
+			PremiumExpiresAt: premiumExpiresAt,
+			Count:            s.Count,
+		}
+	}
+	detail, err := h.regGroups.AddSlots(c.Request.Context(), id, specs)
+	if err != nil {
+		switch {
+		case errors.Is(err, services.ErrGroupNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		case errors.Is(err, services.ErrGroupNeedsSlots), errors.Is(err, services.ErrInvalidSlotSpec):
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		case errors.Is(err, services.ErrSlotCapacityExceeded):
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "could not add slots to the registration group"})
+		}
+		return
+	}
+	c.JSON(http.StatusOK, detail)
+}
+
+// registrationSlotSignatureRequest identifies one slot type — the same
+// grouping key ListRegistrationSlotTypes uses — for the delete/replace
+// endpoints below.
+type registrationSlotSignatureRequest struct {
+	ServerID         uuid.UUID `json:"server_id" binding:"required"`
+	DriveType        string    `json:"drive_type" binding:"required"`
+	QuotaBytes       int64     `json:"quota_bytes" binding:"required"`
+	AccountStatus    string    `json:"account_status" binding:"required"`
+	PremiumExpiresAt *string   `json:"premium_expires_at"`
+}
+
+func (r registrationSlotSignatureRequest) toSignature() (db.RegistrationSlotSignature, bool) {
+	premiumExpiresAt, ok := parseOptionalRFC3339(r.PremiumExpiresAt)
+	if !ok {
+		return db.RegistrationSlotSignature{}, false
+	}
+	return db.RegistrationSlotSignature{
+		ServerID:         r.ServerID,
+		DriveType:        r.DriveType,
+		QuotaBytes:       r.QuotaBytes,
+		AccountStatus:    r.AccountStatus,
+		PremiumExpiresAt: premiumExpiresAt,
+	}, true
+}
+
+// DeleteRegistrationSlotType handles DELETE /api/v1/admin/registration-groups/:id/slots.
+// Removes every currently-free slot matching the signature in the body;
+// consumed or actively-reserved slots of the same configuration are left
+// untouched.
+func (h *Handler) DeleteRegistrationSlotType(c *gin.Context) {
+	if !h.regGroupsConfigured(c) {
+		return
+	}
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid registration group id"})
+		return
+	}
+	var req registrationSlotSignatureRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "a valid slot signature is required"})
+		return
+	}
+	sig, ok := req.toSignature()
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "premium_expires_at must be an RFC3339 timestamp"})
+		return
+	}
+	detail, err := h.regGroups.DeleteSlotType(c.Request.Context(), id, sig)
+	if err != nil {
+		if errors.Is(err, services.ErrGroupNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not delete these slots"})
+		return
+	}
+	c.JSON(http.StatusOK, detail)
+}
+
+type replaceRegistrationSlotTypeRequest struct {
+	Old registrationSlotSignatureRequest `json:"old" binding:"required"`
+	New createRegistrationSlotSpec       `json:"new" binding:"required"`
+}
+
+// ReplaceRegistrationSlotType handles PUT /api/v1/admin/registration-groups/:id/slots.
+// Atomically swaps every currently-free slot matching `old` for `new.count`
+// new slots configured per `new` — backs the edit screen's per-row "Edit"
+// action on an unclaimed slot type. Consumed or actively-reserved slots
+// matching `old` are left untouched.
+func (h *Handler) ReplaceRegistrationSlotType(c *gin.Context) {
+	if !h.regGroupsConfigured(c) {
+		return
+	}
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid registration group id"})
+		return
+	}
+	var req replaceRegistrationSlotTypeRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "old and new slot configurations are required"})
+		return
+	}
+	oldSig, ok := req.Old.toSignature()
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "old.premium_expires_at must be an RFC3339 timestamp"})
+		return
+	}
+	newPremiumExpiresAt, ok := parseOptionalRFC3339(req.New.PremiumExpiresAt)
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "new.premium_expires_at must be an RFC3339 timestamp"})
+		return
+	}
+	newSpec := services.RegistrationSlotSpecInput{
+		ServerID:         req.New.ServerID,
+		DriveType:        req.New.DriveType,
+		QuotaBytes:       req.New.QuotaBytes,
+		AccountStatus:    req.New.AccountStatus,
+		PremiumExpiresAt: newPremiumExpiresAt,
+		Count:            req.New.Count,
+	}
+	detail, err := h.regGroups.ReplaceSlotType(c.Request.Context(), id, oldSig, newSpec)
+	if err != nil {
+		switch {
+		case errors.Is(err, services.ErrGroupNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		case errors.Is(err, services.ErrInvalidSlotSpec):
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		case errors.Is(err, services.ErrSlotCapacityExceeded):
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "could not replace these slots"})
+		}
+		return
+	}
+	c.JSON(http.StatusOK, detail)
+}
+
 // registrationGroupRow decorates a summary with the full public invite URL.
 type registrationGroupRow struct {
 	models.RegistrationGroupSummary

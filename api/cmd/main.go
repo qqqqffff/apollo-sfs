@@ -353,6 +353,12 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	adminHandler.SetPayPalClients(paypalClients)
 	adminHandler.SetPaymentService(paymentSvc)
 	go paymentSvc.PremiumExpiryLoop(context.Background(), 15*time.Minute)
+	// Self-billed subscriptions (card / Apple Pay / Google Pay) have no
+	// PayPal-side billing agreement driving them — this loop is what actually
+	// charges them each period. Hourly is fine: due-ness is decided by each
+	// row's own next_charge_at, so the tick rate only bounds how late a
+	// renewal runs, never whether it runs.
+	go paymentSvc.SubscriptionRenewalLoop(context.Background(), paypalClients, time.Hour)
 	paymentsHandler := payments.NewHandler(paypalClients, paymentSvc, queries, payments.Config{
 		AppBaseURL: cfg.AppBaseURL,
 		PlanIDs: map[string]string{
@@ -367,18 +373,20 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 			"monthly": cfg.PremiumMonthlyPriceCents,
 			"annual":  cfg.PremiumAnnualPriceCents,
 		},
-		Currency: cfg.PremiumTierCurrency,
+		Currency:                      cfg.PremiumTierCurrency,
+		GooglePaySubscriptionsEnabled: cfg.GooglePaySubscriptionsEnabled,
 	})
 	storageHandler := storageroutes.NewHandler(queries)
 	billingHandler := billing.NewHandler(paypalClients, queries, billing.Config{
-		Currency:                 cfg.PremiumTierCurrency,
-		ReturnURL:                "apollosfs://billing/storage/complete",
-		CancelURL:                "apollosfs://billing/storage/cancel",
-		AppBaseURL:               cfg.AppBaseURL,
-		ClientID:                 cfg.PayPalClientID,
-		SandboxClientID:          cfg.PayPalSandboxClientID,
-		PremiumMonthlyPriceCents: cfg.PremiumMonthlyPriceCents,
-		PremiumAnnualPriceCents:  cfg.PremiumAnnualPriceCents,
+		Currency:                      cfg.PremiumTierCurrency,
+		ReturnURL:                     "apollosfs://billing/storage/complete",
+		CancelURL:                     "apollosfs://billing/storage/cancel",
+		AppBaseURL:                    cfg.AppBaseURL,
+		ClientID:                      cfg.PayPalClientID,
+		SandboxClientID:               cfg.PayPalSandboxClientID,
+		PremiumMonthlyPriceCents:      cfg.PremiumMonthlyPriceCents,
+		PremiumAnnualPriceCents:       cfg.PremiumAnnualPriceCents,
+		GooglePaySubscriptionsEnabled: cfg.GooglePaySubscriptionsEnabled,
 	})
 	expansionHandler := expansion.NewHandler(paypalClients, emailSvc, queries, expansion.Config{
 		Currency:  cfg.PremiumTierCurrency,
@@ -536,6 +544,9 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		protected.PUT("/me/preferences/storage-ui", h.UpdateStorageUIPreferences)
 		// Default display drive (server & tier the browser lands on) — every user.
 		protected.PUT("/me/preferences/default-drive", h.UpdateDefaultDrive)
+		// Onboarding spotlight tours seen-flags — every user (the premium guide
+		// is gated client-side on premium, but marking it seen is harmless).
+		protected.PUT("/me/preferences/onboarding", h.MarkOnboardingGuideSeen)
 		// Admin-only, session-scoped sandbox-payments toggle (not persisted).
 		protected.PUT("/me/sandbox-payments", h.UpdateSandboxPayments)
 		// Admin-only, session-scoped storage-expansion-override toggle (not persisted).
@@ -640,6 +651,11 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		protected.GET("/payments/subscriptions", paymentsHandler.ListMySubscriptions)
 		protected.POST("/payments/subscriptions/:id/confirm", paymentsHandler.ConfirmSubscription)
 		protected.POST("/payments/subscriptions/cancel", paymentsHandler.CancelSubscription)
+		// Card / Apple Pay / Google Pay subscriptions: PayPal Subscriptions v1
+		// can't be bound to those funding sources, so these open a
+		// subscription we bill ourselves (see the payments handler).
+		protected.POST("/payments/subscriptions/wallet/order", paymentsHandler.CreateSelfBilledOrder)
+		protected.POST("/payments/subscriptions/wallet/confirm", paymentsHandler.ConfirmSelfBilledOrder)
 
 		// User-facing storage info — separate from admin routes for security.
 		protected.GET("/storage/servers", storageHandler.ListServers)
@@ -768,6 +784,9 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 			adminGroup.GET("/registration-groups/capacity", adminHandler.GetRegistrationCapacity)
 			adminGroup.GET("/registration-groups/:id", adminHandler.GetRegistrationGroup)
 			adminGroup.PATCH("/registration-groups/:id", adminHandler.UpdateRegistrationGroup)
+			adminGroup.POST("/registration-groups/:id/slots", adminHandler.AddRegistrationSlots)
+			adminGroup.PUT("/registration-groups/:id/slots", adminHandler.ReplaceRegistrationSlotType)
+			adminGroup.DELETE("/registration-groups/:id/slots", adminHandler.DeleteRegistrationSlotType)
 			adminGroup.POST("/registration-groups/:id/deactivate", adminHandler.DeactivateRegistrationGroup)
 			adminGroup.DELETE("/registration-groups/:id", adminHandler.DeleteRegistrationGroup)
 

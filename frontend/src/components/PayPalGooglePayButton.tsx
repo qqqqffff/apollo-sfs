@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { usePayPalScriptReducer } from '@paypal/react-paypal-js'
+import type { RecurringTerms } from './recurringTerms'
 
 const GOOGLE_PAY_JS = 'https://pay.google.com/gp/p/js/pay.js'
 
@@ -21,6 +22,52 @@ function loadGooglePayJs(): Promise<void> {
   })
 }
 
+// buildGooglePayTransaction produces the transaction half of the
+// PaymentDataRequest. Exactly one of transactionInfo / recurringTransactionInfo
+// may be present; the recurring form is what discloses the billing schedule in
+// the sheet and enrols the payment method for merchant-initiated charges, so
+// without it, billing the card again later is out of policy. Exported for
+// tests, since that shape is the compliance surface.
+export function buildGooglePayTransaction(opts: {
+  countryCode: string
+  currencyCode: string
+  amount: string
+  recurring?: RecurringTerms
+}): Record<string, any> {
+  const { countryCode, currencyCode, amount, recurring } = opts
+  if (!recurring) {
+    return {
+      transactionInfo: {
+        countryCode,
+        currencyCode,
+        totalPriceStatus: 'FINAL',
+        totalPrice: amount,
+      },
+    }
+  }
+  return {
+    recurringTransactionInfo: {
+      countryCode,
+      currencyCode,
+      label: recurring.description,
+      managementUrl: recurring.managementUrl,
+      ...(recurring.billingAgreement ? { billingAgreement: recurring.billingAgreement } : {}),
+      recurrenceItems: [
+        {
+          label: recurring.itemLabel,
+          price: amount,
+          priceStatus: 'FINAL',
+          recurrencePeriod: {
+            // Google takes uppercase calendar units where Apple takes lowercase.
+            unit: recurring.intervalUnit.toUpperCase(),
+            count: recurring.intervalCount,
+          },
+        },
+      ],
+    },
+  }
+}
+
 interface Props {
   // Which PayPal environment the SDK is running against. Google Pay MUST use its
   // 'TEST' environment when PayPal is in sandbox and 'PRODUCTION' when live —
@@ -40,6 +87,21 @@ interface Props {
   onError?: (message: string) => void
   // Blocks the click (e.g. no plan selected / a capture in flight).
   enabled: boolean
+  // When set, the sheet authorises a merchant-initiated recurring charge
+  // rather than a one-off purchase, via recurringTransactionInfo. Omit for
+  // ordinary one-time purchases (storage add-ons, deposits).
+  //
+  // Only honoured when the server says Google Pay subscriptions are usable
+  // (subscriptionsEnabled), which is off by default: PayPal doesn't vault the
+  // google_pay payment source, so the subscription could never renew, and
+  // Google's merchant-initiated transactions are separately an opt-in program.
+  // Otherwise the button hides rather than taking a wallet
+  // payment the buyer was never shown recurring terms for.
+  recurring?: RecurringTerms
+  // Whether this PayPal merchant account is enrolled in Google Pay's
+  // merchant-initiated transactions program. Only consulted when `recurring`
+  // is set. See docs/paypal_setup.md §10.
+  subscriptionsEnabled?: boolean
 }
 
 // PayPalGooglePayButton renders Google Pay orchestrated by PayPal — PayPal is
@@ -48,17 +110,25 @@ interface Props {
 // `googlepay` in `components`. Renders nothing if the buyer/merchant isn't
 // Google Pay eligible, so the surrounding PayPal buttons/card fields remain the
 // fallback.
-export function PayPalGooglePayButton({ environment, currencyCode, amount, createOrder, onApprove, onError, enabled }: Props) {
+export function PayPalGooglePayButton({
+  environment, currencyCode, amount, createOrder, onApprove, onError, enabled, recurring, subscriptionsEnabled,
+}: Props) {
   const [{ isResolved }] = usePayPalScriptReducer()
   const containerRef = useRef<HTMLDivElement>(null)
   const [visible, setVisible] = useState(false)
 
   // Latest props for the imperatively-created Google button's click handler.
-  const latest = useRef({ currencyCode, amount, createOrder, onApprove, onError, enabled })
-  latest.current = { currencyCode, amount, createOrder, onApprove, onError, enabled }
+  const latest = useRef({ currencyCode, amount, createOrder, onApprove, onError, enabled, recurring })
+  latest.current = { currencyCode, amount, createOrder, onApprove, onError, enabled, recurring }
+
+  // Asking for a recurring authorisation without being enrolled in Google's
+  // MIT program means the sheet request is rejected, so the button is hidden
+  // instead — same reasoning as the Apple button's version check: better no
+  // Google Pay than a wallet charge with undisclosed recurring terms.
+  const blockedForRecurring = !!recurring && !subscriptionsEnabled
 
   useEffect(() => {
-    if (!isResolved) return
+    if (!isResolved || blockedForRecurring) return
     let cancelled = false
 
     ;(async () => {
@@ -102,23 +172,24 @@ export function PayPalGooglePayButton({ environment, currencyCode, amount, creat
 
     return () => { cancelled = true }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isResolved])
+  }, [isResolved, blockedForRecurring])
 
   async function runPayment(client: any, googlepay: any, config: any) {
     const cur = latest.current
     if (!cur.enabled) return
     try {
+      const transaction = buildGooglePayTransaction({
+        countryCode: config.countryCode || 'US',
+        currencyCode: cur.currencyCode,
+        amount: cur.amount(),
+        recurring: cur.recurring,
+      })
       const paymentData = await client.loadPaymentData({
         apiVersion: config.apiVersion,
         apiVersionMinor: config.apiVersionMinor,
         allowedPaymentMethods: config.allowedPaymentMethods,
         merchantInfo: config.merchantInfo,
-        transactionInfo: {
-          countryCode: config.countryCode || 'US',
-          currencyCode: cur.currencyCode,
-          totalPriceStatus: 'FINAL',
-          totalPrice: cur.amount(),
-        },
+        ...transaction,
       })
 
       const orderId = await cur.createOrder()

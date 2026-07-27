@@ -243,6 +243,16 @@ func (s *stubQuerier) GetLastEmailBackupSync(_ context.Context, _ string) (*time
 func (s *stubQuerier) SetBackupStaleNotify(_ context.Context, _ string, enabled bool) (*models.UserPreferences, error) {
 	return &models.UserPreferences{BackupStaleNotify: enabled, ShowStorageButtons: true, StoragePromptEnabled: true}, nil
 }
+func (s *stubQuerier) SetOnboardingGuideSeen(_ context.Context, _, guide string) (*models.UserPreferences, error) {
+	p := &models.UserPreferences{ShowStorageButtons: true, StoragePromptEnabled: true}
+	switch guide {
+	case "base":
+		p.OnboardingBaseSeen = true
+	case "premium":
+		p.OnboardingPremiumSeen = true
+	}
+	return p, nil
+}
 func (s *stubQuerier) AutoPardonExpiredSuspension(_ context.Context, _ string) error { return nil }
 func (s *stubQuerier) AddBannedIP(_ context.Context, _, _ string) error              { return nil }
 func (s *stubQuerier) GetInterestFormSettings(_ context.Context) (*models.InterestFormSettings, error) {

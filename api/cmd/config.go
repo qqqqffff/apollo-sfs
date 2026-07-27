@@ -109,6 +109,26 @@ type Config struct {
 	PremiumAnnualPriceCents  int
 	PremiumTierCurrency      string // ISO 4217, e.g. "USD"
 
+	// GooglePaySubscriptionsEnabled turns on Google Pay for premium
+	// subscription checkouts. Off by default, and it should stay off until
+	// BOTH of these are true:
+	//
+	//  1. PayPal vaults the google_pay payment source. As of 2026-07 it does
+	//     not — Orders v2 silently ignores
+	//     payment_source.google_pay.attributes.vault (verified: an invalid
+	//     store_in_vault enum 400s for card and apple_pay but is accepted for
+	//     google_pay), and PayPal publishes no "save Google Pay" guide. With
+	//     no vault id there is nothing to bill next period, so a Google Pay
+	//     subscription would be charged, refunded and rejected by
+	//     ConfirmSelfBilledOrder.
+	//  2. The merchant is enrolled in Google Pay's merchant-initiated
+	//     transactions program, which is what allows the sheet to send
+	//     recurringTransactionInfo and disclose the recurring terms.
+	//
+	// (1) is PayPal's to fix, not ours. Has no effect on one-time purchases,
+	// where Google Pay works normally. See docs/paypal_setup.md §10.
+	GooglePaySubscriptionsEnabled bool
+
 	// PayPalPlanIDMonthly / PayPalPlanIDAnnual are the live PayPal Billing Plan
 	// ids created per docs/paypal_setup.md. PayPalSandboxPlanID* are their
 	// sandbox-app counterparts, used when the admin sandbox-payments toggle is
@@ -221,9 +241,10 @@ func loadConfig() Config {
 		PayPalSandboxClientSecret: getEnv("PAYPAL_SANDBOX_CLIENT_SECRET", ""),
 		PayPalSandboxWebhookID:    getEnv("PAYPAL_SANDBOX_WEBHOOK_ID", ""),
 
-		PremiumMonthlyPriceCents: premiumMonthlyPrice,
-		PremiumAnnualPriceCents:  premiumAnnualPrice,
-		PremiumTierCurrency:      getEnv("PREMIUM_TIER_CURRENCY", "USD"),
+		PremiumMonthlyPriceCents:      premiumMonthlyPrice,
+		PremiumAnnualPriceCents:       premiumAnnualPrice,
+		PremiumTierCurrency:           getEnv("PREMIUM_TIER_CURRENCY", "USD"),
+		GooglePaySubscriptionsEnabled: os.Getenv("GOOGLE_PAY_SUBSCRIPTIONS_ENABLED") == "true",
 
 		PayPalPlanIDMonthly:        getEnv("PAYPAL_PLAN_ID_MONTHLY", ""),
 		PayPalPlanIDAnnual:         getEnv("PAYPAL_PLAN_ID_ANNUAL", ""),

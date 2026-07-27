@@ -49,6 +49,12 @@ type Config struct {
 	// endpoint. Display-only — see cmd/config.go's Premium*PriceCents doc.
 	PremiumMonthlyPriceCents int
 	PremiumAnnualPriceCents  int
+	// GooglePaySubscriptionsEnabled echoes GOOGLE_PAY_SUBSCRIPTIONS_ENABLED to
+	// the frontend, which hides Google Pay on subscription checkouts unless
+	// it's on. Off by default because PayPal doesn't currently vault the
+	// google_pay payment source, so such a subscription could never renew —
+	// see cmd/config.go and docs/paypal_setup.md §10.
+	GooglePaySubscriptionsEnabled bool
 }
 
 // PremiumPlanOption is one entry of the premium_plans array in GetConfig's
@@ -87,18 +93,20 @@ func NewHandler(paypal services.PayPalClients, q Querier, cfg Config) *Handler {
 func (h *Handler) GetConfig(c *gin.Context) {
 	if middleware.SandboxEnabled(c) {
 		c.JSON(http.StatusOK, gin.H{
-			"paypal_client_id": h.cfg.SandboxClientID,
-			"currency":         h.currencyOrDefault(),
-			"environment":      services.PayPalEnvSandbox,
-			"premium_plans":    h.premiumPlans(),
+			"paypal_client_id":                 h.cfg.SandboxClientID,
+			"currency":                         h.currencyOrDefault(),
+			"environment":                      services.PayPalEnvSandbox,
+			"premium_plans":                    h.premiumPlans(),
+			"google_pay_subscriptions_enabled": h.cfg.GooglePaySubscriptionsEnabled,
 		})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"paypal_client_id": h.cfg.ClientID,
-		"currency":         h.currencyOrDefault(),
-		"environment":      services.PayPalEnvLive,
-		"premium_plans":    h.premiumPlans(),
+		"paypal_client_id":                 h.cfg.ClientID,
+		"currency":                         h.currencyOrDefault(),
+		"environment":                      services.PayPalEnvLive,
+		"premium_plans":                    h.premiumPlans(),
+		"google_pay_subscriptions_enabled": h.cfg.GooglePaySubscriptionsEnabled,
 	})
 }
 

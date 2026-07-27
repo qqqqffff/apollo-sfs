@@ -1,4 +1,4 @@
-import { del, get, patch, post } from './client'
+import { del, get, patch, post, put } from './client'
 import type { PageResult } from '../types/api'
 
 // ── Types ──────────────────────────────────────────────────────────────────────
@@ -83,7 +83,8 @@ export function createRegistrationGroup(body: CreateRegistrationGroupBody) {
   return post<RegistrationGroupDetail>('/admin/registration-groups', body)
 }
 
-// Slots aren't editable — they're fixed at creation (see CreateRegistrationGroupBody).
+// Only name/expiry/notify/reminder are editable here — slot changes go
+// through addRegistrationSlots/deleteRegistrationSlotType/replaceRegistrationSlotType below.
 export interface UpdateRegistrationGroupBody {
   name: string
   expires_at?: string
@@ -97,6 +98,40 @@ export function updateRegistrationGroup(id: string, body: UpdateRegistrationGrou
 
 export function getRegistrationGroup(id: string) {
   return get<RegistrationGroupDetail>(`/admin/registration-groups/${id}`)
+}
+
+// Identifies one slot type (the grouping key RegistrationSlotType is
+// collapsed by) for the delete/replace endpoints below.
+export interface RegistrationSlotSignature {
+  server_id: string
+  drive_type: SlotDriveType
+  quota_bytes: number
+  account_status: SlotAccountStatus
+  premium_expires_at?: string
+}
+
+// Appends new slots to an already-existing group. Existing slots (consumed,
+// reserved, or free) are untouched.
+export function addRegistrationSlots(id: string, slots: RegistrationSlotSpecInput[]) {
+  return post<RegistrationGroupDetail>(`/admin/registration-groups/${id}/slots`, { slots })
+}
+
+// Removes every currently-free slot matching the signature. Consumed or
+// actively-reserved slots of the same configuration are left untouched —
+// the edit screen never offers them for deletion.
+export function deleteRegistrationSlotType(id: string, signature: RegistrationSlotSignature) {
+  return del<RegistrationGroupDetail>(`/admin/registration-groups/${id}/slots`, signature)
+}
+
+// Atomically swaps every currently-free slot matching `old` for `new.count`
+// new slots configured per `new`. Consumed or actively-reserved slots
+// matching `old` are left untouched.
+export function replaceRegistrationSlotType(
+  id: string,
+  oldSignature: RegistrationSlotSignature,
+  newSpec: RegistrationSlotSpecInput,
+) {
+  return put<RegistrationGroupDetail>(`/admin/registration-groups/${id}/slots`, { old: oldSignature, new: newSpec })
 }
 
 export function deactivateRegistrationGroup(id: string) {

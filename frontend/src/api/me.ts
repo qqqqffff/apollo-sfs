@@ -69,6 +69,13 @@ export function updateDefaultDrive(driveId: string | null) {
   })
 }
 
+// markOnboardingGuideSeen records that one of the onboarding spotlight tours
+// has been shown, so it never auto-plays again for this account. Idempotent —
+// the flag only ever goes false → true.
+export function markOnboardingGuideSeen(guide: 'base' | 'premium') {
+  return put<UserPreferences>('/me/preferences/onboarding', { guide })
+}
+
 // LastBackupSync reports when each backup type last completed; null means the
 // user has never used that backup.
 export interface LastBackupSync {

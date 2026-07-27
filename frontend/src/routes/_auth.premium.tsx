@@ -2,11 +2,28 @@ import { createFileRoute, useNavigate, useSearch } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { MdCheck, MdRocketLaunch } from 'react-icons/md'
-import { createPremiumSubscription, confirmPremiumSubscription, type PremiumPlan } from '../api/payments'
+import {
+  createPremiumSubscription,
+  confirmPremiumSubscription,
+  createSelfBilledSubscriptionOrder,
+  confirmSelfBilledSubscription,
+  type PremiumPlan,
+} from '../api/payments'
 import { meQueryOptions } from '../api/me'
+import { getPayPalClientToken } from '../api/billing'
 import { useBillingConfig } from '../hooks/useBillingConfig'
 import { ApiError } from '../api/client'
-import { PayPalSubscribeButton } from '../components/PayPalSubscribeButton'
+import {
+  PayPalCheckoutOptions,
+  CheckoutBackButton,
+  type CheckoutSource,
+} from '../components/PayPalCheckoutOptions'
+import {
+  subscriptionManagementUrl,
+  billingAgreementText,
+  type RecurringTerms,
+} from '../components/recurringTerms'
+import { HostedCardFields } from '../components/HostedCardFields'
 import { PremiumPlanSelector } from '../components/PremiumPlanSelector'
 
 interface Search {
@@ -38,6 +55,8 @@ function RouteComponent() {
   const { data: config, isLoading: configLoading } = useBillingConfig()
   const [error, setError] = useState<string | null>(null)
   const [plan, setPlan] = useState<PremiumPlan>('monthly')
+  const [showCardForm, setShowCardForm] = useState(false)
+  const [busy, setBusy] = useState(false)
 
   const confirm = useMutation({
     mutationFn: (subscriptionId: string) => confirmPremiumSubscription(subscriptionId),
@@ -64,6 +83,36 @@ function RouteComponent() {
     }
   }
 
+  // Card and the two wallets can't approve a PayPal-managed subscription —
+  // Subscriptions v1 ignores payment_source — so they buy the first period as
+  // an order that vaults the payment method, and the API bills every period
+  // after. Same pair of calls the upgrade modal uses.
+  async function handleCreateOrder(source: CheckoutSource): Promise<string> {
+    setError(null)
+    try {
+      const { order_id } = await createSelfBilledSubscriptionOrder(plan, source)
+      return order_id
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not start checkout')
+      throw err
+    }
+  }
+
+  async function handleApprove(orderId: string, source: CheckoutSource) {
+    setBusy(true)
+    setError(null)
+    try {
+      await confirmSelfBilledSubscription(orderId, plan, source)
+      await queryClient.invalidateQueries({ queryKey: ['me'] })
+      navigate({ to: '/settings/api-keys' as never })
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Payment could not be completed')
+      throw err
+    } finally {
+      setBusy(false)
+    }
+  }
+
   if (!user) return <p className="text-sm text-gray-500">Loading…</p>
 
   if (user.is_premium || user.is_admin) {
@@ -87,6 +136,18 @@ function RouteComponent() {
   }
 
   const plans = config?.premium_plans ?? []
+  const selectedPrice = plans.find((p) => p.plan === plan)?.price_cents ?? 0
+  const unit = plan === 'annual' ? 'year' : 'month'
+  // Billing terms the wallet sheets disclose before the buyer authorises a
+  // merchant-initiated charge — see recurringTerms.ts.
+  const recurringTerms: RecurringTerms = {
+    description: 'Apollo SFS Premium',
+    itemLabel: `Premium (${plan === 'annual' ? 'annual' : 'monthly'})`,
+    intervalUnit: unit,
+    intervalCount: 1,
+    managementUrl: subscriptionManagementUrl(),
+    billingAgreement: billingAgreementText(`$${(selectedPrice / 100).toFixed(2)}`, unit),
+  }
 
   return (
     <div className="max-w-2xl mx-auto">
@@ -117,13 +178,51 @@ function RouteComponent() {
           <p className="text-sm text-gray-400 m-0">Loading payment options…</p>
         ) : !config?.paypal_client_id ? (
           <p className="text-sm text-red-500 m-0">Payments are not configured.</p>
+        ) : showCardForm ? (
+          <div className="flex flex-col gap-4">
+            <CheckoutBackButton
+              onClick={() => { setShowCardForm(false); setError(null) }}
+              disabled={busy}
+            />
+            {busy && <p className="text-sm text-gray-500 m-0">Completing your subscription…</p>}
+            <HostedCardFields
+              clientId={config.paypal_client_id}
+              currency={config.currency || 'USD'}
+              createOrder={() => handleCreateOrder('card')}
+              onApprove={(orderId) => handleApprove(orderId, 'card')}
+              onError={(msg) => setError(msg)}
+              disabled={busy || confirm.isPending}
+              submitLabel="Subscribe"
+            />
+            <p className="text-[11px] text-gray-400 text-center m-0">
+              Your card is saved with PayPal to renew this subscription and is charged
+              {plan === 'annual' ? ' every year' : ' every month'} until you cancel. Card details are
+              entered directly into PayPal and never touch our servers.
+            </p>
+          </div>
         ) : (
           <div className="flex flex-col gap-4">
-            <PremiumPlanSelector plans={plans} selected={plan} onSelect={setPlan} disabled={confirm.isPending} />
-            <PayPalSubscribeButton
+            <PremiumPlanSelector plans={plans} selected={plan} onSelect={setPlan} disabled={confirm.isPending || busy} />
+            {busy && <p className="text-sm text-gray-500 m-0">Completing your subscription…</p>}
+            <PayPalCheckoutOptions
+              clientId={config.paypal_client_id}
+              currency={config.currency || 'USD'}
+              environment={config.environment === 'sandbox' ? 'sandbox' : 'live'}
+              getClientToken={async () => (await getPayPalClientToken()).client_token}
+              createOrder={handleCreateOrder}
               getApprovalUrl={handleGetApprovalUrl}
+              onApprove={handleApprove}
               onError={(msg) => setError(msg)}
-              disabled={confirm.isPending}
+              amount={() => (selectedPrice / 100).toFixed(2)}
+              canPay={!confirm.isPending && !busy && plans.length > 0}
+              onChooseCard={() => { setShowCardForm(true); setError(null) }}
+              recurring={recurringTerms}
+              googlePaySubscriptionsEnabled={config.google_pay_subscriptions_enabled}
+              // Apple Pay is live-only — PayPal's sandbox can't verify a second
+              // domain (docs/paypal_setup.md §5), so under the admin
+              // sandbox-payments toggle the tile is hidden rather than failing
+              // eligibility silently.
+              showApplePay={config.environment !== 'sandbox'}
             />
           </div>
         )}

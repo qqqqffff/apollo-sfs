@@ -889,6 +889,35 @@ func (h *Handler) UpdateBackupReminderPreference(c *gin.Context) {
 	c.JSON(http.StatusOK, prefs)
 }
 
+type markOnboardingGuideSeenRequest struct {
+	Guide string `json:"guide" binding:"required,oneof=base premium"`
+}
+
+// MarkOnboardingGuideSeen handles PUT /api/v1/me/preferences/onboarding.
+// Records that the caller has been shown one of the onboarding spotlight
+// tours so it never auto-plays again. Body: {"guide": "base"|"premium"}.
+//
+// Account state, not browser state — the flags used to live in localStorage,
+// which replayed the tour on every new browser/device or cleared-site-data
+// login. The Profile page's "Replay guide" links don't touch this; they open
+// the tour directly.
+func (h *Handler) MarkOnboardingGuideSeen(c *gin.Context) {
+	var req markOnboardingGuideSeenRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": `guide must be "base" or "premium"`})
+		return
+	}
+
+	username := c.GetString("username")
+	prefs, err := h.queries.SetOnboardingGuideSeen(c.Request.Context(), username, req.Guide)
+	if err != nil {
+		log.Printf("MarkOnboardingGuideSeen: user=%s guide=%s err=%v", username, req.Guide, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not save preferences"})
+		return
+	}
+	c.JSON(http.StatusOK, prefs)
+}
+
 type dismissNotificationsRequest struct {
 	IDs []string `json:"ids" binding:"required,min=1"`
 }

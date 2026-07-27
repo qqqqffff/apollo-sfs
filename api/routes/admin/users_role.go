@@ -130,10 +130,16 @@ func (h *Handler) UpdateUserRole(c *gin.Context) {
 				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "payments not configured"})
 				return
 			}
-			if err := client.CancelSubscription(ctx, sub.PayPalSubscriptionID, reason); err != nil {
-				log.Printf("UpdateUserRole: paypal cancel for %q: %v", target, err)
-				c.AbortWithStatusJSON(http.StatusBadGateway, gin.H{"error": "paypal cancel failed"})
-				return
+			// A self-billed subscription (card/Apple Pay/Google Pay) has no
+			// PayPal subscription behind it — the recurring charge is our own
+			// renewal loop, which the status change below stops. See
+			// docs/paypal_setup.md §9.
+			if sub.BillingMode != "self" {
+				if err := client.CancelSubscription(ctx, sub.PayPalSubscriptionID, reason); err != nil {
+					log.Printf("UpdateUserRole: paypal cancel for %q: %v", target, err)
+					c.AbortWithStatusJSON(http.StatusBadGateway, gin.H{"error": "paypal cancel failed"})
+					return
+				}
 			}
 			hadPaypalSubscription = true
 			cancelledSub = sub

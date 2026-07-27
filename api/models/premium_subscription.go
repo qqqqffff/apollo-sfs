@@ -37,6 +37,32 @@ type PremiumSubscription struct {
 	RefundID          *string    `json:"refund_id"           db:"refund_id"`
 	RefundAmountCents *int       `json:"refund_amount_cents" db:"refund_amount_cents"`
 	RefundedAt        *time.Time `json:"refunded_at"         db:"refunded_at"`
+	// BillingMode is "paypal" (PayPal-managed Subscriptions v1 — the shopper
+	// approves on PayPal's hosted page and PayPal drives the recurring
+	// charges) or "self" (we bill a vaulted card/wallet ourselves over Orders
+	// v2, because Subscriptions v1 can't be bound to those funding sources).
+	// The fields below are meaningful only in "self" mode.
+	BillingMode string `json:"billing_mode" db:"billing_mode"`
+	// VaultID is the PayPal saved-payment-method token renewals charge
+	// against; VaultSource records which funding source opened it ("card",
+	// "apple_pay", "google_pay") for display — renewals always go through the
+	// card payment source regardless, since wallets vault the underlying card.
+	VaultID     *string `json:"-"            db:"vault_id"`
+	VaultSource *string `json:"vault_source" db:"vault_source"`
+	// NextChargeAt is when the renewal loop should next bill this
+	// subscription. Equal to CurrentPeriodEnd on a healthy subscription;
+	// pulled earlier by the retry backoff after a failed charge.
+	NextChargeAt *time.Time `json:"next_charge_at" db:"next_charge_at"`
+	// FailedChargeCount is the run of consecutive failed renewal attempts,
+	// reset to 0 on every success. LastChargeError is the most recent failure
+	// message, for the admin orders page and support.
+	FailedChargeCount int     `json:"failed_charge_count" db:"failed_charge_count"`
+	LastChargeError   *string `json:"last_charge_error"   db:"last_charge_error"`
+	// LastCaptureID is the PayPal capture id of the most recent successful
+	// charge (opening period or renewal). Self-billed subscriptions have no
+	// PayPal subscription to list transactions against, so this is the only
+	// handle the admin prorated-refund tooling has on the money that moved.
+	LastCaptureID *string `json:"-" db:"last_capture_id"`
 	// CancellationReason is set only by an admin Cancel action — nil for
 	// subscriptions ended via the user's own self-service cancel or a
 	// PayPal webhook. Surfaced to the cancelled user via a notification-bell

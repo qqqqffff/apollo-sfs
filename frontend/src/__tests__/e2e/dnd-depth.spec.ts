@@ -1,5 +1,5 @@
 import { test, expect, type Page } from '@playwright/test'
-import { mockAuth, mockFavorites, MOCK_SERVER, MOCK_FOLDERS, MOCK_FILES } from './fixtures'
+import { mockAuth, mockFavorites, mockPreferences, MOCK_SERVER, MOCK_FOLDERS, MOCK_FILES } from './fixtures'
 
 // Drag-and-drop moves have to work at every folder depth, not just at a drive
 // root. These run the real app in real Chromium on purpose: a native drag
@@ -28,6 +28,7 @@ const PARENT = {
 
 const NESTED_A = { ...PARENT, id: 'sub1', parent_id: 'fold1', name: 'Nested A' }
 const NESTED_B = { ...PARENT, id: 'sub2', parent_id: 'fold1', name: 'Nested B' }
+const DEEP_C = { ...PARENT, id: 'sub3', parent_id: 'sub1', name: 'Deep C' }
 
 const FILE_IN_PARENT = {
   id: 'fi9', name: 'inside.txt', size_bytes: 2048, mime_type: 'text/plain',
@@ -49,7 +50,7 @@ function contents(folder: unknown, subfolders: unknown[], files: unknown[]) {
 async function mockBrowser(page: Page) {
   await mockAuth(page)
   await page.route('**/api/v1/storage/my-servers', (r) => r.fulfill({ json: { servers: [MOCK_SERVER] } }))
-  await page.route('**/api/v1/me/preferences', (r) => r.fulfill({ json: {} }))
+  await mockPreferences(page)
   await mockFavorites(page)
 
   // The catch-all goes first so the specific folder routes below win —
@@ -58,7 +59,7 @@ async function mockBrowser(page: Page) {
   await page.route('**/api/v1/folders/fold1', (r) =>
     r.fulfill(contents(PARENT, [NESTED_A, NESTED_B], [FILE_IN_PARENT])))
   await page.route('**/api/v1/folders/sub1', (r) =>
-    r.fulfill(contents(NESTED_A, [], [FILE_IN_NESTED])))
+    r.fulfill(contents(NESTED_A, [DEEP_C], [FILE_IN_NESTED])))
   await page.route('**/api/v1/folders/fold1/ancestors', (r) => r.fulfill({ json: { ancestors: [PARENT] } }))
   await page.route('**/api/v1/folders/sub1/ancestors', (r) => r.fulfill({ json: { ancestors: [PARENT, NESTED_A] } }))
 }
@@ -167,12 +168,13 @@ test.describe('drag-and-drop move at depth', () => {
   })
 
   // Holding a drag over a folder row springs it open (HOVER_OPEN_DELAY_MS),
-  // which navigates and refetches mid-drag. The drag has to survive that: the
-  // row list is pinned to its drag-start snapshot so the grabbed row is never
-  // unmounted (unmounting the source kills the drop just as moving it does),
-  // and the floating panel retargets to the newly opened folder so there's
-  // somewhere to land.
-  test('survives a spring-loaded hover-navigate and drops into the opened folder', async ({ page }) => {
+  // which navigates and refetches mid-drag — replacing the whole row list,
+  // including the row being dragged. Once the drag is properly under way that
+  // is fine: unmounting the source node does NOT cancel an established drag
+  // (only disturbing it inside the dragstart window does, which is what
+  // beginDrag guards). So the user keeps drilling down and can drop onto a
+  // row in the folder they just opened.
+  test('springs a folder open mid-drag and drops onto a row inside it', async ({ page }) => {
     const moves = await captureMoves(page)
     await page.goto('/client?folder=fold1')
 
@@ -191,16 +193,26 @@ test.describe('drag-and-drop move at depth', () => {
     await page.waitForTimeout(1400)
 
     await expect(page).toHaveURL(/folder=sub1/)
-    const intoOpened = page.getByText('Drop here to move into "Nested A"')
-    await expect(intoOpened).toBeVisible()
+    // Springing a folder open has to actually show that folder: its own rows,
+    // not the parent's left frozen in place behind the new breadcrumb.
+    await expect(page.getByText('deep.txt', { exact: true })).toBeVisible()
+    await expect(page.getByText('inside.txt', { exact: true })).toHaveCount(0)
+    await expect(page.getByText('Nested B', { exact: true })).toHaveCount(0)
 
-    const zone = (await intoOpened.boundingBox())!
-    await page.mouse.move(zone.x + zone.width / 2, zone.y + zone.height / 2, { steps: 10 })
-    await page.mouse.move(zone.x + zone.width / 2 + 2, zone.y + zone.height / 2, { steps: 2 })
+    // The floating panel retargets to the folder just opened.
+    await expect(page.getByText('Drop here to move into "Nested A"')).toBeVisible()
+
+    // Drop onto a row that only mounted after the navigation, while the row the
+    // drag started on has been unmounted out from under it.
+    const deeper = page.getByText('Deep C', { exact: true })
+    await expect(deeper).toBeVisible()
+    const t = (await deeper.boundingBox())!
+    await page.mouse.move(t.x + t.width / 2, t.y + t.height / 2, { steps: 10 })
+    await page.mouse.move(t.x + t.width / 2 + 2, t.y + t.height / 2, { steps: 2 })
     await page.mouse.up()
     await page.waitForTimeout(300)
 
-    expect(moves).toEqual([{ fileId: 'fi9', targetFolderId: 'sub1' }])
+    expect(moves).toEqual([{ fileId: 'fi9', targetFolderId: 'sub3' }])
   })
 
   test('moves a folder onto a sibling folder inside a folder', async ({ page }) => {

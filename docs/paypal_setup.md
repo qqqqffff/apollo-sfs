@@ -7,7 +7,7 @@ There are four concerns:
 1. **PayPal application** — sandbox first, live once it works end-to-end.
 2. **PayPal Product + Plans** — the monthly/annual billing plans subscriptions are created against.
 3. **Keycloak realm** — adds the `premium` group + role so the JWT carries the role on subsequent logins.
-4. **Apple Pay domain verification** — only needed for storage add-ons' Apple Pay button (see §5); premium subscriptions don't support it (see below).
+4. **Apple Pay domain verification** — needed for the Apple Pay button on both storage add-ons and premium (see §5). Premium reaches card/Apple Pay/Google Pay through a second, self-billed subscription mode — see §9 for why PayPal-managed subscriptions can't use them.
 
 ---
 
@@ -123,7 +123,7 @@ The API's `apollo-sfs-api` confidential client already has the service account p
 
 ## 5. Apple Pay domain verification (storage add-ons only, optional)
 
-Premium subscriptions checkout via PayPal's hosted subscription-approval page (PayPal balance, linked bank/cards, Venmo) — PayPal Subscriptions v1 doesn't support locking a subscription's approval to a specific funding source the way Orders v2 does, so there's no Apple Pay option on the premium checkout. Apple Pay is only available on the **storage add-on** purchase flow.
+Apple Pay is used by both the **storage add-on** purchase flow and the **premium subscription** flow. The premium flow reaches it the long way round — see §7: a card or wallet cannot approve a PayPal-managed subscription at all, so those three funding sources open a subscription the API bills itself, whose first period is an ordinary Orders v2 purchase. Domain verification below is what makes the button appear in Safari for either.
 
 To show the Apple Pay button in Safari for storage add-ons you must prove that you control the domain hosting the checkout page.
 
@@ -217,6 +217,7 @@ Add the following to `.env` at the project root, and to `docker-stack.yml`'s `ap
 | `PREMIUM_MONTHLY_PRICE_CENTS`    | no       | `100`                | Display price only (§2) — must match the Monthly Plan's actual price. Default `100`. |
 | `PREMIUM_ANNUAL_PRICE_CENTS`     | no       | `1000`               | Display price only (§2) — must match the Annual Plan's actual price. Default `1000`. |
 | `PREMIUM_TIER_CURRENCY`          | no       | `USD`                | ISO 4217 currency code. Default `USD`.                                |
+| `GOOGLE_PAY_SUBSCRIPTIONS_ENABLED` | no     | `true`               | **Leave off.** Needs PayPal to vault `payment_source.google_pay`, which it currently does not (§10) — turning it on charges then refunds the buyer. Google Pay is hidden on subscription checkouts while off; one-time purchases unaffected. Default off. |
 
 Redeploy so the API picks up the variables (`docker-compose.yml`/`docker compose restart api` is deprecated for this project — see root `CLAUDE.md`):
 
@@ -259,3 +260,110 @@ Since the live/primary client is always live, "going live" is just populating re
 You can keep exercising the checkout flows against sandbox at any time — as an admin, flip "sandbox payments" on in your Profile page for the current session (see §7). That requires `PAYPAL_SANDBOX_CLIENT_ID`/`_CLIENT_SECRET`/`_WEBHOOK_ID` **and** `PAYPAL_SANDBOX_PLAN_ID_MONTHLY`/`_ANNUAL` to be populated; it has no effect on, and needs nothing from, the live/primary client.
 
 Subscription cancellations/suspensions/expirations processed on PayPal's side (dashboard or automatic dunning after failed renewal charges) arrive via `BILLING.SUBSCRIPTION.CANCELLED`/`.SUSPENDED`/`.EXPIRED`, which flip the user's `is_premium` flag back to false, remove them from the Keycloak group, and bulk-revoke their API keys and file-server links — the same effects as a user-initiated cancel from the Profile page.
+
+---
+
+## 9. Self-billed subscriptions (card, Apple Pay, Google Pay)
+
+Everything above describes **PayPal-managed** subscriptions: the shopper approves on PayPal's hosted page and PayPal drives the recurring charges, notifying us by webhook. That path is PayPal-wallet-only, and not by choice.
+
+### Why there are two billing modes
+
+`POST /v1/billing/subscriptions` **silently ignores a `payment_source`**. It is not rejected, it is dropped — so there is no way to bind a card or a wallet to a PayPal-managed subscription. Verified against sandbox:
+
+| Request | Result |
+|---|---|
+| `payment_source: {token: {id: "BOGUS", type: "PAYMENT_METHOD_TOKEN"}}` | `201 APPROVAL_PENDING` — accepted |
+| `GET` that subscription afterwards | no `payment_source` in the response at all |
+| `plan_id: "P-BOGUSPLANID"` (control) | `400 INVALID_PARAMETER_SYNTAX` |
+
+The control matters: the endpoint *does* validate fields it knows, so a silent 201 on a bogus `payment_source` means the field isn't part of its schema. Don't spend time re-litigating this with vault tokens — the Vault v3 setup-token API (`/v3/vault/setup-tokens`, `/v3/vault/payment-tokens`) is also `403 NOT_AUTHORIZED` on both apps, since the "Save payment methods" capability isn't enabled.
+
+So card, Apple Pay and Google Pay open a **self-billed** subscription instead (`premium_subscriptions.billing_mode = 'self'`), on rails Orders v2 does support and that the storage add-ons already use:
+
+1. **First period** — an ordinary Orders v2 create+capture whose `payment_source.<src>` carries `attributes.vault.store_in_vault = ON_SUCCESS`. The capture response returns `attributes.vault.id`: the saved payment method. `POST /payments/subscriptions/wallet/order` then `/wallet/confirm`.
+2. **Every period after** — `PaymentService.SubscriptionRenewalLoop` (hourly, started in `main.go`) charges that vault id with no shopper present, via `stored_credential {payment_initiator: MERCHANT, payment_type: RECURRING, usage: SUBSEQUENT, usage_pattern: SUBSCRIPTION_PREPAID}`. PayPal rejects the call outright without `payment_type`.
+
+Vault-on-purchase works today even though the standalone Vault API doesn't — they're separately gated. Nothing needs enabling for this to run.
+
+**We are the biller of record for these.** There is no PayPal dunning behind them; the retry policy in `payment.go` is the whole of it.
+
+### What that means operationally
+
+- **Renewal cadence** is `premium_subscriptions.next_charge_at`, ours alone. The hourly tick only bounds how *late* a renewal runs — a restart or downtime delays one, never skips it.
+- **Failed renewals** retry after ~1 day, ~3 days, then ~5 days (`selfBilledMaxAttempts = 4` attempts total, the original included). After the last failure, premium is revoked and the subscription is cancelled — the same teardown as a user-initiated cancel. Access stays live during the retries.
+- **Billing dates don't drift**: a renewal charged four days late still extends from the period that ended, not from the charge (`renewalPeriodStart`).
+- **Cancellation** doesn't call PayPal — there's no subscription there to cancel. Clearing `next_charge_at` is what stops the billing. The saved payment method is *left in PayPal's vault*, because deleting it needs the Vault API that returns 403. It is never charged again. If you want cancelled cards actually purged, enable **Save payment methods** on both apps and wire `DELETE /v3/vault/payment-tokens/{id}` into the cancel path.
+- **A capture with no vault id is refunded, not granted** — it would otherwise sell a subscription that silently dies at the end of period one. Same for a capture that loses the "one live subscription per user" race.
+- **Webhooks don't drive these.** `paypal_subscription_id` is a synthetic `self:<uuid>` that no PayPal event can match. The renewal captures do emit `PAYMENT.CAPTURE.COMPLETED` like any other order.
+
+### Sandbox testing
+
+The §7 toggle covers this flow too, with one gap: **Apple Pay can't be tested in sandbox** (§5 — the domain is verified against the live app, so the tile stays hidden). Google Pay and hosted card fields both work under the toggle, and all three share the same create/confirm code path.
+
+To exercise a renewal without waiting a month, set the row's `next_charge_at` into the past and wait for the next tick:
+
+```sql
+UPDATE premium_subscriptions SET next_charge_at = NOW() - INTERVAL '1 minute'
+WHERE username = '<user>' AND billing_mode = 'self';
+```
+
+Then check `current_period_end` moved forward, `failed_charge_count` is 0, and a new capture exists in the sandbox dashboard. To exercise dunning, do the same after revoking the test card in the sandbox buyer account, and watch `failed_charge_count` climb and access drop on the fourth failure.
+
+---
+
+## 10. Wallet recurring-payment compliance (Apple Pay, Google Pay)
+
+A self-billed subscription (§9) charges the saved payment method again every period with no shopper present. Both wallets have a **required, specified way** to disclose that up front, and taking a wallet payment with a plain one-time request and then billing it again is out of policy on both platforms. The terms are described once in `frontend/src/components/recurringTerms.ts` and each button translates them into its own dialect.
+
+Neither failure mode is loud: the sheet renders, the payment succeeds, and the buyer simply never sees that they signed up for recurring billing. `frontend/src/__tests__/components/walletRecurring.test.ts` pins both request shapes for that reason.
+
+### Apple Pay — `ApplePayRecurringPaymentRequest`
+
+<https://developer.apple.com/documentation/applepayontheweb/applepayrecurringpaymentrequest>
+
+Set as `recurringPaymentRequest` on the `ApplePayPaymentRequest`. Required members: `paymentDescription`, `regularBilling`, `managementURL`. We also send the optional `billingAgreement`; `trialBilling` is unused (no trials) and `tokenNotificationURL` is unused (see below).
+
+`regularBilling` is an `ApplePayLineItem` with `paymentTiming: "recurring"`, `recurringPaymentStartDate`, `recurringPaymentIntervalUnit` (lowercase `month`/`year`) and `recurringPaymentIntervalCount`. No `recurringPaymentEndDate` — the subscription is open-ended until cancelled.
+
+**Version gate:** `recurringPaymentRequest` was added in **Apple Pay on the Web version 14** (macOS 13 / iOS 16). One-time sheets still negotiate version 4 so older Safari keeps Apple Pay; a subscription sheet requires 14, and where `ApplePaySession.supportsVersion(14)` is false **the button hides** rather than falling back to a one-time sheet — the payment method would still be vaulted and billed later, which is exactly the undisclosed charge the requirement exists to prevent. PayPal, Google Pay and card remain available.
+
+`managementURL` points at `/client/profile`, which is where cancellation lives. Keep that true — Apple surfaces it from Wallet, and it's also where Apple expects the buyer to be able to *update* the payment method.
+
+**Not implemented:** `tokenNotificationURL` (Merchant Token Notification Services). Apple posts merchant-token life-cycle events there — card replaced, token deactivated. Without it, a subscription whose underlying card is reissued fails at renewal and falls into the §9 dunning cycle instead of being repaired silently. Adding it means standing up a public endpoint that validates Apple's notification signatures. Worth doing if Apple Pay becomes a common funding source for subscriptions.
+
+### Google Pay — `recurringTransactionInfo`
+
+<https://developers.google.com/pay/api/web/guides/resources/merchant-initiated-transactions>
+
+`PaymentDataRequest` takes **exactly one** of `transactionInfo`, `recurringTransactionInfo`, `deferredTransactionInfo` or `automaticReloadTransactionInfo`. Subscription checkouts send `recurringTransactionInfo` with `label`, `managementUrl`, `billingAgreement` and a `recurrenceItems` array (`label`, `price`, `priceStatus`, `recurrencePeriod: { unit, count }` — unit **uppercase**, unlike Apple).
+
+The code is written and tested, but **Google Pay is off for subscriptions by default and should stay off**, because of a PayPal-side blocker that is more fundamental than Google's own program gating.
+
+#### Blocker 1 — PayPal does not vault `google_pay` (this is the real one)
+
+Orders v2 **silently ignores** `payment_source.google_pay.attributes.vault`. Verified against sandbox with an invalid `store_in_vault` enum, which forces PayPal to reveal whether it parses the field at all:
+
+| `payment_source` | invalid `store_in_vault` value | meaning |
+|---|---|---|
+| `card` | `400 INVALID_PARAMETER_VALUE` at `/payment_source/card/attributes/vault/store_in_vault` | parsed and validated |
+| `apple_pay` | `400 INVALID_PARAMETER_VALUE` at `/payment_source/apple_pay/attributes/vault/store_in_vault` | parsed and validated |
+| `google_pay` | **`201 Created`** | **not parsed — silently ignored** |
+
+Corroborated by PayPal's own documentation set: there are "save payment method" guides for PayPal, cards and Apple Pay, and **none for Google Pay**.
+
+Consequence: a Google Pay subscription would capture the first period, come back with **no vault id**, and have nothing to bill next month. The flow already fails safely — `ConfirmSelfBilledOrder` refunds any capture that returns no vault id and grants nothing (§9) — but the buyer would be charged and refunded for a subscription they never got. `GOOGLE_PAY_SUBSCRIPTIONS_ENABLED` is off precisely so that can't happen, and the API rejects `source=google_pay` on the self-billed endpoints while it's off, so a stale client can't trigger it either.
+
+**This one is PayPal's to fix, not ours.** Ask PayPal support whether their Orders v2 integration supports vaulting `payment_source.google_pay` for merchant-initiated recurring charges. If they add it, re-run the probe above and expect a `400`.
+
+#### Blocker 2 — Google's merchant-initiated transactions program
+
+Separately, MIT is an opt-in Google program; a non-enrolled merchant has the request rejected. Note that **PayPal is the Google Pay merchant of record here** — `allowedPaymentMethods` and `merchantInfo` come from `paypal.Googlepay().config()`, with PayPal as the gateway — so enrolment is likely something PayPal holds, not something you can apply for directly. Confirm with PayPal before assuming you can enrol yourself.
+
+#### Turning it on
+
+Set `GOOGLE_PAY_SUBSCRIPTIONS_ENABLED=true` only once **both** are resolved. Until then Google Pay is hidden on subscription checkouts and completely unaffected on one-time purchases (storage add-ons and deposits keep working normally). Buyers who would have used Google Pay still have Apple Pay, PayPal and card.
+
+### What is unaffected
+
+One-time purchases — storage add-ons, expansion deposits, the account-request deposit — still send a plain `transactionInfo` / one-time `ApplePayPaymentRequest` and are untouched by any of this. The PayPal wallet button and hosted card fields carry their own disclosure (PayPal's approval page, and the copy under the card form respectively), so neither is affected by these gates.

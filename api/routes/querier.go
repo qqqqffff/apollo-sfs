@@ -49,6 +49,7 @@ type Querier interface {
 	GetLastGoogleBackupSync(ctx context.Context, userID uuid.UUID) (*time.Time, error)
 	GetLastEmailBackupSync(ctx context.Context, username string) (*time.Time, error)
 	SetBackupStaleNotify(ctx context.Context, userID string, enabled bool) (*models.UserPreferences, error)
+	SetOnboardingGuideSeen(ctx context.Context, userID, guide string) (*models.UserPreferences, error)
 
 	// Notification bell — admin-only categories
 	ListRecentlyAcceptedInvitations(ctx context.Context, since time.Time) ([]models.Invitation, error)

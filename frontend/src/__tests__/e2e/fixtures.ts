@@ -34,11 +34,10 @@ export const MOCK_FILES = [
 /**
  * Intercept /api/v1/me and return the given user so auth checks pass.
  *
- * Also pre-seeds the onboarding "seen" flags (see OnboardingGuideContext's
- * `seenKey`) so its first-time-user spotlight tour doesn't auto-open — its
- * full-screen blocking overlay would otherwise intercept every click in
- * tests that aren't exercising onboarding itself, since a fresh Playwright
- * browser context always has empty localStorage.
+ * Also stubs GET /api/v1/me/preferences with the onboarding "seen" flags
+ * already set (see OnboardingGuideContext) so the first-time-user spotlight
+ * tour doesn't auto-open — its full-screen blocking overlay would otherwise
+ * intercept every click in tests that aren't exercising onboarding itself.
  *
  * Also stubs GET /api/v1/me/notifications — NotificationBell (rendered in
  * the shared _auth layout nav, so present on every authenticated page, not
@@ -55,10 +54,26 @@ export async function mockAuth(page: Page, user = MOCK_USER) {
   await page.route('**/api/v1/me/notifications', (route) =>
     route.fulfill({ json: { items: [], next_token: '' } }),
   )
-  await page.addInitScript((username: string) => {
-    localStorage.setItem(`apollo_onboarding_base_seen_${username}`, '1')
-    localStorage.setItem(`apollo_onboarding_premium_seen_${username}`, '1')
-  }, user.username)
+  await mockPreferences(page)
+}
+
+/**
+ * GET /api/v1/me/preferences payload used across the E2E suite. Only the
+ * onboarding flags matter to most specs — with both true the spotlight tour
+ * stays closed (see mockAuth). Every stub of this endpoint should use it
+ * rather than `{}`: Playwright gives precedence to the most recently
+ * registered matching route, so one `{}` stub added after mockAuth would
+ * silently bring the blocking tour overlay back.
+ */
+export const MOCK_PREFERENCES = {
+  onboarding_base_seen: true,
+  onboarding_premium_seen: true,
+}
+
+export async function mockPreferences(page: Page) {
+  await page.route('**/api/v1/me/preferences', (route) =>
+    route.fulfill({ json: MOCK_PREFERENCES }),
+  )
 }
 
 export const MOCK_SERVER = {
@@ -103,9 +118,7 @@ export async function mockRootFolder(
   await page.route('**/api/v1/storage/my-servers', (route) =>
     route.fulfill({ json: { servers: [MOCK_SERVER] } }),
   )
-  await page.route('**/api/v1/me/preferences', (route) =>
-    route.fulfill({ json: {} }),
-  )
+  await mockPreferences(page)
   await mockFavorites(page)
 }
 

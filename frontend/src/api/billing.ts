@@ -67,6 +67,12 @@ export interface BillingConfig {
   currency: string
   environment: 'sandbox' | 'live'
   premium_plans: PremiumPlanOption[]
+  // Whether the merchant is enrolled in Google Pay's merchant-initiated
+  // transactions program. Subscription checkouts only show Google Pay when
+  // this is true, since disclosing recurring terms in the sheet requires
+  // sending recurringTransactionInfo, which a non-enrolled merchant is
+  // rejected for. Irrelevant to one-time purchases.
+  google_pay_subscriptions_enabled?: boolean
 }
 
 export function getBillingConfig() {

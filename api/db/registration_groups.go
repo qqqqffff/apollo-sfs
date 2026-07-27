@@ -81,11 +81,38 @@ const selectSlotDriveSQL = `
 	ORDER BY t.avail ASC
 	LIMIT 1`
 
+// insertRegistrationSlotsTx inserts specs' slots into groupID within tx. Each
+// slot resolves to the best-fit drive of its tier on its server; the whole
+// call fails with ErrNoCapacity when any slot cannot be placed (no active
+// drive of that tier has enough unreserved space left). Shared by group
+// creation and by adding/replacing slots on an already-existing group.
+func insertRegistrationSlotsTx(ctx context.Context, tx *sql.Tx, groupID uuid.UUID, specs []NewRegistrationSlotSpec) error {
+	for _, spec := range specs {
+		for i := 0; i < spec.Count; i++ {
+			var driveID uuid.UUID
+			err := tx.QueryRowContext(ctx, selectSlotDriveSQL,
+				spec.ServerID, spec.DriveType, spec.QuotaBytes,
+			).Scan(&driveID)
+			if err == sql.ErrNoRows {
+				return ErrNoCapacity
+			}
+			if err != nil {
+				return fmt.Errorf("insertRegistrationSlotsTx: select drive: %w", err)
+			}
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO registration_slots
+					(group_id, server_id, drive_id, drive_type, quota_bytes, account_status, premium_expires_at)
+				VALUES ($1, $2, $3, $4, $5, $6, $7)
+			`, groupID, spec.ServerID, driveID, spec.DriveType, spec.QuotaBytes, spec.AccountStatus, spec.PremiumExpiresAt); err != nil {
+				return fmt.Errorf("insertRegistrationSlotsTx: insert slot: %w", err)
+			}
+		}
+	}
+	return nil
+}
+
 // CreateRegistrationGroup inserts the group and all of its slots in one
-// transaction. Each slot resolves to the best-fit drive of its tier on its
-// server; the whole creation fails with ErrNoCapacity when any slot cannot be
-// placed (no active drive of that tier has enough unreserved space left).
-// The group's ID and CreatedAt are populated on success.
+// transaction. The group's ID and CreatedAt are populated on success.
 func (q *Queries) CreateRegistrationGroup(ctx context.Context, g *models.RegistrationGroup, specs []NewRegistrationSlotSpec) error {
 	tx, err := q.pool.BeginTx(ctx, nil)
 	if err != nil {
@@ -104,28 +131,84 @@ func (q *Queries) CreateRegistrationGroup(ctx context.Context, g *models.Registr
 	}
 	g.IsActive = true
 
-	for _, spec := range specs {
-		for i := 0; i < spec.Count; i++ {
-			var driveID uuid.UUID
-			err := tx.QueryRowContext(ctx, selectSlotDriveSQL,
-				spec.ServerID, spec.DriveType, spec.QuotaBytes,
-			).Scan(&driveID)
-			if err == sql.ErrNoRows {
-				return ErrNoCapacity
-			}
-			if err != nil {
-				return fmt.Errorf("CreateRegistrationGroup: select drive: %w", err)
-			}
-			if _, err := tx.ExecContext(ctx, `
-				INSERT INTO registration_slots
-					(group_id, server_id, drive_id, drive_type, quota_bytes, account_status, premium_expires_at)
-				VALUES ($1, $2, $3, $4, $5, $6, $7)
-			`, g.ID, spec.ServerID, driveID, spec.DriveType, spec.QuotaBytes, spec.AccountStatus, spec.PremiumExpiresAt); err != nil {
-				return fmt.Errorf("CreateRegistrationGroup: insert slot: %w", err)
-			}
-		}
+	if err := insertRegistrationSlotsTx(ctx, tx, g.ID, specs); err != nil {
+		return err
 	}
 
+	return tx.Commit()
+}
+
+// AddRegistrationSlots appends new slots to an already-existing group, the
+// same way CreateRegistrationGroup provisions a new group's slots. Existing
+// slots are untouched.
+func (q *Queries) AddRegistrationSlots(ctx context.Context, groupID uuid.UUID, specs []NewRegistrationSlotSpec) error {
+	tx, err := q.pool.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("AddRegistrationSlots: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := insertRegistrationSlotsTx(ctx, tx, groupID, specs); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// RegistrationSlotSignature identifies one "slot type" — the grouping key
+// ListRegistrationSlotTypes collapses identical slots by.
+type RegistrationSlotSignature struct {
+	ServerID         uuid.UUID
+	DriveType        string
+	QuotaBytes       int64
+	AccountStatus    string
+	PremiumExpiresAt *time.Time
+}
+
+// deleteFreeRegistrationSlotsSQL removes every slot matching a signature
+// within a group that is neither consumed nor held by a live reservation —
+// i.e. every currently-free slot of that type. Consumed or actively-reserved
+// slots of the same configuration never match, so they're always left in
+// place; reservation rows (even stale released/expired ones) cascade-delete
+// with their slot.
+const deleteFreeRegistrationSlotsSQL = `
+	DELETE FROM registration_slots AS s
+	WHERE s.group_id = $1 AND s.server_id = $2 AND s.drive_type = $3
+	  AND s.quota_bytes = $4 AND s.account_status = $5
+	  AND s.premium_expires_at IS NOT DISTINCT FROM $6
+	  AND s.consumed_at IS NULL
+	  AND NOT ` + activeReservationExists
+
+// DeleteFreeRegistrationSlots removes every currently-free slot of the given
+// signature within the group and returns how many were deleted.
+func (q *Queries) DeleteFreeRegistrationSlots(ctx context.Context, groupID uuid.UUID, sig RegistrationSlotSignature) (int64, error) {
+	res, err := q.db.ExecContext(ctx, deleteFreeRegistrationSlotsSQL,
+		groupID, sig.ServerID, sig.DriveType, sig.QuotaBytes, sig.AccountStatus, sig.PremiumExpiresAt)
+	if err != nil {
+		return 0, fmt.Errorf("DeleteFreeRegistrationSlots: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+// ReplaceRegistrationSlotType atomically swaps every currently-free slot
+// matching oldSig for newSpec.Count new slots configured per newSpec, so an
+// admin can fix a mistake in an unclaimed slot type (or resize its count)
+// without touching slots that are already consumed or mid-registration.
+func (q *Queries) ReplaceRegistrationSlotType(ctx context.Context, groupID uuid.UUID, oldSig RegistrationSlotSignature, newSpec NewRegistrationSlotSpec) error {
+	tx, err := q.pool.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("ReplaceRegistrationSlotType: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, deleteFreeRegistrationSlotsSQL,
+		groupID, oldSig.ServerID, oldSig.DriveType, oldSig.QuotaBytes, oldSig.AccountStatus, oldSig.PremiumExpiresAt,
+	); err != nil {
+		return fmt.Errorf("ReplaceRegistrationSlotType: delete old: %w", err)
+	}
+	if err := insertRegistrationSlotsTx(ctx, tx, groupID, []NewRegistrationSlotSpec{newSpec}); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 

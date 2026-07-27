@@ -1,15 +1,19 @@
 import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useMutation, useQuery } from '@tanstack/react-query'
-import { MdAdd, MdArrowBack, MdClose, MdEdit } from 'react-icons/md'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { MdAdd, MdArrowBack, MdClose, MdEdit, MdDeleteOutline } from 'react-icons/md'
 import {
   createRegistrationGroup,
   updateRegistrationGroup,
   getRegistrationGroup,
+  addRegistrationSlots,
+  deleteRegistrationSlotType,
+  replaceRegistrationSlotType,
   registrationCapacityQueryOptions,
   type SlotAccountStatus,
   type SlotDriveType,
   type RegistrationSlotSpecInput,
+  type RegistrationSlotSignature,
   type RegistrationSlotType,
 } from '../../api/registrationGroups'
 import { formatSlotQuota, tierLabel } from '../../components/GroupRegistrationSection'
@@ -19,8 +23,9 @@ import { useNotification } from '../../context/NotificationContext'
 interface GroupRegistrationCreateParams {
   // Present in edit mode: prefills the form with this group's data and
   // switches submit to PATCH the existing group instead of creating a new
-  // one. Slots are immutable once created (see registrationGroups.ts) so the
-  // slot builder is replaced with a read-only list in this mode.
+  // one. Free (unconsumed, unreserved) slots can still be edited/deleted and
+  // new ones added; consumed or actively-reserved slots are locked (see
+  // registrationGroups.ts).
   groupId?: string
 }
 
@@ -52,8 +57,19 @@ interface DraftSlot {
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
+function signatureOf(t: RegistrationSlotType): RegistrationSlotSignature {
+  return {
+    server_id: t.server_id,
+    drive_type: t.drive_type,
+    quota_bytes: t.quota_bytes,
+    account_status: t.account_status,
+    ...(t.premium_expires_at ? { premium_expires_at: t.premium_expires_at } : {}),
+  }
+}
+
 function RouteComponent() {
   const navigate = useNavigate()
+  const queryClient = useQueryClient()
   const { notify } = useNotification()
   const { groupId } = Route.useSearch()
   const isEditMode = !!groupId
@@ -65,6 +81,11 @@ function RouteComponent() {
     enabled: isEditMode,
     retry: false,
   })
+
+  // Edit mode only: the existing free slot type currently loaded into the
+  // builder for editing (null = the builder is adding a brand-new slot type).
+  const [editingSlotType, setEditingSlotType] = useState<RegistrationSlotType | null>(null)
+  const [slotActionError, setSlotActionError] = useState<string | null>(null)
 
   // Group-level fields
   const [name, setName] = useState('')
@@ -125,7 +146,14 @@ function RouteComponent() {
     const server = servers.find(s => s.id === serverId)
     const avail = server?.tiers[tier]
     if (avail === undefined) return null
-    return avail - (pendingByTier.get(`${serverId}:${tier}`) ?? 0)
+    // Editing an existing free type: its free slots' capacity is still held
+    // (they aren't deleted until the replace succeeds), but they're about to
+    // be freed for whatever this same server+tier ends up replacing them
+    // with — so it's reclaimable for this specific edit.
+    const reclaim = editingSlotType && editingSlotType.server_id === serverId && editingSlotType.drive_type === tier
+      ? editingSlotType.available * editingSlotType.quota_bytes
+      : 0
+    return avail - (pendingByTier.get(`${serverId}:${tier}`) ?? 0) + reclaim
   }
 
   const draftQuotaBytes = Math.round((parseFloat(capacityGb) || 0) * GB)
@@ -175,6 +203,94 @@ function RouteComponent() {
     setPremiumExpiry(s.premiumExpiresAt)
     setSlotCount(String(s.count))
     setSlots(prev => prev.filter((_, j) => j !== index))
+  }
+
+  function resetSlotBuilder() {
+    setSelectedServerId('')
+    setSelectedTier('')
+    setCapacityGb('10')
+    setAccountStatus('base')
+    setPremiumExpiry('')
+    setSlotCount('1')
+  }
+
+  // Edit mode only: loads an existing free slot type into the builder for
+  // editing. Defaults the count to the free (available) count, not the
+  // total, since consumed/reserved slots of this type aren't touched by the
+  // eventual replace.
+  function startEditExistingSlotType(t: RegistrationSlotType) {
+    setEditingSlotType(t)
+    setSlotActionError(null)
+    setSelectedServerId(t.server_id)
+    setSelectedTier(t.drive_type)
+    setCapacityGb(String(t.quota_bytes / GB))
+    setAccountStatus(t.account_status)
+    setPremiumExpiry(t.premium_expires_at ? t.premium_expires_at.slice(0, 10) : '')
+    setSlotCount(String(t.available))
+  }
+
+  function cancelEditSlotType() {
+    setEditingSlotType(null)
+    setSlotActionError(null)
+    resetSlotBuilder()
+  }
+
+  const invalidateGroupDetail = () =>
+    queryClient.invalidateQueries({ queryKey: ['admin', 'registration-groups', groupId] })
+
+  // Edit mode: every builder action applies straight to the live group
+  // (no local staging) since it already exists — unlike create mode's
+  // `slots` draft array, which only gets submitted on "Create registration group".
+  const addSlotsMutation = useMutation({
+    mutationFn: (spec: RegistrationSlotSpecInput) => addRegistrationSlots(groupId!, [spec]),
+    onSuccess: () => {
+      setSlotActionError(null)
+      resetSlotBuilder()
+      invalidateGroupDetail()
+    },
+    onError: (err) => setSlotActionError(err instanceof ApiError ? err.message : 'Failed to add these slots'),
+  })
+
+  const replaceSlotTypeMutation = useMutation({
+    mutationFn: ({ old, spec }: { old: RegistrationSlotSignature; spec: RegistrationSlotSpecInput }) =>
+      replaceRegistrationSlotType(groupId!, old, spec),
+    onSuccess: () => {
+      setEditingSlotType(null)
+      setSlotActionError(null)
+      resetSlotBuilder()
+      invalidateGroupDetail()
+    },
+    onError: (err) => setSlotActionError(err instanceof ApiError ? err.message : 'Failed to save these slot changes'),
+  })
+
+  const deleteSlotTypeMutation = useMutation({
+    mutationFn: (t: RegistrationSlotType) => deleteRegistrationSlotType(groupId!, signatureOf(t)),
+    onSuccess: () => {
+      notify('success', 'Free slots deleted')
+      invalidateGroupDetail()
+    },
+    onError: (err) => notify('error', err instanceof ApiError ? err.message : 'Failed to delete these slots'),
+  })
+
+  function handleSlotBuilderSubmit() {
+    if (!canAddSlot || !selectedServer || !selectedTier) return
+    if (!isEditMode) {
+      addSlot()
+      return
+    }
+    const spec: RegistrationSlotSpecInput = {
+      server_id: selectedServer.id,
+      drive_type: selectedTier,
+      quota_bytes: draftQuotaBytes,
+      account_status: accountStatus,
+      ...(accountStatus === 'premium' && premiumExpiry ? { premium_expires_at: new Date(premiumExpiry).toISOString() } : {}),
+      count: draftCount,
+    }
+    if (editingSlotType) {
+      replaceSlotTypeMutation.mutate({ old: signatureOf(editingSlotType), spec })
+    } else {
+      addSlotsMutation.mutate(spec)
+    }
   }
 
   function addEmail() {
@@ -238,6 +354,14 @@ function RouteComponent() {
 
   const saving = createMutation.isPending || updateMutation.isPending
   const canCreate = name.trim().length > 0 && !saving && (isEditMode || slots.length > 0)
+
+  // Edit mode: free (unconsumed, unreserved) slot types can be edited or
+  // deleted; a type with any consumed/in-progress slots also shows up in the
+  // locked list below with just those counts — the two lists partition each
+  // type's slots by whether they're still touchable, not by type identity.
+  const freeSlotTypes = existingGroup?.slot_types.filter(t => t.available > 0) ?? []
+  const lockedSlotTypes = existingGroup?.slot_types.filter(t => t.consumed > 0 || t.reserved > 0) ?? []
+  const slotBuilderBusy = addSlotsMutation.isPending || replaceSlotTypeMutation.isPending
 
   return (
     <div>
@@ -305,49 +429,121 @@ function RouteComponent() {
         <div className="bg-white rounded-xl border border-gray-200 p-5 flex flex-col gap-4">
           <h3 className="text-sm font-semibold text-gray-900 m-0">Registration slots</h3>
 
-          {isEditMode ? (
-            <>
-              {existingGroup && existingGroup.slot_types.length > 0 && (
-                <div className="rounded-lg border border-gray-200 overflow-x-auto">
-                  <table className="w-full text-xs border-collapse">
-                    <thead>
-                      <tr className="bg-gray-50 border-b border-gray-200">
-                        {['Server', 'Tier', 'Capacity', 'Account status', 'Count'].map((h) => (
-                          <th key={h} className="text-left px-3 py-2 text-[11px] font-semibold text-gray-500 uppercase tracking-wider">{h}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-gray-100">
-                      {existingGroup.slot_types.map((t: RegistrationSlotType) => (
-                        <tr key={t.slot_id}>
-                          <td className="px-3 py-2 text-gray-800">{t.server_name}</td>
-                          <td className="px-3 py-2">
-                            <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold ${
-                              t.drive_type === 'nvme' ? 'bg-emerald-100 text-emerald-700' : 'bg-gray-100 text-gray-500'
-                            }`}>
-                              {tierLabel(t.drive_type)}
-                            </span>
-                          </td>
-                          <td className="px-3 py-2 text-gray-600 whitespace-nowrap">{formatSlotQuota(t.quota_bytes)}</td>
-                          <td className="px-3 py-2 text-gray-600">
-                            {t.account_status === 'premium'
-                              ? `Premium${t.premium_expires_at ? ` (expires ${new Date(t.premium_expires_at).toLocaleDateString()})` : ' (permanent)'}`
-                              : 'Base user'}
-                          </td>
-                          <td className="px-3 py-2 text-gray-800 font-medium">{t.total}</td>
-                        </tr>
+          {isEditMode && freeSlotTypes.length > 0 && (
+            <div className="flex flex-col gap-1.5">
+              <span className="text-xs font-medium text-gray-600">Free — editable</span>
+              <div className="rounded-lg border border-gray-200 overflow-x-auto">
+                <table className="w-full text-xs border-collapse">
+                  <thead>
+                    <tr className="bg-gray-50 border-b border-gray-200">
+                      {['Server', 'Tier', 'Capacity', 'Account status', 'Count', ''].map((h) => (
+                        <th key={h} className="text-left px-3 py-2 text-[11px] font-semibold text-gray-500 uppercase tracking-wider">{h}</th>
                       ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-              <p className="text-xs text-gray-400 m-0">
-                Slots are fixed once a group is created — deactivate or delete the group to change its capacity.
-              </p>
-            </>
-          ) : (
-          <>
-          {slots.length > 0 && (
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100">
+                    {freeSlotTypes.map((t) => (
+                      <tr key={t.slot_id}>
+                        <td className="px-3 py-2 text-gray-800">{t.server_name}</td>
+                        <td className="px-3 py-2">
+                          <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold ${
+                            t.drive_type === 'nvme' ? 'bg-emerald-100 text-emerald-700' : 'bg-gray-100 text-gray-500'
+                          }`}>
+                            {tierLabel(t.drive_type)}
+                          </span>
+                        </td>
+                        <td className="px-3 py-2 text-gray-600 whitespace-nowrap">{formatSlotQuota(t.quota_bytes)}</td>
+                        <td className="px-3 py-2 text-gray-600">
+                          {t.account_status === 'premium'
+                            ? `Premium${t.premium_expires_at ? ` (expires ${new Date(t.premium_expires_at).toLocaleDateString()})` : ' (permanent)'}`
+                            : 'Base user'}
+                        </td>
+                        <td className="px-3 py-2 text-gray-800 font-medium">{t.available}</td>
+                        <td className="px-3 py-2 text-right">
+                          <div className="flex items-center gap-1 justify-end">
+                            <button
+                              type="button"
+                              onClick={() => startEditExistingSlotType(t)}
+                              disabled={deleteSlotTypeMutation.isPending || slotBuilderBusy}
+                              title="Edit these free slots"
+                              className="text-gray-400 hover:text-blue-600 cursor-pointer bg-transparent border-0 p-0.5 disabled:opacity-50"
+                            >
+                              <MdEdit />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (confirm(`Delete ${t.available} free slot${t.available > 1 ? 's' : ''} of this type? Slots already consumed or in progress are not affected.`)) {
+                                  if (editingSlotType && editingSlotType.slot_id === t.slot_id) cancelEditSlotType()
+                                  deleteSlotTypeMutation.mutate(t)
+                                }
+                              }}
+                              disabled={deleteSlotTypeMutation.isPending || slotBuilderBusy}
+                              title="Delete these free slots"
+                              className="text-gray-400 hover:text-red-500 cursor-pointer bg-transparent border-0 p-0.5 disabled:opacity-50"
+                            >
+                              <MdDeleteOutline />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {isEditMode && lockedSlotTypes.length > 0 && (
+            <div className="flex flex-col gap-1.5">
+              <span className="text-xs font-medium text-gray-600">Consumed / in progress — locked</span>
+              <div className="rounded-lg border border-gray-200 overflow-x-auto opacity-90">
+                <table className="w-full text-xs border-collapse">
+                  <thead>
+                    <tr className="bg-gray-50 border-b border-gray-200">
+                      {['Server', 'Tier', 'Capacity', 'Account status', 'Status'].map((h) => (
+                        <th key={h} className="text-left px-3 py-2 text-[11px] font-semibold text-gray-500 uppercase tracking-wider">{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100">
+                    {lockedSlotTypes.map((t) => (
+                      <tr key={t.slot_id}>
+                        <td className="px-3 py-2 text-gray-800">{t.server_name}</td>
+                        <td className="px-3 py-2">
+                          <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold ${
+                            t.drive_type === 'nvme' ? 'bg-emerald-100 text-emerald-700' : 'bg-gray-100 text-gray-500'
+                          }`}>
+                            {tierLabel(t.drive_type)}
+                          </span>
+                        </td>
+                        <td className="px-3 py-2 text-gray-600 whitespace-nowrap">{formatSlotQuota(t.quota_bytes)}</td>
+                        <td className="px-3 py-2 text-gray-600">
+                          {t.account_status === 'premium'
+                            ? `Premium${t.premium_expires_at ? ` (expires ${new Date(t.premium_expires_at).toLocaleDateString()})` : ' (permanent)'}`
+                            : 'Base user'}
+                        </td>
+                        <td className="px-3 py-2 whitespace-nowrap">
+                          {t.consumed > 0 && (
+                            <span className="inline-block text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-500 mr-1">
+                              {t.consumed} consumed
+                            </span>
+                          )}
+                          {t.reserved > 0 && (
+                            <span className="inline-block text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700">
+                              {t.reserved} in progress
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {!isEditMode && slots.length > 0 && (
             <div className="rounded-lg border border-gray-200 overflow-x-auto">
               <table className="w-full text-xs border-collapse">
                 <thead>
@@ -403,6 +599,20 @@ function RouteComponent() {
           )}
 
           <div className="flex flex-col gap-3 rounded-lg border border-dashed border-gray-300 p-4">
+            {isEditMode && editingSlotType && (
+              <div className="flex items-center justify-between gap-2 -mt-1 -mx-1 px-3 py-1.5 rounded-md bg-blue-50 border border-blue-100">
+                <span className="text-xs text-blue-800">
+                  Editing {editingSlotType.available} free {tierLabel(editingSlotType.drive_type).toLowerCase()} slot{editingSlotType.available > 1 ? 's' : ''} on {editingSlotType.server_name}
+                </span>
+                <button
+                  type="button"
+                  onClick={cancelEditSlotType}
+                  className="text-xs text-blue-700 hover:text-blue-900 cursor-pointer bg-transparent border-0 p-0 underline"
+                >
+                  Cancel
+                </button>
+              </div>
+            )}
             <div className="flex flex-wrap items-end gap-4">
               <label className="flex flex-col gap-1">
                 <span className="text-xs font-medium text-gray-600">Server</span>
@@ -546,21 +756,28 @@ function RouteComponent() {
               </p>
             )}
 
+            {isEditMode && slotActionError && (
+              <p className="text-xs text-red-500 m-0">{slotActionError}</p>
+            )}
+
             <button
               type="button"
-              onClick={addSlot}
-              disabled={!canAddSlot}
+              onClick={handleSlotBuilderSubmit}
+              disabled={!canAddSlot || (isEditMode && slotBuilderBusy)}
               className="self-start inline-flex items-center gap-1 px-3 py-1.5 text-sm bg-white border border-gray-300 hover:border-blue-400 hover:text-blue-700 text-gray-700 rounded-lg cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             >
-              <MdAdd /> Add slot{draftCount > 1 ? `s (${draftCount})` : ''}
+              <MdAdd />
+              {isEditMode
+                ? editingSlotType
+                  ? (replaceSlotTypeMutation.isPending ? 'Saving…' : 'Save slot changes')
+                  : (addSlotsMutation.isPending ? 'Adding…' : `Add slot${draftCount > 1 ? `s (${draftCount})` : ''}`)
+                : `Add slot${draftCount > 1 ? `s (${draftCount})` : ''}`}
             </button>
           </div>
           <p className="text-xs text-gray-400 m-0">
             Each slot pre-reserves its capacity on the server until it is claimed, the group is
             deactivated, or the link expires. Admin accounts cannot be provisioned via group registration.
           </p>
-          </>
-          )}
         </div>
 
         {/* Notifications */}

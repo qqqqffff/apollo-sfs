@@ -114,7 +114,8 @@ All secrets live in `.env` (never commit this file). Key groups:
 | `KEYCLOAK_*` | Realm, client, admin, and public URL |
 | `KEY_ENCRYPTION_KEY` | Master key for AES-256 per-user key wrapping |
 | `SESSION_KEY` | Session cookie signing key |
-| `PAYPAL_*` | PayPal credentials — Orders v2 (storage add-ons) + Subscriptions v1 (premium) |
+| `PAYPAL_*` | PayPal credentials — Orders v2 (storage add-ons, plus self-billed card/wallet subscriptions) + Subscriptions v1 (PayPal-wallet premium) |
+| `GOOGLE_PAY_SUBSCRIPTIONS_ENABLED` | Gates Google Pay on subscription checkouts. Leave off — PayPal doesn't vault `payment_source.google_pay`, so such a subscription can't renew (see `docs/paypal_setup.md` §10). One-time Google Pay purchases are unaffected |
 | `GOOGLE_*` | Google OAuth client for web login |
 | `CLOUDFLARE_*` | API token (DDNS), Turnstile site/secret keys |
 | `SENDGRID_*` | SMTP password (via Postfix relay) and inbound webhook secret |

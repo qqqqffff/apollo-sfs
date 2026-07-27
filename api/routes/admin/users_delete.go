@@ -66,7 +66,10 @@ func (h *Handler) DeleteUser(c *gin.Context) {
 	// is being erased regardless of a PayPal hiccup.
 	if sub, err := h.queries.GetActiveSubscriptionForUser(ctx, target); err != nil {
 		log.Printf("DeleteUser: check subscription for %q: %v", target, err)
-	} else if sub != nil {
+	} else if sub != nil && sub.BillingMode != "self" {
+		// Self-billed subscriptions have nothing to cancel at PayPal; deleting
+		// the user cascades the premium_subscriptions row away, which is what
+		// stops our renewal loop. See docs/paypal_setup.md §9.
 		if client := h.paypalClients.For(sub.Environment); client != nil {
 			if err := client.CancelSubscription(ctx, sub.PayPalSubscriptionID, "account deleted: "+reason); err != nil {
 				log.Printf("DeleteUser: paypal cancel for %q: %v", target, err)

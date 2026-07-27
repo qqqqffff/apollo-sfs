@@ -130,38 +130,15 @@ func (s *RegistrationGroupService) Create(ctx context.Context, createdBy uuid.UU
 	}
 	totalSlots := 0
 	for _, spec := range in.Slots {
-		if spec.Count < 1 {
-			return nil, fmt.Errorf("%w: slot count must be at least 1", ErrInvalidSlotSpec)
-		}
-		if spec.QuotaBytes <= 0 {
-			return nil, fmt.Errorf("%w: slot capacity must be positive", ErrInvalidSlotSpec)
-		}
-		if spec.DriveType != "nvme" && spec.DriveType != "hdd" {
-			return nil, fmt.Errorf("%w: tier must be fast (nvme) or standard (hdd)", ErrInvalidSlotSpec)
-		}
-		// Admin accounts cannot be provisioned through a registration group.
-		if spec.AccountStatus != "base" && spec.AccountStatus != "premium" {
-			return nil, fmt.Errorf("%w: account status must be base or premium", ErrInvalidSlotSpec)
-		}
-		if spec.AccountStatus != "premium" && spec.PremiumExpiresAt != nil {
-			return nil, fmt.Errorf("%w: premium expiry is only valid on premium slots", ErrInvalidSlotSpec)
-		}
-		if spec.PremiumExpiresAt != nil && !spec.PremiumExpiresAt.After(time.Now()) {
-			return nil, fmt.Errorf("%w: premium expiry must be in the future", ErrInvalidSlotSpec)
+		if err := validateSlotSpec(spec); err != nil {
+			return nil, err
 		}
 		totalSlots += spec.Count
 	}
 
 	specs := make([]db.NewRegistrationSlotSpec, len(in.Slots))
 	for i, spec := range in.Slots {
-		specs[i] = db.NewRegistrationSlotSpec{
-			ServerID:         spec.ServerID,
-			DriveType:        spec.DriveType,
-			QuotaBytes:       spec.QuotaBytes,
-			AccountStatus:    spec.AccountStatus,
-			PremiumExpiresAt: spec.PremiumExpiresAt,
-			Count:            spec.Count,
-		}
+		specs[i] = toDBSlotSpec(spec)
 	}
 
 	// The 4-char suffix keeps the link unguessable-ish and unique per name;
@@ -249,6 +226,111 @@ func (s *RegistrationGroupService) Update(ctx context.Context, id uuid.UUID, in 
 // List returns a page of group summaries for the admin table.
 func (s *RegistrationGroupService) List(ctx context.Context, page db.PageInput) (*db.PageResult[models.RegistrationGroupSummary], error) {
 	return s.queries.ListRegistrationGroups(ctx, page)
+}
+
+// validateSlotSpec applies the same per-slot rules Create uses to a spec
+// destined for AddSlots or ReplaceSlotType.
+func validateSlotSpec(spec RegistrationSlotSpecInput) error {
+	if spec.Count < 1 {
+		return fmt.Errorf("%w: slot count must be at least 1", ErrInvalidSlotSpec)
+	}
+	if spec.QuotaBytes <= 0 {
+		return fmt.Errorf("%w: slot capacity must be positive", ErrInvalidSlotSpec)
+	}
+	if spec.DriveType != "nvme" && spec.DriveType != "hdd" {
+		return fmt.Errorf("%w: tier must be fast (nvme) or standard (hdd)", ErrInvalidSlotSpec)
+	}
+	// Admin accounts cannot be provisioned through a registration group.
+	if spec.AccountStatus != "base" && spec.AccountStatus != "premium" {
+		return fmt.Errorf("%w: account status must be base or premium", ErrInvalidSlotSpec)
+	}
+	if spec.AccountStatus != "premium" && spec.PremiumExpiresAt != nil {
+		return fmt.Errorf("%w: premium expiry is only valid on premium slots", ErrInvalidSlotSpec)
+	}
+	if spec.PremiumExpiresAt != nil && !spec.PremiumExpiresAt.After(time.Now()) {
+		return fmt.Errorf("%w: premium expiry must be in the future", ErrInvalidSlotSpec)
+	}
+	return nil
+}
+
+func toDBSlotSpec(spec RegistrationSlotSpecInput) db.NewRegistrationSlotSpec {
+	return db.NewRegistrationSlotSpec{
+		ServerID:         spec.ServerID,
+		DriveType:        spec.DriveType,
+		QuotaBytes:       spec.QuotaBytes,
+		AccountStatus:    spec.AccountStatus,
+		PremiumExpiresAt: spec.PremiumExpiresAt,
+		Count:            spec.Count,
+	}
+}
+
+// requireGroupExists is a cheap existence check so Add/ReplaceSlotType fail
+// with a clean ErrGroupNotFound up front, instead of a raw FK-violation error
+// surfacing from the insert step once the group turns out to be gone.
+func (s *RegistrationGroupService) requireGroupExists(ctx context.Context, id uuid.UUID) error {
+	if _, err := s.queries.GetRegistrationGroupSummary(ctx, id); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrGroupNotFound
+		}
+		return fmt.Errorf("registration group lookup: %w", err)
+	}
+	return nil
+}
+
+// AddSlots appends new slots to an existing group, reserving their capacity
+// the same way Create does. Existing slots are untouched.
+func (s *RegistrationGroupService) AddSlots(ctx context.Context, groupID uuid.UUID, specs []RegistrationSlotSpecInput) (*RegistrationGroupDetail, error) {
+	if len(specs) == 0 {
+		return nil, ErrGroupNeedsSlots
+	}
+	if err := s.requireGroupExists(ctx, groupID); err != nil {
+		return nil, err
+	}
+	dbSpecs := make([]db.NewRegistrationSlotSpec, len(specs))
+	for i, spec := range specs {
+		if err := validateSlotSpec(spec); err != nil {
+			return nil, err
+		}
+		dbSpecs[i] = toDBSlotSpec(spec)
+	}
+	if err := s.queries.AddRegistrationSlots(ctx, groupID, dbSpecs); err != nil {
+		if errors.Is(err, db.ErrNoCapacity) {
+			return nil, ErrSlotCapacityExceeded
+		}
+		return nil, fmt.Errorf("add registration slots: %w", err)
+	}
+	return s.Detail(ctx, groupID)
+}
+
+// DeleteSlotType removes every currently-free (unconsumed, unreserved) slot
+// matching sig within the group. Consumed or actively-held slots of the same
+// configuration are left untouched — the edit screen never offers them for
+// deletion in the first place.
+func (s *RegistrationGroupService) DeleteSlotType(ctx context.Context, groupID uuid.UUID, sig db.RegistrationSlotSignature) (*RegistrationGroupDetail, error) {
+	if _, err := s.queries.DeleteFreeRegistrationSlots(ctx, groupID, sig); err != nil {
+		return nil, fmt.Errorf("delete slot type: %w", err)
+	}
+	return s.Detail(ctx, groupID)
+}
+
+// ReplaceSlotType swaps every currently-free slot matching oldSig for
+// newSpec.Count new slots of newSpec's configuration, in one transaction.
+// Consumed or actively-held slots matching oldSig are left untouched — this
+// is how the edit screen "edits" an unclaimed slot type in place.
+func (s *RegistrationGroupService) ReplaceSlotType(ctx context.Context, groupID uuid.UUID, oldSig db.RegistrationSlotSignature, newSpec RegistrationSlotSpecInput) (*RegistrationGroupDetail, error) {
+	if err := validateSlotSpec(newSpec); err != nil {
+		return nil, err
+	}
+	if err := s.requireGroupExists(ctx, groupID); err != nil {
+		return nil, err
+	}
+	if err := s.queries.ReplaceRegistrationSlotType(ctx, groupID, oldSig, toDBSlotSpec(newSpec)); err != nil {
+		if errors.Is(err, db.ErrNoCapacity) {
+			return nil, ErrSlotCapacityExceeded
+		}
+		return nil, fmt.Errorf("replace slot type: %w", err)
+	}
+	return s.Detail(ctx, groupID)
 }
 
 // Detail returns one group with its grouped slot types.

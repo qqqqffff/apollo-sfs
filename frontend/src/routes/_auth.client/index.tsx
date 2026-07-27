@@ -593,14 +593,6 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
     (fileIds, folderIds, targetFolderId) => moveManyTo(fileIds, folderIds, targetFolderId),
   )
 
-  // Snapshot of the row list's data taken the instant a drag starts, held for
-  // as long as the drag is active — see where it's applied to `subfolders`/
-  // `files` below for why. Declared here (not inline there) because it must
-  // be a hook called unconditionally on every render, ahead of this
-  // component's early returns (media collection / single file / email backup
-  // views) further down.
-  const frozenListRef = useRef<{ folders: typeof rawSubfolders; files: typeof rawFiles } | null>(null)
-
   const setAutoUploadMutation = useMutation({
     mutationFn: (folderId: string | null) => updatePreferences(folderId),
     onSuccess: () => {
@@ -1030,32 +1022,8 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
     return <FileView fileId={fileId} />
   }
 
-  // Freeze the row list to its drag-start snapshot for as long as a drag is
-  // active, instead of letting it track folderId live. Confirmed by direct
-  // testing against real Chromium: once the exact DOM node a native
-  // `dragstart` fired on is unmounted, hidden, or repositioned, the browser
-  // silently and permanently cancels that drag's `drop` — dragenter/dragover
-  // keep firing on other targets throughout (so hover highlights look fine),
-  // but nothing happens on release, with no error of any kind. Hovering a
-  // folder open mid-drag (scheduleHoverOpen in useFileDrag → openFolder)
-  // navigates and re-fetches that folder's contents, which would otherwise
-  // replace this whole list — including whichever row the user physically
-  // grabbed. The breadcrumb and the persistent "drop into current folder"
-  // panel below both still track the live folderId, so the user completes
-  // the drop through those instead of a row inside the newly hover-opened
-  // folder — the frozen list is only ever the drag source's own resting
-  // place, never a drop target the user needs to see update.
-  const dragActive = !!(draggingFileId || draggingFolderId)
-  if (dragActive && !frozenListRef.current) {
-    frozenListRef.current = { folders: rawSubfolders, files: rawFiles }
-  } else if (!dragActive && frozenListRef.current) {
-    frozenListRef.current = null
-  }
-  const listSubfolders = frozenListRef.current?.folders ?? rawSubfolders
-  const listFiles = frozenListRef.current?.files ?? rawFiles
-
-  const subfolders = sortedFolders(listSubfolders, sort)
-  const files = sortedFiles(listFiles, sort)
+  const subfolders = sortedFolders(rawSubfolders, sort)
+  const files = sortedFiles(rawFiles, sort)
   // null = root upload (no folder); backend accepts absent folder_id for root.
   const uploadFolderId: string | null = folderId === 'root' ? null : folderId
   // Root uploads in a drive view pin to that drive; inside a folder the folder's
@@ -1063,7 +1031,7 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
   const { drive: uploadDrive, isPinned: uploadDriveIsPinned } = folderId === 'root'
     ? { drive: currentDrive, isPinned: !!currentDrive }
     : resolveDrive(folder?.drive_id ?? null, myServers)
-  const hasContent = listSubfolders.length > 0 || listFiles.length > 0 || recognitionGroups.length > 0
+  const hasContent = rawSubfolders.length > 0 || rawFiles.length > 0 || recognitionGroups.length > 0
   const noResults = search && !isLoading && !hasNextPage && !hasContent
   const viewingUser = impersonatedUser ?? user
 

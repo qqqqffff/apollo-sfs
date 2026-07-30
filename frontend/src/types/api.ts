@@ -329,6 +329,9 @@ export interface UploadResponse {
   mime_type: string
   size_bytes: number
   folder_id: string
+  // Drive the file was routed to, so a bulk uploader can credit the right
+  // drive's quota bar as each file lands.
+  drive_id: string | null
 }
 
 export interface FavoriteList {

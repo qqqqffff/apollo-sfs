@@ -21,6 +21,7 @@ import {
   deleteGoogleDriveFile,
   drivePreviewUrl,
   photosPreviewBlobUrl,
+  removeBackedUpFiles,
   uploadGoogleEntries,
   completeGoogleBackupRun,
   loadGoogleBackupSettings,
@@ -30,6 +31,15 @@ import {
   type BackupResult,
   type GoogleBackupItem,
 } from '../api/googleBackup'
+import {
+  createBackupControl,
+  readCancelAction,
+  type BackupControl,
+  type CancelAction,
+} from '../api/backupControl'
+import { useBackupLiveSync } from '../hooks/useBackupLiveSync'
+import { BackupProgressBar, BackupProgressDetails, BackupRunControls } from './BackupProgress'
+import { BackupCancelModal } from './BackupCancelModal'
 import { SettingToggle } from './SettingToggle'
 
 // ── Types ──────────────────────────────────────────────────────────────────────
@@ -113,6 +123,20 @@ export function GoogleBackupModal({
   const [result,    setResult]    = useState<BackupResult | null>(null)
   const [statusMap, setStatusMap] = useState<Record<number, BackupItemStatus>>({})
   const [finished,  setFinished]  = useState(false)
+  // Live detail for the in-flight run: what is being written right now and how
+  // much has actually landed.
+  const [currentPath, setCurrentPath] = useState<string | null>(null)
+  const [storedBytes, setStoredBytes] = useState(0)
+  const [storedCount, setStoredCount] = useState(0)
+  const [paused, setPaused] = useState(false)
+  const [cancelPrompt, setCancelPrompt] = useState(false)
+  const [rollbackBusy, setRollbackBusy] = useState(false)
+  const [cancelNote, setCancelNote] = useState<string | null>(null)
+  const controlRef = useRef<BackupControl | null>(null)
+  // Set by the cancel dialog before the run is stopped, so the continuation
+  // below knows whether to roll the partial backup back.
+  const cancelActionRef = useRef<CancelAction>('keep')
+  const liveSync = useBackupLiveSync()
   const [cleanupLoading, setCleanupLoading] = useState(false)
   const [cleanupMsg, setCleanupMsg] = useState<string | null>(null)
   const [settings, setSettings] = useState(loadGoogleBackupSettings)
@@ -144,6 +168,13 @@ export function GoogleBackupModal({
     setResult(null)
     setStatusMap({})
     setFinished(false)
+    setCurrentPath(null)
+    setStoredBytes(0)
+    setStoredCount(0)
+    setPaused(false)
+    setCancelPrompt(false)
+    setRollbackBusy(false)
+    setCancelNote(null)
     setCleanupLoading(false)
     setCleanupMsg(null)
     setSettings(loadGoogleBackupSettings())
@@ -165,12 +196,14 @@ export function GoogleBackupModal({
       if (e.key === 'Escape') {
         if (previewItem) { closePreview(); return }
         if (destTarget)  { setDestTarget(null); setDestAnchor(null); return }
-        if (!finished) onClose()
+        // A run in flight is left to the Pause/Cancel controls — closing the
+        // window would orphan the upload loop.
+        if (!finished && !uploading) onClose()
       }
     }
     document.addEventListener('keydown', handler)
     return () => document.removeEventListener('keydown', handler)
-  }, [previewItem, destTarget, finished, onClose])
+  }, [previewItem, destTarget, finished, uploading, onClose])
 
   useEffect(() => {
     document.body.style.overflow = 'hidden'
@@ -285,8 +318,21 @@ export function GoogleBackupModal({
 
   // ── Upload ─────────────────────────────────────────────────────────────────
 
+  // Full destination of an entry, as the user would find it in their files —
+  // media redirected to the auto-upload collection lands there, not in the
+  // folder picked in the row.
+  function destPathFor(entry: FileEntry): string {
+    if (redirectFolderName !== null && isMediaEntry(entry)) return `${redirectFolderName}/${entry.name}`
+    const folder = entry.destFolderId ? folders.find((f) => f.id === entry.destFolderId)?.name : null
+    return folder ? `${folder}/${entry.name}` : `/${entry.name}`
+  }
+
   async function handleBackUp() {
-    const toUpload = entries.filter((_, i) => selected.has(i))
+    // Kept parallel to toUpload so a progress event maps back onto the row it
+    // belongs to (the uploaded copies carry an added destPath, so they are no
+    // longer identical objects to the ones in `entries`).
+    const selectedIndices = entries.map((_, i) => i).filter((i) => selected.has(i))
+    const toUpload = selectedIndices.map((i) => ({ ...entries[i], destPath: destPathFor(entries[i]) }))
     if (toUpload.length === 0) return
 
     if (settings.background) {
@@ -294,29 +340,89 @@ export function GoogleBackupModal({
       return
     }
 
+    const control = createBackupControl()
+    controlRef.current = control
+    cancelActionRef.current = 'keep'
+
     setUploading(true)
     setStatusMap({})
+    setStoredBytes(0)
+    setStoredCount(0)
+    setCancelNote(null)
     setProgress({ done: 0, total: toUpload.length })
-    const res = await uploadGoogleEntries(toUpload, accessToken, (done, total, fin) => {
-      setProgress({ done, total })
-      if (fin) {
-        const idx = entries.indexOf(fin.entry as FileEntry)
-        if (idx >= 0) setStatusMap((m) => ({ ...m, [idx]: fin.status }))
-      }
+
+    const res = await uploadGoogleEntries(toUpload, accessToken, {
+      control,
+      onProgress: (e) => {
+        setProgress({ done: e.done, total: e.total })
+        if (e.phase === 'start') { setCurrentPath(e.path); return }
+        const idx = selectedIndices[e.index]
+        if (idx !== undefined && e.status) setStatusMap((m) => ({ ...m, [idx]: e.status! }))
+        if (e.status === 'done') {
+          setStoredBytes((b) => b + (e.sizeBytes ?? 0))
+          setStoredCount((c) => c + 1)
+          // Show it in the file browser and on the quota bar right away.
+          liveSync.itemStored({ sizeBytes: e.sizeBytes ?? 0, driveId: e.driveId })
+        }
+      },
     })
+
+    let removed = 0
+    const cancelAction = readCancelAction(cancelActionRef)
+    if (res.cancelled && cancelAction === 'remove' && res.uploadedFileIds.length > 0) {
+      setRollbackBusy(true)
+      const rollback = await removeBackedUpFiles(res.uploadedFileIds)
+      removed = rollback.removed
+      setRollbackBusy(false)
+      setCancelNote(
+        rollback.failed === 0
+          ? `Backup cancelled — ${removed} file${removed !== 1 ? 's' : ''} removed again.`
+          : `Backup cancelled — ${removed} of ${res.uploadedFileIds.length} removed; ${rollback.failed} could not be deleted.`,
+      )
+    } else if (res.cancelled) {
+      setCancelNote(`Backup cancelled — ${res.uploaded} file${res.uploaded !== 1 ? 's' : ''} kept.`)
+    }
+
+    controlRef.current = null
+    setCancelPrompt(false)
+    setPaused(false)
+    setCurrentPath(null)
     setResult(res)
     setUploading(false)
     setFinished(true)
+    liveSync.finish()
 
     // Best effort — the backup itself already succeeded.
     try {
       await completeGoogleBackupRun({
-        uploaded: res.uploaded,
+        uploaded: Math.max(0, res.uploaded - removed),
         duplicates: res.duplicates,
         errors: res.errors,
         notify: settings.notify,
       })
     } catch { /* ignore */ }
+  }
+
+  function togglePause() {
+    const control = controlRef.current
+    if (!control) return
+    if (control.isPaused()) { control.resume(); setPaused(false) }
+    else { control.pause(); setPaused(true) }
+  }
+
+  // Cancel pauses first, then asks what should happen to the part that landed.
+  function requestCancel() {
+    controlRef.current?.pause()
+    setPaused(true)
+    setCancelPrompt(true)
+  }
+
+  function resolveCancel(action: 'keep' | 'remove') {
+    cancelActionRef.current = action
+    setCancelPrompt(false)
+    // Releases the loop, which stops and returns a partial result — the
+    // continuation in handleBackUp does the rollback and the summary.
+    controlRef.current?.cancel()
   }
 
   // ── Cleanup ────────────────────────────────────────────────────────────────
@@ -379,7 +485,8 @@ export function GoogleBackupModal({
         <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 shrink-0">
           <button
             onClick={finished ? onDone : onClose}
-            className="p-1 rounded hover:bg-gray-100 text-gray-500 cursor-pointer transition-colors"
+            disabled={uploading}
+            className="p-1 rounded hover:bg-gray-100 text-gray-500 cursor-pointer transition-colors disabled:opacity-30"
           >
             <MdClose className="text-xl" />
           </button>
@@ -590,18 +697,27 @@ export function GoogleBackupModal({
 
         {/* Footer */}
         <div className="border-t border-gray-200 px-4 py-3 flex flex-col gap-2 shrink-0">
-          {/* Upload progress */}
+          {/* Upload progress + live detail + run controls */}
           {uploading && progress && (
-            <div className="flex items-center gap-2">
-              <div className="flex-1 h-1.5 bg-gray-200 rounded-full overflow-hidden">
-                <div
-                  className="h-full bg-green-500 rounded-full transition-all"
-                  style={{ width: `${Math.round((progress.done / progress.total) * 100)}%` }}
-                />
-              </div>
-              <span className="text-xs text-gray-500 shrink-0">{progress.done} / {progress.total}</span>
-            </div>
+            <>
+              <BackupProgressBar done={progress.done} total={progress.total} paused={paused} />
+              <BackupProgressDetails
+                currentPath={currentPath}
+                storedBytes={storedBytes}
+                totalBytes={selectedSize}
+                paused={paused}
+              />
+              <BackupRunControls
+                paused={paused}
+                busy={rollbackBusy}
+                onTogglePause={togglePause}
+                onCancel={requestCancel}
+              />
+            </>
           )}
+
+          {/* Cancellation outcome */}
+          {cancelNote && <p className="text-xs text-center text-amber-600">{cancelNote}</p>}
 
           {/* Result summary */}
           {finished && result && (
@@ -640,7 +756,7 @@ export function GoogleBackupModal({
             </button>
           )}
 
-          {/* Primary action button */}
+          {/* Primary action button — replaced by the run controls while uploading */}
           {finished ? (
             <button
               onClick={onDone}
@@ -648,28 +764,39 @@ export function GoogleBackupModal({
             >
               <MdCheck className="text-base" /> Done
             </button>
-          ) : (
+          ) : !uploading && (
             <button
               onClick={handleBackUp}
               disabled={!canBackUp}
               className="flex items-center justify-center gap-2 py-2.5 bg-green-600 hover:bg-green-700 text-white text-sm font-semibold rounded-lg cursor-pointer transition-colors disabled:opacity-40"
             >
-              {uploading ? (
-                <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-              ) : (
-                <>
-                  <MdCloud className="text-base" />
-                  {isOverQuota
-                    ? 'Over quota — deselect files or upgrade'
-                    : selected.size === 0
-                      ? 'No files selected'
-                      : `Back Up ${selected.size} File${selected.size !== 1 ? 's' : ''}`}
-                </>
-              )}
+              <MdCloud className="text-base" />
+              {isOverQuota
+                ? 'Over quota — deselect files or upgrade'
+                : selected.size === 0
+                  ? 'No files selected'
+                  : `Back Up ${selected.size} File${selected.size !== 1 ? 's' : ''}`}
             </button>
           )}
         </div>
       </div>
+
+      {/* Cancel confirmation — the run is paused behind it */}
+      {cancelPrompt && (
+        <BackupCancelModal
+          storedCount={storedCount}
+          storedBytes={storedBytes}
+          unit="file"
+          busy={rollbackBusy}
+          onRemove={() => resolveCancel('remove')}
+          onKeep={() => resolveCancel('keep')}
+          onResume={() => {
+            setCancelPrompt(false)
+            controlRef.current?.resume()
+            setPaused(false)
+          }}
+        />
+      )}
 
       {/* Destination picker dropdown */}
       {destTarget && destAnchor && (

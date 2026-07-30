@@ -22,6 +22,11 @@ export interface EmailBackupMessage {
   read: boolean
   received_at: string
   created_at: string
+  // Set only on the POST /email-backup/messages response: the encrypted file
+  // the message was just written to. Lets a running backup show the file's
+  // path and credit its bytes to the quota bar without re-reading the folder.
+  file_name?: string
+  file_size_bytes?: number
 }
 
 // EmailBackupDetail combines the index row with the decrypted full message —

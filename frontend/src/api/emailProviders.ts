@@ -58,6 +58,54 @@ export interface ListMessagesResult {
   items: ProviderEmailItem[]
   // True if SAFETY_CAP_EMAILS was hit before the criteria was satisfied.
   truncated: boolean
+  // True when paging stopped early because the caller asked it to.
+  stopped: boolean
+}
+
+// ListMessagesOptions lets the picker render while the mailbox is still being
+// paged: onPage delivers every page as it lands (accumulated and already
+// trimmed to the criteria, so the table never shows rows the run would drop),
+// and shouldStop ends paging early — the "Stop fetching" button — keeping
+// whatever has arrived.
+export interface ListMessagesOptions {
+  onPage?: (items: ProviderEmailItem[], progress: FetchProgress) => void
+  shouldStop?: () => boolean
+}
+
+// FetchProgress describes how far the paged fetch has got. `fraction` is null
+// when the criteria gives nothing to measure against.
+export interface FetchProgress {
+  fetched: number
+  fraction: number | null
+}
+
+// fetchProgressFor estimates completion against the chosen criteria: a count
+// and a byte total measure directly; a "since" date measures how far the
+// oldest message fetched has travelled back towards the cutoff.
+export function fetchProgressFor(
+  criteria: EmailRetrievalCriteria,
+  items: ProviderEmailItem[],
+): FetchProgress {
+  const fetched = items.length
+  const clamp = (v: number) => Math.max(0, Math.min(1, v))
+
+  switch (criteria.mode) {
+    case 'amount':
+      return { fetched, fraction: criteria.amount > 0 ? clamp(fetched / criteria.amount) : null }
+    case 'size': {
+      const bytes = items.reduce((sum, i) => sum + i.sizeEstimate, 0)
+      return { fetched, fraction: criteria.maxBytes > 0 ? clamp(bytes / criteria.maxBytes) : null }
+    }
+    case 'date': {
+      const last = items[items.length - 1]
+      const sinceTs = new Date(criteria.sinceDate + 'T00:00:00').getTime()
+      const now = Date.now()
+      if (!last || Number.isNaN(sinceTs) || now <= sinceTs) return { fetched, fraction: null }
+      const lastTs = new Date(last.date).getTime()
+      if (Number.isNaN(lastTs)) return { fetched, fraction: null }
+      return { fetched, fraction: clamp((now - lastTs) / (now - sinceTs)) }
+    }
+  }
 }
 
 function criteriaSatisfied(criteria: EmailRetrievalCriteria, items: ProviderEmailItem[]): boolean {
@@ -239,29 +287,46 @@ async function fetchGmailMetadata(accessToken: string, ids: string[]): Promise<P
 }
 
 // listGmailMessages pages 200 messages at a time — newest first — until
-// criteria is satisfied, the mailbox is exhausted, or SAFETY_CAP_EMAILS hits.
+// criteria is satisfied, the mailbox is exhausted, SAFETY_CAP_EMAILS hits, or
+// the caller stops it. Every page is handed to opts.onPage as it lands so the
+// picker can fill in while the rest is still downloading.
 export async function listGmailMessages(
   accessToken: string,
   criteria: EmailRetrievalCriteria,
-  onProgress?: (fetched: number) => void,
+  opts: ListMessagesOptions = {},
 ): Promise<ListMessagesResult> {
   const items: ProviderEmailItem[] = []
   let pageToken: string | undefined
   let truncated = false
+  let stopped = false
 
   while (true) {
+    if (opts.shouldStop?.()) { stopped = true; break }
     const { ids, nextPageToken } = await fetchGmailIdPage(accessToken, pageToken)
     if (ids.length === 0) break
     items.push(...await fetchGmailMetadata(accessToken, ids))
-    onProgress?.(items.length)
+    emitPage(criteria, items, opts)
 
     if (items.length >= SAFETY_CAP_EMAILS) { truncated = true; break }
     if (criteriaSatisfied(criteria, items)) break
     if (!nextPageToken) break
+    if (opts.shouldStop?.()) { stopped = true; break }
     pageToken = nextPageToken
   }
 
-  return { items: finalizeByCriteria(criteria, items), truncated }
+  return { items: finalizeByCriteria(criteria, items), truncated, stopped }
+}
+
+// emitPage hands the caller everything fetched so far, trimmed exactly the way
+// the final result will be, plus a progress estimate.
+function emitPage(
+  criteria: EmailRetrievalCriteria,
+  items: ProviderEmailItem[],
+  opts: ListMessagesOptions,
+): void {
+  if (!opts.onPage) return
+  const trimmed = finalizeByCriteria(criteria, items)
+  opts.onPage(trimmed, fetchProgressFor(criteria, trimmed))
 }
 
 interface GmailPart {
@@ -482,7 +547,7 @@ async function fetchOutlookPage(
 export async function listOutlookMessages(
   accessToken: string,
   criteria: EmailRetrievalCriteria,
-  onProgress?: (fetched: number) => void,
+  opts: ListMessagesOptions = {},
 ): Promise<ListMessagesResult> {
   if (criteria.mode === 'size') {
     throw new Error('Retrieving until a target size is not supported for Outlook — Graph does not report message sizes.')
@@ -493,19 +558,22 @@ export async function listOutlookMessages(
     `${GRAPH_API}/me/messages?$top=100&$orderby=receivedDateTime desc` +
     `&$select=id,subject,from,toRecipients,receivedDateTime,hasAttachments,flag,isRead,bodyPreview`
   let truncated = false
+  let stopped = false
 
   while (url) {
+    if (opts.shouldStop?.()) { stopped = true; break }
     const page = await fetchOutlookPage(accessToken, url)
     if (page.items.length === 0) break
     items.push(...page.items)
-    onProgress?.(items.length)
+    emitPage(criteria, items, opts)
 
     if (items.length >= SAFETY_CAP_EMAILS) { truncated = true; break }
     if (criteriaSatisfied(criteria, items)) break
+    if (opts.shouldStop?.()) { stopped = true; break }
     url = page.nextUrl
   }
 
-  return { items: finalizeByCriteria(criteria, items), truncated }
+  return { items: finalizeByCriteria(criteria, items), truncated, stopped }
 }
 
 // downloadOutlookMessage fetches the full message body plus attachments.
@@ -557,11 +625,11 @@ export function listProviderMessages(
   provider: EmailProvider,
   accessToken: string,
   criteria: EmailRetrievalCriteria,
-  onProgress?: (fetched: number) => void,
+  opts: ListMessagesOptions = {},
 ): Promise<ListMessagesResult> {
   return provider === 'gmail'
-    ? listGmailMessages(accessToken, criteria, onProgress)
-    : listOutlookMessages(accessToken, criteria, onProgress)
+    ? listGmailMessages(accessToken, criteria, opts)
+    : listOutlookMessages(accessToken, criteria, opts)
 }
 
 export function downloadProviderMessage(provider: EmailProvider, accessToken: string, id: string): Promise<StoredEmailPayload> {

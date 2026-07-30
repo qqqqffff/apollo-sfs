@@ -140,6 +140,28 @@ what actually pulls bytes off the socket, so throttling anything after that
 point wouldn't affect real network throughput. See
 `docs/upload_bandwidth_fairness.md` for the full design.
 
+## Rate Limiting
+
+`routes/middleware/rate_limit.go` has three tiers, all token buckets with a
+background eviction sweep:
+
+- **Auth endpoints** (`RateLimit()`) — 10 req/min per IP, burst 10.
+- **Authenticated API** (`APIRateLimit()`) — 120 req/min per IP, burst 20.
+  Applied to the whole `protected` group.
+- **Bulk data path** (`bulkDataRoutes`, inside `APIRateLimit()`) — 1200 req/min
+  **per user**, burst 60. Uploads, `/sync/check-hash`, the email-backup message
+  endpoint, and per-item deletes are hit once per file by a legitimate client
+  (Google/email backup, multi-select delete), which the standard budget cut off
+  within a handful of files. Keying by user id rather than IP also keeps one
+  member of a NAT'd household from spending everyone else's budget. Abuse is
+  still bounded by the storage quota these endpoints enforce.
+
+Matching is on `METHOD + c.FullPath()`, so a renamed route silently drops back
+to the standard budget — `TestBulkDataRoutesStillExist` guards the map against
+`cmd/main.go`. The frontend additionally retries a 429 with backoff
+(`frontend/src/api/client.ts`), since the request is refused before the handler
+runs and can always be repeated.
+
 ## Row-Level Security
 
 All `files` and `folders` queries are executed after calling `db.Queries.ForUser(userID)`, which sets the `app.current_user_id` session variable. PostgreSQL RLS policies on those tables reject any row not owned by the current user, preventing cross-user data leakage even if there is a bug in the application query.

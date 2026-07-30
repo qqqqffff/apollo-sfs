@@ -29,6 +29,30 @@ type uploadResponse struct {
 	MimeType  string  `json:"mime_type"`
 	SizeBytes int64   `json:"size_bytes"`
 	FolderID  *string `json:"folder_id"`
+	// Drive the file actually landed on (routing is server-side). Lets a
+	// bulk uploader — e.g. the Google backup — add the bytes to the right
+	// drive's quota bar as each file completes.
+	DriveID *string `json:"drive_id"`
+}
+
+// newUploadResponse renders a stored file as the response every upload path
+// (single, chunked, and both presigned variants) returns.
+func newUploadResponse(file *models.File) uploadResponse {
+	out := uploadResponse{
+		ID:        file.ID.String(),
+		Name:      file.Name,
+		MimeType:  file.MimeType,
+		SizeBytes: file.SizeBytes,
+	}
+	if file.FolderID != nil {
+		s := file.FolderID.String()
+		out.FolderID = &s
+	}
+	if file.DriveID != nil {
+		s := file.DriveID.String()
+		out.DriveID = &s
+	}
+	return out
 }
 
 // throttleUploadBody applies the fair per-user upload bandwidth cap (see
@@ -151,12 +175,6 @@ func (h *Handler) UploadFile(c *gin.Context) {
 		return
 	}
 
-	var folderIDStr *string
-	if file.FolderID != nil {
-		s := file.FolderID.String()
-		folderIDStr = &s
-	}
-
 	h.logAudit(db.AuditInput{
 		TargetUsername: username,
 		ActorUsername:  username,
@@ -166,13 +184,7 @@ func (h *Handler) UploadFile(c *gin.Context) {
 		ResourceName:   &file.Name,
 	})
 
-	c.JSON(http.StatusCreated, uploadResponse{
-		ID:        file.ID.String(),
-		Name:      file.Name,
-		MimeType:  file.MimeType,
-		SizeBytes: file.SizeBytes,
-		FolderID:  folderIDStr,
-	})
+	c.JSON(http.StatusCreated, newUploadResponse(file))
 }
 
 // ── Get metadata ──────────────────────────────────────────────────────────────
@@ -783,18 +795,7 @@ func (h *Handler) CompleteUpload(c *gin.Context) {
 		ResourceName:   &file.Name,
 	})
 
-	var folderIDStr *string
-	if file.FolderID != nil {
-		s := file.FolderID.String()
-		folderIDStr = &s
-	}
-	c.JSON(http.StatusCreated, uploadResponse{
-		ID:        file.ID.String(),
-		Name:      file.Name,
-		MimeType:  file.MimeType,
-		SizeBytes: file.SizeBytes,
-		FolderID:  folderIDStr,
-	})
+	c.JSON(http.StatusCreated, newUploadResponse(file))
 }
 
 // ── Presigned URLs ────────────────────────────────────────────────────────────
@@ -807,12 +808,12 @@ const (
 
 // presignResponse is returned by all presign endpoints.
 type presignResponse struct {
-	DownloadURL string `json:"download_url,omitempty"`
-	PreviewURL  string `json:"preview_url,omitempty"`
-	URL         string `json:"url,omitempty"`
-	UploadID    string `json:"upload_id,omitempty"`
+	DownloadURL  string `json:"download_url,omitempty"`
+	PreviewURL   string `json:"preview_url,omitempty"`
+	URL          string `json:"url,omitempty"`
+	UploadID     string `json:"upload_id,omitempty"`
 	SessionToken string `json:"session_token,omitempty"`
-	ExpiresAt   string `json:"expires_at"`
+	ExpiresAt    string `json:"expires_at"`
 }
 
 // PresignFile handles POST /api/v1/files/:file_id/presign.
@@ -1089,12 +1090,6 @@ func (h *Handler) UploadFilePresigned(c *gin.Context) {
 		return
 	}
 
-	var folderIDStr *string
-	if file.FolderID != nil {
-		s := file.FolderID.String()
-		folderIDStr = &s
-	}
-
 	h.logAudit(db.AuditInput{
 		TargetUsername: claim.Username,
 		ActorUsername:  claim.Username,
@@ -1104,13 +1099,7 @@ func (h *Handler) UploadFilePresigned(c *gin.Context) {
 		ResourceName:   &file.Name,
 	})
 
-	c.JSON(http.StatusCreated, uploadResponse{
-		ID:        file.ID.String(),
-		Name:      file.Name,
-		MimeType:  file.MimeType,
-		SizeBytes: file.SizeBytes,
-		FolderID:  folderIDStr,
-	})
+	c.JSON(http.StatusCreated, newUploadResponse(file))
 }
 
 // PresignChunkedUpload handles POST /api/v1/files/upload/presign/init.
@@ -1364,16 +1353,5 @@ func (h *Handler) CompleteUploadPresigned(c *gin.Context) {
 		ResourceName:   &file.Name,
 	})
 
-	var folderIDStr *string
-	if file.FolderID != nil {
-		s := file.FolderID.String()
-		folderIDStr = &s
-	}
-	c.JSON(http.StatusCreated, uploadResponse{
-		ID:        file.ID.String(),
-		Name:      file.Name,
-		MimeType:  file.MimeType,
-		SizeBytes: file.SizeBytes,
-		FolderID:  folderIDStr,
-	})
+	c.JSON(http.StatusCreated, newUploadResponse(file))
 }

@@ -95,8 +95,9 @@ const invitationColumns = `
 // GetInvitationByID returns an invitation by its UUID regardless of status.
 // Returns sql.ErrNoRows if not found.
 func (q *Queries) GetInvitationByID(ctx context.Context, id uuid.UUID) (*models.Invitation, error) {
-	row := q.db.QueryRowContext(ctx,
-		`SELECT`+invitationColumns+`FROM invitations WHERE id = $1`, id)
+	row := q.db.QueryRowContext(ctx, `
+		SELECT`+invitationColumns+`
+		FROM invitations WHERE id = $1`, id)
 	inv, err := scanInvitation(row)
 	if err != nil {
 		return nil, fmt.Errorf("GetInvitationByID: %w", err)

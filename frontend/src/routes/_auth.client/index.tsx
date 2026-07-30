@@ -77,6 +77,7 @@ import {
   getGoogleUserEmail,
   listGoogleDriveFiles,
   pickGooglePhotosWeb,
+  removeBackedUpFiles,
   uploadGoogleEntries,
   completeGoogleBackupRun,
   loadGoogleBackupSettings,
@@ -88,6 +89,7 @@ import { EmailRetrievalCriteriaModal } from '../../components/EmailRetrievalCrit
 import { EmailBackupModal } from '../../components/EmailBackupModal'
 import { EmailBackupView } from '../../components/EmailBackupView'
 import {
+  fetchProgressFor,
   getGmailUserEmail,
   getMicrosoftUserEmail,
   listProviderMessages,
@@ -95,6 +97,7 @@ import {
   requestMicrosoftAccessToken,
   type EmailProvider,
   type EmailRetrievalCriteria,
+  type FetchProgress,
   type ProviderEmailItem,
 } from '../../api/emailProviders'
 import {
@@ -102,7 +105,11 @@ import {
   completeEmailBackupRun,
   deleteProviderMessages,
   loadEmailBackupSettings,
+  removeBackedUpMessages,
 } from '../../api/emailBackup'
+import { useBackgroundBackup, type BackgroundBackupState } from '../../hooks/useBackgroundBackup'
+import { BackupProgressDetails, BackupRunControls } from '../../components/BackupProgress'
+import { BackupCancelModal } from '../../components/BackupCancelModal'
 
 export const Route = createFileRoute('/_auth/client/')({
   // All keys optional so navigations to /client elsewhere need not pass every
@@ -402,11 +409,9 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
   const [googleAccessToken, setGoogleAccessToken]   = useState('')
   const [googleBackupItems, setGoogleBackupItems]   = useState<GoogleBackupItem[] | null>(null)
   const googleCancelRef = useRef<(() => void) | null>(null)
-  const [bgBackupState, setBgBackupState] = useState<{
-    running: boolean; done: number; total: number
-    uploaded: number; duplicates: number; errors: number
-    driveIds: string[]
-  } | null>(null)
+  // Background (window-closed) Google run: progress card, pause/cancel, and the
+  // keep-or-remove outcome of a cancel.
+  const googleBg = useBackgroundBackup()
 
   // ── Email Backup state ─────────────────────────────────────────────────────
   const [emailSelectOpen, setEmailSelectOpen] = useState(false)
@@ -418,13 +423,17 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
     provider: EmailProvider
     accessToken: string
     accountEmail: string
+    // Grows page by page — the picker opens as soon as the account is known
+    // and fills in while the rest of the mailbox is still being retrieved.
     items: ProviderEmailItem[]
+    fetching: boolean
+    fetchProgress: FetchProgress | null
   } | null>(null)
   const emailCancelRef = useRef<(() => void) | null>(null)
-  const [emailBgBackupState, setEmailBgBackupState] = useState<{
-    running: boolean; done: number; total: number
-    uploaded: number; duplicates: number; errors: number
-  } | null>(null)
+  // Flipped by the picker's "Stop" button to end paging early, keeping what
+  // has already arrived.
+  const emailFetchStopRef = useRef(false)
+  const emailBg = useBackgroundBackup([['email-backup']])
 
   // Trigger the action requested from the side control panel (?action=…), then
   // strip the param so refreshes/back-navigation don't re-trigger it. Waits for
@@ -833,7 +842,7 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
   async function handleEmailCriteriaContinue(provider: EmailProvider, criteria: EmailRetrievalCriteria) {
     setEmailCriteriaFor(null)
     setEmailLoading(true)
-    setEmailLoadingMsg('Loading your emails')
+    setEmailLoadingMsg('Signing in to your email account')
     setEmailError(null)
 
     let cancelled = false
@@ -843,8 +852,10 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
     if (provider === 'microsoft') {
       msPopup = window.open('about:blank', '_blank', 'width=480,height=640')
     }
+    emailFetchStopRef.current = false
     emailCancelRef.current = () => {
       cancelled = true
+      emailFetchStopRef.current = true
       msPopup?.close()
     }
 
@@ -863,13 +874,28 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
         return
       }
 
-      // Pages 200 at a time, so a large "amount"/date range/size target can
-      // take a while — keep the loading modal's message live with progress.
-      const { items, truncated } = await listProviderMessages(provider, token, criteria, (fetched) => {
-        if (!cancelled) setEmailLoadingMsg(`Found ${fetched.toLocaleString()} email${fetched === 1 ? '' : 's'} so far`)
+      // Retrieval pages 200 at a time and a large criteria can take minutes, so
+      // the picker opens on an empty table right away and each page is dropped
+      // into it as it lands — the user can filter and select while the rest is
+      // still downloading, instead of watching a spinner.
+      setEmailBackup({ provider, accessToken: token, accountEmail, items: [], fetching: true, fetchProgress: null })
+      setEmailLoading(false)
+
+      const { items, truncated } = await listProviderMessages(provider, token, criteria, {
+        onPage: (page, fetchProgress) => {
+          if (cancelled) return
+          setEmailBackup((s) => (s ? { ...s, items: page, fetchProgress } : s))
+        },
+        shouldStop: () => cancelled || emailFetchStopRef.current,
       })
-      if (cancelled) return
+      if (cancelled) { setEmailBackup(null); return }
+
+      setEmailBackup((s) => (s
+        ? { ...s, items, fetching: false, fetchProgress: fetchProgressFor(criteria, items) }
+        : s))
+
       if (items.length === 0) {
+        setEmailBackup(null)
         setEmailError('No emails were found matching your criteria.')
         return
       }
@@ -878,9 +904,8 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
           `Stopped after the ${items.length.toLocaleString()}-email safety limit — your criteria may not be fully covered.`,
         )
       }
-
-      setEmailBackup({ provider, accessToken: token, accountEmail, items })
     } catch (e: any) {
+      setEmailBackup(null)
       if (cancelled) return
       const msg: string = e?.message ?? ''
       // Swallow silent dismissals (popup closed, user cancelled)
@@ -893,6 +918,13 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
     }
   }
 
+  // Ends an in-flight retrieval: the picker's "Stop" button, and closing the
+  // picker outright — otherwise paging would carry on against the provider for
+  // a window nobody is looking at any more.
+  function stopEmailFetch() {
+    emailFetchStopRef.current = true
+  }
+
   function handleEmailBackupDone(backupFolderId: string | null) {
     setEmailBackup(null)
     queryClient.invalidateQueries({ queryKey: ['folders'] })
@@ -903,50 +935,63 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
     }
   }
 
-  function handleStartEmailBackground(items: ProviderEmailItem[], folder: { id: string }) {
+  function handleStartEmailBackground(items: ProviderEmailItem[], folder: { id: string; drive_id: string | null }) {
     if (!emailBackup) return
     const { provider, accessToken, accountEmail } = emailBackup
     setEmailBackup(null)
     const settings = loadEmailBackupSettings()
-    setEmailBgBackupState({ running: true, done: 0, total: items.length, uploaded: 0, duplicates: 0, errors: 0 })
 
-    backupEmailEntries(items, provider, accessToken, folder.id, (done, total) =>
-      setEmailBgBackupState((s) => (s ? { ...s, done, total } : s)),
-    ).then(async (res) => {
-      setEmailBgBackupState((s) => (s ? { ...s, running: false, uploaded: res.uploaded, duplicates: res.duplicates, errors: res.errors } : s))
-      queryClient.invalidateQueries({ queryKey: ['folders'] })
-      queryClient.invalidateQueries({ queryKey: ['me'] })
-      queryClient.invalidateQueries({ queryKey: ['email-backup'] })
-
-      if (settings.deleteAfter && res.backedUpIds.length > 0) {
-        await deleteProviderMessages(provider, accessToken, res.backedUpIds)
-      }
-      // Best effort — the backup itself already succeeded.
-      completeEmailBackupRun({
-        folder_id: folder.id,
-        email_address: accountEmail,
-        provider,
-        uploaded: res.uploaded,
-        duplicates: res.duplicates,
-        errors: res.errors,
-        notify: settings.notify,
-      }).catch(() => {})
+    emailBg.start({
+      total: items.length,
+      totalBytes: items.reduce((sum, i) => sum + i.sizeEstimate, 0),
+      unit: 'email',
+      // Every message lands on the backup folder's own drive, so its quota bar
+      // can be credited as each one arrives.
+      driveId: folder.drive_id ?? myServers?.find((s) => s.is_primary)?.drive_id ?? null,
+      run: ({ control, onProgress }) =>
+        backupEmailEntries(items, provider, accessToken, folder.id, {
+          control,
+          folderName: accountEmail,
+          onProgress,
+        }),
+      rollback: (res) => removeBackedUpMessages(res.uploadedMessageIds),
+      onSettled: async (res, removed) => {
+        // A rollback just deleted the copies that would have justified
+        // trashing the originals provider-side.
+        if (settings.deleteAfter && removed === 0 && res.backedUpIds.length > 0) {
+          await deleteProviderMessages(provider, accessToken, res.backedUpIds)
+        }
+        // Best effort — the backup itself already succeeded.
+        completeEmailBackupRun({
+          folder_id: folder.id,
+          email_address: accountEmail,
+          provider,
+          uploaded: Math.max(0, res.uploaded - removed),
+          duplicates: res.duplicates,
+          errors: res.errors,
+          notify: settings.notify,
+        }).catch(() => {})
+      },
     })
   }
 
   function handleStartBackground(entries: BackupEntry[], token: string) {
     setGoogleBackupItems(null)
-    const driveIds = entries.filter((e) => e.googleItem.source === 'drive').map((e) => e.googleItem.id)
-    setBgBackupState({ running: true, done: 0, total: entries.length, uploaded: 0, duplicates: 0, errors: 0, driveIds })
-    uploadGoogleEntries(entries, token, (done, total) =>
-      setBgBackupState((s) => (s ? { ...s, done, total } : s)),
-    ).then(({ uploaded, duplicates, errors }) => {
-      setBgBackupState((s) => (s ? { ...s, running: false, uploaded, duplicates, errors } : s))
-      queryClient.invalidateQueries({ queryKey: ['folders', folderId] })
-      queryClient.invalidateQueries({ queryKey: ['me'] })
-
-      // Best effort — the backup itself already succeeded.
-      completeGoogleBackupRun({ uploaded, duplicates, errors, notify: loadGoogleBackupSettings().notify }).catch(() => {})
+    googleBg.start({
+      total: entries.length,
+      totalBytes: entries.reduce((sum, e) => sum + (e.googleItem.size ?? 0), 0),
+      unit: 'file',
+      run: ({ control, onProgress }) => uploadGoogleEntries(entries, token, { control, onProgress }),
+      rollback: (res) => removeBackedUpFiles(res.uploadedFileIds),
+      onSettled: (res, removed) => {
+        // Best effort — the backup itself already succeeded.
+        completeGoogleBackupRun({
+          uploaded: Math.max(0, res.uploaded - removed),
+          duplicates: res.duplicates,
+          errors: res.errors,
+          notify: loadGoogleBackupSettings().notify,
+        }).catch(() => {})
+      },
     })
   }
 
@@ -1247,78 +1292,60 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
       )}
 
       {/* Background Google Backup progress card */}
-      {bgBackupState && (
-        <div className="mb-3 px-3 py-2.5 bg-white border border-gray-200 rounded-lg shadow-sm flex flex-col gap-1.5">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-1.5">
-              <svg viewBox="0 0 24 24" className="w-3.5 h-3.5 shrink-0" aria-hidden="true">
-                <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
-                <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
-                <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z" fill="#FBBC05"/>
-                <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
-              </svg>
-              <span className="text-xs font-semibold text-gray-700">
-                {bgBackupState.running ? 'Backing up from Google…' : 'Google Backup complete'}
-              </span>
-            </div>
-            {!bgBackupState.running && (
-              <button onClick={() => setBgBackupState(null)} className="text-gray-400 hover:text-gray-600 cursor-pointer"><MdClose className="text-sm" /></button>
-            )}
-          </div>
-          <div className="flex items-center gap-2">
-            <div className="flex-1 h-1.5 bg-gray-200 rounded-full overflow-hidden">
-              <div
-                className={`h-full rounded-full transition-all ${bgBackupState.running ? 'bg-blue-500' : bgBackupState.errors > 0 ? 'bg-amber-500' : 'bg-green-500'}`}
-                style={{ width: `${bgBackupState.total > 0 ? Math.round((bgBackupState.done / bgBackupState.total) * 100) : 0}%` }}
-              />
-            </div>
-            <span className="text-xs text-gray-500 shrink-0">{bgBackupState.done}/{bgBackupState.total}</span>
-          </div>
-          {!bgBackupState.running && (
-            <p className={`text-xs ${bgBackupState.errors > 0 ? 'text-amber-600' : 'text-green-600'}`}>
-              {[
-                `${bgBackupState.uploaded} backed up`,
-                bgBackupState.duplicates > 0 ? `${bgBackupState.duplicates} duplicate${bgBackupState.duplicates !== 1 ? 's' : ''}` : null,
-                bgBackupState.errors > 0 ? `${bgBackupState.errors} failed` : null,
-              ].filter(Boolean).join(' · ')}
-            </p>
-          )}
-        </div>
+      {googleBg.state && (
+        <BackgroundBackupCard
+          state={googleBg.state}
+          title={googleBg.state.running ? 'Backing up from Google…' : 'Google Backup complete'}
+          icon={
+            <svg viewBox="0 0 24 24" className="w-3.5 h-3.5 shrink-0" aria-hidden="true">
+              <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
+              <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
+              <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z" fill="#FBBC05"/>
+              <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
+            </svg>
+          }
+          onTogglePause={googleBg.togglePause}
+          onCancel={googleBg.requestCancel}
+          onDismiss={googleBg.dismiss}
+          busy={googleBg.rollbackBusy}
+        />
       )}
 
       {/* Background Email Backup progress card */}
-      {emailBgBackupState && (
-        <div className="mb-3 px-3 py-2.5 bg-white border border-gray-200 rounded-lg shadow-sm flex flex-col gap-1.5">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-1.5">
-              <MdAlternateEmail className="text-teal-500 text-sm shrink-0" />
-              <span className="text-xs font-semibold text-gray-700">
-                {emailBgBackupState.running ? 'Backing up your email…' : 'Email Backup complete'}
-              </span>
-            </div>
-            {!emailBgBackupState.running && (
-              <button onClick={() => setEmailBgBackupState(null)} className="text-gray-400 hover:text-gray-600 cursor-pointer"><MdClose className="text-sm" /></button>
-            )}
-          </div>
-          <div className="flex items-center gap-2">
-            <div className="flex-1 h-1.5 bg-gray-200 rounded-full overflow-hidden">
-              <div
-                className={`h-full rounded-full transition-all ${emailBgBackupState.running ? 'bg-blue-500' : emailBgBackupState.errors > 0 ? 'bg-amber-500' : 'bg-green-500'}`}
-                style={{ width: `${emailBgBackupState.total > 0 ? Math.round((emailBgBackupState.done / emailBgBackupState.total) * 100) : 0}%` }}
-              />
-            </div>
-            <span className="text-xs text-gray-500 shrink-0">{emailBgBackupState.done}/{emailBgBackupState.total}</span>
-          </div>
-          {!emailBgBackupState.running && (
-            <p className={`text-xs ${emailBgBackupState.errors > 0 ? 'text-amber-600' : 'text-green-600'}`}>
-              {[
-                `${emailBgBackupState.uploaded} backed up`,
-                emailBgBackupState.duplicates > 0 ? `${emailBgBackupState.duplicates} duplicate${emailBgBackupState.duplicates !== 1 ? 's' : ''}` : null,
-                emailBgBackupState.errors > 0 ? `${emailBgBackupState.errors} failed` : null,
-              ].filter(Boolean).join(' · ')}
-            </p>
-          )}
-        </div>
+      {emailBg.state && (
+        <BackgroundBackupCard
+          state={emailBg.state}
+          title={emailBg.state.running ? 'Backing up your email…' : 'Email Backup complete'}
+          icon={<MdAlternateEmail className="text-teal-500 text-sm shrink-0" />}
+          onTogglePause={emailBg.togglePause}
+          onCancel={emailBg.requestCancel}
+          onDismiss={emailBg.dismiss}
+          busy={emailBg.rollbackBusy}
+        />
+      )}
+
+      {/* Cancel confirmations for the background runs */}
+      {googleBg.cancelPrompt && googleBg.state && (
+        <BackupCancelModal
+          storedCount={googleBg.state.storedCount}
+          storedBytes={googleBg.state.storedBytes}
+          unit="file"
+          busy={googleBg.rollbackBusy}
+          onRemove={() => googleBg.resolveCancel('remove')}
+          onKeep={() => googleBg.resolveCancel('keep')}
+          onResume={googleBg.resumeFromPrompt}
+        />
+      )}
+      {emailBg.cancelPrompt && emailBg.state && (
+        <BackupCancelModal
+          storedCount={emailBg.state.storedCount}
+          storedBytes={emailBg.state.storedBytes}
+          unit="email"
+          busy={emailBg.rollbackBusy}
+          onRemove={() => emailBg.resolveCancel('remove')}
+          onKeep={() => emailBg.resolveCancel('keep')}
+          onResume={emailBg.resumeFromPrompt}
+        />
       )}
 
       <div data-tour="search-bar">
@@ -1778,10 +1805,13 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
           accessToken={emailBackup.accessToken}
           accountEmail={emailBackup.accountEmail}
           items={emailBackup.items}
+          fetching={emailBackup.fetching}
+          fetchProgress={emailBackup.fetchProgress}
+          onStopFetching={stopEmailFetch}
           quotaBytes={user.storage_quota_bytes}
           usedBytes={user.storage_used_bytes}
           myServers={myServers}
-          onClose={() => setEmailBackup(null)}
+          onClose={() => { stopEmailFetch(); setEmailBackup(null) }}
           onDone={handleEmailBackupDone}
           onStartBackground={handleStartEmailBackground}
         />
@@ -1919,6 +1949,75 @@ function QuotaBar({ used, quota, onAddStorage, label }: { used: number; quota: n
       <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
         <div className={`h-full rounded-full transition-all ${color}`} style={{ width: `${pct}%` }} />
       </div>
+    </div>
+  )
+}
+
+// BackgroundBackupCard is the toolbar card a backup keeps running behind once
+// its picker window is closed: counts, the file currently being written, the
+// run's total size, and the pause/cancel controls. Shared by the Google and
+// email flows, which differ only in icon and wording.
+function BackgroundBackupCard({ state, title, icon, onTogglePause, onCancel, onDismiss, busy }: {
+  state: BackgroundBackupState
+  title: string
+  icon: React.ReactNode
+  onTogglePause: () => void
+  onCancel: () => void
+  onDismiss: () => void
+  busy: boolean
+}) {
+  const pct = state.total > 0 ? Math.round((state.done / state.total) * 100) : 0
+  const barColor = state.running
+    ? (state.paused ? 'bg-amber-400' : 'bg-blue-500')
+    : state.errors > 0 ? 'bg-amber-500' : 'bg-green-500'
+
+  return (
+    <div className="mb-3 px-3 py-2.5 bg-white border border-gray-200 rounded-lg shadow-sm flex flex-col gap-1.5">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-1.5 min-w-0">
+          {icon}
+          <span className="text-xs font-semibold text-gray-700 truncate">
+            {state.paused && state.running ? 'Backup paused' : title}
+          </span>
+        </div>
+        {state.running ? (
+          <BackupRunControls
+            paused={state.paused}
+            busy={busy}
+            onTogglePause={onTogglePause}
+            onCancel={onCancel}
+            compact
+          />
+        ) : (
+          <button onClick={onDismiss} className="text-gray-400 hover:text-gray-600 cursor-pointer">
+            <MdClose className="text-sm" />
+          </button>
+        )}
+      </div>
+      <div className="flex items-center gap-2">
+        <div className="flex-1 h-1.5 bg-gray-200 rounded-full overflow-hidden">
+          <div className={`h-full rounded-full transition-all ${barColor}`} style={{ width: `${pct}%` }} />
+        </div>
+        <span className="text-xs text-gray-500 shrink-0">{state.done}/{state.total}</span>
+      </div>
+      {state.running && (
+        <BackupProgressDetails
+          currentPath={state.currentPath}
+          storedBytes={state.storedBytes}
+          totalBytes={state.totalBytes}
+          paused={state.paused}
+        />
+      )}
+      {state.note && <p className="text-xs text-amber-600 m-0">{state.note}</p>}
+      {!state.running && !state.note && (
+        <p className={`text-xs m-0 ${state.errors > 0 ? 'text-amber-600' : 'text-green-600'}`}>
+          {[
+            `${state.uploaded} backed up`,
+            state.duplicates > 0 ? `${state.duplicates} duplicate${state.duplicates !== 1 ? 's' : ''}` : null,
+            state.errors > 0 ? `${state.errors} failed` : null,
+          ].filter(Boolean).join(' · ')}
+        </p>
+      )}
     </div>
   )
 }

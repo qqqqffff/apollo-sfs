@@ -11,8 +11,10 @@ import {
   emailBackupSendersQueryOptions,
   emailBackupMessagesInfiniteQueryOptions,
   loadEmailBackupSettings,
+  removeBackedUpMessages,
   saveEmailBackupSettings,
 } from '../../api/emailBackup'
+import { createBackupControl } from '../../api/backupControl'
 import type { ProviderEmailItem, StoredEmailPayload } from '../../api/emailProviders'
 import type { EmailBackupMessage } from '../../types/emailBackup'
 import type { PageResult } from '../../types/api'
@@ -143,6 +145,27 @@ describe('completeEmailBackupRun', () => {
   })
 })
 
+// Gmail download (format=full) + backend upload per item. The Gmail response
+// payload is minimal — the parser tolerates missing parts.
+const gmailResponse = {
+  ok: true, status: 200,
+  json: async () => ({ id: 'x', internalDate: '1750000000000', payload: { headers: [] } }),
+}
+
+function mockBackupFetch(backendStatuses: number[]) {
+  let call = 0
+  global.fetch = jest.fn().mockImplementation((url: string) => {
+    if (url.startsWith('https://gmail.googleapis.com/')) return Promise.resolve(gmailResponse)
+    const status = backendStatuses[Math.min(call++, backendStatuses.length - 1)]
+    return Promise.resolve({
+      ok: status < 300, status, statusText: '',
+      json: async () => (status < 300
+        ? { id: `row-${call}`, file_id: `file-${call}`, file_name: 'msg.email.json', file_size_bytes: 2048 }
+        : { error: 'email already backed up' }),
+    })
+  })
+}
+
 describe('backupEmailEntries', () => {
   it('counts uploads, duplicates (409), and errors, and tracks backed-up ids', async () => {
     const items: ProviderEmailItem[] = [
@@ -150,34 +173,95 @@ describe('backupEmailEntries', () => {
       { ...item, id: 'b' },
       { ...item, id: 'c' },
     ]
-    // Gmail download (format=full) + backend upload per item. The Gmail
-    // response payload is minimal — the parser tolerates missing parts.
-    const gmailResponse = {
-      ok: true, status: 200,
-      json: async () => ({ id: 'x', internalDate: '1750000000000', payload: { headers: [] } }),
-    }
-    const backendResponse = (status: number) => ({
-      ok: status < 300, status, statusText: '',
-      json: async () => (status < 300 ? { id: 'row' } : { error: 'email already backed up' }),
-    })
-    const backendStatuses = [201, 409, 500]
-    let call = 0
-    global.fetch = jest.fn().mockImplementation((url: string) => {
-      if (url.startsWith('https://gmail.googleapis.com/')) return Promise.resolve(gmailResponse)
-      return Promise.resolve(backendResponse(backendStatuses[call++]))
-    })
+    mockBackupFetch([201, 409, 500])
 
     const progress: [number, number][] = []
-    const res = await backupEmailEntries(items, 'gmail', 'token', 'f1', (done, total) => {
-      progress.push([done, total])
+    const res = await backupEmailEntries(items, 'gmail', 'token', 'f1', {
+      onProgress: (e) => { if (e.phase === 'settled') progress.push([e.done, e.total]) },
     })
 
     expect(res.uploaded).toBe(1)
     expect(res.duplicates).toBe(1)
     expect(res.errors).toBe(1)
+    expect(res.cancelled).toBe(false)
     // Uploaded and duplicate messages are safe to delete provider-side.
     expect(res.backedUpIds).toEqual(['a', 'b'])
+    // Only real uploads are rollback candidates.
+    expect(res.uploadedMessageIds).toEqual(['row-1'])
     expect(progress).toEqual([[1, 3], [2, 3], [3, 3]])
+  })
+
+  it('reports the destination path and stored size of each message', async () => {
+    mockBackupFetch([201])
+    const events: { phase: string; path: string; sizeBytes?: number }[] = []
+    await backupEmailEntries([item], 'gmail', 'token', 'f1', {
+      folderName: 'user@example.com',
+      onProgress: (e) => events.push({ phase: e.phase, path: e.path, sizeBytes: e.sizeBytes }),
+    })
+
+    // Before the upload the subject stands in for the not-yet-known file name;
+    // afterwards it is the real stored path.
+    expect(events[0]).toEqual({ phase: 'start', path: 'user@example.com/Hello', sizeBytes: undefined })
+    expect(events[1]).toEqual({
+      phase: 'settled', path: 'user@example.com/msg.email.json', sizeBytes: 2048,
+    })
+  })
+
+  it('stops at the next message when the run is cancelled', async () => {
+    const items: ProviderEmailItem[] = [
+      { ...item, id: 'a' },
+      { ...item, id: 'b' },
+      { ...item, id: 'c' },
+    ]
+    mockBackupFetch([201])
+    const control = createBackupControl()
+
+    const res = await backupEmailEntries(items, 'gmail', 'token', 'f1', {
+      control,
+      // Cancel once the first message has landed — the second must never start.
+      onProgress: (e) => { if (e.phase === 'settled' && e.index === 0) control.cancel() },
+    })
+
+    expect(res.cancelled).toBe(true)
+    expect(res.uploaded).toBe(1)
+    expect(res.uploadedMessageIds).toHaveLength(1)
+  })
+
+  it('holds the loop while paused and continues on resume', async () => {
+    const items: ProviderEmailItem[] = [{ ...item, id: 'a' }, { ...item, id: 'b' }]
+    mockBackupFetch([201])
+    const control = createBackupControl()
+    control.pause()
+
+    let done = false
+    const run = backupEmailEntries(items, 'gmail', 'token', 'f1', { control }).then((r) => {
+      done = true
+      return r
+    })
+
+    // Nothing may be sent while paused.
+    await Promise.resolve()
+    expect(done).toBe(false)
+    expect(global.fetch).not.toHaveBeenCalled()
+
+    control.resume()
+    const res = await run
+    expect(res.uploaded).toBe(2)
+  })
+})
+
+describe('removeBackedUpMessages', () => {
+  it('deletes each message and counts failures', async () => {
+    let call = 0
+    global.fetch = jest.fn().mockImplementation(() => {
+      const ok = call++ === 0
+      return Promise.resolve({
+        ok, status: ok ? 200 : 500, statusText: '',
+        json: async () => (ok ? { message: 'deleted' } : { error: 'nope' }),
+      })
+    })
+
+    expect(await removeBackedUpMessages(['row-1', 'row-2'])).toEqual({ removed: 1, failed: 1 })
   })
 })
 

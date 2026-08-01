@@ -395,6 +395,10 @@ export interface UploadGoogleOptions {
   onProgress?: (e: BackupProgressEvent<BackupEntry>) => void
 }
 
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : 'Backup failed'
+}
+
 export async function uploadGoogleEntries(
   entries: BackupEntry[],
   accessToken: string,
@@ -415,6 +419,7 @@ export async function uploadGoogleEntries(
     let sizeBytes = 0
     let fileId: string | undefined
     let driveId: string | null | undefined
+    let error: string | undefined
 
     const path = e.destPath ?? e.name
     onProgress?.({ phase: 'start', entry: e, index: i, done: i, total, path })
@@ -447,14 +452,15 @@ export async function uploadGoogleEntries(
         driveId = res.drive_id ?? null
         if (res.id) uploadedFileIds.push(res.id)
       }
-    } catch {
+    } catch (err) {
       errors++
       status = 'error'
+      error = errorMessage(err)
     }
 
     onProgress?.({
       phase: 'settled', entry: e, index: i, done: i + 1, total, path,
-      status, sizeBytes, fileId, driveId,
+      status, sizeBytes, fileId, driveId, error,
     })
   }
 

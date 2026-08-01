@@ -1,6 +1,6 @@
 import { createFileRoute, useNavigate, useSearch } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   MdAddCircleOutline,
   MdAlternateEmail,
@@ -322,7 +322,12 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
   const [renameValue, setRenameValue] = useState('')
   const [newFolderKind, setNewFolderKind] = useState<FolderKind>('regular')
   const [newFolderDriveId, setNewFolderDriveId] = useState<string | null>(null)
-  const { progress, startUpload, dismiss } = useFileUpload()
+  const { progress, startUpload, retryFailed, dismiss } = useFileUpload()
+  const onUploadSuccess = useCallback(() => {
+    queryClient.invalidateQueries({ queryKey: ['folders', folderId] })
+    queryClient.invalidateQueries({ queryKey: ['me'] })
+    queryClient.invalidateQueries({ queryKey: ['storage', 'my-servers'] })
+  }, [queryClient, folderId])
   const { isDragging } = useDragDrop((dropped) => { if (!readOnly) setPendingFiles(dropped) })
 
   // ── Multi-select state ─────────────────────────────────────────────────────
@@ -1707,17 +1712,13 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
             setPendingFiles([])
             // Pin root uploads to the drive whose view we're in; inside a folder
             // the folder's own drive governs (pass undefined).
-            startUpload(filesToUpload, uploadFolderId, () => {
-              queryClient.invalidateQueries({ queryKey: ['folders', folderId] })
-              queryClient.invalidateQueries({ queryKey: ['me'] })
-              queryClient.invalidateQueries({ queryKey: ['storage', 'my-servers'] })
-            }, ignoreRedirectIndices, folderId === 'root' ? driveId : undefined)
+            startUpload(filesToUpload, uploadFolderId, onUploadSuccess, ignoreRedirectIndices, folderId === 'root' ? driveId : undefined)
           }}
           onCancel={() => setPendingFiles([])}
         />
       )}
 
-      <UploadToast progress={progress} onDismiss={dismiss} />
+      <UploadToast progress={progress} onDismiss={dismiss} onRetry={() => retryFailed(onUploadSuccess)} />
 
       {storageModalReason && !readOnly && (
         <StorageUpgradeModal

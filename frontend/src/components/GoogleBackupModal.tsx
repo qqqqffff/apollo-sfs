@@ -122,6 +122,7 @@ export function GoogleBackupModal({
   const [progress,  setProgress]  = useState<{ done: number; total: number } | null>(null)
   const [result,    setResult]    = useState<BackupResult | null>(null)
   const [statusMap, setStatusMap] = useState<Record<number, BackupItemStatus>>({})
+  const [errorMap,  setErrorMap]  = useState<Record<number, string>>({})
   const [finished,  setFinished]  = useState(false)
   // Live detail for the in-flight run: what is being written right now and how
   // much has actually landed.
@@ -137,6 +138,7 @@ export function GoogleBackupModal({
   // below knows whether to roll the partial backup back.
   const cancelActionRef = useRef<CancelAction>('keep')
   const liveSync = useBackupLiveSync()
+  const [retrying,  setRetrying]  = useState(false)
   const [cleanupLoading, setCleanupLoading] = useState(false)
   const [cleanupMsg, setCleanupMsg] = useState<string | null>(null)
   const [settings, setSettings] = useState(loadGoogleBackupSettings)
@@ -167,6 +169,7 @@ export function GoogleBackupModal({
     setProgress(null)
     setResult(null)
     setStatusMap({})
+    setErrorMap({})
     setFinished(false)
     setCurrentPath(null)
     setStoredBytes(0)
@@ -175,6 +178,7 @@ export function GoogleBackupModal({
     setCancelPrompt(false)
     setRollbackBusy(false)
     setCancelNote(null)
+    setRetrying(false)
     setCleanupLoading(false)
     setCleanupMsg(null)
     setSettings(loadGoogleBackupSettings())
@@ -346,6 +350,7 @@ export function GoogleBackupModal({
 
     setUploading(true)
     setStatusMap({})
+    setErrorMap({})
     setStoredBytes(0)
     setStoredCount(0)
     setCancelNote(null)
@@ -357,7 +362,10 @@ export function GoogleBackupModal({
         setProgress({ done: e.done, total: e.total })
         if (e.phase === 'start') { setCurrentPath(e.path); return }
         const idx = selectedIndices[e.index]
-        if (idx !== undefined && e.status) setStatusMap((m) => ({ ...m, [idx]: e.status! }))
+        if (idx !== undefined && e.status) {
+          setStatusMap((m) => ({ ...m, [idx]: e.status! }))
+          setErrorMap((m) => (e.error ? { ...m, [idx]: e.error! } : m))
+        }
         if (e.status === 'done') {
           setStoredBytes((b) => b + (e.sizeBytes ?? 0))
           setStoredCount((c) => c + 1)
@@ -425,6 +433,43 @@ export function GoogleBackupModal({
     controlRef.current?.cancel()
   }
 
+  // Re-runs only the entries still marked 'error', merging their outcome back
+  // into the existing status/result rather than restarting the whole batch.
+  async function handleRetryFailed() {
+    const failedIndices = Object.entries(statusMap)
+      .filter(([, s]) => s === 'error')
+      .map(([i]) => Number(i))
+    if (failedIndices.length === 0) return
+
+    setRetrying(true)
+    const toRetry = failedIndices.map((i) => ({ ...entries[i], destPath: destPathFor(entries[i]) }))
+    const res = await uploadGoogleEntries(toRetry, accessToken, {
+      onProgress: (e) => {
+        if (e.phase !== 'settled' || !e.status) return
+        const idx = failedIndices[e.index]
+        if (idx === undefined) return
+        setStatusMap((m) => ({ ...m, [idx]: e.status! }))
+        setErrorMap((m) => {
+          if (e.status !== 'error') {
+            if (!(idx in m)) return m
+            const next = { ...m }
+            delete next[idx]
+            return next
+          }
+          return e.error ? { ...m, [idx]: e.error! } : m
+        })
+      },
+    })
+    setResult((prev) => prev && {
+      uploaded: prev.uploaded + res.uploaded,
+      duplicates: prev.duplicates + res.duplicates,
+      errors: prev.errors - failedIndices.length + res.errors,
+      cancelled: prev.cancelled,
+      uploadedFileIds: [...prev.uploadedFileIds, ...res.uploadedFileIds],
+    })
+    setRetrying(false)
+  }
+
   // ── Cleanup ────────────────────────────────────────────────────────────────
 
   async function handleCleanup() {
@@ -485,7 +530,7 @@ export function GoogleBackupModal({
         <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 shrink-0">
           <button
             onClick={finished ? onDone : onClose}
-            disabled={uploading}
+            disabled={uploading || retrying}
             className="p-1 rounded hover:bg-gray-100 text-gray-500 cursor-pointer transition-colors disabled:opacity-30"
           >
             <MdClose className="text-xl" />
@@ -661,6 +706,7 @@ export function GoogleBackupModal({
                           index={index}
                           checked={selected.has(index)}
                           status={statusMap[index]}
+                          error={errorMap[index]}
                           redirectFolderName={redirectFolderName}
                           folderLabel={folderLabel}
                           uploading={uploading}
@@ -681,6 +727,7 @@ export function GoogleBackupModal({
                     index={index}
                     checked={selected.has(index)}
                     status={statusMap[index]}
+                    error={errorMap[index]}
                     redirectFolderName={redirectFolderName}
                     folderLabel={folderLabel}
                     uploading={uploading}
@@ -739,7 +786,7 @@ export function GoogleBackupModal({
           {finished && !cleanupMsg && (
             <button
               onClick={handleCleanup}
-              disabled={cleanupLoading}
+              disabled={cleanupLoading || retrying}
               className={`flex items-center justify-center gap-1.5 text-sm py-2 rounded-lg border transition-colors cursor-pointer disabled:opacity-50 ${
                 driveCount > 0
                   ? 'border-red-300 text-red-500 hover:bg-red-50'
@@ -756,11 +803,27 @@ export function GoogleBackupModal({
             </button>
           )}
 
+          {/* Retry failed */}
+          {finished && result && result.errors > 0 && (
+            <button
+              onClick={handleRetryFailed}
+              disabled={retrying}
+              className="flex items-center justify-center gap-1.5 text-sm py-2 rounded-lg border border-blue-200 text-blue-600 hover:bg-blue-50 transition-colors cursor-pointer disabled:opacity-50"
+            >
+              {retrying ? (
+                <div className="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin" />
+              ) : (
+                `Retry ${result.errors} failed file${result.errors !== 1 ? 's' : ''}`
+              )}
+            </button>
+          )}
+
           {/* Primary action button — replaced by the run controls while uploading */}
           {finished ? (
             <button
               onClick={onDone}
-              className="flex items-center justify-center gap-2 py-2.5 bg-green-600 hover:bg-green-700 text-white text-sm font-semibold rounded-lg cursor-pointer transition-colors"
+              disabled={retrying}
+              className="flex items-center justify-center gap-2 py-2.5 bg-green-600 hover:bg-green-700 text-white text-sm font-semibold rounded-lg cursor-pointer transition-colors disabled:opacity-40"
             >
               <MdCheck className="text-base" /> Done
             </button>
@@ -853,6 +916,7 @@ interface FileRowProps {
   index: number
   checked: boolean
   status: BackupItemStatus | undefined
+  error?: string
   redirectFolderName: string | null
   folderLabel: (id: string | null) => string
   uploading: boolean
@@ -863,7 +927,7 @@ interface FileRowProps {
 }
 
 function FileRow({
-  entry, index, checked, status, redirectFolderName, folderLabel,
+  entry, index, checked, status, error, redirectFolderName, folderLabel,
   uploading, finished, onToggle, onOpenDest, onPreview,
 }: FileRowProps) {
   const isDrive  = entry.source === 'drive'
@@ -915,6 +979,11 @@ function FileRow({
           </span>
           <span className="text-xs text-gray-400">{entry.size > 0 ? fmt(entry.size) : '—'}</span>
         </div>
+        {status === 'error' && error && (
+          <div className="text-[10px] text-red-500 truncate mt-0.5" title={`${entry.type} — ${error}`}>
+            {entry.type} — {error}
+          </div>
+        )}
       </div>
 
       {/* Status or destination */}

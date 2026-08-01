@@ -124,6 +124,10 @@ export interface BackupEmailOptions {
   folderName?: string
 }
 
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : 'Backup failed'
+}
+
 // backupEmailEntries downloads each selected message from the provider and
 // posts it to the backend one at a time (mirrors uploadGoogleEntries).
 // A 409 from the backend means the message was already backed up → duplicate.
@@ -151,6 +155,7 @@ export async function backupEmailEntries(
     let sizeBytes = 0
     let fileId: string | undefined
     let messageId: string | undefined
+    let error: string | undefined
     // The server names the stored file (date + subject + id hash); until it
     // answers, show the subject so the line isn't blank while it uploads.
     let path = emailDestPath(folderName, item.subject || '(no subject)')
@@ -177,12 +182,13 @@ export async function backupEmailEntries(
       } else {
         errors++
         status = 'error'
+        error = errorMessage(e)
       }
     }
 
     onProgress?.({
       phase: 'settled', entry: item, index: i, done: i + 1, total, path,
-      status, sizeBytes, fileId, messageId,
+      status, sizeBytes, fileId, messageId, error,
     })
   }
 

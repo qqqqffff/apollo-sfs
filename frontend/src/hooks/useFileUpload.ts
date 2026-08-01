@@ -17,6 +17,7 @@ export interface FileUploadItem {
   size: number    // file.size in bytes
   loaded: number  // bytes transferred so far
   status: FileItemStatus
+  error?: string  // reason the upload failed, set once all retries are exhausted
 }
 
 export interface UploadProgress {
@@ -48,6 +49,17 @@ function sleep(ms: number) {
   return new Promise<void>((r) => setTimeout(r, ms))
 }
 
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : 'Upload failed'
+}
+
+interface LastUploadArgs {
+  files: globalThis.File[]
+  folderId: string | null
+  ignoreRedirectIndices?: Set<number>
+  driveId: string | null
+}
+
 export function useFileUpload() {
   const [progress, setProgress] = useState<UploadProgress>(IDLE)
 
@@ -55,6 +67,7 @@ export function useFileUpload() {
   const liveRef   = useRef<UploadProgress>(IDLE)
   const samples   = useRef<{ t: number; loaded: number }[]>([])
   const flushTimer = useRef<ReturnType<typeof setInterval> | null>(null)
+  const lastArgsRef = useRef<LastUploadArgs | null>(null)
 
   function recordSample(loaded: number) {
     const now = Date.now()
@@ -170,6 +183,36 @@ export function useFileUpload() {
     await completeChunkedUploadPresigned(upload_id, session_token)
   }
 
+  // Runs the retry loop for a single file/index, patching its item state as it
+  // goes. Shared by startUpload (fresh queue) and retryFailed (failed subset).
+  async function attemptFile(
+    file: globalThis.File,
+    itemIndex: number,
+    folderId: string | null,
+    ignoreRedirect: boolean,
+    driveId: string | null,
+  ): Promise<boolean> {
+    patchItem(itemIndex, { status: 'uploading', loaded: 0, error: undefined })
+
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      if (attempt > 0) {
+        patchItem(itemIndex, { loaded: 0 })
+        await sleep(RETRY_DELAYS_MS[attempt - 1])
+      }
+      try {
+        await uploadSingleFile(file, folderId, itemIndex, ignoreRedirect, driveId)
+        patchItem(itemIndex, { loaded: file.size, status: 'done', error: undefined })
+        return true
+      } catch (err) {
+        if (attempt === MAX_RETRIES) {
+          patchItem(itemIndex, { status: 'failed', error: errorMessage(err) })
+          return false
+        }
+      }
+    }
+    return false
+  }
+
   const startUpload = useCallback(async (
     files: globalThis.File[],
     folderId: string | null,
@@ -189,31 +232,19 @@ export function useFileUpload() {
     samples.current = []
     setProgress(liveRef.current)
     startFlush()
+    lastArgsRef.current = { files, folderId, ignoreRedirectIndices, driveId: driveId ?? null }
 
     let succeededCount = 0
     let failedCount = 0
 
     await Promise.all(files.map(async (file, i) => {
-      patchItem(i, { status: 'uploading' })
-
-      for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-        if (attempt > 0) {
-          patchItem(i, { loaded: 0 })
-          await sleep(RETRY_DELAYS_MS[attempt - 1])
-        }
-        try {
-          await uploadSingleFile(file, folderId, i, ignoreRedirectIndices?.has(i) ?? false, driveId ?? null)
-          patchItem(i, { loaded: file.size, status: 'done' })
-          succeededCount++
-          liveRef.current = { ...liveRef.current, succeeded: succeededCount }
-          break
-        } catch {
-          if (attempt === MAX_RETRIES) {
-            patchItem(i, { status: 'failed' })
-            failedCount++
-            liveRef.current = { ...liveRef.current, failed: failedCount }
-          }
-        }
+      const ok = await attemptFile(file, i, folderId, ignoreRedirectIndices?.has(i) ?? false, driveId ?? null)
+      if (ok) {
+        succeededCount++
+        liveRef.current = { ...liveRef.current, succeeded: succeededCount }
+      } else {
+        failedCount++
+        liveRef.current = { ...liveRef.current, failed: failedCount }
       }
     }))
 
@@ -227,12 +258,54 @@ export function useFileUpload() {
     if (succeededCount > 0) onAnySuccess()
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // retryFailed re-attempts only the items still in 'failed' status, using the
+  // same folder/redirect/drive routing as the run that produced them. The
+  // original File objects are kept in lastArgsRef, so no re-picking is needed.
+  const retryFailed = useCallback(async (onAnySuccess: () => void) => {
+    const args = lastArgsRef.current
+    if (!args) return
+    const failedIndices = liveRef.current.items
+      .map((it, i) => (it.status === 'failed' ? i : -1))
+      .filter((i) => i >= 0)
+    if (failedIndices.length === 0) return
+
+    liveRef.current = { ...liveRef.current, status: 'uploading' }
+    setProgress(liveRef.current)
+    startFlush()
+
+    let newlySucceeded = 0
+
+    await Promise.all(failedIndices.map(async (i) => {
+      const ok = await attemptFile(
+        args.files[i], i, args.folderId, args.ignoreRedirectIndices?.has(i) ?? false, args.driveId,
+      )
+      if (ok) {
+        newlySucceeded++
+        liveRef.current = {
+          ...liveRef.current,
+          succeeded: liveRef.current.succeeded + 1,
+          failed: liveRef.current.failed - 1,
+        }
+      }
+    }))
+
+    const finalStatus: UploadStatus =
+      liveRef.current.failed === 0 ? 'complete' : liveRef.current.succeeded === 0 ? 'allFailed' : 'partial'
+
+    liveRef.current = { ...liveRef.current, status: finalStatus }
+    stopFlush()
+    setProgress({ ...liveRef.current, speedBps: 0 })
+
+    if (newlySucceeded > 0) onAnySuccess()
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
   const dismiss = useCallback(() => {
     stopFlush()
     liveRef.current = IDLE
     samples.current = []
+    lastArgsRef.current = null
     setProgress(IDLE)
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  return { progress, startUpload, dismiss }
+  return { progress, startUpload, retryFailed, dismiss }
 }

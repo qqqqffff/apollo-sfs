@@ -145,7 +145,11 @@ export function MediaCollectionView({
   const fileRef = useRef<HTMLInputElement>(null)
   const [pendingFiles, setPendingFiles] = useState<globalThis.File[]>([])
   const [showStorageBreakdown, setShowStorageBreakdown] = useState(false)
-  const { progress, startUpload, dismiss } = useFileUpload()
+  const { progress, startUpload, retryFailed, dismiss } = useFileUpload()
+  const onUploadSuccess = useCallback(() => {
+    invalidate()
+    queryClient.invalidateQueries({ queryKey: ['me'] })
+  }, [queryClient]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Multi-select state ─────────────────────────────────────────────────────
   const [selectionMode, setSelectionMode] = useState(false)
@@ -810,10 +814,7 @@ export function MediaCollectionView({
           onConfirm={() => {
             const filesToUpload = pendingFiles
             setPendingFiles([])
-            startUpload(filesToUpload, folderId, () => {
-              invalidate()
-              queryClient.invalidateQueries({ queryKey: ['me'] })
-            })
+            startUpload(filesToUpload, folderId, onUploadSuccess)
           }}
           onCancel={() => setPendingFiles([])}
         />
@@ -826,7 +827,7 @@ export function MediaCollectionView({
         />
       )}
 
-      <UploadToast progress={progress} onDismiss={dismiss} />
+      <UploadToast progress={progress} onDismiss={dismiss} onRetry={() => retryFailed(onUploadSuccess)} />
 
       {infoFile && <MediaInfoModal file={infoFile} devices={devicesData?.items} onClose={() => setInfoFile(null)} />}
 

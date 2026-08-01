@@ -18,6 +18,10 @@ interface Props {
   usedBytes: number
   quotaBytes: number
   quotaLabel?: string
+  // Items that are part of the deletion but whose metadata isn't loaded, so
+  // they can't be listed or sized. Non-zero only for the media grid's
+  // filter-driven selection, which can select items beyond the loaded pages.
+  unlistedCount?: number
   isPending?: boolean
   onConfirm: () => void
   onCancel: () => void
@@ -35,10 +39,11 @@ function formatSize(bytes: number): string {
 // permanence warning, plus a list of everything about to be deleted and a
 // quota-impact bar showing how much space it will free.
 export function BulkDeleteConfirmModal({
-  items, username, usedBytes, quotaBytes, quotaLabel, isPending, onConfirm, onCancel,
+  items, username, usedBytes, quotaBytes, quotaLabel, unlistedCount = 0, isPending, onConfirm, onCancel,
 }: Props) {
   const [dontShowAgain, setDontShowAgain] = useState(false)
   const totalBytes = items.reduce((sum, i) => sum + i.size_bytes, 0)
+  const totalCount = items.length + unlistedCount
   const afterBytes = Math.max(usedBytes - totalBytes, 0)
   const afterPct = quotaBytes > 0 ? Math.min((afterBytes / quotaBytes) * 100, 100) : 0
   const freedPct = quotaBytes > 0 ? Math.min((totalBytes / quotaBytes) * 100, 100 - afterPct) : 0
@@ -72,7 +77,7 @@ export function BulkDeleteConfirmModal({
           <MdDeleteForever className="text-red-500 text-2xl shrink-0 mt-0.5" />
           <div>
             <h3 className="text-base font-semibold text-gray-900 m-0 mb-1">
-              Delete {items.length} item{items.length !== 1 ? 's' : ''} permanently?
+              Delete {totalCount} item{totalCount !== 1 ? 's' : ''} permanently?
             </h3>
             <p className="text-sm text-gray-500 m-0">
               These will be permanently deleted and cannot be recovered.
@@ -100,9 +105,18 @@ export function BulkDeleteConfirmModal({
               ))}
             </tbody>
             <tfoot>
+              {unlistedCount > 0 && (
+                <tr className="border-t border-gray-100">
+                  <td colSpan={2} className="px-3 py-1.5 text-xs text-gray-500 italic">
+                    + {unlistedCount} more selected item{unlistedCount !== 1 ? 's' : ''} not
+                    loaded in this view — they will be deleted too, but aren’t counted in the
+                    size below.
+                  </td>
+                </tr>
+              )}
               <tr className="border-t-2 border-gray-200 bg-gray-50">
                 <td className="px-3 py-1.5 font-semibold text-gray-800">
-                  {items.length} item{items.length !== 1 ? 's' : ''}
+                  {items.length} {unlistedCount > 0 ? 'listed ' : ''}item{items.length !== 1 ? 's' : ''}
                 </td>
                 <td className="px-3 py-1.5 text-right font-semibold text-gray-800 whitespace-nowrap">
                   {formatSize(totalBytes)}

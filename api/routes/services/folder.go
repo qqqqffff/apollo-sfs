@@ -306,13 +306,14 @@ func (s *FolderService) sameEffectiveDrive(ctx context.Context, username string,
 
 // GetMediaContents returns a media folder's metadata, its direct subcollections,
 // and its media files (physical residents plus pointers), ordered per sort and
-// filtered by hidden state. Returns ErrFolderNotFound if the folder does not
-// belong to userID, ErrNotMediaCollection if it is not a media folder.
+// narrowed by hidden state and filter. Returns ErrFolderNotFound if the folder
+// does not belong to userID, ErrNotMediaCollection if it is not a media folder.
 func (s *FolderService) GetMediaContents(
 	ctx context.Context,
 	folderID, userID uuid.UUID,
 	sort db.MediaSort,
 	hidden db.HiddenFilter,
+	filter db.MediaFilter,
 	folderPage, filePage db.PageInput,
 ) (*FolderContents, error) {
 	q, tx, err := s.queries.ForUser(ctx, userID)
@@ -343,7 +344,7 @@ func (s *FolderService) GetMediaContents(
 	if filePage.Skip {
 		files = emptyFiles()
 	} else {
-		files, err = q.ListMediaFiles(ctx, folderID, sort, hidden, filePage)
+		files, err = q.ListMediaFiles(ctx, folderID, sort, hidden, filter, filePage)
 		if err != nil {
 			return nil, fmt.Errorf("get media contents: files: %w", err)
 		}
@@ -354,6 +355,38 @@ func (s *FolderService) GetMediaContents(
 		Subfolders: subfolders,
 		Files:      files,
 	}, nil
+}
+
+// ListMediaFileIDs returns the ids of every file in a media collection matching
+// the hidden state and filter (capped at db.MaxMediaSelectionIDs), ordered per
+// sort. Backs the grid's "select all matching this filter" action. Same
+// ownership/kind guarantees as GetMediaContents.
+func (s *FolderService) ListMediaFileIDs(
+	ctx context.Context,
+	folderID, userID uuid.UUID,
+	sort db.MediaSort,
+	hidden db.HiddenFilter,
+	filter db.MediaFilter,
+) ([]uuid.UUID, error) {
+	q, tx, err := s.queries.ForUser(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list media file ids: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	folder, err := s.getOwned(ctx, q, folderID, userID)
+	if err != nil {
+		return nil, err
+	}
+	if folder.Kind != models.FolderKindMedia {
+		return nil, ErrNotMediaCollection
+	}
+
+	ids, err := q.ListMediaFileIDs(ctx, folderID, sort, hidden, filter)
+	if err != nil {
+		return nil, fmt.Errorf("list media file ids: %w", err)
+	}
+	return ids, nil
 }
 
 // CopyToSubcollection adds a pointer placing fileID into the subcollection

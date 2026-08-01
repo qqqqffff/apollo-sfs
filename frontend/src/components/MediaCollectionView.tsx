@@ -1,12 +1,16 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   MdAdd,
   MdArrowBack,
   MdAutoAwesome,
   MdCheck,
+  MdCheckBox,
+  MdCheckBoxOutlineBlank,
+  MdChecklist,
   MdClose,
   MdCreateNewFolder,
+  MdFilterAlt,
   MdInfoOutline,
   MdMenu,
   MdMovie,
@@ -16,29 +20,49 @@ import {
   MdVisibility,
   MdVisibilityOff,
 } from 'react-icons/md'
-import { getMediaFolder, createFolder } from '../api/folders'
-import { hideFile, unhideFile, previewUrl, streamUrl } from '../api/files'
+import { getMediaFolder, getMediaFileIds, createFolder } from '../api/folders'
+import { deleteFile, hideFile, unhideFile, previewUrl, streamUrl } from '../api/files'
+import { favoriteFile, favoritesQueryOptions, unfavoriteFile } from '../api/favorites'
 import { copyToCollection, removeFromCollection } from '../api/collections'
 import { listDevices } from '../api/devices'
 import { meQueryOptions } from '../api/me'
-import { recognitionStatusQueryOptions } from '../api/recognition'
+import { recognitionGroupsQueryOptions, recognitionStatusQueryOptions } from '../api/recognition'
 import { listMyServers, resolveDrive } from '../api/storage'
 import { useNotification } from '../context/NotificationContext'
 import { useFileUpload } from '../hooks/useFileUpload'
 import { useFavorites } from '../hooks/useFavorites'
+import { useVirtualGrid } from '../hooks/useVirtualGrid'
+import { BulkDeleteConfirmModal } from './BulkDeleteConfirmModal'
 import { CollectionInfoModal } from './CollectionInfoModal'
+import { MediaFilterPanel, groupLabel, summarizeMediaFilters } from './MediaFilterPanel'
+import { MediaSelectionToolbar } from './MediaSelectionToolbar'
 import { MediaViewerPage } from './MediaViewerPage'
 import { RecognitionGroupsModal } from './RecognitionGroupsModal'
 import { UploadModal } from './UploadModal'
 import { StorageBreakdownModal } from './StorageBreakdownModal'
 import { UploadToast } from './UploadToast'
-import type { Device, File, Folder, HiddenMode, MediaSort } from '../types/api'
+import { EMPTY_MEDIA_FILTERS, countMediaFilters } from '../types/api'
+import type { Device, File, Folder, HiddenMode, MediaFilters, MediaSort } from '../types/api'
 
 // Items-per-row control: keeps grid tiles from shrinking below 100x100px —
 // matches the grid's Tailwind gap-3 (0.75rem = 12px).
 const GRID_GAP_PX = 12
 const MIN_TILE_PX = 100
 const GRID_COLS_STORAGE_KEY = 'apollo-sfs:media-grid-cols'
+
+// Fallback height a tile's caption strip adds on top of its square thumbnail,
+// used only until a real tile has been measured.
+const ESTIMATED_TILE_CAPTION_PX = 45
+
+// Page size requested per fetch. The grid only ever renders a couple of
+// screenfuls, so pulling the server's maximum per round trip costs nothing on
+// screen and keeps a fast scroll ahead of the network.
+const MEDIA_PAGE_SIZE = 128
+
+// How many bulk actions (hide, delete, copy…) run at once. A filter-driven
+// selection can cover thousands of items, and these hit the per-user
+// bulk-data rate limit one request per file.
+const BULK_CONCURRENCY = 6
 
 interface Props {
   folderId: string
@@ -59,11 +83,18 @@ interface Props {
 }
 
 // useInfiniteMedia paginates a media collection's files (and first-page subfolders).
-function useInfiniteMedia(folderId: string, sort: MediaSort, hidden: HiddenMode) {
+function useInfiniteMedia(folderId: string, sort: MediaSort, hidden: HiddenMode, filters: MediaFilters) {
   const query = useInfiniteQuery({
-    queryKey: ['media', folderId, sort, hidden],
+    queryKey: ['media', folderId, sort, hidden, filters],
     queryFn: ({ pageParam }) =>
-      getMediaFolder(folderId, { sort, hidden, fileCursor: pageParam || undefined, folderLimit: pageParam ? 0 : undefined }),
+      getMediaFolder(folderId, {
+        sort,
+        hidden,
+        filters,
+        fileCursor: pageParam || undefined,
+        fileLimit: MEDIA_PAGE_SIZE,
+        folderLimit: pageParam ? 0 : undefined,
+      }),
     initialPageParam: '' as string,
     getNextPageParam: (last) => last.files.next_token || undefined,
   })
@@ -77,6 +108,17 @@ function useInfiniteMedia(folderId: string, sort: MediaSort, hidden: HiddenMode)
     isFetchingNextPage: query.isFetchingNextPage,
     fetchNextPage: query.fetchNextPage,
   }
+}
+
+// runBatched applies fn to every id with a bounded number in flight, and
+// reports how many failed. Used by every bulk selection action.
+async function runBatched<T>(ids: T[], fn: (id: T) => Promise<unknown>): Promise<number> {
+  let failed = 0
+  for (let i = 0; i < ids.length; i += BULK_CONCURRENCY) {
+    const results = await Promise.allSettled(ids.slice(i, i + BULK_CONCURRENCY).map(fn))
+    failed += results.filter((r) => r.status === 'rejected').length
+  }
+  return failed
 }
 
 export function MediaCollectionView({
@@ -93,6 +135,8 @@ export function MediaCollectionView({
   const { favoriteFileIds, toggleFile: toggleFavoriteFile } = useFavorites()
   const [sort, setSort] = useState<MediaSort>('taken_at')
   const [hidden, setHidden] = useState<HiddenMode>('hide')
+  const [filters, setFilters] = useState<MediaFilters>(EMPTY_MEDIA_FILTERS)
+  const [showFilters, setShowFilters] = useState(false)
   const [creating, setCreating] = useState(false)
   const [newName, setNewName] = useState('')
   const [infoFile, setInfoFile] = useState<File | null>(null)
@@ -102,6 +146,16 @@ export function MediaCollectionView({
   const [pendingFiles, setPendingFiles] = useState<globalThis.File[]>([])
   const [showStorageBreakdown, setShowStorageBreakdown] = useState(false)
   const { progress, startUpload, dismiss } = useFileUpload()
+
+  // ── Multi-select state ─────────────────────────────────────────────────────
+  const [selectionMode, setSelectionMode] = useState(false)
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  // Human-readable summaries of the filters a selection was built from — one
+  // chip per "select matching" the user ran (they union together).
+  const [selectionFilterChips, setSelectionFilterChips] = useState<string[]>([])
+  const [isSelectingByFilter, setIsSelectingByFilter] = useState(false)
+  const [bulkPending, setBulkPending] = useState(false)
+  const [pendingBulkDelete, setPendingBulkDelete] = useState(false)
 
   // Below `lg` the controls row becomes a slide-in drawer (same pattern as
   // the files page's side control panel) instead of a wrapping toolbar.
@@ -120,20 +174,28 @@ export function MediaCollectionView({
   }, [controlsOpen])
 
   // Items-per-row: measure the grid's actual rendered width and cap the
-  // column count so tiles never shrink below 100x100px.
-  const gridRef = useRef<HTMLDivElement>(null)
+  // column count so tiles never shrink below 100x100px. Attached as a ref
+  // callback rather than a mount effect because the grid element comes and
+  // goes with the empty state.
+  const gridRef = useRef<HTMLDivElement | null>(null)
+  const gridObserver = useRef<ResizeObserver | null>(null)
   const [gridWidth, setGridWidth] = useState(0)
 
-  useEffect(() => {
-    const el = gridRef.current
+  const attachGrid = useCallback((el: HTMLDivElement | null) => {
+    gridRef.current = el
+    gridObserver.current?.disconnect()
     if (!el) return
     const observer = new ResizeObserver((entries) => {
       const width = entries[0]?.contentRect.width
       if (width) setGridWidth(width)
     })
     observer.observe(el)
-    return () => observer.disconnect()
+    gridObserver.current = observer
+    const width = el.getBoundingClientRect().width
+    if (width) setGridWidth(width)
   }, [])
+
+  useEffect(() => () => gridObserver.current?.disconnect(), [])
 
   const maxCols = gridWidth > 0 ? Math.max(1, Math.floor((gridWidth + GRID_GAP_PX) / (MIN_TILE_PX + GRID_GAP_PX))) : 4
   const colOptions = Array.from({ length: maxCols }, (_, i) => i + 1)
@@ -152,9 +214,21 @@ export function MediaCollectionView({
 
   // Polls while indexing is active; disabled entirely for non-premium users.
   const { data: recognitionStatus } = useQuery(recognitionStatusQueryOptions(folderId, isPremium))
+  const recognitionEnabled = !!recognitionStatus?.enabled
+
+  // Labeled groups, used both to name the filter chips and (inside the panel)
+  // to offer the label checkboxes.
+  const { data: labeledGroupData } = useQuery({
+    ...recognitionGroupsQueryOptions(folderId, undefined, true),
+    enabled: recognitionEnabled,
+  })
+  const groupNames = useMemo(
+    () => new Map((labeledGroupData?.groups ?? []).map((g) => [g.id, groupLabel(g)])),
+    [labeledGroupData],
+  )
 
   const { subfolders, files, isLoading, error, hasNextPage, isFetchingNextPage, fetchNextPage } =
-    useInfiniteMedia(folderId, sort, hidden)
+    useInfiniteMedia(folderId, sort, hidden, filters)
 
   function invalidate() {
     queryClient.invalidateQueries({ queryKey: ['media', folderId] })
@@ -188,6 +262,246 @@ export function MediaCollectionView({
   // When viewing a subcollection (not the top-level media folder), items may be
   // pointers that can be removed from this collection.
   const isSubcollection = folder.parent_id !== null
+
+  // ── Virtualized grid ───────────────────────────────────────────────────────
+  // Only the rows near the viewport are rendered; the container reserves the
+  // full height of every row so the scrollbar (and the user's position in it)
+  // never shifts as tiles mount and unmount. One extra row of skeleton tiles
+  // is reserved while another page is still to come, so scrolling into
+  // not-yet-loaded territory lands on placeholders rather than a hard stop.
+  const cellWidth = gridWidth > 0 ? (gridWidth - GRID_GAP_PX * (cols - 1)) / cols : MIN_TILE_PX
+  const [tileCaptionPx, setTileCaptionPx] = useState<number | null>(null)
+  const rowHeight = cellWidth + (tileCaptionPx ?? ESTIMATED_TILE_CAPTION_PX)
+
+  // Measured off the first rendered tile: everything a tile adds on top of its
+  // square thumbnail (caption lines + borders), which depends on font metrics
+  // rather than layout width, so one measurement holds for every tile.
+  const measureTile = useCallback((el: HTMLDivElement | null) => {
+    if (!el || gridWidth <= 0) return
+    const extra = el.getBoundingClientRect().height - cellWidth
+    if (extra > 0) {
+      setTileCaptionPx((prev) => (prev === null || Math.abs(prev - extra) > 0.5 ? extra : prev))
+    }
+  }, [gridWidth, cellWidth])
+
+  const placeholderCount = hasNextPage ? cols : 0
+  const { startIndex, endIndex, stride, totalHeight } = useVirtualGrid({
+    itemCount: files.length + placeholderCount,
+    cols,
+    rowHeight,
+    gap: GRID_GAP_PX,
+    containerRef: gridRef,
+  })
+
+  const firstRow = Math.floor(startIndex / cols)
+  const lastRow = Math.ceil(endIndex / cols)
+  const visibleRows = Array.from({ length: Math.max(0, lastRow - firstRow) }, (_, i) => firstRow + i)
+
+  // Infinite scroll: the render window reaching past the loaded items (which
+  // it does a full 2 viewports early, thanks to the overscan) pulls the next
+  // page in.
+  useEffect(() => {
+    if (hasNextPage && !isFetchingNextPage && endIndex >= files.length) {
+      fetchNextPage()
+    }
+  }, [endIndex, files.length, hasNextPage, isFetchingNextPage, fetchNextPage])
+
+  // A new sort/filter is a new list — start it from the top rather than
+  // stranding the user mid-scroll in unrelated results.
+  const listKey = `${sort}|${hidden}|${JSON.stringify(filters)}`
+  const firstListRender = useRef(true)
+  useEffect(() => {
+    if (firstListRender.current) {
+      firstListRender.current = false
+      return
+    }
+    window.scrollTo({ top: 0 })
+  }, [listKey])
+
+  // ── Scroll restoration around the full-screen viewer ───────────────────────
+  // Closing the viewer must land back on the item that was on screen — which
+  // is whatever the user last swiped to, not the one they opened. The viewer
+  // locks body scroll while it's up, so the grid's position is not preserved
+  // on its own; we re-derive it from that item's row instead.
+  const [restoreToFileId, setRestoreToFileId] = useState<string | null>(null)
+  const lastActiveFileId = useRef<string | undefined>(activeFileId)
+
+  useEffect(() => {
+    const previous = lastActiveFileId.current
+    lastActiveFileId.current = activeFileId
+    if (previous && !activeFileId) setRestoreToFileId(previous)
+  }, [activeFileId])
+
+  useEffect(() => {
+    if (!restoreToFileId || activeFileId) return
+    const index = files.findIndex((f) => f.id === restoreToFileId)
+    const el = gridRef.current
+    if (index < 0 || !el) return
+    // Wait a frame so the viewer's body-scroll lock has been released and the
+    // grid has its full height back before we scroll.
+    const frame = requestAnimationFrame(() => {
+      const gridTop = el.getBoundingClientRect().top + window.scrollY
+      const rowTop = gridTop + Math.floor(index / cols) * stride
+      // Centre the row when it fits; otherwise just bring it to the top.
+      const offset = Math.max(0, (window.innerHeight - rowHeight) / 2)
+      window.scrollTo({ top: Math.max(0, rowTop - offset), behavior: 'auto' })
+    })
+    setRestoreToFileId(null)
+    return () => cancelAnimationFrame(frame)
+  }, [restoreToFileId, activeFileId, files, cols, stride, rowHeight])
+
+  // ── Selection ──────────────────────────────────────────────────────────────
+  // Selected ids only make sense against the collection they were picked in.
+  useEffect(() => {
+    setSelectedIds(new Set())
+    setSelectionFilterChips([])
+  }, [folderId])
+
+  function clearSelection() {
+    setSelectedIds(new Set())
+    setSelectionFilterChips([])
+  }
+
+  function toggleSelectionMode() {
+    setSelectionMode((m) => {
+      if (m) clearSelection()
+      return !m
+    })
+  }
+
+  function toggleSelect(id: string) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  // Filter-driven selection: adds every item matching the filter to the
+  // current selection (rather than narrowing the view), so applying several
+  // different filters in a row unions them into one selection. The match set
+  // has to come from the server — the grid only holds the pages fetched so far.
+  async function selectByFilter(applied: MediaFilters) {
+    if (countMediaFilters(applied) === 0) return
+    setIsSelectingByFilter(true)
+    try {
+      const { file_ids, truncated } = await getMediaFileIds(folderId, { sort, hidden, filters: applied })
+      setSelectedIds((prev) => new Set([...prev, ...file_ids]))
+      setSelectionFilterChips((prev) => {
+        const summary = summarizeMediaFilters(applied, groupNames)
+        return prev.includes(summary) ? prev : [...prev, summary]
+      })
+      if (truncated) {
+        notify('error', 'Too many matches to select them all — the first 20,000 were selected')
+      } else if (file_ids.length === 0) {
+        notify('error', 'Nothing matched that filter')
+      } else {
+        notify('success', `${file_ids.length} item${file_ids.length !== 1 ? 's' : ''} matched`)
+      }
+    } catch {
+      notify('error', 'Failed to select by filter')
+    } finally {
+      setIsSelectingByFilter(false)
+    }
+  }
+
+  // "Select all" in the toolbar means everything in the current view — which,
+  // like the filter selection, spans pages that aren't loaded yet.
+  async function selectAllInView() {
+    setIsSelectingByFilter(true)
+    try {
+      const { file_ids, truncated } = await getMediaFileIds(folderId, { sort, hidden, filters })
+      setSelectedIds(new Set(file_ids))
+      setSelectionFilterChips([])
+      if (truncated) notify('error', 'Too many items to select them all — the first 20,000 were selected')
+    } catch {
+      notify('error', 'Failed to select all')
+    } finally {
+      setIsSelectingByFilter(false)
+    }
+  }
+
+  function handleFilterApply(applied: MediaFilters) {
+    if (selectionMode) {
+      selectByFilter(applied)
+      return
+    }
+    setFilters(applied)
+    setShowFilters(false)
+  }
+
+  const selectedIdList = useMemo(() => Array.from(selectedIds), [selectedIds])
+  const selectedLoadedFiles = useMemo(
+    () => files.filter((f) => selectedIds.has(f.id)),
+    [files, selectedIds],
+  )
+  const allSelectedFavorited =
+    selectedIdList.length > 0 && selectedIdList.every((id) => favoriteFileIds.has(id))
+
+  // Runs a per-file action across the whole selection, then refreshes the grid
+  // (and anything else the action touched) once at the end.
+  async function runOnSelection(
+    action: (id: string) => Promise<unknown>,
+    describe: (n: number) => string,
+    extraInvalidate?: () => void,
+  ) {
+    if (selectedIdList.length === 0) return
+    setBulkPending(true)
+    const failed = await runBatched(selectedIdList, action)
+    const done = selectedIdList.length - failed
+    setBulkPending(false)
+    invalidate()
+    extraInvalidate?.()
+    if (failed > 0) notify('error', `${describe(done)}, ${failed} failed`)
+    else notify('success', describe(done))
+  }
+
+  async function runBulkFavorite() {
+    const shouldUnfavorite = allSelectedFavorited
+    await runOnSelection(
+      (id) => (shouldUnfavorite ? unfavoriteFile(id) : favoriteFile(id)),
+      (n) => `${n} item${n !== 1 ? 's' : ''} ${shouldUnfavorite ? 'unfavorited' : 'favorited'}`,
+      () => queryClient.invalidateQueries({ queryKey: favoritesQueryOptions.queryKey }),
+    )
+  }
+
+  async function runBulkHidden(hide: boolean) {
+    await runOnSelection(
+      (id) => (hide ? hideFile(id) : unhideFile(id)),
+      (n) => `${n} item${n !== 1 ? 's' : ''} ${hide ? 'hidden' : 'unhidden'}`,
+    )
+  }
+
+  async function runBulkCopy(collectionId: string) {
+    await runOnSelection(
+      (id) => copyToCollection(collectionId, id),
+      (n) => `${n} item${n !== 1 ? 's' : ''} added to collection`,
+    )
+  }
+
+  async function runBulkRemove() {
+    await runOnSelection(
+      (id) => removeFromCollection(folderId, id),
+      (n) => `${n} item${n !== 1 ? 's' : ''} removed from this collection`,
+    )
+    clearSelection()
+  }
+
+  async function runBulkDelete() {
+    await runOnSelection(
+      (id) => deleteFile(id),
+      (n) => `${n} item${n !== 1 ? 's' : ''} deleted`,
+      () => {
+        queryClient.invalidateQueries({ queryKey: ['me'] })
+        queryClient.invalidateQueries({ queryKey: ['storage', 'my-servers'] })
+      },
+    )
+    setPendingBulkDelete(false)
+    clearSelection()
+  }
+
+  const activeFilterCount = countMediaFilters(filters)
 
   if (isLoading) return <p className="text-sm text-gray-500">Loading…</p>
   if (error) return <p className="text-sm text-red-500">Failed to load collection.</p>
@@ -247,11 +561,13 @@ export function MediaCollectionView({
         <select
           value={sort}
           onChange={(e) => setSort(e.target.value as MediaSort)}
+          aria-label="Sort media"
           className="border border-gray-200 rounded-lg px-2.5 py-1.5 text-xs text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer"
         >
           <option value="taken_at">Date taken</option>
           <option value="created_at">Date uploaded</option>
           <option value="name">Name</option>
+          <option value="source">Upload source</option>
         </select>
 
         <select
@@ -272,7 +588,36 @@ export function MediaCollectionView({
           <ToggleBtn active={hidden === 'only'} onClick={() => setHidden('only')} label="Hidden" />
         </div>
 
-        {recognitionStatus?.enabled && (
+        <button
+          onClick={() => setShowFilters(true)}
+          title={selectionMode ? 'Select items by filter' : 'Filter this collection'}
+          className={`inline-flex items-center gap-1 px-2.5 py-1.5 text-xs border rounded-lg cursor-pointer transition-colors ${
+            activeFilterCount > 0
+              ? 'bg-blue-50 text-blue-600 border-blue-200'
+              : 'bg-white text-gray-700 border-gray-200 hover:bg-gray-50'
+          }`}
+        >
+          <MdFilterAlt className="text-sm" /> Filter
+          {activeFilterCount > 0 && (
+            <span className="ml-0.5 inline-flex items-center justify-center min-w-4 h-4 px-1 rounded-full bg-blue-600 text-white text-[10px] font-semibold">
+              {activeFilterCount}
+            </span>
+          )}
+        </button>
+
+        <button
+          onClick={toggleSelectionMode}
+          title={selectionMode ? 'Exit selection mode' : 'Select multiple items'}
+          className={`inline-flex items-center gap-1 px-2.5 py-1.5 text-xs border rounded-lg cursor-pointer transition-colors ${
+            selectionMode
+              ? 'bg-blue-50 text-blue-600 border-blue-200'
+              : 'bg-white text-gray-700 border-gray-200 hover:bg-gray-50'
+          }`}
+        >
+          <MdChecklist className="text-sm" /> Select
+        </button>
+
+        {recognitionEnabled && (
           <button
             onClick={() => { setShowGroups(true); setControlsOpen(false) }}
             className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs border border-amber-200 bg-amber-50 rounded-lg text-amber-700 hover:bg-amber-100 cursor-pointer transition-colors"
@@ -312,6 +657,36 @@ export function MediaCollectionView({
           </>
         )}
       </div>
+
+      {/* Active view filters (browsing) — one chip per facet, clearable. */}
+      {activeFilterCount > 0 && (
+        <div className="flex flex-wrap items-center gap-2 mb-3">
+          <span className="text-xs text-gray-500">
+            Filtered: {summarizeMediaFilters(filters, groupNames)}
+          </span>
+          <button
+            onClick={() => setFilters(EMPTY_MEDIA_FILTERS)}
+            className="text-xs text-blue-600 hover:text-blue-700 cursor-pointer bg-transparent border-0 p-0"
+          >
+            Clear filters
+          </button>
+        </div>
+      )}
+
+      {/* Filters a selection was built from — several union together. */}
+      {selectionMode && selectionFilterChips.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5 mb-3">
+          <span className="text-xs text-gray-400">Selected by:</span>
+          {selectionFilterChips.map((chip) => (
+            <span
+              key={chip}
+              className="inline-flex items-center px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-100 text-[11px]"
+            >
+              {chip}
+            </span>
+          ))}
+        </div>
+      )}
 
       {creating && (
         <div className="flex items-center gap-2 mb-4 px-2 py-1.5 rounded-lg bg-purple-50 ring-1 ring-purple-200 ring-inset max-w-sm">
@@ -361,42 +736,57 @@ export function MediaCollectionView({
         </section>
       )}
 
-      {/* Media grid */}
-      {files.length === 0 ? (
+      {/* Media grid — virtualized: only rows near the viewport are rendered,
+          with the container holding the full height of the rest. */}
+      {files.length === 0 && !hasNextPage ? (
         <p className="text-sm text-gray-400 mt-4">
-          {hidden === 'only' ? 'No hidden media.' : 'No media in this collection yet.'}
+          {activeFilterCount > 0
+            ? 'No media matches these filters.'
+            : hidden === 'only' ? 'No hidden media.' : 'No media in this collection yet.'}
         </p>
       ) : (
-        <div
-          ref={gridRef}
-          className="grid gap-3"
-          style={{ gridTemplateColumns: `repeat(${cols}, minmax(${MIN_TILE_PX}px, 1fr))` }}
-        >
-          {files.map((f) => (
-            <MediaTile
-              key={f.id}
-              file={f}
-              readOnly={readOnly}
-              subcollections={subfolders}
-              isSubcollection={isSubcollection}
-              onOpen={() => onOpenFile(f.id)}
-              onShowInfo={() => setInfoFile(f)}
-              onToggleHidden={() => hideMutation.mutate({ id: f.id, hide: !f.hidden })}
-              onCopy={(collectionId) => copyMutation.mutate({ collectionId, fileId: f.id })}
-              onRemove={() => removeMutation.mutate(f.id)}
-            />
+        <div ref={attachGrid} className="relative" style={{ height: totalHeight }}>
+          {visibleRows.map((row) => (
+            <div
+              key={row}
+              className="absolute inset-x-0 grid gap-3"
+              style={{
+                top: row * stride,
+                height: rowHeight,
+                gridTemplateColumns: `repeat(${cols}, minmax(${MIN_TILE_PX}px, 1fr))`,
+              }}
+            >
+              {Array.from({ length: cols }, (_, c) => row * cols + c)
+                .filter((index) => index < files.length + placeholderCount)
+                .map((index) => {
+                  const f = files[index]
+                  if (!f) return <MediaTilePlaceholder key={`placeholder-${index}`} />
+                  return (
+                    <MediaTile
+                      key={f.id}
+                      file={f}
+                      readOnly={readOnly}
+                      subcollections={subfolders}
+                      isSubcollection={isSubcollection}
+                      selectionMode={selectionMode}
+                      selected={selectedIds.has(f.id)}
+                      measureRef={index === firstRow * cols ? measureTile : undefined}
+                      onToggleSelect={() => toggleSelect(f.id)}
+                      onOpen={() => onOpenFile(f.id)}
+                      onShowInfo={() => setInfoFile(f)}
+                      onToggleHidden={() => hideMutation.mutate({ id: f.id, hide: !f.hidden })}
+                      onCopy={(collectionId) => copyMutation.mutate({ collectionId, fileId: f.id })}
+                      onRemove={() => removeMutation.mutate(f.id)}
+                    />
+                  )
+                })}
+            </div>
           ))}
         </div>
       )}
 
-      {hasNextPage && (
-        <button
-          onClick={() => fetchNextPage()}
-          disabled={isFetchingNextPage}
-          className="mt-4 text-sm text-blue-600 hover:text-blue-700 cursor-pointer bg-transparent border-0 disabled:opacity-50"
-        >
-          {isFetchingNextPage ? 'Loading…' : 'Load more'}
-        </button>
+      {isFetchingNextPage && (
+        <p className="mt-4 text-sm text-gray-400">Loading more…</p>
       )}
 
       {user && (
@@ -446,6 +836,53 @@ export function MediaCollectionView({
           isPremium={isPremium}
           readOnly={readOnly}
           onClose={() => setShowCollectionInfo(false)}
+        />
+      )}
+
+      {showFilters && (
+        <MediaFilterPanel
+          collectionId={folderId}
+          value={selectionMode ? EMPTY_MEDIA_FILTERS : filters}
+          selectionMode={selectionMode}
+          recognitionEnabled={recognitionEnabled}
+          isApplying={isSelectingByFilter}
+          selectedCount={selectedIds.size}
+          onApply={handleFilterApply}
+          onClose={() => setShowFilters(false)}
+        />
+      )}
+
+      {selectionMode && (
+        <MediaSelectionToolbar
+          count={selectedIds.size}
+          allFavorited={allSelectedFavorited}
+          readOnly={readOnly}
+          subcollections={subfolders}
+          isSubcollection={isSubcollection}
+          canSelectAll={files.length > 0}
+          isWorking={bulkPending || isSelectingByFilter}
+          onSelectAll={selectAllInView}
+          onToggleFavorite={runBulkFavorite}
+          onSetHidden={runBulkHidden}
+          onCopyTo={runBulkCopy}
+          onRemove={runBulkRemove}
+          onDelete={() => setPendingBulkDelete(true)}
+          onClose={clearSelection}
+        />
+      )}
+
+      {pendingBulkDelete && (
+        <BulkDeleteConfirmModal
+          items={selectedLoadedFiles.map((f) => ({
+            id: f.id, name: f.name, size_bytes: f.size_bytes, kind: 'file' as const,
+          }))}
+          unlistedCount={selectedIds.size - selectedLoadedFiles.length}
+          username={user?.username ?? ''}
+          usedBytes={user?.storage_used_bytes ?? 0}
+          quotaBytes={user?.storage_quota_bytes ?? 0}
+          isPending={bulkPending}
+          onConfirm={runBulkDelete}
+          onCancel={() => setPendingBulkDelete(false)}
         />
       )}
 
@@ -502,11 +939,33 @@ function ToggleBtn({ active, onClick, label }: { active: boolean; onClick: () =>
   )
 }
 
+// MediaTilePlaceholder stands in for an item on a page that hasn't arrived
+// yet. It occupies exactly one grid cell so the row (and the scroll height
+// the grid reserves for it) is identical whether or not the data is in.
+function MediaTilePlaceholder() {
+  return (
+    <div
+      aria-hidden="true"
+      className="rounded-lg border border-gray-200 bg-gray-50 overflow-hidden animate-pulse"
+    >
+      <div className="w-full aspect-square bg-gray-100" />
+      <div className="px-2 py-1.5 flex flex-col gap-1">
+        <div className="h-2 rounded bg-gray-200 w-3/4" />
+        <div className="h-2 rounded bg-gray-100 w-1/2" />
+      </div>
+    </div>
+  )
+}
+
 function MediaTile({
   file,
   readOnly,
   subcollections,
   isSubcollection,
+  selectionMode,
+  selected,
+  measureRef,
+  onToggleSelect,
   onOpen,
   onShowInfo,
   onToggleHidden,
@@ -517,6 +976,12 @@ function MediaTile({
   readOnly: boolean
   subcollections: Folder[]
   isSubcollection: boolean
+  selectionMode: boolean
+  selected: boolean
+  // Set on one tile per render so the grid can measure a real tile's height
+  // and reserve exactly that much room for the rows it doesn't render.
+  measureRef?: (el: HTMLDivElement | null) => void
+  onToggleSelect: () => void
   onOpen: () => void
   onShowInfo: () => void
   onToggleHidden: () => void
@@ -529,9 +994,14 @@ function MediaTile({
   const dateLabel = file.taken_at ?? file.created_at
 
   return (
-    <div className={`relative group rounded-lg overflow-hidden border border-gray-200 bg-gray-50 ${file.hidden ? 'opacity-60' : ''}`}>
+    <div
+      ref={measureRef}
+      className={`relative group rounded-lg overflow-hidden border bg-gray-50 ${file.hidden ? 'opacity-60' : ''} ${
+        selected ? 'border-blue-500 ring-2 ring-blue-500' : 'border-gray-200'
+      }`}
+    >
       <button
-        onClick={onOpen}
+        onClick={selectionMode ? onToggleSelect : onOpen}
         className="block w-full aspect-square bg-gray-100 cursor-pointer border-0 p-0 m-0"
         title={file.name}
       >
@@ -552,42 +1022,57 @@ function MediaTile({
         </p>
       </div>
 
-      {file.hidden && (
+      {file.hidden && !selectionMode && (
         <span className="absolute top-1 left-1 bg-black/60 text-white text-[10px] px-1.5 py-0.5 rounded">Hidden</span>
+      )}
+
+      {selectionMode && (
+        <button
+          onClick={onToggleSelect}
+          aria-label={selected ? 'Deselect item' : 'Select item'}
+          className="absolute top-1 left-1 bg-white/90 hover:bg-white rounded p-0.5 cursor-pointer border-0 shadow-sm leading-none"
+        >
+          {selected
+            ? <MdCheckBox className="text-lg text-blue-600" />
+            : <MdCheckBoxOutlineBlank className="text-lg text-gray-400" />}
+        </button>
       )}
 
       {/* Visible by default (touch devices below `sm` have no hover state to
           reveal these on); from `sm` up, fade in on hover/focus so the grid
-          stays visually quiet on pointer-driven layouts. */}
-      <div className="absolute top-1 right-1 flex gap-1 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100 transition-opacity">
-        <button
-          onClick={onShowInfo}
-          title="File info"
-          className="bg-white/90 hover:bg-white rounded p-1 cursor-pointer border-0 text-gray-600 shadow-sm"
-        >
-          <MdInfoOutline className="text-sm" />
-        </button>
-        {!readOnly && (
-          <>
-            <button
-              onClick={onToggleHidden}
-              title={file.hidden ? 'Unhide' : 'Hide'}
-              className="bg-white/90 hover:bg-white rounded p-1 cursor-pointer border-0 text-gray-600 shadow-sm"
-            >
-              {file.hidden ? <MdVisibility className="text-sm" /> : <MdVisibilityOff className="text-sm" />}
-            </button>
-            {subcollections.length > 0 && (
+          stays visually quiet on pointer-driven layouts. Hidden entirely in
+          selection mode, where a tap means "select". */}
+      {!selectionMode && (
+        <div className="absolute top-1 right-1 flex gap-1 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100 transition-opacity">
+          <button
+            onClick={onShowInfo}
+            title="File info"
+            className="bg-white/90 hover:bg-white rounded p-1 cursor-pointer border-0 text-gray-600 shadow-sm"
+          >
+            <MdInfoOutline className="text-sm" />
+          </button>
+          {!readOnly && (
+            <>
               <button
-                onClick={() => setMenuOpen((v) => !v)}
-                title="Add to subcollection"
+                onClick={onToggleHidden}
+                title={file.hidden ? 'Unhide' : 'Hide'}
                 className="bg-white/90 hover:bg-white rounded p-1 cursor-pointer border-0 text-gray-600 shadow-sm"
               >
-                <MdAdd className="text-sm" />
+                {file.hidden ? <MdVisibility className="text-sm" /> : <MdVisibilityOff className="text-sm" />}
               </button>
-            )}
-          </>
-        )}
-      </div>
+              {subcollections.length > 0 && (
+                <button
+                  onClick={() => setMenuOpen((v) => !v)}
+                  title="Add to subcollection"
+                  className="bg-white/90 hover:bg-white rounded p-1 cursor-pointer border-0 text-gray-600 shadow-sm"
+                >
+                  <MdAdd className="text-sm" />
+                </button>
+              )}
+            </>
+          )}
+        </div>
+      )}
 
       {menuOpen && subcollections.length > 0 && (
         <div className="absolute top-9 right-1 z-10 bg-white rounded-lg shadow-lg border border-gray-200 py-1 min-w-40">

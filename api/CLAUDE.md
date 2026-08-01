@@ -170,6 +170,29 @@ All `files` and `folders` queries are executed after calling `db.Queries.ForUser
 
 `routes/media.go` accepts video uploads, stores the original, then enqueues a background FFmpeg transcode. Variants (lower resolution) are stored in MinIO and tracked in the `video_variants` table with statuses `pending`, `ready`, or `failed`. Streaming uses range requests and WebSocket for real-time progress.
 
+## Media Collection Listing
+
+`GET /folders/:folder_id/media` (`routes/media.go` → `FolderService.GetMediaContents`
+→ `db.Queries.ListMediaFiles`) is the media grid's paged listing: files
+physically in the collection plus the pointers into it, ordered by `?sort`
+(`taken_at` | `created_at` | `name` | `source`) and narrowed by `?hidden`.
+
+Filtering happens here rather than in the browser, since the grid only ever
+holds the pages it has fetched. `db.MediaFilter` carries the facets —
+`?taken_after` / `?taken_before` (over `COALESCE(taken_at, created_at)`, the
+same value the grid sorts and labels by), `?uploaded_after` / `?uploaded_before`,
+`?source`, `?media_type` (`image`/`video`/`other`), and `?group` (recognition
+group ids) — each repeatable or comma-joined and capped at
+`maxMediaFilterValues`. Dates take RFC3339 or a bare `YYYY-MM-DD`; the web
+client always sends RFC3339 instants so local-day boundaries survive the trip.
+Unparseable dates, unknown media types, and malformed group ids are dropped
+rather than failing the request — a filter is a view preference, not a mutation.
+
+`GET /folders/:folder_id/media/ids` takes the same params and returns only the
+matching file ids (capped at `db.MaxMediaSelectionIDs`, with `truncated` set
+when the cap is hit). It backs the grid's "select everything matching this
+filter" action, which needs the whole match set rather than the loaded page.
+
 ## AI Recognition (Premium)
 
 Per-collection face/pet/object indexing. `routes/services/recognition.go` owns

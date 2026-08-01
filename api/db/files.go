@@ -4,9 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 
 	"apollo-sfs.com/api/models"
 )
@@ -505,6 +508,9 @@ const (
 	MediaSortCreated MediaSort = "created_at"
 	// MediaSortName orders alphabetically by name.
 	MediaSortName MediaSort = "name"
+	// MediaSortSource groups by upload origin (files.source), newest capture
+	// first within each origin.
+	MediaSortSource MediaSort = "source"
 )
 
 // HiddenFilter controls whether hidden files appear in a media listing.
@@ -527,6 +533,8 @@ func (s MediaSort) orderClause() string {
 		return "f.created_at DESC, f.name ASC"
 	case MediaSortName:
 		return "f.name ASC"
+	case MediaSortSource:
+		return "f.source ASC, COALESCE(f.taken_at, f.created_at) DESC, f.name ASC"
 	default: // MediaSortTakenAt
 		return "COALESCE(f.taken_at, f.created_at) DESC, f.name ASC"
 	}
@@ -544,29 +552,130 @@ func (h HiddenFilter) hiddenClause() string {
 	}
 }
 
+// Media type buckets accepted by MediaFilter.MediaTypes. Matched against the
+// mime_type prefix; MediaTypeOther is everything that is neither.
+const (
+	MediaTypeImage = "image"
+	MediaTypeVideo = "video"
+	MediaTypeOther = "other"
+)
+
+// MediaFilter narrows a media collection listing beyond the hidden filter.
+// The zero value adds no narrowing at all. Every field is combined with AND;
+// the slice fields are OR-ed within themselves (any of the listed values).
+type MediaFilter struct {
+	// TakenAfter/TakenBefore bound the capture date, falling back to the
+	// upload date for files with no extracted taken_at (same COALESCE the
+	// grid sorts and labels by, so the filter matches what the user sees).
+	TakenAfter  *time.Time
+	TakenBefore *time.Time
+	// UploadedAfter/UploadedBefore bound created_at (the upload date).
+	UploadedAfter  *time.Time
+	UploadedBefore *time.Time
+	// Sources matches files.source exactly ("web", "device", "google_photos", …).
+	Sources []string
+	// MediaTypes matches the mime_type bucket: image, video, or other.
+	MediaTypes []string
+	// GroupIDs restricts to files with at least one detection in any of these
+	// recognition groups (the labeled people/pets/objects filter).
+	GroupIDs []uuid.UUID
+}
+
+// IsZero reports whether the filter would narrow nothing.
+func (f MediaFilter) IsZero() bool {
+	return f.TakenAfter == nil && f.TakenBefore == nil &&
+		f.UploadedAfter == nil && f.UploadedBefore == nil &&
+		len(f.Sources) == 0 && len(f.MediaTypes) == 0 && len(f.GroupIDs) == 0
+}
+
+// clauses appends the filter's bind values to args and returns the matching
+// `AND …` SQL fragment. Placeholder numbers continue from len(*args), so the
+// caller must have appended its own leading arguments first.
+func (f MediaFilter) clauses(args *[]any) string {
+	var sb strings.Builder
+	bind := func(v any) string {
+		*args = append(*args, v)
+		return "$" + strconv.Itoa(len(*args))
+	}
+
+	if f.TakenAfter != nil {
+		sb.WriteString(" AND COALESCE(f.taken_at, f.created_at) >= " + bind(*f.TakenAfter))
+	}
+	if f.TakenBefore != nil {
+		sb.WriteString(" AND COALESCE(f.taken_at, f.created_at) <= " + bind(*f.TakenBefore))
+	}
+	if f.UploadedAfter != nil {
+		sb.WriteString(" AND f.created_at >= " + bind(*f.UploadedAfter))
+	}
+	if f.UploadedBefore != nil {
+		sb.WriteString(" AND f.created_at <= " + bind(*f.UploadedBefore))
+	}
+	if len(f.Sources) > 0 {
+		sb.WriteString(" AND f.source = ANY(" + bind(pq.Array(f.Sources)) + ")")
+	}
+	if len(f.MediaTypes) > 0 {
+		// A closed set of literal fragments — never user-interpolated.
+		parts := make([]string, 0, len(f.MediaTypes))
+		for _, t := range f.MediaTypes {
+			switch t {
+			case MediaTypeImage:
+				parts = append(parts, "f.mime_type LIKE 'image/%'")
+			case MediaTypeVideo:
+				parts = append(parts, "f.mime_type LIKE 'video/%'")
+			case MediaTypeOther:
+				parts = append(parts, "(f.mime_type NOT LIKE 'image/%' AND f.mime_type NOT LIKE 'video/%')")
+			}
+		}
+		if len(parts) > 0 {
+			sb.WriteString(" AND (" + strings.Join(parts, " OR ") + ")")
+		}
+	}
+	if len(f.GroupIDs) > 0 {
+		ids := make([]string, len(f.GroupIDs))
+		for i, id := range f.GroupIDs {
+			ids[i] = id.String()
+		}
+		sb.WriteString(" AND f.id IN (SELECT file_id FROM recognition_group_members WHERE group_id = ANY(" +
+			bind(pq.Array(ids)) + "::uuid[]))")
+	}
+	return sb.String()
+}
+
+// mediaScopeClause is the collection membership test shared by the media
+// listing queries: files physically in the collection plus files pointed into
+// it via collection_items. $1 must be bound to the collection id.
+const mediaScopeClause = `
+		WHERE (
+			f.folder_id = $1
+			OR f.id IN (SELECT file_id FROM collection_items WHERE collection_id = $1)
+		)
+		`
+
 // ListMediaFiles returns a page of files belonging to a media collection. This
 // is the union of files physically in the collection (folder_id = collectionID)
-// and files pointed into it via collection_items, filtered by hidden state and
-// ordered per sort. Must run inside a ForUser transaction (RLS scopes rows).
-func (q *Queries) ListMediaFiles(ctx context.Context, collectionID uuid.UUID, sort MediaSort, hidden HiddenFilter, in PageInput) (*PageResult[models.File], error) {
+// and files pointed into it via collection_items, narrowed by hidden state and
+// filter, and ordered per sort. Must run inside a ForUser transaction (RLS
+// scopes rows).
+func (q *Queries) ListMediaFiles(ctx context.Context, collectionID uuid.UUID, sort MediaSort, hidden HiddenFilter, filter MediaFilter, in PageInput) (*PageResult[models.File], error) {
 	limit := clampLimit(in.Limit)
 	offset, err := decodeOffsetCursor(in.Cursor)
 	if err != nil {
 		return nil, fmt.Errorf("ListMediaFiles: %w", err)
 	}
 
+	args := []any{collectionID}
+	filterSQL := filter.clauses(&args)
+	args = append(args, limit, offset)
+
 	query := `
 		SELECT` + fileColumns + `
-		FROM files f
-		WHERE (
-			f.folder_id = $1
-			OR f.id IN (SELECT file_id FROM collection_items WHERE collection_id = $1)
-		)
-		` + hidden.hiddenClause() + `
+		FROM files f` +
+		mediaScopeClause +
+		hidden.hiddenClause() + filterSQL + `
 		ORDER BY ` + sort.orderClause() + `
-		LIMIT $2 OFFSET $3`
+		LIMIT $` + strconv.Itoa(len(args)-1) + ` OFFSET $` + strconv.Itoa(len(args))
 
-	rows, err := q.db.QueryContext(ctx, query, collectionID, limit, offset)
+	rows, err := q.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("ListMediaFiles: %w", err)
 	}
@@ -587,6 +696,48 @@ func (q *Queries) ListMediaFiles(ctx context.Context, collectionID uuid.UUID, so
 		Items:     files,
 		NextToken: offsetNextToken(len(files), limit, offset),
 	}, nil
+}
+
+// MaxMediaSelectionIDs bounds ListMediaFileIDs so "select everything matching
+// this filter" on a huge collection can't return an unbounded payload.
+const MaxMediaSelectionIDs = 20000
+
+// ListMediaFileIDs returns just the ids of every file in a media collection
+// matching the hidden state and filter, ordered per sort and capped at
+// MaxMediaSelectionIDs. Backs the grid's "select all matching this filter"
+// action, which needs the whole match set rather than the loaded page.
+// Must run inside a ForUser transaction (RLS scopes rows).
+func (q *Queries) ListMediaFileIDs(ctx context.Context, collectionID uuid.UUID, sort MediaSort, hidden HiddenFilter, filter MediaFilter) ([]uuid.UUID, error) {
+	args := []any{collectionID}
+	filterSQL := filter.clauses(&args)
+	args = append(args, MaxMediaSelectionIDs)
+
+	query := `
+		SELECT f.id
+		FROM files f` +
+		mediaScopeClause +
+		hidden.hiddenClause() + filterSQL + `
+		ORDER BY ` + sort.orderClause() + `
+		LIMIT $` + strconv.Itoa(len(args))
+
+	rows, err := q.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("ListMediaFileIDs: %w", err)
+	}
+	defer rows.Close()
+
+	ids := make([]uuid.UUID, 0)
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("ListMediaFileIDs scan: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("ListMediaFileIDs: %w", err)
+	}
+	return ids, nil
 }
 
 // SetFileHidden toggles a file's hidden flag and returns the updated record.

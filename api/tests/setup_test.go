@@ -804,6 +804,12 @@ type stubFolderService struct {
 	folder    *models.Folder
 	folderErr error
 	contents  *services.FolderContents
+	// Ids returned by ListMediaFileIDs, plus the sort/hidden/filter the last
+	// media call was made with — asserted by the media listing tests.
+	mediaFileIDs []uuid.UUID
+	mediaSort    db.MediaSort
+	mediaHidden  db.HiddenFilter
+	mediaFilter  db.MediaFilter
 }
 
 func (s *stubFolderService) ListRoot(_ context.Context, _ uuid.UUID, _, _ db.PageInput, _ *services.DriveFilter) (*services.FolderContents, error) {
@@ -828,7 +834,10 @@ func (s *stubFolderService) GetContents(_ context.Context, _, _ uuid.UUID, _, _ 
 		Files:      &db.PageResult[models.File]{Items: []models.File{}},
 	}, nil
 }
-func (s *stubFolderService) GetMediaContents(_ context.Context, _, _ uuid.UUID, _ db.MediaSort, _ db.HiddenFilter, _, _ db.PageInput) (*services.FolderContents, error) {
+func (s *stubFolderService) GetMediaContents(_ context.Context, _, _ uuid.UUID, sort db.MediaSort, hidden db.HiddenFilter, filter db.MediaFilter, _, _ db.PageInput) (*services.FolderContents, error) {
+	s.mediaSort = sort
+	s.mediaHidden = hidden
+	s.mediaFilter = filter
 	if s.folderErr != nil {
 		return nil, s.folderErr
 	}
@@ -840,6 +849,15 @@ func (s *stubFolderService) GetMediaContents(_ context.Context, _, _ uuid.UUID, 
 		Subfolders: &db.PageResult[models.Folder]{Items: []models.Folder{}},
 		Files:      &db.PageResult[models.File]{Items: []models.File{}},
 	}, nil
+}
+func (s *stubFolderService) ListMediaFileIDs(_ context.Context, _, _ uuid.UUID, sort db.MediaSort, hidden db.HiddenFilter, filter db.MediaFilter) ([]uuid.UUID, error) {
+	s.mediaSort = sort
+	s.mediaHidden = hidden
+	s.mediaFilter = filter
+	if s.folderErr != nil {
+		return nil, s.folderErr
+	}
+	return s.mediaFileIDs, nil
 }
 func (s *stubFolderService) Create(_ context.Context, _ uuid.UUID, _ *uuid.UUID, _, _, _ string, _ *uuid.UUID) (*models.Folder, error) {
 	return s.folder, s.folderErr

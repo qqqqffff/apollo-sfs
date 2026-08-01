@@ -203,8 +203,61 @@ export interface UserPreferences {
   updated_at: string
 }
 
-export type MediaSort = 'taken_at' | 'created_at' | 'name'
+export type MediaSort = 'taken_at' | 'created_at' | 'name' | 'source'
 export type HiddenMode = 'hide' | 'show' | 'only'
+
+// MediaType buckets a file by its mime_type prefix, matching the backend's
+// db.MediaType* constants.
+export type MediaType = 'image' | 'video' | 'other'
+
+// UploadSource is the closed set of values the backend writes to files.source.
+export const UPLOAD_SOURCES = [
+  'web',
+  'device',
+  'google_drive',
+  'google_photos',
+  'email_backup_gmail',
+  'email_backup_microsoft',
+  'file_server',
+] as const
+export type UploadSource = (typeof UPLOAD_SOURCES)[number]
+
+// MediaFilters narrows a media collection listing. Dates are `YYYY-MM-DD`
+// (what <input type="date"> produces); empty strings/arrays mean "no filter".
+export interface MediaFilters {
+  takenAfter: string
+  takenBefore: string
+  uploadedAfter: string
+  uploadedBefore: string
+  sources: string[]
+  mediaTypes: MediaType[]
+  // Recognition group ids — the labeled people/pets/objects filter.
+  groupIds: string[]
+}
+
+export const EMPTY_MEDIA_FILTERS: MediaFilters = {
+  takenAfter: '',
+  takenBefore: '',
+  uploadedAfter: '',
+  uploadedBefore: '',
+  sources: [],
+  mediaTypes: [],
+  groupIds: [],
+}
+
+// countMediaFilters returns how many of the filter's facets are active — the
+// number shown on the toolbar's Filter badge.
+export function countMediaFilters(f: MediaFilters): number {
+  return (
+    (f.takenAfter ? 1 : 0) +
+    (f.takenBefore ? 1 : 0) +
+    (f.uploadedAfter ? 1 : 0) +
+    (f.uploadedBefore ? 1 : 0) +
+    (f.sources.length > 0 ? 1 : 0) +
+    (f.mediaTypes.length > 0 ? 1 : 0) +
+    (f.groupIds.length > 0 ? 1 : 0)
+  )
+}
 
 export interface FolderContents {
   folder: Folder | null

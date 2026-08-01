@@ -719,6 +719,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		premiumGroup.Use(mw.RequirePremium())
 		{
 			premiumGroup.GET("/folders/:folder_id/media", h.GetMediaFolder)
+			premiumGroup.GET("/folders/:folder_id/media/ids", h.GetMediaFolderFileIDs)
 			premiumGroup.PUT("/me/preferences", h.UpdatePreferences)
 			premiumGroup.PUT("/me/preferences/backup-reminder", h.UpdateBackupReminderPreference)
 			premiumGroup.POST("/collections/:collection_id/items/:file_id", h.CopyFileToCollection)

@@ -56,15 +56,20 @@ function FileRow({ item }: { item: FileUploadItem }) {
                                <span className="text-gray-500">{Math.round(pct)}%</span>
 
   return (
-    <div className="flex items-center gap-2 py-1 min-w-0">
-      <span className="flex-1 truncate text-xs text-gray-700 min-w-0">{item.name}</span>
-      <div className="w-20 h-1 bg-gray-100 rounded-full overflow-hidden shrink-0">
-        <div
-          className={`h-full rounded-full transition-all duration-150 ${barColor}`}
-          style={{ width: item.status === 'done' ? '100%' : `${pct}%` }}
-        />
+    <div className="py-1 min-w-0">
+      <div className="flex items-center gap-2 min-w-0">
+        <span className="flex-1 truncate text-xs text-gray-700 min-w-0" title={item.name}>{item.name}</span>
+        <div className="w-20 h-1 bg-gray-100 rounded-full overflow-hidden shrink-0">
+          <div
+            className={`h-full rounded-full transition-all duration-150 ${barColor}`}
+            style={{ width: item.status === 'done' ? '100%' : `${pct}%` }}
+          />
+        </div>
+        <span className="text-xs w-10 text-right shrink-0">{rightLabel}</span>
       </div>
-      <span className="text-xs w-10 text-right shrink-0">{rightLabel}</span>
+      {item.status === 'failed' && item.error && (
+        <p className="text-[10px] text-red-500 truncate mt-0.5" title={item.error}>{item.error}</p>
+      )}
     </div>
   )
 }
@@ -77,9 +82,12 @@ interface Props {
   // Label used for the in-progress header (e.g. "Uploading", "Moving").
   // Defaults to "Uploading" so the existing upload flow is unaffected.
   verb?: string
+  // Re-attempts only the items still in 'failed' status. Omitted for progress
+  // sources that don't support retry (e.g. drive migration).
+  onRetry?: () => void
 }
 
-export function UploadToast({ progress, onDismiss, verb = 'Uploading' }: Props) {
+export function UploadToast({ progress, onDismiss, verb = 'Uploading', onRetry }: Props) {
   const { status, items, totalBytes, loadedBytes, speedBps, succeeded, failed } = progress
 
   useEffect(() => {
@@ -115,13 +123,23 @@ export function UploadToast({ progress, onDismiss, verb = 'Uploading' }: Props) 
           )}
         </div>
         {!isUploading && (
-          <button
-            onClick={onDismiss}
-            aria-label="Dismiss"
-            className="text-gray-400 hover:text-gray-600 cursor-pointer shrink-0"
-          >
-            <MdClose className="text-base" />
-          </button>
+          <div className="flex items-center gap-2 shrink-0">
+            {failed > 0 && onRetry && (
+              <button
+                onClick={onRetry}
+                className="text-xs font-semibold text-blue-600 hover:text-blue-700 cursor-pointer"
+              >
+                Retry failed
+              </button>
+            )}
+            <button
+              onClick={onDismiss}
+              aria-label="Dismiss"
+              className="text-gray-400 hover:text-gray-600 cursor-pointer"
+            >
+              <MdClose className="text-base" />
+            </button>
+          </div>
         )}
       </div>
 

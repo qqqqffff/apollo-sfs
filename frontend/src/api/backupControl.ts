@@ -100,6 +100,9 @@ export interface BackupProgressEvent<E> {
   messageId?: string
   // Drive the file landed on, when the server reports it.
   driveId?: string | null
+  // Reason the item failed, when status is 'error' — surfaced in the UI and
+  // used to scope a retry to just the items that need it.
+  error?: string
 }
 
 export interface BackupRunResult {

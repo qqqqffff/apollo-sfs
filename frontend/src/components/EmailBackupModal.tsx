@@ -121,6 +121,7 @@ export function EmailBackupModal({
   // ── Upload state ───────────────────────────────────────────────────────────
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null)
   const [statusMap, setStatusMap] = useState<Record<string, EmailBackupItemStatus>>({})
+  const [errorMap, setErrorMap] = useState<Record<string, string>>({})
   const [result, setResult] = useState<EmailBackupResult | null>(null)
   const [folderId, setFolderId] = useState<string | null>(null)
   const [uploadError, setUploadError] = useState<string | null>(null)
@@ -139,6 +140,7 @@ export function EmailBackupModal({
   // handleBackUp knows whether to roll the partial backup back.
   const cancelActionRef = useRef<CancelAction>('keep')
   const liveSync = useBackupLiveSync([['email-backup']])
+  const [retrying, setRetrying] = useState(false)
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -288,6 +290,7 @@ export function EmailBackupModal({
     setPhase('uploading')
     setFolderId(folder.id)
     setStatusMap({})
+    setErrorMap({})
     setStoredBytes(0)
     setStoredCount(0)
     setCancelNote(null)
@@ -299,7 +302,10 @@ export function EmailBackupModal({
       onProgress: (e) => {
         setProgress({ done: e.done, total: e.total })
         if (e.phase === 'start') { setCurrentPath(e.path); return }
-        if (e.status) setStatusMap((m) => ({ ...m, [e.entry.id]: e.status! }))
+        if (e.status) {
+          setStatusMap((m) => ({ ...m, [e.entry.id]: e.status! }))
+          setErrorMap((m) => (e.error ? { ...m, [e.entry.id]: e.error! } : m))
+        }
         if (e.status === 'done') {
           setCurrentPath(e.path)
           setStoredBytes((b) => b + (e.sizeBytes ?? 0))
@@ -384,6 +390,69 @@ export function EmailBackupModal({
     controlRef.current?.cancel()
   }
 
+  // Re-runs only the messages still marked 'error', merging their outcome
+  // back into the existing status/result rather than restarting the batch.
+  async function handleRetryFailed() {
+    if (!folderId) return
+    const failedIds = Object.entries(statusMap).filter(([, s]) => s === 'error').map(([id]) => id)
+    if (failedIds.length === 0) return
+
+    setRetrying(true)
+    const toRetry = items.filter((i) => failedIds.includes(i.id))
+    const res = await backupEmailEntries(toRetry, provider, accessToken, folderId, {
+      folderName: accountEmail,
+      onProgress: (e) => {
+        if (e.phase !== 'settled' || !e.status) return
+        setStatusMap((m) => ({ ...m, [e.entry.id]: e.status! }))
+        setErrorMap((m) => {
+          if (e.status !== 'error') {
+            if (!(e.entry.id in m)) return m
+            const next = { ...m }
+            delete next[e.entry.id]
+            return next
+          }
+          return e.error ? { ...m, [e.entry.id]: e.error! } : m
+        })
+      },
+    })
+
+    setResult((prev) => prev && {
+      uploaded: prev.uploaded + res.uploaded,
+      duplicates: prev.duplicates + res.duplicates,
+      errors: prev.errors - failedIds.length + res.errors,
+      cancelled: prev.cancelled,
+      uploadedFileIds: [...prev.uploadedFileIds, ...res.uploadedFileIds],
+      backedUpIds: [...prev.backedUpIds, ...res.backedUpIds],
+      uploadedMessageIds: [...prev.uploadedMessageIds, ...res.uploadedMessageIds],
+    })
+
+    if (settings.deleteAfter && res.backedUpIds.length > 0) {
+      const { failed } = await deleteProviderMessages(provider, accessToken, res.backedUpIds)
+      const deleted = res.backedUpIds.length - failed
+      const where = provider === 'gmail' ? 'Gmail trash' : 'Deleted Items'
+      setCleanupMsg(
+        failed === 0
+          ? `${deleted} email${deleted !== 1 ? 's' : ''} moved to your ${where}.`
+          : `${deleted} of ${res.backedUpIds.length} moved to your ${where}; ${failed} could not be deleted.`,
+      )
+    }
+
+    // Best effort — the backup itself already succeeded.
+    try {
+      await completeEmailBackupRun({
+        folder_id: folderId,
+        email_address: accountEmail,
+        provider,
+        uploaded: res.uploaded,
+        duplicates: res.duplicates,
+        errors: res.errors,
+        notify: settings.notify,
+      })
+    } catch { /* ignore */ }
+
+    setRetrying(false)
+  }
+
   const canBackUp = selectedItems.length > 0 && !isOverQuota && phase === 'pick' && !fetching
   const uploading = phase === 'uploading'
   const finished = phase === 'finished'
@@ -401,7 +470,7 @@ export function EmailBackupModal({
         <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 shrink-0">
           <button
             onClick={finished ? () => onDone(folderId) : onClose}
-            disabled={uploading}
+            disabled={uploading || retrying}
             className="p-1 rounded hover:bg-gray-100 text-gray-500 cursor-pointer transition-colors disabled:opacity-30"
           >
             <MdClose className="text-xl" />
@@ -744,6 +813,7 @@ export function EmailBackupModal({
                   item={item}
                   checked={selected.has(item.id)}
                   status={statusMap[item.id]}
+                  error={errorMap[item.id]}
                   disabled={phase !== 'pick'}
                   onToggle={() => toggle(item.id)}
                 />
@@ -786,10 +856,25 @@ export function EmailBackupModal({
 
           {cleanupMsg && <p className="text-xs text-gray-500 text-center">{cleanupMsg}</p>}
 
+          {finished && result && result.errors > 0 && (
+            <button
+              onClick={handleRetryFailed}
+              disabled={retrying}
+              className="flex items-center justify-center gap-1.5 text-sm py-2 rounded-lg border border-blue-200 text-blue-600 hover:bg-blue-50 transition-colors cursor-pointer disabled:opacity-50"
+            >
+              {retrying ? (
+                <div className="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin" />
+              ) : (
+                `Retry ${result.errors} failed email${result.errors !== 1 ? 's' : ''}`
+              )}
+            </button>
+          )}
+
           {finished ? (
             <button
               onClick={() => onDone(folderId)}
-              className="flex items-center justify-center gap-2 py-2.5 bg-green-600 hover:bg-green-700 text-white text-sm font-semibold rounded-lg cursor-pointer transition-colors"
+              disabled={retrying}
+              className="flex items-center justify-center gap-2 py-2.5 bg-green-600 hover:bg-green-700 text-white text-sm font-semibold rounded-lg cursor-pointer transition-colors disabled:opacity-40"
             >
               <MdCheck className="text-base" /> Open backup folder
             </button>
@@ -849,10 +934,11 @@ function FilterChip({ active, onClick, icon, label }: {
   )
 }
 
-function EmailRow({ item, checked, status, disabled, onToggle }: {
+function EmailRow({ item, checked, status, error, disabled, onToggle }: {
   item: ProviderEmailItem
   checked: boolean
   status: EmailBackupItemStatus | undefined
+  error?: string
   disabled: boolean
   onToggle: () => void
 }) {
@@ -893,6 +979,9 @@ function EmailRow({ item, checked, status, disabled, onToggle }: {
             <span className="text-[10px] text-gray-400">{fmt(item.sizeEstimate)}</span>
           )}
         </div>
+        {status === 'error' && error && (
+          <div className="text-[10px] text-red-500 truncate mt-0.5" title={error}>{error}</div>
+        )}
       </div>
 
       {status ? (

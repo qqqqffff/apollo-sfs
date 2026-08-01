@@ -4,7 +4,7 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tansta
 import {
   MdCheck, MdClose, MdEdit, MdInfoOutline, MdBlock, MdLockClock, MdLockOpen, MdStorage,
   MdOpenInNew, MdDns, MdExpandMore, MdExpandLess, MdSearch, MdArrowUpward, MdArrowDownward, MdUnfoldMore,
-  MdAdd, MdDeleteOutline,
+  MdAdd, MdDeleteOutline, MdManageAccounts, MdDeleteForever,
 } from 'react-icons/md'
 import {
   getAdminAuditLogs,
@@ -17,16 +17,20 @@ import {
   banUser,
   suspendUser,
   pardonUser,
+  updateUserRole,
+  deleteAdminUser,
 } from '../../api/admin'
-import type { AdminUserStorageAllocation, SortDir, StorageAllocationsViolation, StorageTier, UserRoleFilter, UserSortKey } from '../../api/admin'
+import type { AdminUserStorageAllocation, SortDir, StorageAllocationsViolation, StorageTier, UserRoleFilter, UserSortKey, UpdateUserRoleBody } from '../../api/admin'
 import { ApiError } from '../../api/client'
 import { meQueryOptions } from '../../api/me'
 import type { AuditLog, User, UserBan } from '../../types/api'
 import { useNotification } from '../../context/NotificationContext'
 import { useImpersonation } from '../../context/ImpersonationContext'
 import { BanSuspendModal } from '../../components/BanSuspendModal'
-import { AccountBadges } from '../../components/GroupBadge'
+import { AccountBadges, type AccountGroup } from '../../components/GroupBadge'
 import { AllocationChangeBreakdown } from '../../components/AllocationChangeBreakdown'
+import { RoleAssignModal, type RoleAssignConfirm } from '../../components/RoleAssignModal'
+import { DeleteUserModal } from '../../components/DeleteUserModal'
 
 const PAGE_SIZE = 25
 
@@ -195,6 +199,14 @@ function AuditLogModal({ username, onClose }: { username: string; onClose: () =>
 
 function RoleBadge({ user }: { user: User }) {
   return <AccountBadges user={user} />
+}
+
+// accountRole reduces a user's is_admin/is_premium flags to the single role
+// value the role-editor modal assigns — mirrors the API's effectiveRole.
+function accountRole(u: User): AccountGroup {
+  if (u.is_admin) return 'admin'
+  if (u.is_premium) return 'premium'
+  return 'user'
 }
 
 // ── Per-user storage detail (expandable subtable) ─────────────────────────────
@@ -801,6 +813,8 @@ function RouteComponent() {
   const [auditUser, setAuditUser] = useState<string | null>(null)
   const [expandedUser, setExpandedUser] = useState<string | null>(focus ?? null)
   const [banModal, setBanModal] = useState<BanModal | null>(null)
+  const [roleModal, setRoleModal] = useState<User | null>(null)
+  const [deleteModal, setDeleteModal] = useState<User | null>(null)
 
   function viewUserFiles(u: User) {
     impersonate(u)
@@ -863,6 +877,46 @@ function RouteComponent() {
     },
     onError: () => notify('error', 'Failed to pardon user'),
   })
+
+  const roleMutation = useMutation({
+    mutationFn: ({ username, body }: { username: string; body: UpdateUserRoleBody }) =>
+      updateUserRole(username, body),
+    onSuccess: () => {
+      setRoleModal(null)
+      queryClient.invalidateQueries({ queryKey: ['admin', 'users'] })
+      notify('success', 'Role updated')
+    },
+    onError: (err: Error) => notify('error', err.message ?? 'Failed to update role'),
+  })
+
+  const deleteUserMutation = useMutation({
+    mutationFn: ({ username, reason }: { username: string; reason: string }) =>
+      deleteAdminUser(username, reason),
+    onSuccess: () => {
+      setDeleteModal(null)
+      queryClient.invalidateQueries({ queryKey: ['admin', 'users'] })
+      notify('success', 'User deleted')
+    },
+    onError: (err: Error) => notify('error', err.message ?? 'Failed to delete user'),
+  })
+
+  function handleRoleConfirm(input: RoleAssignConfirm) {
+    if (!roleModal) return
+    roleMutation.mutate({
+      username: roleModal.username,
+      body: {
+        role: input.role,
+        reason: input.reason,
+        premium_expires_at: input.premiumExpiresAt ?? null,
+        block_future_premium: input.blockFuturePremium,
+      },
+    })
+  }
+
+  function handleDeleteConfirm(reason: string) {
+    if (!deleteModal) return
+    deleteUserMutation.mutate({ username: deleteModal.username, reason })
+  }
 
   function startEdit(username: string) {
     setEditingUsername(username)
@@ -1060,6 +1114,25 @@ function RouteComponent() {
                           </button>
                         </>
                       )}
+
+                      {u.username !== me?.username && (
+                        <>
+                          <button
+                            onClick={() => setRoleModal(u)}
+                            title="Edit role"
+                            className="text-gray-400 hover:text-blue-600 cursor-pointer bg-transparent border-0 p-0 transition-colors"
+                          >
+                            <MdManageAccounts className="text-base" />
+                          </button>
+                          <button
+                            onClick={() => setDeleteModal(u)}
+                            title="Delete user"
+                            className="text-gray-400 hover:text-red-700 cursor-pointer bg-transparent border-0 p-0 transition-colors"
+                          >
+                            <MdDeleteForever className="text-base" />
+                          </button>
+                        </>
+                      )}
                     </div>
                   </td>
                 </tr>
@@ -1089,6 +1162,25 @@ function RouteComponent() {
           onConfirm={handleBanConfirm}
           onClose={() => setBanModal(null)}
           isPending={banMutation.isPending || suspendMutation.isPending}
+        />
+      )}
+
+      {roleModal && (
+        <RoleAssignModal
+          username={roleModal.username}
+          currentRole={accountRole(roleModal)}
+          onConfirm={handleRoleConfirm}
+          onClose={() => setRoleModal(null)}
+          isPending={roleMutation.isPending}
+        />
+      )}
+
+      {deleteModal && (
+        <DeleteUserModal
+          username={deleteModal.username}
+          onConfirm={handleDeleteConfirm}
+          onClose={() => setDeleteModal(null)}
+          isPending={deleteUserMutation.isPending}
         />
       )}
     </div>

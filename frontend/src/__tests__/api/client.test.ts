@@ -168,6 +168,45 @@ describe('del', () => {
   })
 })
 
+// ── rate-limit retry ──────────────────────────────────────────────────────────
+
+describe('429 retry', () => {
+  beforeEach(() => {
+    jest.spyOn(global, 'setTimeout').mockImplementation(((fn: () => void) => {
+      fn()
+      return 0 as unknown as ReturnType<typeof setTimeout>
+    }) as unknown as typeof setTimeout)
+  })
+  afterEach(() => jest.restoreAllMocks())
+
+  it('retries a rate-limited request and returns the eventual success', async () => {
+    const limited = {
+      ok: false, status: 429, statusText: 'Too Many Requests',
+      json: jest.fn().mockResolvedValue({ error: 'too many requests' }),
+      headers: new Headers({ 'Retry-After': '0' }),
+    }
+    const okRes = {
+      ok: true, status: 200, statusText: 'OK',
+      json: jest.fn().mockResolvedValue({ value: 7 }),
+      headers: new Headers(),
+    }
+    global.fetch = jest.fn()
+      .mockResolvedValueOnce(limited)
+      .mockResolvedValueOnce(limited)
+      .mockResolvedValueOnce(okRes)
+
+    await expect(post<{ value: number }>('/files/upload', {})).resolves.toEqual({ value: 7 })
+    expect(global.fetch).toHaveBeenCalledTimes(3)
+  })
+
+  it('gives up after the retry budget and throws the 429', async () => {
+    mockFetch(429, { error: 'too many requests' })
+    await expect(get('/x')).rejects.toThrow(ApiError)
+    // First attempt plus the bounded retries.
+    expect(global.fetch).toHaveBeenCalledTimes(5)
+  })
+})
+
 // ── upload ────────────────────────────────────────────────────────────────────
 
 describe('upload', () => {
@@ -209,6 +248,11 @@ class MockXHR {
   status = 200
   statusText = 'OK'
   responseText = ''
+  responseHeaders: Record<string, string> = {}
+
+  getResponseHeader(name: string): string | null {
+    return this.responseHeaders[name] ?? null
+  }
 
   addEventListener(event: string, fn: (e?: unknown) => void) {
     if (!this._listeners[event]) this._listeners[event] = []

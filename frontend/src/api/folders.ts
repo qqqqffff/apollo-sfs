@@ -1,5 +1,5 @@
 import { del, get, patch, post } from './client'
-import type { DriveMigrationEligibility, Folder, FolderContents, FolderDriveMigration, FolderKind, HiddenMode, MediaSort } from '../types/api'
+import type { DriveMigrationEligibility, Folder, FolderContents, FolderDriveMigration, FolderKind, HiddenMode, MediaFilters, MediaSort } from '../types/api'
 
 export interface FolderPageParams {
   folderCursor?: string
@@ -35,16 +35,68 @@ export function getFolder(folderId: string, p: FolderPageParams = {}) {
 export interface MediaPageParams extends FolderPageParams {
   sort?: MediaSort
   hidden?: HiddenMode
+  filters?: MediaFilters
 }
 
-// getMediaFolder fetches a media collection's subcollections and media files
-// (physical residents plus pointers), ordered by sort and filtered by hidden.
-export function getMediaFolder(folderId: string, p: MediaPageParams = {}) {
+// dayBoundary converts a `YYYY-MM-DD` value from an <input type="date"> into
+// an RFC3339 instant at the start (or end) of that day **in the viewer's own
+// time zone** — a bare date would be read as UTC midnight server-side, which
+// silently clips items shot late in the day for anyone west of UTC.
+function dayBoundary(date: string, edge: 'start' | 'end'): string | null {
+  const [y, m, d] = date.split('-').map(Number)
+  if (!y || !m || !d) return null
+  const dt = edge === 'start'
+    ? new Date(y, m - 1, d, 0, 0, 0, 0)
+    : new Date(y, m - 1, d, 23, 59, 59, 999)
+  return Number.isNaN(dt.getTime()) ? null : dt.toISOString()
+}
+
+// appendMediaFilters writes the filter facets onto a query string. Shared by
+// the listing and the id-only endpoint so both always agree on what a given
+// filter means.
+function appendMediaFilters(params: URLSearchParams, f: MediaFilters | undefined) {
+  if (!f) return
+  const ranges: [string, string, 'start' | 'end'][] = [
+    ['taken_after', f.takenAfter, 'start'],
+    ['taken_before', f.takenBefore, 'end'],
+    ['uploaded_after', f.uploadedAfter, 'start'],
+    ['uploaded_before', f.uploadedBefore, 'end'],
+  ]
+  for (const [key, value, edge] of ranges) {
+    if (!value) continue
+    const iso = dayBoundary(value, edge)
+    if (iso) params.set(key, iso)
+  }
+  if (f.sources.length > 0) params.set('source', f.sources.join(','))
+  if (f.mediaTypes.length > 0) params.set('media_type', f.mediaTypes.join(','))
+  if (f.groupIds.length > 0) params.set('group', f.groupIds.join(','))
+}
+
+function mediaQS(p: MediaPageParams): URLSearchParams {
   const params = new URLSearchParams(buildQS(p).replace(/^\?/, ''))
   if (p.sort) params.set('sort', p.sort)
   if (p.hidden && p.hidden !== 'hide') params.set('hidden', p.hidden === 'only' ? 'only' : 'show')
+  appendMediaFilters(params, p.filters)
+  return params
+}
+
+// getMediaFolder fetches a media collection's subcollections and media files
+// (physical residents plus pointers), ordered by sort and narrowed by hidden
+// state plus the optional filter facets.
+export function getMediaFolder(folderId: string, p: MediaPageParams = {}) {
+  const params = mediaQS(p)
   const qs = params.size ? `?${params}` : ''
   return get<FolderContents>(`/folders/${folderId}/media${qs}`)
+}
+
+// getMediaFileIds returns the ids of every file matching the same sort/hidden/
+// filter params getMediaFolder accepts — what "select everything matching this
+// filter" needs, since the grid only ever holds the pages loaded so far.
+// truncated is set when the server's cap was hit.
+export function getMediaFileIds(folderId: string, p: MediaPageParams = {}) {
+  const params = mediaQS(p)
+  const qs = params.size ? `?${params}` : ''
+  return get<{ file_ids: string[]; truncated: boolean }>(`/folders/${folderId}/media/ids${qs}`)
 }
 
 export function createFolder(name: string, parent_id?: string, kind: FolderKind = 'regular', drive_id?: string) {

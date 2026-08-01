@@ -1,9 +1,9 @@
 import { createFileRoute, useNavigate, Link } from '@tanstack/react-router'
 import { useEffect, useRef, useCallback, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { MdAddCircleOutline, MdArrowForward, MdAssignment, MdCheck, MdClose, MdEdit, MdFeedback, MdHistory, MdPhotoLibrary, MdRocketLaunch, MdShield, MdStorage, MdBolt, MdRefresh, MdScience } from 'react-icons/md'
+import { MdAddCircleOutline, MdArrowForward, MdAssignment, MdCheck, MdClose, MdEdit, MdFeedback, MdHistory, MdPhotoLibrary, MdRocketLaunch, MdShield, MdStorage, MdBolt, MdRefresh, MdReplay, MdSchool, MdScience } from 'react-icons/md'
 import { FaApple } from 'react-icons/fa'
-import { meQueryOptions, updateUsername, preferencesQueryOptions, updatePreferences, updateStorageUIPreferences, updateDefaultDrive, updateSandboxPayments, updateExpansionOverride, unlinkProvider, lastBackupSyncQueryOptions, updateBackupReminderPreference } from '../../api/me'
+import { meQueryOptions, updateUsername, preferencesQueryOptions, updatePreferences, updateStorageUIPreferences, updateDefaultDrive, updateSandboxPayments, updateExpansionOverride, unlinkProvider, linkProvider, lastBackupSyncQueryOptions, updateBackupReminderPreference } from '../../api/me'
 import { formatTimeSince } from '../../components/LastSyncNote'
 import { logout } from '../../api/auth'
 import { listRoot } from '../../api/folders'
@@ -13,8 +13,10 @@ import { PremiumUpgradeModal } from '../../components/PremiumUpgradeModal'
 import { AccountBadges } from '../../components/GroupBadge'
 import { FileServerLinksCard } from '../../components/FileServerLinksCard'
 import { useNotification } from '../../context/NotificationContext'
+import { useOnboardingGuide } from '../../context/OnboardingGuideContext'
 import { formatCents, listMyExpansionRequests, type ExpansionRequest } from '../../api/billing'
 import { useBillingConfig } from '../../hooks/useBillingConfig'
+import { socialLinkUrl, type SocialProvider } from '../../utils/socialAuth'
 import { cancelPremiumSubscription } from '../../api/payments'
 import {
   getStorageBreakdown,
@@ -28,6 +30,14 @@ import {
 
 export const Route = createFileRoute('/_auth/client/profile')({
   component: RouteComponent,
+  // Keycloak redirects here with ?code=&state= at the end of the "Connect"
+  // account-linking flow — see socialLinkUrl and LinkedAccountsCard. `error` is
+  // what it sends instead when the user backs out at the provider.
+  validateSearch: (search: Record<string, unknown>): { code?: string; state?: string; error?: string } => ({
+    code: typeof search.code === 'string' ? search.code : undefined,
+    state: typeof search.state === 'string' ? search.state : undefined,
+    error: typeof search.error === 'string' ? search.error : undefined,
+  }),
 })
 
 const GB = 1024 ** 3
@@ -61,7 +71,7 @@ function RouteComponent() {
       <div className="bg-white border border-gray-200 rounded-xl divide-y divide-gray-100">
         <UsernameRow currentUsername={user.username} />
         <Row label="Email" value={user.email} />
-        <div className="flex items-center justify-between px-5 py-3.5">
+        <div className="flex items-center justify-between px-5 py-3.5" data-tour="account-type">
           <span className="text-sm text-gray-500">Account type</span>
           <AccountBadges user={user} />
         </div>
@@ -77,7 +87,7 @@ function RouteComponent() {
             ? new Date(user.last_seen_at).toLocaleString()
             : '—'}
         />
-        <div className="px-5 py-4">
+        <div className="px-5 py-4" data-tour="storage-bar">
           <div className="flex justify-between text-sm mb-2">
             <span className="text-gray-500">Storage</span>
             <span className="text-gray-700 font-medium">
@@ -132,13 +142,19 @@ function RouteComponent() {
       />
       {showUpgradeModal && <PremiumUpgradeModal onClose={() => setShowUpgradeModal(false)} />}
 
-      {(user.is_premium || user.is_admin) && <FileServerLinksCard />}
+      {(user.is_premium || user.is_admin) && (
+        <div data-tour="file-server-links"><FileServerLinksCard /></div>
+      )}
 
       <StorageUIPreferences />
 
+      <GuidesCard isPremium={user.is_premium || user.is_admin} />
+
       <MediaAutoUpload />
 
-      {(user.is_premium || user.is_admin) && <BackupReminderCard />}
+      {(user.is_premium || user.is_admin) && (
+        <div data-tour="backup-reminder"><BackupReminderCard /></div>
+      )}
 
       {user.is_admin && (
         <SandboxPaymentsToggle
@@ -661,6 +677,40 @@ function StorageUIPreferences() {
   )
 }
 
+// GuidesCard replays the first-time onboarding tours on demand. Both guides
+// otherwise only auto-open once per account (see OnboardingGuideContext) —
+// this is the way back in after that.
+function GuidesCard({ isPremium }: { isPremium: boolean }) {
+  const { openGuide } = useOnboardingGuide()
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-xl px-5 py-4" data-tour="guides-card">
+      <h3 className="text-sm font-semibold text-gray-800 mb-1 flex items-center gap-1.5">
+        <MdSchool className="text-gray-500" /> Guides
+      </h3>
+      <p className="text-xs text-gray-400 mb-4">
+        Replay the first-time walkthroughs whenever you want a refresher.
+      </p>
+      <div className="flex flex-col gap-2 items-start">
+        <button
+          onClick={() => openGuide('base')}
+          className="inline-flex items-center gap-1.5 text-sm text-blue-600 hover:text-blue-700 bg-transparent border-0 p-0 cursor-pointer font-medium transition-colors"
+        >
+          <MdReplay className="text-sm" /> Replay getting-started guide
+        </button>
+        {isPremium && (
+          <button
+            onClick={() => openGuide('premium')}
+            className="inline-flex items-center gap-1.5 text-sm text-blue-600 hover:text-blue-700 bg-transparent border-0 p-0 cursor-pointer font-medium transition-colors"
+          >
+            <MdReplay className="text-sm" /> Replay premium features guide
+          </button>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function SandboxPaymentsToggle({
   enabled, expansionOverrideEnabled,
 }: {
@@ -909,16 +959,64 @@ function MicrosoftIcon() {
   )
 }
 
+const PROVIDERS: { key: SocialProvider; label: string; icon: React.ReactNode }[] = [
+  { key: 'google',    label: 'Google',    icon: <GoogleIcon /> },
+  { key: 'apple',     label: 'Apple',     icon: <FaApple className="text-gray-900 text-lg" /> },
+  { key: 'microsoft', label: 'Microsoft', icon: <MicrosoftIcon /> },
+]
+
+function providerLabel(provider: string) {
+  return PROVIDERS.find((p) => p.key === provider)?.label ?? provider
+}
+
 function LinkedAccountsCard({ linkedProviders }: { linkedProviders: string[] }) {
   const queryClient = useQueryClient()
+  const navigate = useNavigate()
+  // Keycloak echoes the provider back in `state`; `code` is the authorization
+  // code to exchange, `error` is set instead when the sign-in didn't complete.
+  const { code, state, error: oauthError } = Route.useSearch()
   const [unlinking, setUnlinking] = useState<string | null>(null)
+  const [linking, setLinking] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [outcome, setOutcome] = useState<{ ok: boolean; text: string } | null>(null)
 
-  const providers = [
-    { key: 'google',    label: 'Google',    icon: <GoogleIcon /> },
-    { key: 'apple',     label: 'Apple',     icon: <FaApple className="text-gray-900 text-lg" /> },
-    { key: 'microsoft', label: 'Microsoft', icon: <MicrosoftIcon /> },
-  ]
+  // Finish the "Connect" round-trip. The authorization code is single-use, so
+  // the params are stripped from the URL first — a re-render or a refresh must
+  // not replay a spent code. The ref guards against React 18 StrictMode
+  // double-invoking the effect before that navigation lands.
+  const redeemed = useRef(false)
+  useEffect(() => {
+    if (!code && !oauthError) return
+    if (redeemed.current) return
+    redeemed.current = true
+
+    const provider = state ?? ''
+    navigate({ to: '/client/profile', search: {}, replace: true })
+
+    if (oauthError || !code || !provider) {
+      setOutcome({
+        ok: false,
+        text: oauthError === 'access_denied'
+          ? 'Connecting was cancelled.'
+          : 'Could not connect the account. Please try again.',
+      })
+      return
+    }
+
+    setLinking(provider)
+    linkProvider(provider, code)
+      .then(() => {
+        setOutcome({ ok: true, text: `${providerLabel(provider)} account connected.` })
+        return queryClient.invalidateQueries({ queryKey: ['me'] })
+      })
+      .catch((err) => {
+        setOutcome({
+          ok: false,
+          text: err instanceof ApiError ? err.message : 'Could not connect the account. Please try again.',
+        })
+      })
+      .finally(() => setLinking(null))
+  }, [code, state, oauthError, navigate, queryClient])
 
   const handleUnlink = async (provider: string) => {
     setUnlinking(provider)
@@ -933,17 +1031,24 @@ function LinkedAccountsCard({ linkedProviders }: { linkedProviders: string[] }) 
     }
   }
 
+  // Linking has no in-app step to render: the browser leaves for Keycloak, which
+  // brokers the provider sign-in and redirects back to this page with the code
+  // the effect above redeems.
+  const handleConnect = (provider: SocialProvider) => {
+    window.location.href = socialLinkUrl(provider)
+  }
+
   return (
     <div className="bg-white border border-gray-200 rounded-xl px-5 py-4">
       <h3 className="text-sm font-semibold text-gray-800 mb-3">Linked accounts</h3>
       <div className="flex flex-col divide-y divide-gray-100">
-        {providers.map(({ key, label, icon }) => {
-          const linked = linkedProviders.includes(key)
+        {PROVIDERS.map(({ key, label, icon }) => {
+          const isLinked = linkedProviders.includes(key)
           return (
             <div key={key} className="flex items-center gap-3 py-3 first:pt-0 last:pb-0">
               <span className="w-5 flex items-center justify-center shrink-0">{icon}</span>
               <span className="text-sm text-gray-700 flex-1">{label}</span>
-              {linked ? (
+              {isLinked ? (
                 <div className="flex items-center gap-2">
                   <span className="flex items-center gap-1 text-xs font-medium text-green-600">
                     <MdCheck className="shrink-0" /> Connected
@@ -957,12 +1062,21 @@ function LinkedAccountsCard({ linkedProviders }: { linkedProviders: string[] }) 
                   </button>
                 </div>
               ) : (
-                <span className="text-xs text-gray-400">Not connected</span>
+                <button
+                  onClick={() => handleConnect(key)}
+                  disabled={linking !== null}
+                  className="text-xs font-medium text-blue-600 hover:text-blue-700 bg-transparent border-0 p-0 cursor-pointer transition-colors disabled:opacity-50"
+                >
+                  {linking === key ? 'Connecting…' : 'Connect'}
+                </button>
               )}
             </div>
           )
         })}
       </div>
+      {outcome && (
+        <p className={`text-xs mt-2 ${outcome.ok ? 'text-green-600' : 'text-red-500'}`}>{outcome.text}</p>
+      )}
       {error && <p className="text-xs text-red-500 mt-2">{error}</p>}
     </div>
   )

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   MdAlternateEmail,
   MdAttachFile,
@@ -16,24 +16,42 @@ import {
   MdStorage,
 } from 'react-icons/md'
 import type { MyServer } from '../api/storage'
-import type { EmailProvider, ProviderEmailItem } from '../api/emailProviders'
+import type { EmailProvider, FetchProgress, ProviderEmailItem } from '../api/emailProviders'
 import {
   backupEmailEntries,
   completeEmailBackupRun,
   deleteProviderMessages,
   ensureEmailBackupFolder,
   loadEmailBackupSettings,
+  removeBackedUpMessages,
   saveEmailBackupSettings,
   type EmailBackupItemStatus,
   type EmailBackupResult,
 } from '../api/emailBackup'
+import {
+  createBackupControl,
+  readCancelAction,
+  type BackupControl,
+  type CancelAction,
+} from '../api/backupControl'
+import { useBackupLiveSync } from '../hooks/useBackupLiveSync'
+import { BackupProgressBar, BackupProgressDetails, BackupRunControls } from './BackupProgress'
+import { BackupCancelModal } from './BackupCancelModal'
 import { ApiError } from '../api/client'
+import { SettingToggle } from './SettingToggle'
 
 interface Props {
   provider: EmailProvider
   accessToken: string
   accountEmail: string
+  // Grows while the mailbox is still being paged — the table renders what has
+  // arrived instead of waiting for the whole retrieval to finish.
   items: ProviderEmailItem[]
+  // True while more pages are still coming in.
+  fetching: boolean
+  fetchProgress: FetchProgress | null
+  // Ends the retrieval early, keeping whatever has been fetched.
+  onStopFetching: () => void
   quotaBytes: number
   usedBytes: number
   myServers: MyServer[] | undefined
@@ -41,6 +59,10 @@ interface Props {
   // Called from the finished screen; folderId lets the caller jump into the
   // new backup folder.
   onDone: (folderId: string | null) => void
+  // Called instead of running the upload inline when "Back up in the
+  // background" is on — mirrors GoogleBackupModal's onStartBackground. The
+  // folder is already created by the time this fires.
+  onStartBackground: (items: ProviderEmailItem[], folder: { id: string; drive_id: string | null }) => void
 }
 
 type Phase = 'pick' | 'uploading' | 'finished'
@@ -62,8 +84,8 @@ function fmtDate(iso: string): string {
 // tier/server and the delete-after / notify settings, then back everything up
 // with per-message progress.
 export function EmailBackupModal({
-  provider, accessToken, accountEmail, items, quotaBytes, usedBytes, myServers,
-  onClose, onDone,
+  provider, accessToken, accountEmail, items, fetching, fetchProgress, onStopFetching,
+  quotaBytes, usedBytes, myServers, onClose, onDone, onStartBackground,
 }: Props) {
   const [tab, setTab] = useState<'emails' | 'settings'>('emails')
   const [phase, setPhase] = useState<Phase>('pick')
@@ -80,6 +102,15 @@ export function EmailBackupModal({
 
   // ── Selection ──────────────────────────────────────────────────────────────
   const [selected, setSelected] = useState<Set<string>>(() => new Set(items.map((i) => i.id)))
+  // Everything is selected by default, including messages that arrive while the
+  // retrieval is still paging — but only until the user makes a choice of their
+  // own, after which late arrivals stay unselected rather than silently
+  // re-adding themselves to a curated selection.
+  const [selectionTouched, setSelectionTouched] = useState(false)
+  useEffect(() => {
+    if (selectionTouched) return
+    setSelected(new Set(items.map((i) => i.id)))
+  }, [items, selectionTouched])
 
   // ── Settings ───────────────────────────────────────────────────────────────
   const [settings, setSettings] = useState(loadEmailBackupSettings)
@@ -90,10 +121,26 @@ export function EmailBackupModal({
   // ── Upload state ───────────────────────────────────────────────────────────
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null)
   const [statusMap, setStatusMap] = useState<Record<string, EmailBackupItemStatus>>({})
+  const [errorMap, setErrorMap] = useState<Record<string, string>>({})
   const [result, setResult] = useState<EmailBackupResult | null>(null)
   const [folderId, setFolderId] = useState<string | null>(null)
   const [uploadError, setUploadError] = useState<string | null>(null)
   const [cleanupMsg, setCleanupMsg] = useState<string | null>(null)
+  // Live detail for the in-flight run: where the current message is being
+  // written and how much has actually landed.
+  const [currentPath, setCurrentPath] = useState<string | null>(null)
+  const [storedBytes, setStoredBytes] = useState(0)
+  const [storedCount, setStoredCount] = useState(0)
+  const [paused, setPaused] = useState(false)
+  const [cancelPrompt, setCancelPrompt] = useState(false)
+  const [rollbackBusy, setRollbackBusy] = useState(false)
+  const [cancelNote, setCancelNote] = useState<string | null>(null)
+  const controlRef = useRef<BackupControl | null>(null)
+  // Set by the cancel dialog before the run is stopped, so the continuation in
+  // handleBackUp knows whether to roll the partial backup back.
+  const cancelActionRef = useRef<CancelAction>('keep')
+  const liveSync = useBackupLiveSync([['email-backup']])
+  const [retrying, setRetrying] = useState(false)
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -138,6 +185,7 @@ export function EmailBackupModal({
   const allVisibleSelected = filtered.length > 0 && filtered.every((i) => selected.has(i.id))
 
   function toggle(id: string) {
+    setSelectionTouched(true)
     setSelected((prev) => {
       const s = new Set(prev)
       s.has(id) ? s.delete(id) : s.add(id)
@@ -145,15 +193,36 @@ export function EmailBackupModal({
     })
   }
 
+  // "All" adds the rows the current filter shows; "None" clears the *whole*
+  // selection, not just those rows. Clearing only the visible ones left
+  // filtered-out messages selected behind the filter — invisible on screen but
+  // still part of the backup, so narrowing the list and pressing None then
+  // picking a handful used to back up everything that had been fetched.
   function toggleAllVisible() {
+    setSelectionTouched(true)
     setSelected((prev) => {
+      if (allVisibleSelected) return new Set()
       const s = new Set(prev)
-      filtered.forEach((i) => (allVisibleSelected ? s.delete(i.id) : s.add(i.id)))
+      filtered.forEach((i) => s.add(i.id))
       return s
     })
   }
 
   const selectedItems = useMemo(() => items.filter((i) => selected.has(i.id)), [items, selected])
+
+  // Selected messages the current filter hides. They are still part of the
+  // backup, so say so rather than letting the count silently disagree with
+  // what the table shows.
+  const hiddenSelected = useMemo(() => {
+    const visible = new Set(filtered.map((i) => i.id))
+    return selectedItems.filter((i) => !visible.has(i.id))
+  }, [filtered, selectedItems])
+
+  function deselectHidden() {
+    setSelectionTouched(true)
+    const hidden = new Set(hiddenSelected.map((i) => i.id))
+    setSelected((prev) => new Set(Array.from(prev).filter((id) => !hidden.has(id))))
+  }
 
   // ── Quota ──────────────────────────────────────────────────────────────────
   const selectedSize = useMemo(
@@ -182,7 +251,7 @@ export function EmailBackupModal({
     setDriveId(primaryInTier?.drive_id ?? inTier[0]?.drive_id ?? null)
   }
 
-  function updateSettings(patch: Partial<{ deleteAfter: boolean; notify: boolean }>) {
+  function updateSettings(patch: Partial<{ deleteAfter: boolean; notify: boolean; background: boolean }>) {
     setSettings((prev) => {
       const next = { ...prev, ...patch }
       saveEmailBackupSettings(next)
@@ -194,34 +263,85 @@ export function EmailBackupModal({
   async function handleBackUp() {
     if (selectedItems.length === 0 || isOverQuota) return
     setUploadError(null)
-    setPhase('uploading')
-    setStatusMap({})
-    setProgress({ done: 0, total: selectedItems.length })
 
-    let folder: { id: string } | null = null
+    let folder: { id: string; drive_id: string | null } | null = null
     try {
-      const res = await ensureEmailBackupFolder(accountEmail, driveId)
-      folder = res.folder
-      setFolderId(res.folder.id)
+      const folderRes = await ensureEmailBackupFolder(accountEmail, driveId)
+      folder = folderRes.folder
     } catch (e) {
-      setPhase('pick')
-      setProgress(null)
       setUploadError(
         e instanceof ApiError ? e.message : 'Could not create the backup folder. Please try again.',
       )
       return
     }
 
-    const res = await backupEmailEntries(
-      selectedItems, provider, accessToken, folder.id,
-      (done, total, fin) => {
-        setProgress({ done, total })
-        if (fin) setStatusMap((m) => ({ ...m, [fin.item.id]: fin.status }))
-      },
-    )
-    setResult(res)
+    if (settings.background) {
+      onStartBackground(selectedItems, folder)
+      return
+    }
 
-    if (settings.deleteAfter && res.backedUpIds.length > 0) {
+    const control = createBackupControl()
+    controlRef.current = control
+    cancelActionRef.current = 'keep'
+    // An existing backup folder keeps its own pin, so credit that drive's
+    // quota bar rather than the one selected in Settings.
+    const destDriveId = folder.drive_id ?? driveId
+
+    setPhase('uploading')
+    setFolderId(folder.id)
+    setStatusMap({})
+    setErrorMap({})
+    setStoredBytes(0)
+    setStoredCount(0)
+    setCancelNote(null)
+    setProgress({ done: 0, total: selectedItems.length })
+
+    const res = await backupEmailEntries(selectedItems, provider, accessToken, folder.id, {
+      control,
+      folderName: accountEmail,
+      onProgress: (e) => {
+        setProgress({ done: e.done, total: e.total })
+        if (e.phase === 'start') { setCurrentPath(e.path); return }
+        if (e.status) {
+          setStatusMap((m) => ({ ...m, [e.entry.id]: e.status! }))
+          setErrorMap((m) => (e.error ? { ...m, [e.entry.id]: e.error! } : m))
+        }
+        if (e.status === 'done') {
+          setCurrentPath(e.path)
+          setStoredBytes((b) => b + (e.sizeBytes ?? 0))
+          setStoredCount((c) => c + 1)
+          // Show it in the file browser and on the quota bar right away.
+          liveSync.itemStored({ sizeBytes: e.sizeBytes ?? 0, driveId: destDriveId })
+        }
+      },
+    })
+
+    let removed = 0
+    const cancelAction = readCancelAction(cancelActionRef)
+    if (res.cancelled && cancelAction === 'remove' && res.uploadedMessageIds.length > 0) {
+      setRollbackBusy(true)
+      const rollback = await removeBackedUpMessages(res.uploadedMessageIds)
+      removed = rollback.removed
+      setRollbackBusy(false)
+      setCancelNote(
+        rollback.failed === 0
+          ? `Backup cancelled — ${removed} email${removed !== 1 ? 's' : ''} removed again.`
+          : `Backup cancelled — ${removed} of ${res.uploadedMessageIds.length} removed; ${rollback.failed} could not be deleted.`,
+      )
+    } else if (res.cancelled) {
+      setCancelNote(`Backup cancelled — ${res.uploaded} email${res.uploaded !== 1 ? 's' : ''} kept.`)
+    }
+
+    controlRef.current = null
+    setCancelPrompt(false)
+    setPaused(false)
+    setCurrentPath(null)
+    setResult(res)
+    liveSync.finish()
+
+    // Only trash messages provider-side that are still backed up here — a
+    // rollback just removed the copies that would have justified it.
+    if (settings.deleteAfter && removed === 0 && res.backedUpIds.length > 0) {
       const { failed } = await deleteProviderMessages(provider, accessToken, res.backedUpIds)
       const deleted = res.backedUpIds.length - failed
       const where = provider === 'gmail' ? 'Gmail trash' : 'Deleted Items'
@@ -238,7 +358,7 @@ export function EmailBackupModal({
         folder_id: folder.id,
         email_address: accountEmail,
         provider,
-        uploaded: res.uploaded,
+        uploaded: Math.max(0, res.uploaded - removed),
         duplicates: res.duplicates,
         errors: res.errors,
         notify: settings.notify,
@@ -248,7 +368,92 @@ export function EmailBackupModal({
     setPhase('finished')
   }
 
-  const canBackUp = selectedItems.length > 0 && !isOverQuota && phase === 'pick'
+  function togglePause() {
+    const control = controlRef.current
+    if (!control) return
+    if (control.isPaused()) { control.resume(); setPaused(false) }
+    else { control.pause(); setPaused(true) }
+  }
+
+  // Cancel pauses first, then asks what should happen to the part that landed.
+  function requestCancel() {
+    controlRef.current?.pause()
+    setPaused(true)
+    setCancelPrompt(true)
+  }
+
+  function resolveCancel(action: CancelAction) {
+    cancelActionRef.current = action
+    setCancelPrompt(false)
+    // Releases the loop, which stops and returns a partial result — the
+    // continuation in handleBackUp does the rollback and the summary.
+    controlRef.current?.cancel()
+  }
+
+  // Re-runs only the messages still marked 'error', merging their outcome
+  // back into the existing status/result rather than restarting the batch.
+  async function handleRetryFailed() {
+    if (!folderId) return
+    const failedIds = Object.entries(statusMap).filter(([, s]) => s === 'error').map(([id]) => id)
+    if (failedIds.length === 0) return
+
+    setRetrying(true)
+    const toRetry = items.filter((i) => failedIds.includes(i.id))
+    const res = await backupEmailEntries(toRetry, provider, accessToken, folderId, {
+      folderName: accountEmail,
+      onProgress: (e) => {
+        if (e.phase !== 'settled' || !e.status) return
+        setStatusMap((m) => ({ ...m, [e.entry.id]: e.status! }))
+        setErrorMap((m) => {
+          if (e.status !== 'error') {
+            if (!(e.entry.id in m)) return m
+            const next = { ...m }
+            delete next[e.entry.id]
+            return next
+          }
+          return e.error ? { ...m, [e.entry.id]: e.error! } : m
+        })
+      },
+    })
+
+    setResult((prev) => prev && {
+      uploaded: prev.uploaded + res.uploaded,
+      duplicates: prev.duplicates + res.duplicates,
+      errors: prev.errors - failedIds.length + res.errors,
+      cancelled: prev.cancelled,
+      uploadedFileIds: [...prev.uploadedFileIds, ...res.uploadedFileIds],
+      backedUpIds: [...prev.backedUpIds, ...res.backedUpIds],
+      uploadedMessageIds: [...prev.uploadedMessageIds, ...res.uploadedMessageIds],
+    })
+
+    if (settings.deleteAfter && res.backedUpIds.length > 0) {
+      const { failed } = await deleteProviderMessages(provider, accessToken, res.backedUpIds)
+      const deleted = res.backedUpIds.length - failed
+      const where = provider === 'gmail' ? 'Gmail trash' : 'Deleted Items'
+      setCleanupMsg(
+        failed === 0
+          ? `${deleted} email${deleted !== 1 ? 's' : ''} moved to your ${where}.`
+          : `${deleted} of ${res.backedUpIds.length} moved to your ${where}; ${failed} could not be deleted.`,
+      )
+    }
+
+    // Best effort — the backup itself already succeeded.
+    try {
+      await completeEmailBackupRun({
+        folder_id: folderId,
+        email_address: accountEmail,
+        provider,
+        uploaded: res.uploaded,
+        duplicates: res.duplicates,
+        errors: res.errors,
+        notify: settings.notify,
+      })
+    } catch { /* ignore */ }
+
+    setRetrying(false)
+  }
+
+  const canBackUp = selectedItems.length > 0 && !isOverQuota && phase === 'pick' && !fetching
   const uploading = phase === 'uploading'
   const finished = phase === 'finished'
   const listData = uploading || finished ? selectedItems : filtered
@@ -265,7 +470,7 @@ export function EmailBackupModal({
         <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 shrink-0">
           <button
             onClick={finished ? () => onDone(folderId) : onClose}
-            disabled={uploading}
+            disabled={uploading || retrying}
             className="p-1 rounded hover:bg-gray-100 text-gray-500 cursor-pointer transition-colors disabled:opacity-30"
           >
             <MdClose className="text-xl" />
@@ -277,12 +482,48 @@ export function EmailBackupModal({
           {phase === 'pick' ? (
             <button
               onClick={toggleAllVisible}
+              title={allVisibleSelected ? 'Clear the whole selection' : 'Select every email the filters show'}
               className="text-xs font-semibold text-blue-600 hover:text-blue-700 cursor-pointer px-1"
             >
               {allVisibleSelected ? 'None' : 'All'}
             </button>
           ) : <div className="w-10" />}
         </div>
+
+        {/* Retrieval progress — the table fills in while this runs */}
+        {fetching && phase === 'pick' && (
+          <div className="px-4 py-2 border-b border-gray-100 bg-blue-50/40 shrink-0 flex items-center gap-3">
+            <div className="w-3.5 h-3.5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin shrink-0" />
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center justify-between gap-2 text-xs">
+                <span className="font-semibold text-blue-700 truncate">
+                  Retrieving your emails — {items.length.toLocaleString()} loaded so far
+                </span>
+                {fetchProgress?.fraction != null && (
+                  <span className="text-blue-500 shrink-0">{Math.round(fetchProgress.fraction * 100)}%</span>
+                )}
+              </div>
+              <div className="h-1 bg-blue-100 rounded-full overflow-hidden mt-1">
+                {fetchProgress?.fraction != null ? (
+                  <div
+                    className="h-full bg-blue-500 rounded-full transition-all"
+                    style={{ width: `${Math.round(fetchProgress.fraction * 100)}%` }}
+                  />
+                ) : (
+                  // No measurable target (e.g. an unbounded date range) — show
+                  // motion rather than a bar that never fills.
+                  <div className="h-full w-1/3 bg-blue-400 rounded-full animate-pulse" />
+                )}
+              </div>
+            </div>
+            <button
+              onClick={onStopFetching}
+              className="text-xs font-semibold text-blue-600 hover:text-blue-700 cursor-pointer px-1 shrink-0"
+            >
+              Stop
+            </button>
+          </div>
+        )}
 
         {/* Tab bar */}
         {phase === 'pick' && (
@@ -358,8 +599,22 @@ export function EmailBackupModal({
                   )}
                 </div>
               )}
+              {servers.length > 0 && (
+                <div className="mt-3 flex items-center gap-1.5 text-xs font-medium text-gray-600 bg-white rounded-md border border-gray-200 px-2.5 py-1.5 w-fit max-w-full">
+                  {tier === 'nvme' ? <MdBolt className="text-blue-500 shrink-0" /> : <MdStorage className="text-amber-500 shrink-0" />}
+                  <span className="shrink-0">{tier === 'nvme' ? 'Fast' : 'Standard'}</span>
+                  <span className="text-gray-300 shrink-0">›</span>
+                  <span className="truncate">{accountEmail}</span>
+                </div>
+              )}
             </div>
 
+            <SettingToggle
+              title="Back up in the background"
+              desc="Close this window when you start a backup and keep uploading, with progress shown in the toolbar."
+              checked={settings.background}
+              onChange={(v) => updateSettings({ background: v })}
+            />
             <SettingToggle
               title="Delete emails after backup"
               desc={provider === 'gmail'
@@ -408,6 +663,21 @@ export function EmailBackupModal({
                     * Some emails don&apos;t report a size and are excluded from the estimate. The quota is
                     still enforced during upload.
                   </p>
+                )}
+                {phase === 'pick' && hiddenSelected.length > 0 && (
+                  <div className="flex items-center gap-2 mt-2 text-[11px] text-amber-700 bg-amber-50 border border-amber-100 rounded-md px-2 py-1">
+                    <span className="flex-1">
+                      {hiddenSelected.length.toLocaleString()} selected email
+                      {hiddenSelected.length !== 1 ? 's are' : ' is'} hidden by the current filters and
+                      will still be backed up.
+                    </span>
+                    <button
+                      onClick={deselectHidden}
+                      className="font-semibold underline cursor-pointer bg-transparent border-0 text-amber-700 shrink-0"
+                    >
+                      Deselect
+                    </button>
+                  </div>
                 )}
               </div>
             )}
@@ -543,6 +813,7 @@ export function EmailBackupModal({
                   item={item}
                   checked={selected.has(item.id)}
                   status={statusMap[item.id]}
+                  error={errorMap[item.id]}
                   disabled={phase !== 'pick'}
                   onToggle={() => toggle(item.id)}
                 />
@@ -554,16 +825,24 @@ export function EmailBackupModal({
         {/* Footer */}
         <div className="border-t border-gray-200 px-4 py-3 flex flex-col gap-2 shrink-0">
           {uploading && progress && (
-            <div className="flex items-center gap-2">
-              <div className="flex-1 h-1.5 bg-gray-200 rounded-full overflow-hidden">
-                <div
-                  className="h-full bg-green-500 rounded-full transition-all"
-                  style={{ width: `${Math.round((progress.done / progress.total) * 100)}%` }}
-                />
-              </div>
-              <span className="text-xs text-gray-500 shrink-0">{progress.done} / {progress.total}</span>
-            </div>
+            <>
+              <BackupProgressBar done={progress.done} total={progress.total} paused={paused} />
+              <BackupProgressDetails
+                currentPath={currentPath}
+                storedBytes={storedBytes}
+                totalBytes={selectedSize}
+                paused={paused}
+              />
+              <BackupRunControls
+                paused={paused}
+                busy={rollbackBusy}
+                onTogglePause={togglePause}
+                onCancel={requestCancel}
+              />
+            </>
           )}
+
+          {cancelNote && <p className="text-xs text-center text-amber-600">{cancelNote}</p>}
 
           {finished && result && (
             <p className={`text-xs text-center ${result.errors > 0 ? 'text-amber-600' : 'text-green-600'}`}>
@@ -577,35 +856,63 @@ export function EmailBackupModal({
 
           {cleanupMsg && <p className="text-xs text-gray-500 text-center">{cleanupMsg}</p>}
 
+          {finished && result && result.errors > 0 && (
+            <button
+              onClick={handleRetryFailed}
+              disabled={retrying}
+              className="flex items-center justify-center gap-1.5 text-sm py-2 rounded-lg border border-blue-200 text-blue-600 hover:bg-blue-50 transition-colors cursor-pointer disabled:opacity-50"
+            >
+              {retrying ? (
+                <div className="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin" />
+              ) : (
+                `Retry ${result.errors} failed email${result.errors !== 1 ? 's' : ''}`
+              )}
+            </button>
+          )}
+
           {finished ? (
             <button
               onClick={() => onDone(folderId)}
-              className="flex items-center justify-center gap-2 py-2.5 bg-green-600 hover:bg-green-700 text-white text-sm font-semibold rounded-lg cursor-pointer transition-colors"
+              disabled={retrying}
+              className="flex items-center justify-center gap-2 py-2.5 bg-green-600 hover:bg-green-700 text-white text-sm font-semibold rounded-lg cursor-pointer transition-colors disabled:opacity-40"
             >
               <MdCheck className="text-base" /> Open backup folder
             </button>
-          ) : (
+          ) : !uploading && (
             <button
               onClick={handleBackUp}
               disabled={!canBackUp}
               className="flex items-center justify-center gap-2 py-2.5 bg-green-600 hover:bg-green-700 text-white text-sm font-semibold rounded-lg cursor-pointer transition-colors disabled:opacity-40"
             >
-              {uploading ? (
-                <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-              ) : (
-                <>
-                  <MdCloud className="text-base" />
-                  {isOverQuota
-                    ? 'Over quota — deselect emails or upgrade'
-                    : selectedItems.length === 0
-                      ? 'No emails selected'
-                      : `Back Up ${selectedItems.length} Email${selectedItems.length !== 1 ? 's' : ''}`}
-                </>
-              )}
+              <MdCloud className="text-base" />
+              {fetching
+                ? `Retrieving emails… (${items.length.toLocaleString()} so far)`
+                : isOverQuota
+                  ? 'Over quota — deselect emails or upgrade'
+                  : selectedItems.length === 0
+                    ? 'No emails selected'
+                    : `Back Up ${selectedItems.length} Email${selectedItems.length !== 1 ? 's' : ''}`}
             </button>
           )}
         </div>
       </div>
+
+      {/* Cancel confirmation — the run is paused behind it */}
+      {cancelPrompt && (
+        <BackupCancelModal
+          storedCount={storedCount}
+          storedBytes={storedBytes}
+          unit="email"
+          busy={rollbackBusy}
+          onRemove={() => resolveCancel('remove')}
+          onKeep={() => resolveCancel('keep')}
+          onResume={() => {
+            setCancelPrompt(false)
+            controlRef.current?.resume()
+            setPaused(false)
+          }}
+        />
+      )}
     </div>
   )
 }
@@ -627,32 +934,11 @@ function FilterChip({ active, onClick, icon, label }: {
   )
 }
 
-function SettingToggle({ title, desc, checked, onChange }: {
-  title: string; desc: string; checked: boolean; onChange: (v: boolean) => void
-}) {
-  return (
-    <div className="flex items-center justify-between bg-gray-50 rounded-lg p-4">
-      <div className="flex-1 mr-4">
-        <div className="text-sm font-semibold text-gray-900">{title}</div>
-        <div className="text-xs text-gray-500 mt-0.5 leading-relaxed">{desc}</div>
-      </div>
-      <label className="relative inline-flex cursor-pointer shrink-0">
-        <input
-          type="checkbox"
-          className="sr-only peer"
-          checked={checked}
-          onChange={(e) => onChange(e.target.checked)}
-        />
-        <div className="w-10 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-0.5 after:start-0.5 after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600" />
-      </label>
-    </div>
-  )
-}
-
-function EmailRow({ item, checked, status, disabled, onToggle }: {
+function EmailRow({ item, checked, status, error, disabled, onToggle }: {
   item: ProviderEmailItem
   checked: boolean
   status: EmailBackupItemStatus | undefined
+  error?: string
   disabled: boolean
   onToggle: () => void
 }) {
@@ -665,6 +951,8 @@ function EmailRow({ item, checked, status, disabled, onToggle }: {
       <button
         onClick={() => !disabled && onToggle()}
         disabled={disabled}
+        aria-label={`${checked ? 'Deselect' : 'Select'} ${item.subject || '(no subject)'}`}
+        aria-pressed={checked}
         className={`w-5 h-5 rounded-full border-2 flex items-center justify-center shrink-0 cursor-pointer transition-colors ${
           checked ? 'bg-blue-600 border-blue-600' : 'border-gray-300'
         }`}
@@ -691,6 +979,9 @@ function EmailRow({ item, checked, status, disabled, onToggle }: {
             <span className="text-[10px] text-gray-400">{fmt(item.sizeEstimate)}</span>
           )}
         </div>
+        {status === 'error' && error && (
+          <div className="text-[10px] text-red-500 truncate mt-0.5" title={error}>{error}</div>
+        )}
       </div>
 
       {status ? (

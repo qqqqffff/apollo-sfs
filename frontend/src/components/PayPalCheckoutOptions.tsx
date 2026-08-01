@@ -3,6 +3,13 @@ import { MdArrowBack } from 'react-icons/md'
 import { PayPalGooglePayButton } from './PayPalGooglePayButton'
 import { PayPalApplePayButton } from './PayPalApplePayButton'
 import { PayPalWalletRedirectButton } from './PayPalWalletRedirectButton'
+import type { RecurringTerms } from './recurringTerms'
+
+// The funding sources this component's in-page buttons can produce an order
+// with. The "PayPal" wallet button is not one of them — it redirects to a
+// PayPal-hosted approval page rather than creating and confirming an order
+// in-page (see PayPalWalletRedirectButton).
+export type CheckoutSource = 'apple_pay' | 'google_pay' | 'card'
 
 interface Props {
   clientId: string
@@ -15,13 +22,16 @@ interface Props {
   getClientToken: () => Promise<string>
   // Creates the order server-side and resolves to its PayPal order id — shared
   // by the Apple Pay button, the Google Pay button, and (once "Pay with card"
-  // is chosen) HostedCardFields.
-  createOrder: () => Promise<string>
+  // is chosen) HostedCardFields. The funding source is passed through because
+  // some flows have to create a different order per source: a vaulting order's
+  // payment_source key must match the source that will confirm it (see the
+  // premium subscription modal). Callers that don't care can ignore it.
+  createOrder: (source: CheckoutSource) => Promise<string>
   // Creates an order the same way and resolves to its PayPal-hosted approval
   // URL, for the "PayPal" wallet button below — see PayPalWalletRedirectButton
   // for why that one redirects instead of using createOrder+onApprove.
   getApprovalUrl: () => Promise<string>
-  onApprove: (orderId: string) => Promise<void> | void
+  onApprove: (orderId: string, source: CheckoutSource) => Promise<void> | void
   onError: (message: string) => void
   // Current amount in major units (e.g. "30.00"), read at click time for the
   // Apple Pay / Google Pay sheets.
@@ -34,6 +44,19 @@ interface Props {
   // account-request form) pass false to keep from accidentally taking a real
   // Apple Pay charge.
   showApplePay?: boolean
+  // When set, the Apple Pay and Google Pay sheets authorise a recurring
+  // charge and disclose the billing terms, instead of presenting a one-off
+  // purchase. Required whenever the payment method will be billed again later
+  // — see recurringTerms.ts. The PayPal wallet button and the card fields are
+  // unaffected (PayPal discloses its own terms on the approval page; the card
+  // form carries the disclosure in its own copy).
+  recurring?: RecurringTerms
+  // Whether Google Pay is usable for subscriptions at all; only consulted
+  // when `recurring` is set. Off by default because PayPal doesn't vault the
+  // google_pay payment source, so the subscription could never renew — see
+  // docs/paypal_setup.md §10. Without it the Google Pay button hides on
+  // subscription surfaces (it still works for one-time purchases).
+  googlePaySubscriptionsEnabled?: boolean
 }
 
 // The wallet-checkout step shared by every payment surface (storage/premium
@@ -43,6 +66,7 @@ interface Props {
 // pixel- and behavior-identical instead of drifting copy to copy.
 export function PayPalCheckoutOptions({
   clientId, currency, environment, getClientToken, createOrder, getApprovalUrl, onApprove, onError, amount, canPay, onChooseCard, showApplePay = true,
+  recurring, googlePaySubscriptionsEnabled,
 }: Props) {
   return (
     <div className={`flex flex-col gap-2 ${canPay ? '' : 'opacity-50 pointer-events-none'}`}>
@@ -57,10 +81,11 @@ export function PayPalCheckoutOptions({
           currencyCode={currency}
           amount={amount}
           getClientToken={getClientToken}
-          createOrder={createOrder}
-          onApprove={onApprove}
+          createOrder={() => createOrder('apple_pay')}
+          onApprove={(orderId) => onApprove(orderId, 'apple_pay')}
           onError={onError}
           enabled={canPay}
+          recurring={recurring}
         />
       )}
       <PayPalScriptProvider
@@ -80,10 +105,12 @@ export function PayPalCheckoutOptions({
           environment={environment}
           currencyCode={currency}
           amount={amount}
-          createOrder={createOrder}
-          onApprove={onApprove}
+          createOrder={() => createOrder('google_pay')}
+          onApprove={(orderId) => onApprove(orderId, 'google_pay')}
           onError={onError}
           enabled={canPay}
+          recurring={recurring}
+          subscriptionsEnabled={googlePaySubscriptionsEnabled}
         />
       </PayPalScriptProvider>
       <PayPalWalletRedirectButton

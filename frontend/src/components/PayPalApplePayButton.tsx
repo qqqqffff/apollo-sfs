@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import type { RecurringTerms } from './recurringTerms'
 
 // Apple's official Apple Pay JS SDK — provides the <apple-pay-button> custom
 // element used below (required by the PayPal integration guide).
@@ -83,6 +84,72 @@ interface Props {
   onError?: (message: string) => void
   // Blocks the click (e.g. no plan selected / a capture in flight).
   enabled: boolean
+  // When set, the sheet is a subscription authorisation rather than a one-off
+  // charge: Apple renders the billing terms, registers the subscription in
+  // Wallet, and issues a merchant token intended for repeat billing. Omit for
+  // ordinary one-time purchases (storage add-ons, deposits).
+  recurring?: RecurringTerms
+}
+
+// Apple Pay JS API version that introduced recurringPaymentRequest (macOS 13 /
+// iOS 16). Version 4 is plenty for the one-time sheet and is kept for it so
+// older Safari still gets Apple Pay; a subscription sheet has to negotiate 14
+// or not run at all — see the eligibility check below.
+const APPLE_PAY_VERSION_ONE_TIME = 4
+const APPLE_PAY_VERSION_RECURRING = 14
+
+// recurringLineItem builds the ApplePayLineItem describing the billing cycle.
+// Apple's own examples pass Date objects, which is what the fields are typed
+// as. No recurringPaymentEndDate: the subscription runs until cancelled, and
+// Apple treats an absent end date as open-ended.
+function recurringLineItem(terms: RecurringTerms, amount: string) {
+  return {
+    label: terms.itemLabel,
+    amount,
+    type: 'final',
+    paymentTiming: 'recurring',
+    recurringPaymentStartDate: terms.startDate ?? new Date(),
+    recurringPaymentIntervalUnit: terms.intervalUnit,
+    recurringPaymentIntervalCount: terms.intervalCount,
+  }
+}
+
+// buildApplePayPaymentRequest assembles the ApplePayPaymentRequest handed to
+// ApplePaySession. Exported for tests: the recurring half of this shape is a
+// compliance requirement (ApplePayRecurringPaymentRequest mandates
+// paymentDescription, regularBilling and managementURL), so it's worth pinning
+// independently of the SDK plumbing around it.
+export function buildApplePayPaymentRequest(opts: {
+  config: { countryCode?: string; merchantCapabilities?: unknown; supportedNetworks?: unknown } | null
+  currencyCode: string
+  amount: string
+  recurring?: RecurringTerms
+}): Record<string, any> {
+  const { config, currencyCode, amount, recurring } = opts
+  const request: Record<string, any> = {
+    countryCode: config?.countryCode ?? 'US',
+    currencyCode,
+    merchantCapabilities: config?.merchantCapabilities,
+    supportedNetworks: config?.supportedNetworks,
+    requiredBillingContactFields: ['name', 'postalAddress'],
+    total: { label: 'Apollo SFS', amount, type: 'final' },
+  }
+  if (recurring) {
+    // Declaring the terms here is what makes this a subscription
+    // authorisation: Apple shows the billing schedule in the sheet, adds the
+    // subscription to Wallet under managementURL, and issues a merchant token
+    // meant to be billed again.
+    request.recurringPaymentRequest = {
+      paymentDescription: recurring.description,
+      regularBilling: recurringLineItem(recurring, amount),
+      managementURL: recurring.managementUrl,
+      ...(recurring.billingAgreement ? { billingAgreement: recurring.billingAgreement } : {}),
+    }
+    // Mirror the schedule on the sheet's own line items so the total isn't
+    // presented as a bare one-off charge next to the recurring disclosure.
+    request.lineItems = [recurringLineItem(recurring, amount)]
+  }
+  return request
 }
 
 // PayPalApplePayButton renders Apple Pay orchestrated by PayPal via the Web
@@ -96,7 +163,7 @@ interface Props {
 // browser/device/buyer isn't Apple Pay eligible, so the surrounding PayPal
 // buttons/card fields remain the fallback.
 export function PayPalApplePayButton({
-  environment, currencyCode, amount, getClientToken, createOrder, onApprove, onError, enabled,
+  environment, currencyCode, amount, getClientToken, createOrder, onApprove, onError, enabled, recurring,
 }: Props) {
   const [eligible, setEligible] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -105,8 +172,16 @@ export function PayPalApplePayButton({
   const paypalSession = useRef<{ session: any; config: any } | null>(null)
 
   // Latest props for the imperatively-driven ApplePaySession callbacks.
-  const latest = useRef({ currencyCode, amount, getClientToken, createOrder, onApprove, onError, enabled })
-  latest.current = { currencyCode, amount, getClientToken, createOrder, onApprove, onError, enabled }
+  const latest = useRef({ currencyCode, amount, getClientToken, createOrder, onApprove, onError, enabled, recurring })
+  latest.current = { currencyCode, amount, getClientToken, createOrder, onApprove, onError, enabled, recurring }
+
+  // A subscription sheet needs API version 14 for recurringPaymentRequest.
+  // Where that isn't available the button hides rather than falling back to a
+  // one-time sheet: the payment method would still be saved and billed again
+  // later, but the buyer would never have been shown the recurring terms — the
+  // exact undisclosed merchant-initiated charge Apple's guide exists to
+  // prevent. The other options (PayPal, Google Pay, card) still cover them.
+  const needsRecurringSupport = !!recurring
 
   useEffect(() => {
     let cancelled = false
@@ -115,6 +190,7 @@ export function PayPalApplePayButton({
       try {
         const ApplePaySession = (window as any).ApplePaySession
         if (!ApplePaySession?.canMakePayments?.()) return
+        if (needsRecurringSupport && !ApplePaySession.supportsVersion?.(APPLE_PAY_VERSION_RECURRING)) return
 
         const [paypal] = await Promise.all([
           loadPayPalV6(environment),
@@ -144,7 +220,7 @@ export function PayPalApplePayButton({
 
     return () => { cancelled = true }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [environment])
+  }, [environment, needsRecurringSupport])
 
   function handleClick() {
     const cur = latest.current
@@ -154,15 +230,14 @@ export function PayPalApplePayButton({
 
     // The ApplePaySession MUST be created synchronously inside the user
     // gesture handler, one per click.
-    const paymentRequest = {
-      countryCode: config?.countryCode ?? 'US',
+    const paymentRequest = buildApplePayPaymentRequest({
+      config,
       currencyCode: cur.currencyCode,
-      merchantCapabilities: config?.merchantCapabilities,
-      supportedNetworks: config?.supportedNetworks,
-      requiredBillingContactFields: ['name', 'postalAddress'],
-      total: { label: 'Apollo SFS', amount: cur.amount(), type: 'final' },
-    }
-    const session = new ApplePaySession(4, paymentRequest)
+      amount: cur.amount(),
+      recurring: cur.recurring,
+    })
+    const version = cur.recurring ? APPLE_PAY_VERSION_RECURRING : APPLE_PAY_VERSION_ONE_TIME
+    const session = new ApplePaySession(version, paymentRequest)
     setBusy(true)
 
     session.onvalidatemerchant = (event: any) => {
@@ -177,7 +252,13 @@ export function PayPalApplePayButton({
     }
 
     session.onpaymentmethodselected = () => {
-      session.completePaymentMethodSelection({ newTotal: paymentRequest.total })
+      // Nothing about the terms depends on which card was picked, so the
+      // update just re-states what the sheet already shows. lineItems have to
+      // be repeated alongside the total or the sheet drops them.
+      session.completePaymentMethodSelection({
+        newTotal: paymentRequest.total,
+        ...(paymentRequest.lineItems ? { newLineItems: paymentRequest.lineItems } : {}),
+      })
     }
 
     session.onpaymentauthorized = async (event: any) => {

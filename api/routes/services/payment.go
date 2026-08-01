@@ -170,6 +170,53 @@ func (s *PaymentService) RevokePremiumAllocation(ctx context.Context, username s
 	return s.revokePremiumEffects(ctx, username)
 }
 
+// ExpireAdminGrantedPremium revokes premium access for every user whose
+// admin-granted Premium trial (users.premium_expires_at, set by the admin
+// Users page's role editor) has lapsed. Real PayPal subscriptions are never
+// touched here — ListExpiredPremiumGrants excludes anyone with an
+// active/suspended subscription row of their own. Errors for one user are
+// logged and do not stop the sweep from continuing to the next.
+func (s *PaymentService) ExpireAdminGrantedPremium(ctx context.Context) error {
+	usernames, err := s.queries.ListExpiredPremiumGrants(ctx, time.Now())
+	if err != nil {
+		return fmt.Errorf("expire admin granted premium: list: %w", err)
+	}
+	for _, username := range usernames {
+		if err := s.RevokePremiumAllocation(ctx, username); err != nil {
+			log.Printf("expire admin granted premium: revoke %q: %v", username, err)
+			continue
+		}
+		if err := s.queries.SetPremiumExpiry(ctx, username, nil); err != nil {
+			log.Printf("expire admin granted premium: clear expiry %q: %v", username, err)
+		}
+		if err := s.queries.InsertRoleChangeNotification(ctx, db.InsertRoleChangeNotificationParams{
+			Username: username, ChangedBy: "system", PreviousRole: "premium", NewRole: "user",
+			Reason: "Premium trial expired",
+		}); err != nil {
+			log.Printf("expire admin granted premium: notification %q: %v", username, err)
+		}
+	}
+	return nil
+}
+
+// PremiumExpiryLoop runs ExpireAdminGrantedPremium on a fixed interval until
+// ctx is cancelled. Started once from main.go next to the other periodic
+// background loops (allocation revert, reconciliation).
+func (s *PaymentService) PremiumExpiryLoop(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := s.ExpireAdminGrantedPremium(ctx); err != nil {
+				log.Printf("PremiumExpiryLoop: %v", err)
+			}
+		}
+	}
+}
+
 // CreatePending records a new "created" payments row. Returns the row so
 // the caller can echo back the order_id to the frontend.
 func (s *PaymentService) CreatePending(ctx context.Context, p *models.Payment) error {
@@ -220,6 +267,248 @@ func (s *PaymentService) ApplySubscriptionActivated(ctx context.Context, subscri
 		ResourceName:   &resourceName,
 	}); err != nil {
 		log.Printf("apply subscription activated: audit log: %v", err)
+	}
+	return nil
+}
+
+// ActivateSelfBilledSubscription records a subscription funded by a vaulted
+// card or wallet and grants premium. The opening period has already been
+// captured by the time this runs, so unlike the PayPal-managed flow there is
+// no approval-pending step and no activation webhook to wait for — this is the
+// grant.
+//
+// Returns db.ErrSubscriptionExists if the user already holds a live
+// subscription; the caller should refund the charge it just took, since no
+// access is granted for it.
+func (s *PaymentService) ActivateSelfBilledSubscription(ctx context.Context, sub *models.PremiumSubscription) error {
+	if err := s.queries.CreateSelfBilledSubscription(ctx, sub); err != nil {
+		return err
+	}
+	if err := s.queries.SetUserPremium(ctx, sub.Username, true); err != nil {
+		return fmt.Errorf("activate self-billed subscription: set premium: %w", err)
+	}
+	if s.kc != nil {
+		if err := s.kc.AddUserToGroupByName(ctx, sub.Username, "premium"); err != nil {
+			log.Printf("activate self-billed subscription: KC group add for %q: %v", sub.Username, err)
+		}
+	}
+	resourceType := "premium_subscription"
+	resourceName := sub.PayPalSubscriptionID
+	if err := s.queries.InsertAuditLog(ctx, db.AuditInput{
+		TargetUsername: sub.Username,
+		ActorUsername:  sub.Username,
+		Action:         "premium.granted",
+		ResourceType:   &resourceType,
+		ResourceID:     &sub.ID,
+		ResourceName:   &resourceName,
+	}); err != nil {
+		log.Printf("activate self-billed subscription: audit log: %v", err)
+	}
+	return nil
+}
+
+// ── Self-billed renewals ─────────────────────────────────────────────────────
+
+// Renewal policy for self-billed subscriptions. PayPal isn't billing these, so
+// the whole dunning cycle is ours: a declined card gets a few spaced retries
+// with access left intact, then access is revoked and the subscription
+// cancelled outright rather than left in limbo.
+const (
+	// selfBilledRenewalBatch caps how many subscriptions one pass will try, so
+	// a backlog is worked through over several ticks instead of one long burst
+	// of PayPal calls.
+	selfBilledRenewalBatch = 50
+	// selfBilledMaxAttempts is the total number of charge attempts for one
+	// period, the first included. After the last one fails, access is revoked.
+	selfBilledMaxAttempts = 4
+)
+
+// nextRenewalAttempt decides what happens after a declined renewal, given how
+// many consecutive failures the subscription has now had (this one included).
+// Retries are spaced roughly a day, then three, then five — long enough for an
+// expired card to be replaced or a balance topped up, without leaving unpaid
+// access open for weeks. Once the attempts are exhausted the caller revokes.
+func nextRenewalAttempt(failedCount int) (delay time.Duration, giveUp bool) {
+	if failedCount >= selfBilledMaxAttempts {
+		return 0, true
+	}
+	switch failedCount {
+	case 1:
+		return 24 * time.Hour, false
+	case 2:
+		return 72 * time.Hour, false
+	default:
+		return 120 * time.Hour, false
+	}
+}
+
+// renewalPeriodStart is when the period being renewed should be measured from.
+// Normally that's the period that just ended, not the moment the charge
+// happens — otherwise a renewal retried three days late would push the billing
+// date three days later every time it hiccuped, and a subscription that failed
+// a few times a year would drift off its anniversary.
+//
+// The exception is a period end so far in the past that extending from it
+// wouldn't even reach the present (a subscription resurrected after a long
+// outage): billing from `now` avoids handing out a period that has already
+// elapsed.
+func renewalPeriodStart(plan string, periodEnd *time.Time, now time.Time) time.Time {
+	if periodEnd == nil {
+		return now
+	}
+	if PlanPeriodEnd(plan, *periodEnd).Before(now) {
+		return now
+	}
+	return *periodEnd
+}
+
+// PlanPeriodEnd returns when a plan's period starting at `from` ends. Self-
+// billed subscriptions have no PayPal-side schedule, so this is the only
+// source of truth for when the next charge is due.
+func PlanPeriodEnd(plan string, from time.Time) time.Time {
+	if plan == "annual" {
+		return from.AddDate(1, 0, 0)
+	}
+	return from.AddDate(0, 1, 0)
+}
+
+// PayPalChargeClient is the slice of PayPalClient the renewal loop needs,
+// behind an interface so tests can drive the dunning cycle without HTTP.
+type PayPalChargeClient interface {
+	ChargeVaulted(ctx context.Context, vaultID string, amountCents int, currency string) (*CaptureOrderResult, error)
+}
+
+// PayPalChargeClients resolves the charge client for a subscription's
+// environment — the live/sandbox split, same as PayPalClients.For.
+type PayPalChargeClients interface {
+	ChargeClientFor(env string) PayPalChargeClient
+}
+
+// SubscriptionRenewalLoop charges due self-billed subscriptions on a fixed
+// interval until ctx is cancelled. Started from main.go alongside the other
+// background loops.
+//
+// The interval only sets how often the loop looks for work; what makes a
+// subscription due is its own next_charge_at, so a missed tick (restart,
+// downtime) delays a renewal rather than skipping it.
+func (s *PaymentService) SubscriptionRenewalLoop(ctx context.Context, clients PayPalChargeClients, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := s.RunDueRenewals(ctx, clients); err != nil {
+				log.Printf("subscription renewal loop: %v", err)
+			}
+		}
+	}
+}
+
+// RunDueRenewals charges every self-billed subscription whose next charge is
+// due. One subscription's failure never stops the pass.
+func (s *PaymentService) RunDueRenewals(ctx context.Context, clients PayPalChargeClients) error {
+	due, err := s.queries.ListDueSelfBilledSubscriptions(ctx, time.Now().UTC(), selfBilledRenewalBatch)
+	if err != nil {
+		return fmt.Errorf("list due renewals: %w", err)
+	}
+	for i := range due {
+		if err := s.renewOne(ctx, clients, &due[i]); err != nil {
+			log.Printf("renew subscription %s (user %s): %v", due[i].ID, due[i].Username, err)
+		}
+	}
+	return nil
+}
+
+// renewOne charges one subscription's next period, applying the dunning policy
+// on failure.
+func (s *PaymentService) renewOne(ctx context.Context, clients PayPalChargeClients, sub *models.PremiumSubscription) error {
+	if sub.VaultID == nil || *sub.VaultID == "" {
+		// The schema forbids this, so treat it as data corruption rather than
+		// retrying forever against a token that doesn't exist.
+		return s.failRenewalTerminally(ctx, sub, "subscription has no saved payment method")
+	}
+	client := clients.ChargeClientFor(sub.Environment)
+	if client == nil {
+		// Credentials for this environment are missing right now (e.g. the
+		// sandbox app is unconfigured). Leave the row due and try next tick
+		// rather than counting it against the shopper's retry budget.
+		return fmt.Errorf("no paypal client for environment %q", sub.Environment)
+	}
+
+	capture, err := client.ChargeVaulted(ctx, *sub.VaultID, sub.AmountCents, sub.Currency)
+	if err != nil {
+		return s.handleRenewalFailure(ctx, sub, err.Error())
+	}
+	if capture.Status != "COMPLETED" {
+		return s.handleRenewalFailure(ctx, sub, "charge status "+capture.Status)
+	}
+
+	from := renewalPeriodStart(sub.Plan, sub.CurrentPeriodEnd, time.Now().UTC())
+	if err := s.queries.RecordSelfBilledRenewal(ctx, sub.ID, PlanPeriodEnd(sub.Plan, from), capture.CaptureID); err != nil {
+		// The money is taken but the period wasn't extended — the next tick
+		// would charge again, so this must be loud.
+		return fmt.Errorf("CHARGED %s BUT FAILED TO RECORD RENEWAL: %w", capture.CaptureID, err)
+	}
+	// A subscription suspended by earlier failures is live again, so restore
+	// the access those failures revoked.
+	if sub.Status == "suspended" {
+		if err := s.queries.SetUserPremium(ctx, sub.Username, true); err != nil {
+			log.Printf("renew: restore premium for %q: %v", sub.Username, err)
+		}
+		if s.kc != nil {
+			if err := s.kc.AddUserToGroupByName(ctx, sub.Username, "premium"); err != nil {
+				log.Printf("renew: KC group add for %q: %v", sub.Username, err)
+			}
+		}
+	}
+	return nil
+}
+
+// handleRenewalFailure books a declined renewal and either schedules another
+// attempt or gives up and revokes access.
+func (s *PaymentService) handleRenewalFailure(ctx context.Context, sub *models.PremiumSubscription, reason string) error {
+	failed := sub.FailedChargeCount + 1
+	delay, giveUp := nextRenewalAttempt(failed)
+	if giveUp {
+		return s.failRenewalTerminally(ctx, sub, reason)
+	}
+	retryAt := time.Now().UTC().Add(delay)
+	if _, err := s.queries.RecordSelfBilledChargeFailure(ctx, sub.ID, reason, &retryAt); err != nil {
+		return err
+	}
+	log.Printf("renewal declined for %s (attempt %d/%d): %s — retrying %s",
+		sub.Username, failed, selfBilledMaxAttempts, reason, retryAt.Format(time.RFC3339))
+	return nil
+}
+
+// failRenewalTerminally ends a subscription that has exhausted its retries:
+// the row is cancelled (which clears next_charge_at, so the loop drops it) and
+// premium is revoked exactly as an ordinary cancellation would.
+func (s *PaymentService) failRenewalTerminally(ctx context.Context, sub *models.PremiumSubscription, reason string) error {
+	if _, err := s.queries.RecordSelfBilledChargeFailure(ctx, sub.ID, reason, nil); err != nil {
+		return err
+	}
+	if err := s.queries.MarkSelfBilledStatus(ctx, sub.ID, "cancelled"); err != nil {
+		return err
+	}
+	if err := s.revokePremiumEffects(ctx, sub.Username); err != nil {
+		return fmt.Errorf("revoke after failed renewals: %w", err)
+	}
+	log.Printf("subscription %s cancelled for %s after %d failed renewals: %s",
+		sub.ID, sub.Username, selfBilledMaxAttempts, reason)
+	resourceType := "premium_subscription"
+	resourceName := sub.PayPalSubscriptionID
+	if err := s.queries.InsertAuditLog(ctx, db.AuditInput{
+		TargetUsername: sub.Username,
+		ActorUsername:  sub.Username,
+		Action:         "premium.revoked",
+		ResourceType:   &resourceType,
+		ResourceID:     &sub.ID,
+		ResourceName:   &resourceName,
+	}); err != nil {
+		log.Printf("failed renewal: audit log: %v", err)
 	}
 	return nil
 }

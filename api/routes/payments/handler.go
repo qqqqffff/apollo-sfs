@@ -2,6 +2,7 @@ package payments
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"apollo-sfs.com/api/db"
 	"apollo-sfs.com/api/models"
 	"apollo-sfs.com/api/routes/middleware"
 	"apollo-sfs.com/api/routes/services"
@@ -46,6 +48,15 @@ type Config struct {
 	SandboxPlanIDs map[string]string
 	PlanPrices     map[string]int
 	Currency       string
+	// GooglePaySubscriptionsEnabled allows google_pay as a self-billed
+	// subscription funding source. Off by default: PayPal doesn't vault the
+	// google_pay payment source (verified — Orders v2 ignores
+	// payment_source.google_pay.attributes.vault), so the capture would come
+	// back with no vault id and ConfirmSelfBilledOrder would refund it. The
+	// frontend already hides the button; this stops a stale or hand-rolled
+	// client taking a charge that can only ever be given back.
+	// See docs/paypal_setup.md §10.
+	GooglePaySubscriptionsEnabled bool
 }
 
 // PlanID resolves the PayPal Billing Plan id to use for the given plan name
@@ -86,6 +97,11 @@ func (h *Handler) CreateSubscription(c *gin.Context) {
 	}
 	ctx := c.Request.Context()
 	sandbox := middleware.SandboxEnabled(c)
+
+	if user.PremiumPurchaseBlocked {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "premium purchases are restricted on this account"})
+		return
+	}
 
 	subscribed, err := h.queries.HasActivePremiumSubscription(ctx, user.Username)
 	if err != nil {
@@ -154,6 +170,214 @@ func (h *Handler) CreateSubscription(c *gin.Context) {
 		"subscription_id": result.SubscriptionID,
 		"approve_url":     result.ApproveURL,
 	})
+}
+
+// ── Self-billed subscriptions (card / Apple Pay / Google Pay) ────────────────
+
+// PayPal Subscriptions v1 can only ever be approved with the PayPal wallet —
+// POST /v1/billing/subscriptions ignores `payment_source` outright, so a card
+// or wallet cannot be bound to one. Those funding sources instead open a
+// subscription we bill ourselves: an ordinary Orders v2 purchase for the first
+// period that also vaults the payment method, after which
+// SubscriptionRenewalLoop charges the saved token each period.
+//
+// The two endpoints below mirror the storage add-ons' create/capture pair,
+// because every web payment surface works the same way — the server creates
+// the order, the shopper's browser confirms it against PayPal (Apple Pay
+// sheet, Google Pay sheet, or hosted card fields), and the server captures.
+// No card data ever reaches us.
+
+// CreateSelfBilledOrder is POST /api/v1/payments/subscriptions/wallet/order.
+// Body: {plan: "monthly"|"annual", source: "card"|"apple_pay"|"google_pay"}.
+// Creates the vaulting order for the first period and returns its PayPal order
+// id for the browser to confirm. Nothing is granted or persisted here — the
+// subscription only exists once ConfirmSelfBilledOrder captures.
+func (h *Handler) CreateSelfBilledOrder(c *gin.Context) {
+	if h.svc == nil {
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "payments not configured"})
+		return
+	}
+	user, ok := h.loadCurrentUser(c)
+	if !ok {
+		return
+	}
+	var req struct {
+		Plan   string `json:"plan" binding:"required,oneof=monthly annual"`
+		Source string `json:"source" binding:"required,oneof=card apple_pay google_pay"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if h.rejectUnsupportedSource(c, req.Source) {
+		return
+	}
+	ctx := c.Request.Context()
+	client, env, ok := h.subscriptionPreflight(c, user)
+	if !ok {
+		return
+	}
+	price := h.cfg.PlanPrices[req.Plan]
+	if price <= 0 {
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "plan not configured"})
+		return
+	}
+	result, err := client.CreateOrder(ctx, services.CreateOrderInput{
+		AmountCents:   price,
+		Currency:      h.cfg.Currency,
+		PaymentMethod: req.Source,
+		ReturnURL:     h.cfg.AppBaseURL + "/premium?status=approved",
+		CancelURL:     h.cfg.AppBaseURL + "/premium?status=cancelled",
+		Vault:         true,
+	})
+	if err != nil {
+		log.Printf("payments CreateSelfBilledOrder paypal (env=%s): %v", env, err)
+		c.AbortWithStatusJSON(http.StatusBadGateway, gin.H{"error": "paypal error"})
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{
+		"order_id":     result.OrderID,
+		"amount_cents": price,
+		"currency":     h.cfg.Currency,
+	})
+}
+
+// ConfirmSelfBilledOrder is POST /api/v1/payments/subscriptions/wallet/confirm.
+// Body: {order_id, plan, source}. Captures the first period, then opens the
+// subscription against the payment method PayPal vaulted during that capture.
+//
+// A capture with no vault id is refunded rather than granted: the charge would
+// otherwise buy a subscription that can never renew, silently expiring at the
+// end of the first period.
+func (h *Handler) ConfirmSelfBilledOrder(c *gin.Context) {
+	if h.svc == nil {
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "payments not configured"})
+		return
+	}
+	user, ok := h.loadCurrentUser(c)
+	if !ok {
+		return
+	}
+	var req struct {
+		OrderID string `json:"order_id" binding:"required"`
+		Plan    string `json:"plan" binding:"required,oneof=monthly annual"`
+		Source  string `json:"source" binding:"required,oneof=card apple_pay google_pay"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if h.rejectUnsupportedSource(c, req.Source) {
+		return
+	}
+	ctx := c.Request.Context()
+	client, env, ok := h.subscriptionPreflight(c, user)
+	if !ok {
+		return
+	}
+
+	capture, err := client.CaptureOrder(ctx, req.OrderID)
+	if err != nil {
+		log.Printf("payments ConfirmSelfBilledOrder capture (env=%s): %v", env, err)
+		c.AbortWithStatusJSON(http.StatusBadGateway, gin.H{"error": "could not complete payment"})
+		return
+	}
+	if capture.VaultID == "" {
+		log.Printf("payments ConfirmSelfBilledOrder: capture %s has no vault id, refunding", capture.CaptureID)
+		h.refundUngrantedCharge(ctx, client, capture, "no vault id returned")
+		c.AbortWithStatusJSON(http.StatusBadGateway, gin.H{
+			"error": "your payment method could not be saved for renewals — it has been refunded, please try another method",
+		})
+		return
+	}
+
+	now := time.Now().UTC()
+	periodEnd := services.PlanPeriodEnd(req.Plan, now)
+	sub := &models.PremiumSubscription{
+		Username:         user.Username,
+		Plan:             req.Plan,
+		Environment:      env,
+		AmountCents:      capture.AmountCents,
+		Currency:         capture.Currency,
+		PaymentMethod:    req.Source,
+		VaultID:          &capture.VaultID,
+		VaultSource:      &req.Source,
+		CurrentPeriodEnd: &periodEnd,
+		LastCaptureID:    &capture.CaptureID,
+	}
+	if err := h.svc.ActivateSelfBilledSubscription(ctx, sub); err != nil {
+		if errors.Is(err, db.ErrSubscriptionExists) {
+			// Lost a race with another checkout (double-submit, second tab).
+			// The charge bought nothing, so it goes straight back.
+			h.refundUngrantedCharge(ctx, client, capture, "duplicate subscription")
+			c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": "already premium — the duplicate charge has been refunded"})
+			return
+		}
+		log.Printf("payments ConfirmSelfBilledOrder activate: %v", err)
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "could not activate subscription"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"status":             "active",
+		"subscription_id":    sub.PayPalSubscriptionID,
+		"current_period_end": periodEnd,
+	})
+}
+
+// refundUngrantedCharge returns money taken for a subscription that was never
+// opened. Best-effort and logged loudly on failure — a stuck charge here needs
+// a human, but the request it belongs to has already failed either way.
+func (h *Handler) refundUngrantedCharge(ctx context.Context, client *services.PayPalClient, capture *services.CaptureOrderResult, reason string) {
+	if _, err := client.RefundCapture(ctx, capture.CaptureID, capture.AmountCents, capture.Currency); err != nil {
+		log.Printf("payments: REFUND FAILED for ungranted capture %s (%s): %v — needs manual refund",
+			capture.CaptureID, reason, err)
+	}
+}
+
+// subscriptionPreflight applies the checks every subscription-opening request
+// shares — purchase not blocked, no existing live subscription, a configured
+// PayPal client for the caller's environment — and resolves that client.
+// Mirrors CreateSubscription's guards so the self-billed path can't be used to
+// sidestep them.
+// rejectUnsupportedSource blocks funding sources that can't back a self-billed
+// subscription, before any money moves.
+func (h *Handler) rejectUnsupportedSource(c *gin.Context, source string) bool {
+	if source == services.VaultSourceGooglePay && !h.cfg.GooglePaySubscriptionsEnabled {
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
+			"error": "google pay is not available for subscriptions — please use another payment method",
+		})
+		return true
+	}
+	return false
+}
+
+func (h *Handler) subscriptionPreflight(c *gin.Context, user *models.User) (*services.PayPalClient, string, bool) {
+	ctx := c.Request.Context()
+	sandbox := middleware.SandboxEnabled(c)
+
+	if user.PremiumPurchaseBlocked {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "premium purchases are restricted on this account"})
+		return nil, "", false
+	}
+	subscribed, err := h.queries.HasActivePremiumSubscription(ctx, user.Username)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "check subscription"})
+		return nil, "", false
+	}
+	if subscribed || (user.IsAdmin && !sandbox) {
+		c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": "already premium"})
+		return nil, "", false
+	}
+	env := services.PayPalEnvLive
+	if sandbox {
+		env = services.PayPalEnvSandbox
+	}
+	client := h.paypal.For(env)
+	if client == nil {
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "payments not configured"})
+		return nil, "", false
+	}
+	return client, env, true
 }
 
 // ConfirmSubscription is POST /api/v1/payments/subscriptions/:id/confirm.
@@ -237,10 +461,17 @@ func (h *Handler) CancelSubscription(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "payments not configured"})
 		return
 	}
-	if err := client.CancelSubscription(ctx, sub.PayPalSubscriptionID, "user requested cancellation"); err != nil {
-		log.Printf("payments CancelSubscription paypal: %v", err)
-		c.AbortWithStatusJSON(http.StatusBadGateway, gin.H{"error": "paypal error"})
-		return
+	// A self-billed subscription has no PayPal subscription to cancel — the
+	// recurring charge is our renewal loop, and clearing next_charge_at (via
+	// the revoke below) is what stops it. The saved payment method is left in
+	// PayPal's vault: deleting it needs the Vault API, which isn't enabled on
+	// the app (see docs/paypal_setup.md §9). It is never charged again.
+	if sub.BillingMode != "self" {
+		if err := client.CancelSubscription(ctx, sub.PayPalSubscriptionID, "user requested cancellation"); err != nil {
+			log.Printf("payments CancelSubscription paypal: %v", err)
+			c.AbortWithStatusJSON(http.StatusBadGateway, gin.H{"error": "paypal error"})
+			return
+		}
 	}
 	if err := h.svc.RevokeSubscription(ctx, sub.PayPalSubscriptionID, "cancelled", "user requested cancellation"); err != nil {
 		log.Printf("payments CancelSubscription revoke: %v", err)

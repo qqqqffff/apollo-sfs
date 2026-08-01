@@ -67,6 +67,12 @@ export interface BillingConfig {
   currency: string
   environment: 'sandbox' | 'live'
   premium_plans: PremiumPlanOption[]
+  // Whether the merchant is enrolled in Google Pay's merchant-initiated
+  // transactions program. Subscription checkouts only show Google Pay when
+  // this is true, since disclosing recurring terms in the sheet requires
+  // sending recurringTransactionInfo, which a non-enrolled merchant is
+  // rejected for. Irrelevant to one-time purchases.
+  google_pay_subscriptions_enabled?: boolean
 }
 
 export function getBillingConfig() {
@@ -299,7 +305,8 @@ export async function listMyOrders(): Promise<UserOrder[]> {
 
 export type NotificationKind =
   | 'capacity_provisioned' | 'payment_required' | 'action_pending' | 'share_received'
-  | 'subscription_cancelled' | 'quota_changed' | 'email_backup_completed' | 'backup_stale'
+  | 'subscription_cancelled' | 'quota_changed' | 'email_backup_completed' | 'google_backup_completed'
+  | 'backup_stale' | 'role_changed'
   // Admin-only categories (empty for non-admin users).
   | 'invitation_accepted' | 'order_received' | 'email_received' | 'alarm_triggered'
 

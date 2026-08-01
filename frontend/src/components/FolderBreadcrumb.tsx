@@ -4,6 +4,8 @@ import { MdChevronRight, MdStorage } from 'react-icons/md'
 import { ancestorsQueryOptions } from '../api/folders'
 import { adminGetUserAncestors } from '../api/admin'
 import { TierIcon } from './TierIcon'
+import { HoverDonut } from './HoverDonut'
+import { HOVER_OPEN_DELAY_MS } from '../hooks/useFileDrag'
 import type { Folder } from '../types/api'
 
 type FolderDropHandlers = {
@@ -211,6 +213,7 @@ function Crumb({
         }`}
       >
         {icon}
+        {icon && <span className="text-gray-300 shrink-0" aria-hidden="true">&bull;</span>}
         <span className="truncate">{label}</span>
       </span>
     )
@@ -225,7 +228,11 @@ function Crumb({
       }`}
     >
       {icon}
+      {icon && <span className="text-gray-300 shrink-0" aria-hidden="true">&bull;</span>}
       <span className="truncate">{label}</span>
+      {/* Only clickable (navigable) crumbs schedule a hover-open timer — the
+          "current" crumb never does, so it never renders this. */}
+      {dragOver && <HoverDonut durationMs={HOVER_OPEN_DELAY_MS} className="text-blue-500" />}
     </button>
   )
 }

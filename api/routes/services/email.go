@@ -132,6 +132,70 @@ func (s *EmailService) SendInvitation(
 	)
 }
 
+// SendGroupInviteNotification enqueues the group-registration announcement to
+// every address in recipients when an admin creates a registration group.
+// availableSlots is the number of registerable account slots; inviteURL is the
+// full public group-invite link; expiresAt is a pre-formatted expiry ("" when
+// the link never expires).
+func (s *EmailService) SendGroupInviteNotification(
+	ctx context.Context,
+	recipients []string,
+	groupName string,
+	availableSlots int,
+	inviteURL string,
+	expiresAt string,
+) error {
+	for _, to := range recipients {
+		if err := s.enqueue(ctx, to,
+			fmt.Sprintf("You're invited to register on %s", s.appName),
+			"group_invite_notification",
+			map[string]any{
+				"AppName":        s.appName,
+				"AppURL":         s.appURL,
+				"Email":          to,
+				"GroupName":      groupName,
+				"AvailableSlots": availableSlots,
+				"InviteURL":      inviteURL,
+				"ExpiresAt":      expiresAt,
+			},
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SendGroupInviteLastChance enqueues the opt-in follow-up sent one day before
+// a registration group's link expires, with the updated count of slots still
+// available and a "last chance" note.
+func (s *EmailService) SendGroupInviteLastChance(
+	ctx context.Context,
+	recipients []string,
+	groupName string,
+	availableSlots int,
+	inviteURL string,
+	expiresAt string,
+) error {
+	for _, to := range recipients {
+		if err := s.enqueue(ctx, to,
+			fmt.Sprintf("Last chance — %d account slot(s) left on %s", availableSlots, s.appName),
+			"group_invite_last_chance",
+			map[string]any{
+				"AppName":        s.appName,
+				"AppURL":         s.appURL,
+				"Email":          to,
+				"GroupName":      groupName,
+				"AvailableSlots": availableSlots,
+				"InviteURL":      inviteURL,
+				"ExpiresAt":      expiresAt,
+			},
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // SendShareNotification enqueues an email telling a recipient that ownerEmail
 // shared a file or folder with them. itemType is "file" or "folder";
 // permissionLabel is a human-readable summary e.g. "view and download";
@@ -379,6 +443,49 @@ func (s *EmailService) SendExpansionCancellation(
 			"PlanLabel":       planLabel,
 			"RefundFormatted": refundFormatted,
 			"Reason":          reason,
+		},
+	)
+}
+
+// SendPremiumRoleCancelled notifies a user that an admin removed their
+// Premium access via the admin Users page's role editor. hadPaypalSubscription
+// is true when a real PayPal subscription existed and was cancelled;
+// blockedFuturePurchase is true when the admin also blocked future Premium
+// purchases (only meaningful on a demotion to a regular user). Mandatory —
+// always called, regardless of user notification preferences, whenever an
+// active Premium membership is changed away.
+func (s *EmailService) SendPremiumRoleCancelled(
+	ctx context.Context,
+	toEmail, reason string,
+	hadPaypalSubscription, blockedFuturePurchase bool,
+) error {
+	return s.enqueue(ctx, toEmail,
+		fmt.Sprintf("Your Premium access was removed — %s", s.appName),
+		"role_premium_cancelled",
+		map[string]any{
+			"AppName":               s.appName,
+			"AppURL":                s.appURL,
+			"Email":                 toEmail,
+			"Reason":                reason,
+			"HadPaypalSubscription": hadPaypalSubscription,
+			"BlockedFuturePurchase": blockedFuturePurchase,
+		},
+	)
+}
+
+// SendAccountDeleted notifies a user that an admin permanently deleted their
+// account and all files via the admin Users page's delete action. Mandatory —
+// always called. Must be enqueued before the users row is deleted since
+// toEmail is the only copy of the address kept around afterward.
+func (s *EmailService) SendAccountDeleted(ctx context.Context, toEmail, reason string) error {
+	return s.enqueue(ctx, toEmail,
+		fmt.Sprintf("Your account has been deleted — %s", s.appName),
+		"account_deleted",
+		map[string]any{
+			"AppName": s.appName,
+			"AppURL":  s.appURL,
+			"Email":   toEmail,
+			"Reason":  reason,
 		},
 	)
 }

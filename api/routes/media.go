@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -21,9 +23,80 @@ func parseMediaSort(c *gin.Context) db.MediaSort {
 		return db.MediaSortCreated
 	case "name":
 		return db.MediaSortName
+	case "source":
+		return db.MediaSortSource
 	default:
 		return db.MediaSortTakenAt
 	}
+}
+
+// maxMediaFilterValues bounds each repeatable filter param so a hand-crafted
+// URL can't turn one listing into an enormous IN/ANY clause.
+const maxMediaFilterValues = 50
+
+// parseMediaFilterTime accepts either a full RFC3339 timestamp or a bare
+// YYYY-MM-DD date (what <input type="date"> submits), which is interpreted as
+// UTC midnight. An unparseable value is ignored rather than failing the
+// request — a filter is a view preference, not a mutation.
+func parseMediaFilterTime(raw string) *time.Time {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	if t, err := time.Parse(time.RFC3339, raw); err == nil {
+		return &t
+	}
+	if t, err := time.Parse("2006-01-02", raw); err == nil {
+		return &t
+	}
+	return nil
+}
+
+// parseCSVQuery reads a repeatable, optionally comma-joined query param
+// (`?source=web&source=device` or `?source=web,device`), de-duplicating and
+// capping the result at maxMediaFilterValues.
+func parseCSVQuery(c *gin.Context, key string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0)
+	for _, raw := range c.QueryArray(key) {
+		for _, part := range strings.Split(raw, ",") {
+			part = strings.TrimSpace(part)
+			if part == "" || seen[part] || len(out) >= maxMediaFilterValues {
+				continue
+			}
+			seen[part] = true
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+// parseMediaFilter maps the media listing's filter query params to a
+// db.MediaFilter. Unknown media types and malformed group ids are dropped, so
+// a partially-bogus filter still returns a sensible listing.
+func parseMediaFilter(c *gin.Context) db.MediaFilter {
+	f := db.MediaFilter{
+		TakenAfter:     parseMediaFilterTime(c.Query("taken_after")),
+		TakenBefore:    parseMediaFilterTime(c.Query("taken_before")),
+		UploadedAfter:  parseMediaFilterTime(c.Query("uploaded_after")),
+		UploadedBefore: parseMediaFilterTime(c.Query("uploaded_before")),
+		Sources:        parseCSVQuery(c, "source"),
+	}
+
+	for _, t := range parseCSVQuery(c, "media_type") {
+		switch t {
+		case db.MediaTypeImage, db.MediaTypeVideo, db.MediaTypeOther:
+			f.MediaTypes = append(f.MediaTypes, t)
+		}
+	}
+
+	for _, raw := range parseCSVQuery(c, "group") {
+		if id, err := uuid.Parse(raw); err == nil {
+			f.GroupIDs = append(f.GroupIDs, id)
+		}
+	}
+
+	return f
 }
 
 // parseHiddenFilter maps the ?hidden query param to a db.HiddenFilter.
@@ -41,7 +114,9 @@ func parseHiddenFilter(c *gin.Context) db.HiddenFilter {
 
 // GetMediaFolder handles GET /api/v1/folders/:folder_id/media.
 // Returns a media collection's subcollections and its media files (physical
-// residents plus pointers), ordered by ?sort and filtered by ?hidden.
+// residents plus pointers), ordered by ?sort and narrowed by ?hidden plus the
+// optional filter params (?taken_after, ?taken_before, ?uploaded_after,
+// ?uploaded_before, ?source, ?media_type, ?group).
 func (h *Handler) GetMediaFolder(c *gin.Context) {
 	folderID, err := uuid.Parse(c.Param("folder_id"))
 	if err != nil {
@@ -56,22 +131,61 @@ func (h *Handler) GetMediaFolder(c *gin.Context) {
 		folderID, userID,
 		parseMediaSort(c),
 		parseHiddenFilter(c),
+		parseMediaFilter(c),
 		parsePage(c, "folder"),
 		parsePage(c, "file"),
 	)
 	if err != nil {
-		switch {
-		case errors.Is(err, services.ErrFolderNotFound):
-			c.JSON(http.StatusNotFound, gin.H{"error": "folder not found"})
-		case errors.Is(err, services.ErrNotMediaCollection):
-			c.JSON(http.StatusBadRequest, gin.H{"error": "folder is not a media collection"})
-		default:
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "could not retrieve media collection"})
-		}
+		writeMediaListingError(c, err)
 		return
 	}
 
 	c.JSON(http.StatusOK, contents)
+}
+
+// GetMediaFolderFileIDs handles GET /api/v1/folders/:folder_id/media/ids.
+// Returns just the ids of every file matching the same ?hidden/filter params
+// GetMediaFolder accepts, so the grid can select a whole filter's worth of
+// items without paging the full records down. Capped at
+// db.MaxMediaSelectionIDs, with truncated=true when the cap was hit.
+func (h *Handler) GetMediaFolderFileIDs(c *gin.Context) {
+	folderID, err := uuid.Parse(c.Param("folder_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid folder_id"})
+		return
+	}
+
+	userID, _ := uuid.Parse(c.GetString("userID"))
+
+	ids, err := h.folders.ListMediaFileIDs(
+		c.Request.Context(),
+		folderID, userID,
+		parseMediaSort(c),
+		parseHiddenFilter(c),
+		parseMediaFilter(c),
+	)
+	if err != nil {
+		writeMediaListingError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"file_ids":  ids,
+		"truncated": len(ids) >= db.MaxMediaSelectionIDs,
+	})
+}
+
+// writeMediaListingError maps the shared media-listing service errors to
+// HTTP responses.
+func writeMediaListingError(c *gin.Context, err error) {
+	switch {
+	case errors.Is(err, services.ErrFolderNotFound):
+		c.JSON(http.StatusNotFound, gin.H{"error": "folder not found"})
+	case errors.Is(err, services.ErrNotMediaCollection):
+		c.JSON(http.StatusBadRequest, gin.H{"error": "folder is not a media collection"})
+	default:
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not retrieve media collection"})
+	}
 }
 
 // ── Hide / unhide ──────────────────────────────────────────────────────────

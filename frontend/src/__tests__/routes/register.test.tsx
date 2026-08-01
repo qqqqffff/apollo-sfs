@@ -1,5 +1,5 @@
 import React from 'react'
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
 import '@testing-library/jest-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
@@ -21,10 +21,24 @@ jest.mock('@tanstack/react-router', () => {
 
 const mockValidateInviteToken = jest.fn()
 const mockRegister = jest.fn().mockResolvedValue(undefined)
+const mockLogout = jest.fn().mockResolvedValue(undefined)
 
 jest.mock('../../api/auth', () => ({
   register: (...args: any[]) => mockRegister(...args),
   validateInviteToken: (...args: any[]) => mockValidateInviteToken(...args),
+  logout: (...args: any[]) => mockLogout(...args),
+}))
+
+// Defaults to signed-out so pre-existing tests exercise the normal form;
+// individual tests override this to exercise the "already signed in" gate.
+let mockAuthState: { isAuthenticated: boolean; isLoading: boolean; user: { username: string } | null } = {
+  isAuthenticated: false,
+  isLoading: false,
+  user: null,
+}
+
+jest.mock('../../auth', () => ({
+  useAuth: () => mockAuthState,
 }))
 
 // Defaults to no Turnstile key (captcha not required) so pre-existing tests
@@ -88,6 +102,8 @@ describe('Register page (/register)', () => {
     })
     mockGetPublicConfig.mockReset().mockResolvedValue({})
     mockRegister.mockClear()
+    mockLogout.mockClear()
+    mockAuthState = { isAuthenticated: false, isLoading: false, user: null }
   })
 
   test('shows invalid-link message when token is empty', () => {
@@ -205,10 +221,10 @@ describe('Register page (/register)', () => {
   test('password requirements checklist is hidden until the field is focused', () => {
     mockToken = 'invite-abc'
     const { container } = renderPage()
-    expect(screen.queryByText(/at least 8 characters/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/at least 12 characters/i)).not.toBeInTheDocument()
     const passwordInput = container.querySelector('input[autocomplete="new-password"]') as HTMLInputElement
     fireEvent.focus(passwordInput)
-    expect(screen.getByText(/at least 8 characters/i)).toBeInTheDocument()
+    expect(screen.getByText(/at least 12 characters/i)).toBeInTheDocument()
   })
 
   test('password requirements checklist hides again on blur', () => {
@@ -216,9 +232,9 @@ describe('Register page (/register)', () => {
     const { container } = renderPage()
     const passwordInput = container.querySelector('input[autocomplete="new-password"]') as HTMLInputElement
     fireEvent.focus(passwordInput)
-    expect(screen.getByText(/at least 8 characters/i)).toBeInTheDocument()
+    expect(screen.getByText(/at least 12 characters/i)).toBeInTheDocument()
     fireEvent.blur(passwordInput)
-    expect(screen.queryByText(/at least 8 characters/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/at least 12 characters/i)).not.toBeInTheDocument()
   })
 
   test('password requirement items check off as the typed password satisfies them', () => {
@@ -271,5 +287,59 @@ describe('Register page (/register)', () => {
     await waitFor(() => expect(mockRegister).toHaveBeenCalledWith(
       'alice', 'invited@example.com', 'Abcdefg1!', 'invite-abc', 'mock-captcha-token',
     ))
+  })
+
+  test('shows an already-signed-in notice instead of the form when a session is active', () => {
+    mockToken = 'invite-abc'
+    mockAuthState = { isAuthenticated: true, isLoading: false, user: { username: 'bob' } }
+    renderPage()
+    expect(screen.getByText(/already signed in/i)).toBeInTheDocument()
+    expect(screen.getByText(/signed in as/i)).toHaveTextContent('bob')
+    expect(screen.queryByRole('heading', { name: /create account/i })).not.toBeInTheDocument()
+  })
+
+  test('signing out from the already-signed-in notice calls logout()', async () => {
+    mockToken = 'invite-abc'
+    mockAuthState = { isAuthenticated: true, isLoading: false, user: { username: 'bob' } }
+    renderPage()
+    fireEvent.click(screen.getByRole('button', { name: /sign out and continue/i }))
+    await waitFor(() => expect(mockLogout).toHaveBeenCalled())
+  })
+
+  test('never shows the already-signed-in notice over its own just-created account', async () => {
+    mockToken = 'invite-abc'
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
+
+    // Registration auto-logs-in, so the `me` refresh the mutation kicks off on
+    // success flips isAuthenticated to true. Hold that refresh open to make the
+    // window it opens observable: react-query only marks the mutation
+    // successful once onSuccess resolves, so for the whole of it the page sees
+    // "authenticated" with no successful mutation — which used to render the
+    // sign-out prompt over the account that had just been created.
+    let releaseMeRefresh!: () => void
+    const heldRefresh = new Promise<void>((resolve) => { releaseMeRefresh = resolve })
+    jest.spyOn(client, 'invalidateQueries').mockReturnValue(heldRefresh)
+    mockRegister.mockImplementation(async () => {
+      mockAuthState = { isAuthenticated: true, isLoading: false, user: { username: 'alice' } }
+    })
+
+    const { container } = render(
+      <QueryClientProvider client={client}>
+        <Page />
+      </QueryClientProvider>,
+    )
+    fireEvent.change(container.querySelector('input[autocomplete="username"]') as HTMLInputElement, { target: { value: 'alice' } })
+    fireEvent.change(container.querySelector('input[autocomplete="new-password"]') as HTMLInputElement, { target: { value: 'Abcdefghij1!' } })
+    fireEvent.click(screen.getByRole('checkbox'))
+    fireEvent.click(screen.getByRole('button', { name: /create account/i }))
+
+    await waitFor(() => expect(mockRegister).toHaveBeenCalled())
+    // Let onSuccess's synchronous part and the re-render it causes land.
+    await act(async () => { await Promise.resolve() })
+    expect(screen.queryByText(/already signed in/i)).not.toBeInTheDocument()
+
+    releaseMeRefresh()
+    expect(await screen.findByRole('heading', { name: /welcome aboard/i })).toBeInTheDocument()
+    expect(screen.queryByText(/already signed in/i)).not.toBeInTheDocument()
   })
 })

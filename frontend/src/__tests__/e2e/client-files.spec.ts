@@ -4,6 +4,7 @@ import {
   mockRootFolder,
   MOCK_FOLDERS,
   MOCK_FILES,
+  MOCK_SERVER,
   GB,
 } from './fixtures'
 
@@ -13,9 +14,13 @@ test.describe('Client — Files page (/client)', () => {
     await mockRootFolder(page)
   })
 
-  test('shows My Files heading at root', async ({ page }) => {
+  // The storage-tier root UI shows a tier-scoped heading ("<tier> · <server
+  // name>") once the user's (single, in this fixture) drive resolves, rather
+  // than a generic "My Files" — see FolderView's root heading in
+  // routes/_auth.client/index.tsx.
+  test('shows the drive heading at root', async ({ page }) => {
     await page.goto('/client')
-    await expect(page.getByRole('heading', { name: /my files/i })).toBeVisible()
+    await expect(page.getByRole('heading', { name: new RegExp(MOCK_SERVER.name, 'i') })).toBeVisible()
   })
 
   test('renders folder names returned by the API', async ({ page }) => {
@@ -87,9 +92,8 @@ test.describe('Client — Files page (/client)', () => {
     })
 
     await page.goto('/client')
-    // Click the first file Delete button (after 2 folder buttons)
-    const deleteButtons = page.getByRole('button', { name: /^delete$/i })
-    await deleteButtons.nth(2).click()
+    // Click the first file's "Delete file" button (folders get a separate "Delete folder" button)
+    await page.getByRole('button', { name: /^delete file$/i }).first().click()
 
     // DeleteConfirmModal appears — click the modal's "Delete" confirm button
     const deleteReq = page.waitForRequest(
@@ -202,38 +206,49 @@ test.describe('Client — Profile page (/client/profile)', () => {
     await expect(page.getByText(/10\.0%\s*used/i)).toBeVisible()
   })
 
-  test('PATCH /api/v1/me/password is called on password form submit', async ({ page }) => {
-    await page.route('**/api/v1/me/password', async (route) => {
-      await route.fulfill({ json: { message: 'ok' } })
+  // Changing password now lives on its own page (/client/change-password) behind
+  // a two-factor "email me a code" step — see routes/_auth.client/change-password.tsx.
+  test.describe('Change password (/client/change-password)', () => {
+    test.beforeEach(async ({ page }) => {
+      await page.route('**/api/v1/me/password/request-code', async (route) => {
+        await route.fulfill({ json: { message: 'ok' } })
+      })
+      await page.goto('/client/change-password')
+      await page.getByRole('button', { name: /email me a code/i }).click()
+      await expect(page.getByPlaceholder(/6-digit code/i)).toBeVisible()
     })
-    await page.goto('/client/profile')
 
-    const inputs = page.locator('input[type="password"]')
-    await inputs.nth(0).fill('OldPass1!')
-    await inputs.nth(1).fill('NewPass1!')
-    await inputs.nth(2).fill('NewPass1!')
+    test('POST /api/v1/me/password is called on password form submit', async ({ page }) => {
+      await page.route('**/api/v1/me/password', async (route) => {
+        await route.fulfill({ json: { message: 'ok' } })
+      })
 
-    const patchReq = page.waitForRequest(
-      (req) => req.method() === 'POST' && req.url().includes('/me/password'),
-    )
-    await page.getByRole('button', { name: /update password/i }).click()
-    const req = await patchReq
-    expect(req.postDataJSON()).toMatchObject({
-      current_password: 'OldPass1!',
-      new_password: 'NewPass1!',
+      await page.getByPlaceholder(/6-digit code/i).fill('123456')
+      const inputs = page.locator('input[type="password"]')
+      await inputs.nth(0).fill('OldPass1!')
+      await inputs.nth(1).fill('NewPassword1!')
+      await inputs.nth(2).fill('NewPassword1!')
+
+      const patchReq = page.waitForRequest(
+        (req) => req.method() === 'POST' && req.url().includes('/me/password') && !req.url().includes('request-code'),
+      )
+      await page.getByRole('button', { name: /update password/i }).click()
+      const req = await patchReq
+      expect(req.postDataJSON()).toMatchObject({
+        current_password: 'OldPass1!',
+        new_password: 'NewPassword1!',
+        code: '123456',
+      })
     })
-  })
 
-  test('shows password requirement checklist when typing in new-password field', async ({ page }) => {
-    await page.goto('/client/profile')
-    const inputs = page.locator('input[type="password"]')
-    await inputs.nth(1).focus()
-    await expect(page.getByText(/at least 8 characters/i)).toBeVisible()
-  })
+    test('shows password requirement checklist when typing in new-password field', async ({ page }) => {
+      await page.locator('input[type="password"]').nth(1).focus()
+      await expect(page.getByText(/at least 12 characters/i)).toBeVisible()
+    })
 
-  test('Update password button is disabled until all requirements met', async ({ page }) => {
-    await page.goto('/client/profile')
-    const btn = page.getByRole('button', { name: /update password/i })
-    await expect(btn).toBeDisabled()
+    test('Update password button is disabled until all requirements met', async ({ page }) => {
+      const btn = page.getByRole('button', { name: /update password/i })
+      await expect(btn).toBeDisabled()
+    })
   })
 })

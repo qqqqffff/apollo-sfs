@@ -8,6 +8,13 @@ export interface User {
   is_admin: boolean
   is_premium: boolean
   premium_granted_at: string | null
+  // Admin-granted Premium "trial" expiry (independent of real PayPal
+  // billing) — null means either not premium, or premium granted with no
+  // expiry (permanent). Set via the admin Users page's role editor.
+  premium_expires_at?: string | null
+  // True when the admin has restricted this account from purchasing a new
+  // Premium subscription (set on a Premium → User demotion).
+  premium_purchase_blocked?: boolean
   // True when the user has an active/suspended premium subscription of their
   // own — distinct from is_premium, which is also true for every admin
   // regardless of whether they ever subscribed. Lets the UI show a separate
@@ -185,12 +192,72 @@ export interface UserPreferences {
   // Hide the drive-speed-benchmark promo card in the Add Storage modal.
   // Default false.
   hide_benchmark_promo: boolean
+  // Whether the base / premium onboarding spotlight tours have already been
+  // shown to this account. Each auto-plays exactly once — on first login, and
+  // on the first login where premium is active. Stored on the account rather
+  // than in localStorage so a new browser or cleared site data doesn't replay
+  // them. Both default false.
+  onboarding_base_seen: boolean
+  onboarding_premium_seen: boolean
   created_at: string
   updated_at: string
 }
 
-export type MediaSort = 'taken_at' | 'created_at' | 'name'
+export type MediaSort = 'taken_at' | 'created_at' | 'name' | 'source'
 export type HiddenMode = 'hide' | 'show' | 'only'
+
+// MediaType buckets a file by its mime_type prefix, matching the backend's
+// db.MediaType* constants.
+export type MediaType = 'image' | 'video' | 'other'
+
+// UploadSource is the closed set of values the backend writes to files.source.
+export const UPLOAD_SOURCES = [
+  'web',
+  'device',
+  'google_drive',
+  'google_photos',
+  'email_backup_gmail',
+  'email_backup_microsoft',
+  'file_server',
+] as const
+export type UploadSource = (typeof UPLOAD_SOURCES)[number]
+
+// MediaFilters narrows a media collection listing. Dates are `YYYY-MM-DD`
+// (what <input type="date"> produces); empty strings/arrays mean "no filter".
+export interface MediaFilters {
+  takenAfter: string
+  takenBefore: string
+  uploadedAfter: string
+  uploadedBefore: string
+  sources: string[]
+  mediaTypes: MediaType[]
+  // Recognition group ids — the labeled people/pets/objects filter.
+  groupIds: string[]
+}
+
+export const EMPTY_MEDIA_FILTERS: MediaFilters = {
+  takenAfter: '',
+  takenBefore: '',
+  uploadedAfter: '',
+  uploadedBefore: '',
+  sources: [],
+  mediaTypes: [],
+  groupIds: [],
+}
+
+// countMediaFilters returns how many of the filter's facets are active — the
+// number shown on the toolbar's Filter badge.
+export function countMediaFilters(f: MediaFilters): number {
+  return (
+    (f.takenAfter ? 1 : 0) +
+    (f.takenBefore ? 1 : 0) +
+    (f.uploadedAfter ? 1 : 0) +
+    (f.uploadedBefore ? 1 : 0) +
+    (f.sources.length > 0 ? 1 : 0) +
+    (f.mediaTypes.length > 0 ? 1 : 0) +
+    (f.groupIds.length > 0 ? 1 : 0)
+  )
+}
 
 export interface FolderContents {
   folder: Folder | null
@@ -276,6 +343,10 @@ export interface Invitation {
   initial_quota_bytes: number
   grant_admin: boolean
   grant_premium: boolean
+  // Optional Premium trial expiry applied at registration time — meaningful
+  // only alongside grant_premium (and ignored when grant_admin is also set).
+  // Null/absent means a permanent grant.
+  premium_expires_at?: string | null
   invitation_url?: string
 }
 
@@ -311,6 +382,9 @@ export interface UploadResponse {
   mime_type: string
   size_bytes: number
   folder_id: string
+  // Drive the file was routed to, so a bulk uploader can credit the right
+  // drive's quota bar as each file lands.
+  drive_id: string | null
 }
 
 export interface FavoriteList {

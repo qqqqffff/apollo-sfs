@@ -2,6 +2,7 @@ package services
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -120,6 +121,10 @@ func TestGrantInvitationRoles_RoleLookupFails_ReturnsError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error when the admin role cannot be looked up")
 	}
+	if !errors.Is(err, ErrRoleProvisioningFailed) {
+		t.Errorf("error %v does not wrap ErrRoleProvisioningFailed — the register/mobile "+
+			"handlers match on it to return a retryable failure", err)
+	}
 	if fk.grantCalled {
 		t.Error("role-mappings should not be called when a role lookup failed")
 	}
@@ -137,5 +142,8 @@ func TestGrantInvitationRoles_GrantCallFails_ReturnsError(t *testing.T) {
 	err := s.grantInvitationRoles(t.Context(), "admin-token", "user-1", "alice", &models.Invitation{GrantAdmin: true})
 	if err == nil {
 		t.Fatal("expected an error when Keycloak rejects the role grant")
+	}
+	if !errors.Is(err, ErrRoleProvisioningFailed) {
+		t.Errorf("error %v does not wrap ErrRoleProvisioningFailed", err)
 	}
 }

@@ -32,6 +32,14 @@ type EmailBackupMessage struct {
 	Read              bool      `json:"read"`
 	ReceivedAt        time.Time `json:"received_at"`
 	CreatedAt         time.Time `json:"created_at"`
+
+	// Name and size of the encrypted file the message was stored as. Not
+	// columns of email_backup_messages — set only on the response to
+	// POST /email-backup/messages, so a running backup can show the file it
+	// just wrote (folder + name) and add its bytes to the quota bar without
+	// re-reading the whole listing. Omitted everywhere else.
+	FileName      string `json:"file_name,omitempty"`
+	FileSizeBytes int64  `json:"file_size_bytes,omitempty"`
 }
 
 // EmailBackupMessageDetail combines the index row with the decrypted on-file

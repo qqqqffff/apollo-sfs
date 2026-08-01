@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -22,6 +23,17 @@ type AdminQuerier interface {
 	SetUserFeedbackAccess(ctx context.Context, username string, enabled bool) error
 	GetUserDrive(ctx context.Context, username string) (*models.UserDriveAllocation, error)
 	GetDriveAvailableBytes(ctx context.Context, driveID uuid.UUID) (int64, error)
+
+	// Role editor + account deletion (admin Users page)
+	SetUserAdmin(ctx context.Context, username string, isAdmin bool) error
+	SetUserPremium(ctx context.Context, username string, isPremium bool) error
+	SetPremiumExpiry(ctx context.Context, username string, expiresAt *time.Time) error
+	SetPremiumPurchaseBlocked(ctx context.Context, username string, blocked bool) error
+	InsertRoleChangeNotification(ctx context.Context, p db.InsertRoleChangeNotificationParams) error
+	GetActiveSubscriptionForUser(ctx context.Context, username string) (*models.PremiumSubscription, error)
+	InsertAuditLog(ctx context.Context, in db.AuditInput) error
+	DeleteUserRecord(ctx context.Context, username string) error
+	DeleteAllUserFolders(ctx context.Context, username string) error
 
 	// Banned IPs
 	ListBannedIPs(ctx context.Context, activeOnly bool, in db.PageInput) (*db.PageResult[models.BannedIP], error)
@@ -61,7 +73,9 @@ type AdminQuerier interface {
 
 	// Drive benchmark
 	RequestBenchmarkOnAllNodes(ctx context.Context) error
-	CountPendingBenchmarkRequests(ctx context.Context) (int, error)
+	CountInFlightBenchmarkNodes(ctx context.Context) (int, error)
+	CountActiveNodes(ctx context.Context) (int, error)
+	ListRunningBenchmarkNodes(ctx context.Context) ([]db.NodeBenchmarkProgress, error)
 	ListNodeDiskBenchmarks(ctx context.Context) ([]db.NodeDiskBenchmarkRow, error)
 
 	// Nodes (storage-node layer between servers and drives)
@@ -116,7 +130,7 @@ type AdminQuerier interface {
 
 // AdminInviteService is the subset of *services.InviteService used by admin handlers.
 type AdminInviteService interface {
-	Create(ctx context.Context, invitedByUserID uuid.UUID, invitedByUsername, email string, initialQuotaBytes int64, grantAdmin bool, grantPremium bool, initialDriveID *uuid.UUID) (*models.Invitation, error)
+	Create(ctx context.Context, invitedByUserID uuid.UUID, invitedByUsername, email string, initialQuotaBytes int64, grantAdmin bool, grantPremium bool, initialDriveID *uuid.UUID, premiumExpiresAt *time.Time) (*models.Invitation, error)
 	List(ctx context.Context, page db.PageInput) (*db.PageResult[models.Invitation], error)
 	InvitationURL(token string) string
 	Resend(ctx context.Context, id uuid.UUID, byUsername string) error

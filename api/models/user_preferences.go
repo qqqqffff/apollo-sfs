@@ -33,7 +33,16 @@ type UserPreferences struct {
 	// HideBenchmarkPromo hides the drive-speed-benchmark promo card in the Add
 	// Storage modal. Default false. Purely cosmetic — never affects the
 	// benchmark itself or the admin metrics page.
-	HideBenchmarkPromo bool      `json:"hide_benchmark_promo" db:"hide_benchmark_promo"`
-	CreatedAt          time.Time `json:"created_at" db:"created_at"`
-	UpdatedAt          time.Time `json:"updated_at" db:"updated_at"`
+	HideBenchmarkPromo bool `json:"hide_benchmark_promo" db:"hide_benchmark_promo"`
+	// OnboardingBaseSeen / OnboardingPremiumSeen record that the account has
+	// been shown the base and premium spotlight tours, so each auto-plays
+	// exactly once — on first login, and on the first login where premium is
+	// active. Account state rather than browser state on purpose: these used
+	// to be localStorage keys, which replayed the tour on every new browser,
+	// new device, or cleared-site-data login. Both default false; the
+	// "Replay guide" links on the Profile page bypass them entirely.
+	OnboardingBaseSeen    bool      `json:"onboarding_base_seen" db:"onboarding_base_seen"`
+	OnboardingPremiumSeen bool      `json:"onboarding_premium_seen" db:"onboarding_premium_seen"`
+	CreatedAt             time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt             time.Time `json:"updated_at" db:"updated_at"`
 }

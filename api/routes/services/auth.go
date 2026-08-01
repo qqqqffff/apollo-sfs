@@ -62,11 +62,11 @@ type kcTokenResponse struct {
 
 // kcUser is the body sent to POST /admin/realms/{realm}/users.
 type kcUser struct {
-	Username      string          `json:"username"`
-	Email         string          `json:"email"`
-	Enabled       bool            `json:"enabled"`
-	EmailVerified bool            `json:"emailVerified"`
-	Credentials   []kcCredential  `json:"credentials,omitempty"`
+	Username      string         `json:"username"`
+	Email         string         `json:"email"`
+	Enabled       bool           `json:"enabled"`
+	EmailVerified bool           `json:"emailVerified"`
+	Credentials   []kcCredential `json:"credentials,omitempty"`
 }
 
 type kcCredential struct {
@@ -86,13 +86,13 @@ type kcUserResult struct {
 // AuthService handles all authentication operations: login, registration,
 // logout, token refresh, and password-reset email triggering.
 type AuthService struct {
-	queries       *db.Queries
-	kcURL         string
-	kcRealm       string
-	kcClientID    string
-	kcSecret      string
-	appBaseURL    string
-	http          *http.Client
+	queries        *db.Queries
+	kcURL          string
+	kcRealm        string
+	kcClientID     string
+	kcSecret       string
+	appBaseURL     string
+	http           *http.Client
 	googleClientID string
 	googleSecret   string
 
@@ -231,6 +231,95 @@ func (s *AuthService) LinkSocialAccount(ctx context.Context, existingUsername, p
 	}
 
 	return tokens, nil
+}
+
+// ErrIdentityClaimed means the brokered login resolved to a Keycloak user that
+// already owns an app account — the provider identity belongs to somebody else,
+// so it must not be moved onto the account doing the linking.
+var ErrIdentityClaimed = errors.New("this provider account is already linked to another Apollo SFS account")
+
+// ErrIdentityNotReturned means Keycloak completed the brokered login but the
+// resulting user carries no federated identity for the requested provider,
+// so there is nothing to attach.
+var ErrIdentityNotReturned = errors.New("the provider did not return an identity to link")
+
+// LinkBrokeredIdentity attaches the identity produced by a brokered IdP login
+// to an already-signed-in account. It is the web counterpart of
+// LinkSocialIdentity (which takes a native SDK's ID token, as the mobile apps
+// do): the browser has no provider SDK, so it re-runs the same Keycloak
+// authorization-code flow the sign-in buttons use and this exchanges the
+// resulting code.
+//
+// Three outcomes are possible once the code is exchanged:
+//   - Keycloak resolved the login straight onto currentKcUserID (the provider
+//     was already linked, or Keycloak's own account-linking step ran) — done.
+//   - It landed on a fresh, unclaimed Keycloak user that first-broker-login
+//     created; its federated identity is moved across and that user deleted,
+//     exactly as LinkSocialAccount does for the sign-in email-conflict path.
+//   - It landed on a Keycloak user that already has an app account —
+//     ErrIdentityClaimed, nothing is touched.
+//
+// Unlike AuthCodeExchange this deliberately neither provisions an app user for
+// the brokered identity nor returns tokens: the caller's session must stay on
+// the account that was already signed in.
+func (s *AuthService) LinkBrokeredIdentity(ctx context.Context, currentKcUserID, code, redirectURI, provider string) error {
+	tokens, err := s.tokenRequest(ctx, url.Values{
+		"grant_type":    {"authorization_code"},
+		"client_id":     {s.kcClientID},
+		"client_secret": {s.kcSecret},
+		"code":          {code},
+		"redirect_uri":  {redirectURI},
+	})
+	if err != nil {
+		return fmt.Errorf("link brokered identity: code exchange: %w", err)
+	}
+	// The brokered login opened its own Keycloak session; the app session is
+	// untouched and stays on the current user, so this one is dead weight.
+	defer func() { _ = s.Logout(ctx, tokens.RefreshToken) }()
+
+	claims, err := decodeTokenClaims(tokens.AccessToken)
+	if err != nil {
+		return fmt.Errorf("link brokered identity: %w", err)
+	}
+	if claims.Sub == currentKcUserID {
+		return nil // already linked to this very account
+	}
+
+	if _, err := s.queries.GetUserByUsername(ctx, claims.PreferredUsername); err == nil {
+		return ErrIdentityClaimed
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("link brokered identity: look up brokered user: %w", err)
+	}
+
+	adminToken, err := s.adminToken(ctx)
+	if err != nil {
+		return fmt.Errorf("link brokered identity: admin token: %w", err)
+	}
+	fedIDs, err := s.kcGetFederatedIdentities(ctx, adminToken, claims.Sub)
+	if err != nil {
+		return fmt.Errorf("link brokered identity: fetch federated identities: %w", err)
+	}
+
+	linked := false
+	for _, fid := range fedIDs {
+		if fid.IdentityProvider != provider {
+			continue
+		}
+		if err := s.kcAddFederatedIdentity(ctx, adminToken, currentKcUserID, fid); err != nil {
+			return fmt.Errorf("link brokered identity: add federated identity: %w", err)
+		}
+		linked = true
+	}
+	if !linked {
+		return ErrIdentityNotReturned
+	}
+
+	// Drop the throwaway Keycloak user now that its identity lives on the real
+	// account. Non-fatal, same as LinkSocialAccount: the link already succeeded.
+	if err := s.kcDeleteUser(ctx, adminToken, claims.Sub); err != nil {
+		log.Printf("link brokered identity: warning: could not delete temp KC user %s: %v", claims.Sub, err)
+	}
+	return nil
 }
 
 // GetLinkedProviders returns the list of Keycloak IdP aliases linked to the given user.
@@ -391,6 +480,15 @@ func (s *AuthService) ensureUserProvisioned(ctx context.Context, accessToken str
 // for an invite, distinct from a 500 on an internal failure.
 var ErrInvitationRequired = errors.New("a valid invitation is required")
 
+// ErrRoleProvisioningFailed is returned by provisionInvitedAppUser when the
+// invitation requested realm roles (admin/premium) that could not be resolved
+// or granted in Keycloak. It is returned before any app DB state is written
+// or the invitation is marked accepted, so the invitation stays valid and the
+// recipient can retry. Handlers map it to a distinct response telling the
+// user to try accepting the invitation again shortly, rather than a plain
+// success that silently hands them a lesser account.
+var ErrRoleProvisioningFailed = errors.New("invited role could not be provisioned")
+
 // validateInvitation looks up a pending invitation by token and verifies it
 // matches the email and has not expired. Shared by password registration and
 // brokered (social) first-login.
@@ -411,7 +509,9 @@ func (s *AuthService) validateInvitation(ctx context.Context, token, email strin
 // grantInvitationRoles assigns the Keycloak realm roles requested by inv
 // (admin and/or premium) to kcUserID. Admins implicitly receive premium at the
 // app layer, but it is also granted explicitly so the Keycloak JWT carries the
-// role. A no-op when the invitation requests neither role.
+// role. A no-op when the invitation requests neither role. Failures are
+// wrapped in ErrRoleProvisioningFailed so callers can surface them as a
+// retryable registration failure rather than a generic 500.
 func (s *AuthService) grantInvitationRoles(ctx context.Context, adminToken, kcUserID, username string, inv *models.Invitation) error {
 	if !inv.GrantAdmin && !inv.GrantPremium {
 		return nil
@@ -430,14 +530,14 @@ func (s *AuthService) grantInvitationRoles(ctx context.Context, adminToken, kcUs
 		role, roleErr := s.kcGetRealmRole(ctx, adminToken, roleName)
 		if roleErr != nil {
 			log.Printf("register: look up realm role %q for %s: %v", roleName, username, roleErr)
-			return fmt.Errorf("look up realm role %q: %w", roleName, roleErr)
+			return fmt.Errorf("%w: look up role %q: %v", ErrRoleProvisioningFailed, roleName, roleErr)
 		}
 		rolesToGrant = append(rolesToGrant, *role)
 	}
 
 	if grantErr := s.kcGrantRealmRoles(ctx, adminToken, kcUserID, rolesToGrant); grantErr != nil {
 		log.Printf("register: grant realm roles %v to %s (kc id %s): %v", names, username, kcUserID, grantErr)
-		return fmt.Errorf("grant realm roles %v: %w", names, grantErr)
+		return fmt.Errorf("%w: grant roles %v: %v", ErrRoleProvisioningFailed, names, grantErr)
 	}
 	return nil
 }
@@ -447,16 +547,21 @@ func (s *AuthService) grantInvitationRoles(ctx context.Context, adminToken, kcUs
 // been validated and whose Keycloak account (kcUserID) already exists. It grants
 // the invitation's realm roles, provisions the encryption key, selects and
 // allocates a drive, creates the app DB record, and marks the invitation accepted.
+//
+// Role granting runs first and is fatal on failure (see ErrRoleProvisioningFailed):
+// nothing below it — the DB user, the drive allocation, or the invitation's
+// accepted flag — is written, so a failed grant leaves the invitation valid for
+// the caller to retry instead of silently completing with a downgraded account.
 func (s *AuthService) provisionInvitedAppUser(
 	ctx context.Context,
 	adminToken, kcUserID, username, email, inviteToken string,
 	inv *models.Invitation,
 ) error {
-	// Grant realm roles requested by the invitation. This must succeed before
-	// the account is considered provisioned: there is no admin-panel action to
-	// re-grant a missing role afterward, so a silent failure here would leave
-	// an invited admin/premium user permanently under-provisioned with no
-	// visible trace. Fail loudly instead — same as every other step below.
+	// Grant realm roles requested by the invitation. Fatal: this runs before any
+	// app DB state is written or the invitation is accepted (below), so on
+	// failure we return here and leave the invitation unconsumed rather than
+	// silently handing out an account with fewer privileges than promised —
+	// there is no admin-panel action to re-grant a missing role afterward.
 	if err := s.grantInvitationRoles(ctx, adminToken, kcUserID, username, inv); err != nil {
 		return err
 	}
@@ -505,6 +610,16 @@ func (s *AuthService) provisionInvitedAppUser(
 	}
 	if err := s.queries.AllocateUserToDrive(ctx, username, drive.ID, quotaBytes); err != nil {
 		return fmt.Errorf("allocate drive: %w", err)
+	}
+
+	// Apply the invitation's optional Premium trial expiry. Only meaningful
+	// for a plain premium grant (not admin, whose premium is implicit) — see
+	// InviteService.Create, which already normalizes this, but the check is
+	// repeated here since it's the field that actually takes effect.
+	if inv.GrantPremium && !inv.GrantAdmin && inv.PremiumExpiresAt != nil {
+		if err := s.queries.SetPremiumExpiry(ctx, username, inv.PremiumExpiresAt); err != nil {
+			log.Printf("provision invited user: set premium expiry for %q: %v", username, err)
+		}
 	}
 
 	// Accept invitation. Non-fatal: the account already exists.
@@ -599,6 +714,128 @@ func (s *AuthService) Register(ctx context.Context, username, email, password, i
 	tokens, err := s.Login(ctx, username, password)
 	if err != nil {
 		return nil, fmt.Errorf("register: auto-login: %w", err)
+	}
+	return tokens, nil
+}
+
+// ErrRegistrationSessionExpired is returned by RegisterWithReservation when
+// the reservation token no longer holds its slot (expired, released, raced
+// away, or its group was deactivated). The handler maps it to 410 so the
+// register page can show the session-expired modal.
+var ErrRegistrationSessionExpired = errors.New("your registration session has expired — please return to the invite page and pick a slot again")
+
+// ErrEmailTaken is returned when a registration email already belongs to an
+// existing account.
+var ErrEmailTaken = errors.New("an account with this email address already exists")
+
+// EmailInUse reports whether an app account already exists for the given email.
+func (s *AuthService) EmailInUse(ctx context.Context, email string) (bool, error) {
+	_, err := s.queries.GetUserByEmail(ctx, email)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return false, fmt.Errorf("email in use: %w", err)
+}
+
+// RegisterWithReservation creates an account from a group-registration slot
+// reservation (see RegistrationGroupService). Unlike Register, the email is
+// user-supplied — the reservation carries no email — so it is checked against
+// existing accounts here. The slot dictates quota, drive, and account status
+// (base or premium with an optional trial expiry; never admin).
+//
+// Mirrors Register's ordering guarantees: the premium role grant is fatal
+// BEFORE any app DB state is written or the slot consumed, so a failed grant
+// leaves the reservation valid for a retry.
+func (s *AuthService) RegisterWithReservation(ctx context.Context, username, email, password, reservationToken string) (*TokenPair, error) {
+	// Sweep expired holds so the validity check below is accurate.
+	if _, err := s.queries.ReleaseExpiredSlotReservations(ctx); err != nil {
+		log.Printf("register with reservation: sweep: %v", err)
+	}
+
+	info, err := s.queries.GetSlotReservationByToken(ctx, reservationToken)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrRegistrationSessionExpired
+		}
+		return nil, fmt.Errorf("register with reservation: %w", err)
+	}
+	if info.Reservation.CompletedAt != nil || info.Reservation.ReleasedAt != nil ||
+		time.Now().After(info.Reservation.ExpiresAt) ||
+		info.Slot.ConsumedAt != nil || !info.GroupUsable {
+		return nil, ErrRegistrationSessionExpired
+	}
+
+	inUse, err := s.EmailInUse(ctx, email)
+	if err != nil {
+		return nil, fmt.Errorf("register with reservation: %w", err)
+	}
+	if inUse {
+		return nil, ErrEmailTaken
+	}
+
+	adminToken, err := s.adminToken(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("register with reservation: get admin token: %w", err)
+	}
+	kcUserID, err := s.kcCreateUser(ctx, adminToken, username, email, password)
+	if err != nil {
+		return nil, fmt.Errorf("register with reservation: create keycloak user: %w", err)
+	}
+
+	// Premium slots grant the realm role first, and fatally — same contract as
+	// provisionInvitedAppUser: nothing below is written on failure, so the
+	// reservation stays claimable for a retry.
+	if info.Slot.AccountStatus == "premium" {
+		role, roleErr := s.kcGetRealmRole(ctx, adminToken, "premium")
+		if roleErr != nil {
+			return nil, fmt.Errorf("%w: look up role premium: %v", ErrRoleProvisioningFailed, roleErr)
+		}
+		if grantErr := s.kcGrantRealmRoles(ctx, adminToken, kcUserID, []kcRoleRef{*role}); grantErr != nil {
+			return nil, fmt.Errorf("%w: grant premium role: %v", ErrRoleProvisioningFailed, grantErr)
+		}
+	}
+
+	if s.ProvisionUserKey == nil {
+		return nil, fmt.Errorf("encryption service not wired")
+	}
+	encKey, nonce, masterKeyVer, err := s.ProvisionUserKey(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("register with reservation: provision key: %w", err)
+	}
+
+	if err := s.queries.CreateUser(ctx, &models.User{
+		Username:          username,
+		Email:             email,
+		EncryptedKey:      encKey,
+		KeyNonce:          nonce,
+		MasterKeyVersion:  masterKeyVer,
+		StorageUsedBytes:  0,
+		StorageQuotaBytes: info.Slot.QuotaBytes,
+	}); err != nil {
+		return nil, fmt.Errorf("register with reservation: create db user: %w", err)
+	}
+	if err := s.queries.AllocateUserToDrive(ctx, username, info.Slot.DriveID, info.Slot.QuotaBytes); err != nil {
+		return nil, fmt.Errorf("register with reservation: allocate drive: %w", err)
+	}
+	if info.Slot.AccountStatus == "premium" && info.Slot.PremiumExpiresAt != nil {
+		if err := s.queries.SetPremiumExpiry(ctx, username, info.Slot.PremiumExpiresAt); err != nil {
+			log.Printf("register with reservation: set premium expiry for %q: %v", username, err)
+		}
+	}
+
+	// Consume the slot. Non-fatal: the account already exists — a failure here
+	// (a rare race against the sweep) is logged loudly rather than stranding
+	// the user, mirroring AcceptInvitation's tolerance.
+	if err := s.queries.CompleteSlotReservation(ctx, info.Reservation.ID, info.Slot.ID, username); err != nil {
+		log.Printf("register with reservation: consume slot %s for %q: %v", info.Slot.ID, username, err)
+	}
+
+	tokens, err := s.Login(ctx, username, password)
+	if err != nil {
+		return nil, fmt.Errorf("register with reservation: auto-login: %w", err)
 	}
 	return tokens, nil
 }
@@ -812,6 +1049,87 @@ func (s *AuthService) kcGrantRealmRoles(ctx context.Context, adminToken, userID 
 	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("keycloak returned %s: %s", resp.Status, string(b))
+	}
+	return nil
+}
+
+// kcRevokeRealmRoles removes the given realm roles from the Keycloak user —
+// the DELETE counterpart of kcGrantRealmRoles, same endpoint and body shape.
+func (s *AuthService) kcRevokeRealmRoles(ctx context.Context, adminToken, userID string, roles []kcRoleRef) error {
+	body, err := json.Marshal(roles)
+	if err != nil {
+		return err
+	}
+	endpoint := fmt.Sprintf("%s/admin/realms/%s/users/%s/role-mappings/realm", s.kcURL, s.kcRealm, userID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, endpoint, strings.NewReader(string(body)))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	resp, err := s.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("keycloak request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("keycloak returned %s: %s", resp.Status, string(b))
+	}
+	return nil
+}
+
+// SetAdminRealmRole grants or revokes the "admin" realm role for username —
+// used by the admin Users page's role editor (routes/admin.UpdateUserRole).
+// Unlike the DB is_admin flag, this is what actually takes effect: the auth
+// middleware resyncs is_admin/is_premium from the JWT's realm roles on every
+// request, so a DB-only change would be overwritten on the user's next call.
+func (s *AuthService) SetAdminRealmRole(ctx context.Context, username string, grant bool) error {
+	adminToken, err := s.adminToken(ctx)
+	if err != nil {
+		return fmt.Errorf("set admin realm role: get admin token: %w", err)
+	}
+	kcID, err := s.kcFindUserByUsername(ctx, adminToken, username)
+	if err != nil {
+		return fmt.Errorf("set admin realm role: look up keycloak user: %w", err)
+	}
+	if kcID == "" {
+		return fmt.Errorf("set admin realm role: user %q not found in keycloak", username)
+	}
+	role, err := s.kcGetRealmRole(ctx, adminToken, "admin")
+	if err != nil {
+		return fmt.Errorf("set admin realm role: %w", err)
+	}
+	if grant {
+		if err := s.kcGrantRealmRoles(ctx, adminToken, kcID, []kcRoleRef{*role}); err != nil {
+			return fmt.Errorf("set admin realm role: grant: %w", err)
+		}
+		return nil
+	}
+	if err := s.kcRevokeRealmRoles(ctx, adminToken, kcID, []kcRoleRef{*role}); err != nil {
+		return fmt.Errorf("set admin realm role: revoke: %w", err)
+	}
+	return nil
+}
+
+// DeleteUser permanently removes username's Keycloak identity — used by the
+// admin Users page's delete action once local files/DB rows have been (or
+// are about to be) purged. Returns nil (no-op) if the user is already gone
+// from Keycloak, so a retried delete stays idempotent.
+func (s *AuthService) DeleteUser(ctx context.Context, username string) error {
+	adminToken, err := s.adminToken(ctx)
+	if err != nil {
+		return fmt.Errorf("delete user: get admin token: %w", err)
+	}
+	kcID, err := s.kcFindUserByUsername(ctx, adminToken, username)
+	if err != nil {
+		return fmt.Errorf("delete user: look up keycloak user: %w", err)
+	}
+	if kcID == "" {
+		return nil
+	}
+	if err := s.kcDeleteUser(ctx, adminToken, kcID); err != nil {
+		return fmt.Errorf("delete user: keycloak: %w", err)
 	}
 	return nil
 }
@@ -1183,8 +1501,8 @@ func (s *AuthService) ExchangeGoogleServerAuthCode(ctx context.Context, serverAu
 	defer resp.Body.Close()
 
 	var gr struct {
-		IDToken string `json:"id_token"`
-		Error   string `json:"error"`
+		IDToken   string `json:"id_token"`
+		Error     string `json:"error"`
 		ErrorDesc string `json:"error_description"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&gr); err != nil {
@@ -1456,4 +1774,3 @@ func (s *AuthService) kcFindGroupByName(ctx context.Context, adminToken, name st
 	}
 	return "", nil
 }
-

@@ -114,7 +114,8 @@ All secrets live in `.env` (never commit this file). Key groups:
 | `KEYCLOAK_*` | Realm, client, admin, and public URL |
 | `KEY_ENCRYPTION_KEY` | Master key for AES-256 per-user key wrapping |
 | `SESSION_KEY` | Session cookie signing key |
-| `PAYPAL_*` | PayPal credentials — Orders v2 (storage add-ons) + Subscriptions v1 (premium) |
+| `PAYPAL_*` | PayPal credentials — Orders v2 (storage add-ons, plus self-billed card/wallet subscriptions) + Subscriptions v1 (PayPal-wallet premium) |
+| `GOOGLE_PAY_SUBSCRIPTIONS_ENABLED` | Gates Google Pay on subscription checkouts. Leave off — PayPal doesn't vault `payment_source.google_pay`, so such a subscription can't renew (see `docs/paypal_setup.md` §10). One-time Google Pay purchases are unaffected |
 | `GOOGLE_*` | Google OAuth client for web login |
 | `CLOUDFLARE_*` | API token (DDNS), Turnstile site/secret keys |
 | `SENDGRID_*` | SMTP password (via Postfix relay) and inbound webhook secret |
@@ -148,5 +149,5 @@ Docker logging uses the JSON file driver with rotation (10 MB max, 3 files). Ngi
 - `docs/sfs_api.md` — SFS public API reference
 - `docs/file_server_links.md` — premium WebDAV mount links (file server feature)
 - `docs/storage_reconciliation.md` — MinIO <-> Postgres reconciliation: drift sources, the daily 4am-local heartbeat, and the admin endpoints for it
-- `docs/drive_benchmark_setup.md` — on-demand fast (NVMe) vs standard (HDD) drive speed benchmark: how the trigger reaches node-agent, the writable scratch-directory host setup, and the promo blog post/cards it feeds
+- `docs/drive_benchmark_setup.md` — on-demand fast (NVMe) vs standard (HDD) drive speed benchmark: how the trigger reaches node-agent, the writable scratch-directory host setup, the sequential + random-access (`O_DIRECT`, page-cache-bypassing) methodology, live per-node/per-disk progress reporting, and the promo blog post/cards it feeds
 - `docs/upload_bandwidth_fairness.md` — fair per-user upload speed cap: budget derived automatically from the periodic WAN speed test (no manual config), the live reserve/user-count split, "clean sample" gating against active uploads, and where it hooks into the request body

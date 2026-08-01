@@ -71,6 +71,7 @@ export function FilesSidebarToggle() {
     <button
       onClick={() => ctx?.setOpen(true)}
       aria-label="Open files menu"
+      data-tour="sidebar-toggle"
       className="lg:hidden inline-flex items-center justify-center w-9 h-9 shrink-0 rounded-lg border border-gray-200 text-gray-500 hover:text-gray-900 hover:bg-gray-100 cursor-pointer bg-white transition-colors"
     >
       <MdMenu className="text-lg" />
@@ -153,6 +154,7 @@ function FilesSidebar({ open, onClose }: { open: boolean; onClose: () => void })
                 <SidebarButton
                   icon={<MdPhotoLibrary className="text-purple-400" />}
                   onClick={() => fireAction('new-collection')}
+                  tourId="sidebar-new-collection"
                 >
                   New collection
                 </SidebarButton>
@@ -174,7 +176,7 @@ function FilesSidebar({ open, onClose }: { open: boolean; onClose: () => void })
                 </SidebarButton>
               )}
               {isPremium && hasGoogleLinked && (
-                <SidebarButton icon={<GoogleIcon />} onClick={() => fireAction('google-backup')}>
+                <SidebarButton icon={<GoogleIcon />} onClick={() => fireAction('google-backup')} tourId="sidebar-google-backup">
                   Google Backup
                 </SidebarButton>
               )}
@@ -182,6 +184,7 @@ function FilesSidebar({ open, onClose }: { open: boolean; onClose: () => void })
                 <SidebarButton
                   icon={<MdAlternateEmail className="text-teal-500" />}
                   onClick={() => fireAction('email-backup')}
+                  tourId="sidebar-email-backup"
                 >
                   Email Backup
                 </SidebarButton>
@@ -216,11 +219,12 @@ function SidebarLink({
 }
 
 function SidebarButton({
-  icon, onClick, children,
-}: { icon: React.ReactNode; onClick: () => void; children: React.ReactNode }) {
+  icon, onClick, children, tourId,
+}: { icon: React.ReactNode; onClick: () => void; children: React.ReactNode; tourId?: string }) {
   return (
     <button
       onClick={onClick}
+      data-tour={tourId}
       className="flex items-center gap-2 w-full px-3 py-2 rounded-lg text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-100 cursor-pointer bg-transparent border-0 text-left transition-colors whitespace-nowrap"
     >
       <span className="text-lg flex items-center">{icon}</span>

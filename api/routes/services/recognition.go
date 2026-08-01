@@ -195,7 +195,7 @@ func (s *RecognitionService) enqueueCollection(ctx context.Context, userID uuid.
 	cursor := ""
 	for {
 		page, err := q.ListMediaFiles(ctx, collectionID, db.MediaSortCreated, db.HiddenInclude,
-			db.PageInput{Cursor: cursor, Limit: db.MaxPageLimit})
+			db.MediaFilter{}, db.PageInput{Cursor: cursor, Limit: db.MaxPageLimit})
 		if err != nil {
 			return 0, fmt.Errorf("recognition enqueue: list files: %w", err)
 		}

@@ -9,21 +9,53 @@ export class ApiError extends Error {
     public readonly status: number,
     message: string,
     public readonly body: Record<string, unknown> = {},
+    // Retry-After header value, when the server sent one (429s).
+    public readonly retryAfter: string | null = null,
   ) {
     super(message)
     this.name = 'ApiError'
   }
 }
 
+// ── Rate-limit (429) retry ────────────────────────────────────────────────────
+// A 429 is refused by the rate-limit middleware before the handler runs, so
+// nothing happened server-side and the request is always safe to repeat — even
+// a POST. Bulk flows (backups, multi-select deletes) are the ones that reach a
+// limit at all, and surfacing a hard failure there loses a file for no reason.
+
+const RATE_LIMIT_RETRIES = 4
+const RATE_LIMIT_BASE_DELAY_MS = 600
+
+function sleep(ms: number) {
+  return new Promise<void>((r) => setTimeout(r, ms))
+}
+
+// Honour Retry-After (seconds, or an HTTP date) when the server sends one,
+// otherwise back off exponentially with a little jitter.
+function retryDelayMs(attempt: number, retryAfter: string | null): number {
+  if (retryAfter) {
+    const secs = Number(retryAfter)
+    if (Number.isFinite(secs) && secs >= 0) return Math.min(secs * 1000, 30_000)
+    const at = Date.parse(retryAfter)
+    if (!Number.isNaN(at)) return Math.min(Math.max(at - Date.now(), 0), 30_000)
+  }
+  return RATE_LIMIT_BASE_DELAY_MS * 2 ** attempt + Math.random() * 250
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(BASE + path, {
-    credentials: 'include',
-    headers: {
-      'Content-Type': 'application/json',
-      ...init?.headers,
-    },
-    ...init,
-  })
+  let res!: Response
+  for (let attempt = 0; ; attempt++) {
+    res = await fetch(BASE + path, {
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+        ...init?.headers,
+      },
+      ...init,
+    })
+    if (res.status !== 429 || attempt >= RATE_LIMIT_RETRIES) break
+    await sleep(retryDelayMs(attempt, res.headers.get('Retry-After')))
+  }
 
   if (!res.ok) {
     if (res.status === 401) dispatchSessionExpired()
@@ -88,7 +120,25 @@ const STALL_TIMEOUT_MS = 600_000
 
 // XHR-based upload that fires onProgress(loaded, total) as bytes are sent.
 // Automatically aborts and rejects if no bytes are transferred for STALL_TIMEOUT_MS.
-export function uploadWithProgress<T>(
+// Retries a rate-limited (429) upload the same way request() does — the body
+// never reached the handler, so re-sending it can't duplicate anything.
+export async function uploadWithProgress<T>(
+  path: string,
+  form: FormData,
+  onProgress: (loaded: number, total: number) => void,
+): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await uploadAttempt<T>(path, form, onProgress)
+    } catch (e) {
+      const rateLimited = e instanceof ApiError && e.status === 429
+      if (!rateLimited || attempt >= RATE_LIMIT_RETRIES) throw e
+      await sleep(retryDelayMs(attempt, e.retryAfter ?? null))
+    }
+  }
+}
+
+function uploadAttempt<T>(
   path: string,
   form: FormData,
   onProgress: (loaded: number, total: number) => void,
@@ -140,11 +190,12 @@ export function uploadWithProgress<T>(
         }
       } else {
         if (xhr.status === 401) dispatchSessionExpired()
+        const retryAfter = xhr.getResponseHeader('Retry-After')
         try {
           const body = JSON.parse(xhr.responseText) as { error?: string }
-          reject(new ApiError(xhr.status, body.error ?? xhr.statusText))
+          reject(new ApiError(xhr.status, body.error ?? xhr.statusText, {}, retryAfter))
         } catch {
-          reject(new ApiError(xhr.status, xhr.statusText))
+          reject(new ApiError(xhr.status, xhr.statusText, {}, retryAfter))
         }
       }
     })

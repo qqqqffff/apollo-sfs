@@ -190,7 +190,24 @@ func (h *Handler) CancelSubscription(c *gin.Context) {
 	var refundCents int
 	if sub.CurrentPeriodEnd != nil {
 		refundCents = prorateRefundCents(sub.Plan, sub.AmountCents, *sub.CurrentPeriodEnd, time.Now())
-		if refundCents > 0 {
+		if refundCents > 0 && sub.BillingMode == "self" {
+			// Self-billed: there is no PayPal subscription to list sales
+			// against, so the refund goes straight at the last capture we
+			// took — an Orders v2 capture, refunded like any storage add-on.
+			// See docs/paypal_setup.md §9.
+			if sub.LastCaptureID != nil && *sub.LastCaptureID != "" {
+				refund, err := client.RefundCapture(c.Request.Context(), *sub.LastCaptureID, refundCents, sub.Currency)
+				if err != nil {
+					log.Printf("orders CancelSubscription paypal refund (self-billed): %v", err)
+					c.AbortWithStatusJSON(http.StatusBadGateway, gin.H{"error": "refund failed"})
+					return
+				}
+				refundID = refund.RefundID
+			} else {
+				log.Printf("orders CancelSubscription: self-billed subscription %s has no capture id, cancelling without refund", sub.ID)
+				refundCents = 0
+			}
+		} else if refundCents > 0 {
 			periodStart := subscriptionPeriodStart(sub.Plan, *sub.CurrentPeriodEnd)
 			txs, txErr := client.ListSubscriptionTransactions(c.Request.Context(), sub.PayPalSubscriptionID, periodStart.Add(-48*time.Hour), time.Now())
 			if txErr != nil {
@@ -215,10 +232,15 @@ func (h *Handler) CancelSubscription(c *gin.Context) {
 		}
 	}
 
-	if err := client.CancelSubscription(c.Request.Context(), sub.PayPalSubscriptionID, reason); err != nil {
-		log.Printf("orders CancelSubscription paypal cancel: %v", err)
-		c.AbortWithStatusJSON(http.StatusBadGateway, gin.H{"error": "cancel failed"})
-		return
+	// Self-billed subscriptions have no PayPal subscription to cancel — the
+	// RevokeSubscription below clears next_charge_at, which is what actually
+	// stops our renewal loop billing them.
+	if sub.BillingMode != "self" {
+		if err := client.CancelSubscription(c.Request.Context(), sub.PayPalSubscriptionID, reason); err != nil {
+			log.Printf("orders CancelSubscription paypal cancel: %v", err)
+			c.AbortWithStatusJSON(http.StatusBadGateway, gin.H{"error": "cancel failed"})
+			return
+		}
 	}
 
 	if err := h.queries.MarkSubscriptionCancellationReason(c.Request.Context(), sub.ID, reason); err != nil {

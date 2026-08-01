@@ -26,7 +26,7 @@ import {
   triggerSpeedTest,
   upsertAlarmSubscription,
 } from '../../api/admin'
-import type { AlarmType, DiskFrame, DriveFrame, DriveStat, DriveSummary, LatestTestRunResponse, MetricsFrame, NodeDisk, NodeFrame, NodeSummary, TestCase, TestProgressResponse, TestRun, TestRunReport, TestSuiteEntry, TierBenchmarkStat } from '../../api/admin'
+import type { AlarmType, BenchmarkNodeProgress, BenchmarkStep, DiskFrame, DriveFrame, DriveStat, DriveSummary, LatestTestRunResponse, MetricsFrame, NodeDisk, NodeFrame, NodeSummary, TestCase, TestProgressResponse, TestRun, TestRunReport, TestSuiteEntry, TierBenchmarkStat } from '../../api/admin'
 import { ApiError } from '../../api/client'
 import { useMetricsStream } from '../../hooks/useMetricsStream'
 import { LineGraph } from '../../components/LineGraph'
@@ -994,7 +994,11 @@ function RouteComponent() {
             <p className="text-sm text-gray-400 m-0">Loading…</p>
           )}
           {benchmarkRunning && (
-            <p className="text-sm text-gray-400 m-0 animate-pulse">Benchmarking fast and standard tier drives…</p>
+            <BenchmarkProgress
+              completed={driveBenchmark?.completed_nodes ?? 0}
+              total={driveBenchmark?.total_nodes ?? 0}
+              running={driveBenchmark?.running ?? []}
+            />
           )}
           {!driveBenchmarkLoading && !benchmarkRunning && !driveBenchmark?.fast && !driveBenchmark?.standard && (
             <p className="text-sm text-gray-400 m-0">None — no benchmark has been run yet. Click "Run benchmark" to test both tiers.</p>
@@ -1235,10 +1239,65 @@ function SpeedTestCard({ result, onRun, pending, selected, onClick }: {
   )
 }
 
+// ── Drive benchmark progress ─────────────────────────────────────────────────
+// Determinate progress: a node's whole disk batch (sequential + random pass,
+// every configured disk) arrives in one atomic push (see
+// docs/drive_benchmark_setup.md), so completed/total nodes is the coarse fill
+// — usually just 0/2 → 1/2 → 2/2 for the manager + Pi 5 topology, but it's
+// honest rather than a fake timer-based fill. `running` fills in the detail
+// within that: node-agent reports its current disk/step live, so we can show
+// exactly what's executing right now rather than a generic "benchmarking…".
+
+const BENCHMARK_STEP_LABELS: Record<BenchmarkStep, string> = {
+  seq_write: 'sequential write',
+  seq_read: 'sequential read',
+  random_write: 'random write (4K)',
+  random_read: 'random read (4K)',
+}
+
+function tierLabel(driveType: string): string {
+  if (driveType === 'nvme') return 'Fast (NVMe)'
+  if (driveType === 'hdd') return 'Standard (HDD)'
+  return driveType || 'Unknown tier'
+}
+
+function BenchmarkProgress({ completed, total, running }: { completed: number; total: number; running: BenchmarkNodeProgress[] }) {
+  const pct = total > 0 ? Math.min(100, (completed / total) * 100) : 0
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-1.5">
+        <p className="text-sm text-gray-400 m-0 animate-pulse">Benchmarking fast and standard tier drives…</p>
+        {total > 0 && (
+          <span className="text-xs text-gray-400 tabular-nums shrink-0 ml-3">{completed}/{total} nodes</span>
+        )}
+      </div>
+      <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
+        <div
+          className={`h-full rounded-full bg-blue-500 transition-all duration-500 ${completed < total ? 'animate-pulse' : ''}`}
+          style={{ width: `${Math.max(pct, 6)}%` }}
+        />
+      </div>
+      {running.length > 0 && (
+        <ul className="flex flex-col gap-1 pl-0 list-none mt-2.5">
+          {running.map((r) => (
+            <li key={r.hostname} className="flex items-center gap-2 text-xs">
+              <span className="w-1.5 h-1.5 rounded-full bg-blue-500 shrink-0 animate-pulse" />
+              <span className="text-gray-600">{tierLabel(r.drive_type)}</span>
+              <span className="text-gray-400">·</span>
+              <span className="text-gray-600 font-medium">{r.label}</span>
+              <span className="text-gray-400">— {BENCHMARK_STEP_LABELS[r.step] ?? r.step}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
 // ── Drive benchmark card ─────────────────────────────────────────────────────
-// One tier's averaged write/read result — no history to graph (see the Tests
-// section above for the shape this on-demand result mirrors), just the most
-// recent run.
+// One tier's averaged sequential + random-access result — no history to graph
+// (see the Tests section above for the shape this on-demand result mirrors),
+// just the most recent run.
 
 function TierBenchmarkCard({ label, stat }: { label: string; stat: TierBenchmarkStat | undefined }) {
   if (!stat) {
@@ -1252,13 +1311,21 @@ function TierBenchmarkCard({ label, stat }: { label: string; stat: TierBenchmark
   return (
     <div className="border border-gray-200 rounded-lg px-4 py-3">
       <p className="text-xs font-semibold text-gray-500 m-0 mb-1">{label}</p>
+      <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-400 m-0 mb-0.5">Sequential</p>
       <p className="text-lg font-bold text-gray-900 tabular-nums m-0">
-        {stat.write_mbps.toFixed(0)} <span className="text-xs font-normal text-gray-400">MB/s write</span>
+        {stat.seq_write_mbps.toFixed(0)} <span className="text-xs font-normal text-gray-400">MB/s write</span>
       </p>
       <p className="text-lg font-bold text-gray-900 tabular-nums m-0">
-        {stat.read_mbps.toFixed(0)} <span className="text-xs font-normal text-gray-400">MB/s read</span>
+        {stat.seq_read_mbps.toFixed(0)} <span className="text-xs font-normal text-gray-400">MB/s read</span>
       </p>
-      <p className="text-[11px] text-gray-400 m-0 mt-1">
+      <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-400 m-0 mt-2 mb-0.5">Random (4K)</p>
+      <p className="text-sm font-bold text-gray-900 tabular-nums m-0">
+        {stat.random_write_iops.toFixed(0)} <span className="text-xs font-normal text-gray-400">IOPS write · {stat.random_write_mbps.toFixed(1)} MB/s</span>
+      </p>
+      <p className="text-sm font-bold text-gray-900 tabular-nums m-0">
+        {stat.random_read_iops.toFixed(0)} <span className="text-xs font-normal text-gray-400">IOPS read · {stat.random_read_mbps.toFixed(1)} MB/s</span>
+      </p>
+      <p className="text-[11px] text-gray-400 m-0 mt-2">
         {stat.disk_count} disk{stat.disk_count === 1 ? '' : 's'} · {new Date(stat.tested_at).toLocaleString()}
       </p>
     </div>

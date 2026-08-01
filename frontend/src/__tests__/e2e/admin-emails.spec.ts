@@ -102,7 +102,8 @@ test.describe('Admin — Service emails page (/admin/emails)', () => {
 
   test('navigating via the Emails nav link reaches the page', async ({ page }) => {
     await page.goto('/admin/emails')
-    // The admin nav exposes an Emails link; clicking it stays on the page.
+    // The admin nav's sub-links (including Emails) live behind the "Admin" dropdown button.
+    await page.getByRole('button', { name: /^Admin$/ }).click()
     await page.getByRole('link', { name: /^Emails$/ }).first().click()
     await expect(page.getByRole('heading', { name: /service emails/i })).toBeVisible()
   })

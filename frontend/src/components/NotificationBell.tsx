@@ -15,9 +15,11 @@ import {
   MdReceiptLong,
   MdMoneyOff,
   MdStorage,
+  MdCloudUpload,
   MdExpandMore,
   MdChevronRight,
   MdClose,
+  MdManageAccounts,
 } from 'react-icons/md'
 import {
   listNotifications,
@@ -46,7 +48,9 @@ const KIND_META: Record<NotificationKind, KindMeta> = {
   subscription_cancelled: { icon: MdMoneyOff,             className: 'bg-orange-50 text-orange-600', category: 'Billing' },
   quota_changed:        { icon: MdStorage,               className: 'bg-sky-50 text-sky-600',       category: 'Storage' },
   email_backup_completed: { icon: MdMarkEmailRead,        className: 'bg-teal-50 text-teal-600',     category: 'Backups' },
+  google_backup_completed: { icon: MdCloudUpload,          className: 'bg-blue-50 text-blue-600',     category: 'Backups' },
   backup_stale:         { icon: MdHistory,               className: 'bg-amber-50 text-amber-600',   category: 'Backups' },
+  role_changed:         { icon: MdManageAccounts,         className: 'bg-purple-50 text-purple-600', category: 'Account' },
   invitation_accepted:  { icon: MdPersonAddAlt1,         className: 'bg-green-50 text-green-600',   category: 'Invitations' },
   order_received:       { icon: MdReceiptLong,           className: 'bg-blue-50 text-blue-600',     category: 'Orders' },
   email_received:       { icon: MdMarkEmailUnread,       className: 'bg-sky-50 text-sky-600',       category: 'Emails' },
@@ -57,7 +61,7 @@ const FALLBACK_META: KindMeta = KIND_META.action_pending
 
 // Category display order: actionable user notifications first, then admin
 // activity, most urgent (alarms) at the top of the admin block.
-const CATEGORY_ORDER = ['Billing', 'Storage', 'Shares', 'Backups', 'Alarms', 'Orders', 'Invitations', 'Emails']
+const CATEGORY_ORDER = ['Billing', 'Storage', 'Account', 'Shares', 'Backups', 'Alarms', 'Orders', 'Invitations', 'Emails']
 
 // Categories collapsed by default when the dropdown first loads — Emails in
 // particular can get noisy (one entry per inbound message), so it's tucked

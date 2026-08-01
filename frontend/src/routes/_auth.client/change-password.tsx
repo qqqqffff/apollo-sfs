@@ -4,25 +4,15 @@ import { useMutation } from '@tanstack/react-query'
 import { MdArrowBack, MdCheck, MdClose, MdMarkEmailRead, MdShield } from 'react-icons/md'
 import { changePassword, requestPasswordChangeCode } from '../../api/me'
 import { ApiError } from '../../api/client'
+import { getPasswordChecks, PASSWORD_CHECK_LABELS } from '../../utils/passwordPolicy'
 
 export const Route = createFileRoute('/_auth/client/change-password')({
   component: RouteComponent,
 })
 
-interface PasswordChecks {
-  length: boolean
-  upper: boolean
-  number: boolean
-  symbol: boolean
-  match: boolean
-}
-
-function getChecks(newPassword: string, confirm: string): PasswordChecks {
+function getChecks(newPassword: string, confirm: string) {
   return {
-    length: newPassword.length >= 8,
-    upper: /[A-Z]/.test(newPassword),
-    number: /[0-9]/.test(newPassword),
-    symbol: /[^A-Za-z0-9]/.test(newPassword),
+    ...getPasswordChecks(newPassword),
     match: newPassword.length > 0 && newPassword === confirm,
   }
 }
@@ -198,11 +188,10 @@ function RouteComponent() {
 
             {touched && (
               <ul className="space-y-1 pl-0.5">
-                <CheckItem ok={checks.length} label="At least 8 characters" />
-                <CheckItem ok={checks.upper}  label="One uppercase letter" />
-                <CheckItem ok={checks.number} label="One number" />
-                <CheckItem ok={checks.symbol} label="One symbol" />
-                <CheckItem ok={checks.match}  label="Passwords match" />
+                {PASSWORD_CHECK_LABELS.map(([key, label]) => (
+                  <CheckItem key={key} ok={checks[key]} label={label} />
+                ))}
+                <CheckItem ok={checks.match} label="Passwords match" />
               </ul>
             )}
 

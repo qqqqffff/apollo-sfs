@@ -172,13 +172,14 @@ export function listInvitations(cursor?: string) {
   return get<PageResult<Invitation>>(`/admin/invitations${qs}`)
 }
 
-export function createInvitation(email: string, initialQuotaBytes: number, grantAdmin = false, grantPremium = false, initialDriveId?: string) {
+export function createInvitation(email: string, initialQuotaBytes: number, grantAdmin = false, grantPremium = false, initialDriveId?: string, premiumExpiresAt?: string) {
   return post<Invitation>('/admin/invitations', {
     email,
     initial_quota_bytes: initialQuotaBytes,
     grant_admin: grantAdmin,
     grant_premium: grantPremium,
     ...(initialDriveId ? { initial_drive_id: initialDriveId } : {}),
+    ...(premiumExpiresAt ? { premium_expires_at: premiumExpiresAt } : {}),
   })
 }
 
@@ -526,6 +527,23 @@ export function pardonUser(username: string) {
   return post<{ message: string }>(`/admin/users/${encodeURIComponent(username)}/pardon`)
 }
 
+// ── Role editor / account deletion ────────────────────────────────────────────
+
+export interface UpdateUserRoleBody {
+  role: 'admin' | 'premium' | 'user'
+  reason: string
+  premium_expires_at?: string | null
+  block_future_premium?: boolean
+}
+
+export function updateUserRole(username: string, body: UpdateUserRoleBody) {
+  return patch<{ message: string }>(`/admin/users/${encodeURIComponent(username)}/role`, body)
+}
+
+export function deleteAdminUser(username: string, reason: string) {
+  return del<{ message: string }>(`/admin/users/${encodeURIComponent(username)}`, { reason })
+}
+
 export function listUserBans(status: BanStatus, cursor?: string, limit?: number) {
   const params = new URLSearchParams({ status })
   if (cursor) params.set('cursor', cursor)
@@ -618,8 +636,12 @@ export const speedTestQueryOptions = {
 // ── Drive benchmark ──────────────────────────────────────────────────────────
 
 export interface TierBenchmarkStat {
-  write_mbps: number
-  read_mbps: number
+  seq_write_mbps: number
+  seq_read_mbps: number
+  random_write_mbps: number
+  random_write_iops: number
+  random_read_mbps: number
+  random_read_iops: number
   disk_count: number
   tested_at: string
 }
@@ -628,17 +650,37 @@ export interface NodeDiskBenchmarkRow {
   node_id: string
   hostname: string
   label: string
-  write_mbps?: number
-  read_mbps?: number
+  seq_write_mbps?: number
+  seq_read_mbps?: number
+  random_write_mbps?: number
+  random_write_iops?: number
+  random_read_mbps?: number
+  random_read_iops?: number
+  direct_io: boolean
   size_bytes: number
   error?: string
   tested_at: string
   drive_type: string
 }
 
+export type BenchmarkStep = 'seq_write' | 'seq_read' | 'random_write' | 'random_read'
+
+export interface BenchmarkNodeProgress {
+  hostname: string
+  label: string
+  step: BenchmarkStep
+  drive_type: string
+}
+
 export interface DriveBenchmarkDetail {
   /** True while a triggered run hasn't been picked up/reported by every node yet. */
   pending: boolean
+  /** Active nodes that have reported back since the last trigger (or since always, when nothing is pending). */
+  completed_nodes: number
+  /** Every active node a triggered run fans out to — a node's whole disk batch arrives in one atomic push, so this is the coarsest progress granularity available. */
+  total_nodes: number
+  /** Finer-grained detail within that: which disk/step each still-in-flight node is executing right now. */
+  running?: BenchmarkNodeProgress[]
   disks: NodeDiskBenchmarkRow[]
   fast?: TierBenchmarkStat
   standard?: TierBenchmarkStat

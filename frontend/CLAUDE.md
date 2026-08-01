@@ -44,6 +44,9 @@ frontend/
 │   │   ├── SearchBar.tsx
 │   │   ├── UploadModal.tsx
 │   │   ├── DeleteConfirmModal.tsx
+│   │   ├── MediaCollectionView.tsx    # Media collection grid (see Media Grid below)
+│   │   ├── MediaFilterPanel.tsx       # Media filter dialog / select-by-filter
+│   │   ├── MediaSelectionToolbar.tsx  # Media grid's bulk-action bar
 │   │   └── AppIcon.tsx
 │   ├── hooks/                   # Custom React hooks
 │   │   ├── useFileUpload.ts     # Upload with progress and encryption
@@ -51,6 +54,7 @@ frontend/
 │   │   ├── useSort.ts           # Sort state management
 │   │   ├── useDragDrop.ts       # Drag-and-drop uploads
 │   │   ├── useInfiniteFolderContents.ts  # Paginated folder listing
+│   │   ├── useVirtualGrid.ts    # Windowed rendering for the media grid
 │   │   └── useMetricsStream.ts  # WebSocket connection for admin metrics
 │   ├── api/                     # API client functions (typed fetch wrappers)
 │   ├── context/                 # React Context providers
@@ -113,6 +117,44 @@ const { data, isLoading } = useQuery({
 ```
 
 Mutations that modify server state should call `queryClient.invalidateQueries` with the relevant key so stale data is re-fetched.
+
+## Media Grid (`MediaCollectionView`)
+
+A media collection renders as a virtualized, filterable, multi-selectable grid
+rather than the standard file listing.
+
+**Virtualized infinite scroll.** `useVirtualGrid` maps the scroll position onto
+grid rows and renders only the band on screen plus **two viewport-heights of
+overscan above and below**. Every row's height is still reserved by the
+container (`totalHeight`), so the scrollbar never jumps as tiles mount and
+unmount, and a collection of any size costs a few dozen DOM nodes. Pages are
+pulled in automatically when the render window reaches the end of the loaded
+items (there is no "Load more" button), at `fileLimit: 128` — the server
+maximum — per request, and one row of skeleton placeholder tiles holds the
+space for a page still in flight. Tile height is measured off a real tile so
+the reserved space matches what's rendered on any font setting.
+
+**Scroll restoration.** Opening the full-screen `MediaViewerPage` locks body
+scroll, which loses the grid's position. On close the grid scrolls back to the
+row of the item that was on screen — whatever the user last swiped to in the
+viewer, not the one they opened.
+
+**Filtering.** `MediaFilterPanel` covers date taken (before/after), upload date
+(before/after), upload source, media type, and — when AI recognition is on —
+the collection's labeled people/pets/objects. Filtering is done **server-side**
+(`GET /folders/:id/media` query params) because the grid only ever holds the
+pages fetched so far. `<input type="date">` values are converted to local-day
+start/end instants client-side (`api/folders.ts`), so an evening photo isn't
+clipped out of its own date west of UTC.
+
+**Selection.** The toolbar's Select button turns tile taps into selection.
+While selection is active, applying a filter **selects everything matching it**
+instead of narrowing the view, and several filters union into one selection —
+so the match set comes from `GET /folders/:id/media/ids` (ids only, capped at
+20,000) rather than the loaded pages. That means a selection can include items
+whose metadata isn't loaded, which is why `BulkDeleteConfirmModal` takes an
+`unlistedCount`. Bulk actions run at `BULK_CONCURRENCY` in flight to stay
+inside the API's per-user bulk-data rate limit.
 
 ## Testing
 

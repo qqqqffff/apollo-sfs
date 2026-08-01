@@ -21,6 +21,52 @@ export function createPremiumSubscription(plan: PremiumPlan): Promise<CreateSubs
   return post<CreateSubscriptionResponse>('/payments/subscriptions', { plan })
 }
 
+// SelfBilledSource is a funding source PayPal Subscriptions v1 can't be bound
+// to. POST /v1/billing/subscriptions ignores `payment_source` entirely, so a
+// card or wallet cannot approve a PayPal-managed subscription — those open a
+// subscription the API bills itself instead: the first period is an ordinary
+// Orders v2 purchase that also vaults the payment method, and the API's
+// renewal loop charges that saved method every period after.
+//
+// The two calls below are the usual create-order / confirm-order pair every
+// web payment surface uses (Apple Pay sheet, Google Pay sheet, hosted card
+// fields), so no card data ever reaches our servers.
+export type SelfBilledSource = 'card' | 'apple_pay' | 'google_pay'
+
+export interface SelfBilledOrderResponse {
+  order_id: string
+  amount_cents: number
+  currency: string
+}
+
+export function createSelfBilledSubscriptionOrder(
+  plan: PremiumPlan,
+  source: SelfBilledSource,
+): Promise<SelfBilledOrderResponse> {
+  return post<SelfBilledOrderResponse>('/payments/subscriptions/wallet/order', { plan, source })
+}
+
+export interface ConfirmSelfBilledResponse {
+  status: string
+  subscription_id: string
+  current_period_end: string
+}
+
+// confirmSelfBilledSubscription captures the first period and opens the
+// subscription. If PayPal returned no vault id the charge is refunded server-
+// side and this rejects — a subscription that can't renew is never granted.
+export function confirmSelfBilledSubscription(
+  orderId: string,
+  plan: PremiumPlan,
+  source: SelfBilledSource,
+): Promise<ConfirmSelfBilledResponse> {
+  return post<ConfirmSelfBilledResponse>('/payments/subscriptions/wallet/confirm', {
+    order_id: orderId,
+    plan,
+    source,
+  })
+}
+
 export function confirmPremiumSubscription(subscriptionId: string): Promise<ConfirmSubscriptionResponse> {
   return post<ConfirmSubscriptionResponse>(`/payments/subscriptions/${subscriptionId}/confirm`)
 }

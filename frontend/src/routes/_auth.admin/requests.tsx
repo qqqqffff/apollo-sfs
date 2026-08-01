@@ -17,12 +17,13 @@ import {
 import { STORAGE_PLANS } from '../../api/billing'
 import { ApiError } from '../../api/client'
 import { useNotification } from '../../context/NotificationContext'
+import { GroupRegistrationSection } from '../../components/GroupRegistrationSection'
 
-type Tab = 'access' | 'invitations'
+type Tab = 'access' | 'invitations' | 'groups'
 
 export const Route = createFileRoute('/_auth/admin/requests')({
   validateSearch: (search: Record<string, unknown>): { tab?: Tab } => {
-    const tab = search.tab === 'access' || search.tab === 'invitations' ? search.tab : undefined
+    const tab = search.tab === 'access' || search.tab === 'invitations' || search.tab === 'groups' ? search.tab : undefined
     return { tab }
   },
   component: RouteComponent,
@@ -53,6 +54,7 @@ function RouteComponent() {
         {([
           { key: 'access',      label: 'Access Requests' },
           { key: 'invitations', label: 'Invitations' },
+          { key: 'groups',      label: 'Group Registration' },
         ] as { key: Tab; label: string }[]).map(({ key, label }) => (
           <button
             key={key}
@@ -71,6 +73,7 @@ function RouteComponent() {
 
       {activeTab === 'access' && <InterestSection />}
       {activeTab === 'invitations' && <InvitationsSection />}
+      {activeTab === 'groups' && <GroupRegistrationSection />}
     </div>
   )
 }
@@ -157,6 +160,7 @@ function InvitationsSection() {
   const [useCustom, setUseCustom] = useState(false)
   const [grantAdmin, setGrantAdmin] = useState(false)
   const [grantPremium, setGrantPremium] = useState(false)
+  const [premiumExpiresAt, setPremiumExpiresAt] = useState('')
   const [selectedDriveId, setSelectedDriveId] = useState<string>('')
   const { notify } = useNotification()
   const [createError, setCreateError] = useState<string | null>(null)
@@ -169,11 +173,15 @@ function InvitationsSection() {
     : quotaBytes
 
   const createMutation = useMutation({
-    mutationFn: () => createInvitation(email, effectiveQuota, grantAdmin, grantPremium, selectedDriveId || undefined),
+    mutationFn: () => createInvitation(
+      email, effectiveQuota, grantAdmin, grantPremium, selectedDriveId || undefined,
+      grantPremium && !grantAdmin && premiumExpiresAt ? new Date(premiumExpiresAt).toISOString() : undefined,
+    ),
     onSuccess: () => {
       setEmail('')
       setGrantAdmin(false)
       setGrantPremium(false)
+      setPremiumExpiresAt('')
       setSelectedDriveId('')
       setCreateError(null)
       queryClient.invalidateQueries({ queryKey: ['admin', 'invitations'] })
@@ -316,7 +324,7 @@ function InvitationsSection() {
           </div>
         )}
 
-        <div className="flex flex-wrap gap-4">
+        <div className="flex flex-wrap items-center gap-4">
           <label className="flex items-center gap-2 cursor-pointer select-none">
             <input
               type="checkbox"
@@ -334,13 +342,29 @@ function InvitationsSection() {
               type="checkbox"
               checked={grantAdmin ? true : grantPremium}
               disabled={grantAdmin}
-              onChange={(e) => setGrantPremium(e.target.checked)}
+              onChange={(e) => {
+                setGrantPremium(e.target.checked)
+                if (!e.target.checked) setPremiumExpiresAt('')
+              }}
               className="w-4 h-4 rounded border-gray-300 accent-blue-600 cursor-pointer"
             />
             <span className="text-xs text-gray-600">
               Grant premium{grantAdmin ? ' (included with admin)' : ''}
             </span>
           </label>
+          {grantPremium && !grantAdmin && (
+            <label className="flex items-center gap-2 select-none">
+              <span className="text-xs text-gray-500">Trial expires</span>
+              <input
+                type="date"
+                value={premiumExpiresAt}
+                onChange={(e) => setPremiumExpiresAt(e.target.value)}
+                min={new Date().toISOString().slice(0, 10)}
+                className="border border-gray-200 rounded-lg px-2 py-1 text-xs text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+              <span className="text-xs text-gray-400">(blank = permanent)</span>
+            </label>
+          )}
         </div>
       </form>
       {createError && <p className="text-sm text-red-500 mb-4">{createError}</p>}

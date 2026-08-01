@@ -17,6 +17,10 @@ if (!AbortSignal.timeout) {
   }
 }
 
+// Polyfill window.scrollTo — used to reset scroll position on step changes
+// (e.g. the register wizard) but not implemented by jsdom.
+window.scrollTo = () => {}
+
 // Polyfill ResizeObserver — used by FolderBreadcrumb to react to width changes
 // but not implemented by jsdom. A no-op stub is enough; tests don't resize.
 if (!globalThis.ResizeObserver) {

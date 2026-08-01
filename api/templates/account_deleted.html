@@ -1,0 +1,51 @@
+{{/*
+  Template name : "account_deleted"
+  Trigger       : Admin permanently deletes a user account via the admin
+                  Users page's delete action
+  Data fields   :
+    AppName  string
+    AppURL   string
+    Email    string
+    Reason   string  — admin's required reason
+*/}}
+{{define "account_deleted"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <title>Your account has been deleted — {{.AppName}}</title>
+</head>
+<body>
+  <div class="email-wrapper">
+    <div class="email-card">
+
+      {{template "header" .}}
+
+      <div class="email-body">
+        <h1>Account deleted</h1>
+        <p>
+          Your account on <strong>{{.AppName}}</strong> and all of its files have been
+          permanently deleted by an administrator. This action cannot be undone.
+        </p>
+
+        <table style="width:100%;border-collapse:collapse;margin:20px 0;">
+          <tr>
+            <td style="padding:8px 12px;font-weight:600;color:#374151;width:40%;vertical-align:top;">Reason</td>
+            <td style="padding:8px 12px;color:#111827;">{{.Reason}}</td>
+          </tr>
+        </table>
+
+        <p style="font-size:14px;color:#6b7280;">
+          If you have questions about this decision, please contact support.
+        </p>
+      </div>
+
+      {{template "footer" .}}
+
+    </div>
+  </div>
+</body>
+</html>
+{{end}}

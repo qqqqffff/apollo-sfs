@@ -1,5 +1,12 @@
 import { post, uploadWithProgress } from './client'
+import { deleteFile } from './files'
 import type { UploadResponse } from '../types/api'
+import type {
+  BackupControl,
+  BackupItemStatus,
+  BackupProgressEvent,
+  BackupRunResult,
+} from './backupControl'
 
 const DRIVE_API         = 'https://www.googleapis.com/drive/v3'
 const PHOTOS_PICKER_API = 'https://photospicker.googleapis.com/v1'
@@ -43,15 +50,13 @@ export interface BackupEntry {
   name: string
   type: string
   destFolderId: string | null
+  // Human-readable destination ("Photos/IMG_0042.jpg"), resolved by the picker
+  // where folder names — and the media auto-upload redirect — are known.
+  destPath?: string
 }
 
-export type BackupItemStatus = 'done' | 'duplicate' | 'error'
-
-export interface BackupResult {
-  uploaded: number
-  duplicates: number
-  errors: number
-}
+export type { BackupItemStatus } from './backupControl'
+export type BackupResult = BackupRunResult
 
 // ── Google Identity Services ─────────────────────────────────────────────────
 
@@ -383,21 +388,41 @@ function sourceFor(item: GoogleBackupItem): string {
   return item.source === 'photos' ? 'google_photos' : 'google_drive'
 }
 
+export interface UploadGoogleOptions {
+  // Pause/resume/cancel handle; checked between items.
+  control?: BackupControl
+  // Fires twice per entry — see BackupProgressEvent.
+  onProgress?: (e: BackupProgressEvent<BackupEntry>) => void
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : 'Backup failed'
+}
+
 export async function uploadGoogleEntries(
   entries: BackupEntry[],
   accessToken: string,
-  onProgress?: (
-    done: number,
-    total: number,
-    finished?: { entry: BackupEntry; status: BackupItemStatus },
-  ) => void,
+  opts: UploadGoogleOptions = {},
 ): Promise<BackupResult> {
+  const { control, onProgress } = opts
   const total = entries.length
   let uploaded = 0, duplicates = 0, errors = 0
+  const uploadedFileIds: string[] = []
+  let cancelled = false
 
   for (let i = 0; i < total; i++) {
+    // Blocks while paused; false once the user cancelled the run.
+    if (control && !(await control.gate())) { cancelled = true; break }
+
     const e = entries[i]
     let status: BackupItemStatus = 'error'
+    let sizeBytes = 0
+    let fileId: string | undefined
+    let driveId: string | null | undefined
+    let error: string | undefined
+
+    const path = e.destPath ?? e.name
+    onProgress?.({ phase: 'start', entry: e, index: i, done: i, total, path })
 
     try {
       const blob   = await downloadGoogleBlob(e.googleItem, accessToken)
@@ -419,30 +444,80 @@ export async function uploadGoogleEntries(
         form.append('file', file)
         if (e.destFolderId) form.append('folder_id', e.destFolderId)
         form.append('source', sourceFor(e.googleItem))
-        await uploadWithProgress<UploadResponse>('/files/upload', form, () => {})
+        const res = await uploadWithProgress<UploadResponse>('/files/upload', form, () => {})
         uploaded++
         status = 'done'
+        sizeBytes = res.size_bytes ?? blob.size
+        fileId = res.id
+        driveId = res.drive_id ?? null
+        if (res.id) uploadedFileIds.push(res.id)
       }
-    } catch {
+    } catch (err) {
       errors++
       status = 'error'
+      error = errorMessage(err)
     }
 
-    onProgress?.(i + 1, total, { entry: e, status })
+    onProgress?.({
+      phase: 'settled', entry: e, index: i, done: i + 1, total, path,
+      status, sizeBytes, fileId, driveId, error,
+    })
   }
 
-  return { uploaded, duplicates, errors }
+  return { uploaded, duplicates, errors, cancelled, uploadedFileIds }
+}
+
+// removeBackedUpFiles deletes the files a run already wrote — the "remove what
+// was backed up" branch of a cancelled backup. Best effort per file, mirroring
+// deleteProviderMessages.
+export async function removeBackedUpFiles(fileIds: string[]): Promise<{ removed: number; failed: number }> {
+  let removed = 0, failed = 0
+  for (const id of fileIds) {
+    try { await deleteFile(id); removed++ }
+    catch { failed++ }
+  }
+  return { removed, failed }
+}
+
+// ── Run completion (notification bell) ───────────────────────────────────────
+
+export interface GoogleBackupRun {
+  id: string
+  uploaded: number
+  duplicates: number
+  errors: number
+  notify: boolean
+  completed_at: string
+}
+
+// completeGoogleBackupRun logs a finished run so, when notify is true, it
+// surfaces in the notification bell — mirrors completeEmailBackupRun
+// (api/emailBackup.ts). Called from both the foreground and background
+// upload paths.
+export function completeGoogleBackupRun(run: {
+  uploaded: number
+  duplicates: number
+  errors: number
+  notify: boolean
+}) {
+  return post<GoogleBackupRun>('/google-backup/runs', run)
 }
 
 // ── Backup settings (localStorage) ───────────────────────────────────────────
+// Shape matches loadEmailBackupSettings/saveEmailBackupSettings
+// (api/emailBackup.ts) so both backup flows offer the same settings.
 
-const BG_KEY = 'apollo_gbackup_background'
+const BG_KEY     = 'apollo_gbackup_background'
+const NOTIFY_KEY = 'apollo_gbackup_notify'
 
-export function loadBackupBackground(): boolean {
-  const v = localStorage.getItem(BG_KEY)
-  return v === null ? true : v === 'true'
+export function loadGoogleBackupSettings(): { background: boolean; notify: boolean } {
+  return {
+    background: localStorage.getItem(BG_KEY) !== 'false',  // default on
+    notify: localStorage.getItem(NOTIFY_KEY) !== 'false',  // default on
+  }
 }
 
-export function saveBackupBackground(v: boolean) {
-  localStorage.setItem(BG_KEY, String(v))
+export function saveGoogleBackupSettings(s: { background: boolean; notify: boolean }) {
+  localStorage.setItem(BG_KEY, String(s.background))
+  localStorage.setItem(NOTIFY_KEY, String(s.notify))
 }

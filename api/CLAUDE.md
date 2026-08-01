@@ -42,9 +42,9 @@ api/
 │   ├── devices.go       # Mobile device registration
 │   ├── sync.go          # Mobile sync endpoint
 │   └── api_keys.go      # SFS API key management
-├── models/              # 24 data model structs (file, folder, user, server, node, …)
+├── models/              # 39 data model structs (file, folder, user, server, node, …)
 ├── db/                  # Database connection, query helpers, RLS session setup
-├── migrations/          # 20 versioned SQL migration files (run on startup)
+├── migrations/          # 58 versioned SQL migration files (run on startup)
 ├── templates/           # HTML email templates
 ├── sanitize/            # Input validation and sanitization helpers
 ├── tests/               # Unit and integration tests
@@ -72,7 +72,19 @@ Every protected route goes through the JWT middleware in `routes/middleware/`. T
 - Extracts the Keycloak user UUID (sub claim) and realm roles
 - Sets `app.current_user_id` on the PostgreSQL session so Row-Level Security applies
 
-Social login (Google, Apple) goes through `routes/auth/social_callback.go`, which exchanges the IdP token via Keycloak's identity-provider brokering API.
+Social login (Google, Apple, Microsoft) goes through `routes/auth/social_callback.go`, which exchanges the IdP token via Keycloak's identity-provider brokering API.
+
+Connecting a provider to an account that already exists (profile page → "Linked accounts" → Connect) is `POST /me/social/link`. It takes the identity three ways: a provider ID token (`token` — what the mobile apps' native SDKs return), a Google server auth code (`server_auth_code`), or a Keycloak authorization code (`code`) for the web, which has no provider SDK and so re-runs the same brokered authorization-code flow the sign-in buttons use. `AuthService.LinkBrokeredIdentity` exchanges that code without provisioning an app user or returning tokens — the caller's session must stay on the account already signed in — then moves the federated identity onto it, refusing (`ErrIdentityClaimed`) if the provider account already belongs to another app account. Note the web flow's `redirect_uri` is the **profile page itself**, not an API callback: the session cookie is `SameSite=Strict`, so it isn't sent on the cross-site redirect back from Keycloak and a callback route would arrive unauthenticated; landing on the SPA lets it forward the code over a same-site XHR that does carry the cookie.
+
+Invite acceptance (`routes/auth/register.go`, `routes/auth/mobile.go`) grants the invitation's realm roles (admin/premium) in Keycloak *before* writing any app DB state or marking the invitation accepted. If that grant fails, `provisionInvitedAppUser` (`routes/services/auth.go`) returns `ErrRoleProvisioningFailed` and the whole request aborts — the invitation stays valid so the recipient can just retry, rather than silently completing with fewer privileges than promised.
+
+## Admin Role Management & Account Deletion
+
+The admin Users page can reassign a user's role or permanently delete their account:
+
+- **`PATCH /admin/users/:user_id/role`** (`routes/admin/users_role.go`) moves a user between exactly one of `admin`/`premium`/`user`. Keycloak is the source of truth — `SetAdminRealmRole`/`AddUserToGroupByName`/`RemoveUserFromGroupByName("premium")` grant or revoke the underlying realm role or group — with the `users` table's `is_admin`/`is_premium` columns set alongside for immediate read consistency (the auth middleware resyncs both from the JWT on every request regardless, so a DB-only change would just be overwritten). Demoting a real subscriber away from `premium` cancels their PayPal subscription first — aborting the whole request on a PayPal failure before any Keycloak/DB write lands — and sends a mandatory cancellation email; demoting straight to `user` can also set `block_future_premium` to stop them from immediately re-purchasing. Promoting to `premium` can set an optional `premium_expires_at` for an admin-granted trial. Every change requires a `reason` string, recorded in `role_change_notifications` (`db/role_change_notifications.go`) and surfaced to the affected user as a `role_changed` notification-bell item.
+- **`DELETE /admin/users/:user_id`** (`routes/admin/users_delete.go`) permanently removes an account: cancels any real PayPal subscription, sends the mandatory deletion email (before the row is gone — `email_queue` keeps its own copy of the address), purges files and folders, deletes the Keycloak identity, then deletes the `users` row. Every step but the final row deletion is best-effort/logged rather than a hard failure, mirroring `BanUser`'s tolerance for partial failure.
+- **Premium trial expiry**: `PaymentService.PremiumExpiryLoop` (`routes/services/payment.go`), started from `cmd/main.go` alongside the other background loops, sweeps `premium_expires_at` every 15 minutes and revokes access the same way a manual demotion would once a trial lapses.
 
 ## Encryption Model
 
@@ -128,6 +140,28 @@ what actually pulls bytes off the socket, so throttling anything after that
 point wouldn't affect real network throughput. See
 `docs/upload_bandwidth_fairness.md` for the full design.
 
+## Rate Limiting
+
+`routes/middleware/rate_limit.go` has three tiers, all token buckets with a
+background eviction sweep:
+
+- **Auth endpoints** (`RateLimit()`) — 10 req/min per IP, burst 10.
+- **Authenticated API** (`APIRateLimit()`) — 120 req/min per IP, burst 20.
+  Applied to the whole `protected` group.
+- **Bulk data path** (`bulkDataRoutes`, inside `APIRateLimit()`) — 1200 req/min
+  **per user**, burst 60. Uploads, `/sync/check-hash`, the email-backup message
+  endpoint, and per-item deletes are hit once per file by a legitimate client
+  (Google/email backup, multi-select delete), which the standard budget cut off
+  within a handful of files. Keying by user id rather than IP also keeps one
+  member of a NAT'd household from spending everyone else's budget. Abuse is
+  still bounded by the storage quota these endpoints enforce.
+
+Matching is on `METHOD + c.FullPath()`, so a renamed route silently drops back
+to the standard budget — `TestBulkDataRoutesStillExist` guards the map against
+`cmd/main.go`. The frontend additionally retries a 429 with backoff
+(`frontend/src/api/client.ts`), since the request is refused before the handler
+runs and can always be repeated.
+
 ## Row-Level Security
 
 All `files` and `folders` queries are executed after calling `db.Queries.ForUser(userID)`, which sets the `app.current_user_id` session variable. PostgreSQL RLS policies on those tables reject any row not owned by the current user, preventing cross-user data leakage even if there is a bug in the application query.
@@ -135,6 +169,29 @@ All `files` and `folders` queries are executed after calling `db.Queries.ForUser
 ## Video Transcoding
 
 `routes/media.go` accepts video uploads, stores the original, then enqueues a background FFmpeg transcode. Variants (lower resolution) are stored in MinIO and tracked in the `video_variants` table with statuses `pending`, `ready`, or `failed`. Streaming uses range requests and WebSocket for real-time progress.
+
+## Media Collection Listing
+
+`GET /folders/:folder_id/media` (`routes/media.go` → `FolderService.GetMediaContents`
+→ `db.Queries.ListMediaFiles`) is the media grid's paged listing: files
+physically in the collection plus the pointers into it, ordered by `?sort`
+(`taken_at` | `created_at` | `name` | `source`) and narrowed by `?hidden`.
+
+Filtering happens here rather than in the browser, since the grid only ever
+holds the pages it has fetched. `db.MediaFilter` carries the facets —
+`?taken_after` / `?taken_before` (over `COALESCE(taken_at, created_at)`, the
+same value the grid sorts and labels by), `?uploaded_after` / `?uploaded_before`,
+`?source`, `?media_type` (`image`/`video`/`other`), and `?group` (recognition
+group ids) — each repeatable or comma-joined and capped at
+`maxMediaFilterValues`. Dates take RFC3339 or a bare `YYYY-MM-DD`; the web
+client always sends RFC3339 instants so local-day boundaries survive the trip.
+Unparseable dates, unknown media types, and malformed group ids are dropped
+rather than failing the request — a filter is a view preference, not a mutation.
+
+`GET /folders/:folder_id/media/ids` takes the same params and returns only the
+matching file ids (capped at `db.MaxMediaSelectionIDs`, with `truncated` set
+when the cap is hit). It backs the grid's "select everything matching this
+filter" action, which needs the whole match set rather than the loaded page.
 
 ## AI Recognition (Premium)
 

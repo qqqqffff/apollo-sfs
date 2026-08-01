@@ -19,6 +19,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	"apollo-sfs.com/api/db"
 	"apollo-sfs.com/api/models"
 	"apollo-sfs.com/api/routes/middleware"
 	"apollo-sfs.com/api/routes/services"
@@ -386,7 +387,22 @@ type socialLinkRequest struct {
 	Provider       string `json:"provider"        binding:"required"`
 	Token          string `json:"token"`
 	ServerAuthCode string `json:"server_auth_code"`
+	// Code is the Keycloak authorization code from the web "Connect" flow —
+	// the browser has no provider SDK to produce Token, so it re-runs the same
+	// brokered authorization-code flow the sign-in buttons use and hands the
+	// code here. See LinkSocial for why the code, not the callback, is what
+	// arrives authenticated.
+	Code string `json:"code"`
 }
+
+// brokeredLinkRedirectPath is the redirect_uri the web "Connect" flow registers
+// with Keycloak, and so the one the code must be exchanged against. It points at
+// the profile page itself rather than an API callback on purpose: the session
+// cookie is SameSite=Strict, so it is not sent on the cross-site redirect back
+// from Keycloak — an API callback would arrive unauthenticated. Landing on the
+// SPA instead lets it forward the code over a normal same-site XHR, which does
+// carry the cookie. Keep in sync with socialLinkUrl in the frontend.
+const brokeredLinkRedirectPath = "/client/profile"
 
 type socialUnlinkRequest struct {
 	Provider string `json:"provider" binding:"required"`
@@ -394,7 +410,10 @@ type socialUnlinkRequest struct {
 
 // LinkSocial handles POST /api/v1/me/social/link.
 // Links an Apple, Google, or Microsoft identity to the authenticated user's
-// account.
+// account. The identity can be presented three ways: a provider ID token
+// (Token — what the mobile apps' native SDKs return), a Google server auth code
+// (ServerAuthCode), or a Keycloak authorization code from the web Connect
+// flow (Code).
 func (h *Handler) LinkSocial(c *gin.Context) {
 	userID := c.GetString("userID")
 	if userID == "" {
@@ -409,6 +428,23 @@ func (h *Handler) LinkSocial(c *gin.Context) {
 	}
 	if req.Provider != "apple" && req.Provider != "google" && req.Provider != "microsoft" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "provider must be apple, google, or microsoft"})
+		return
+	}
+
+	if req.Code != "" {
+		redirectURI := h.auth.AppBaseURL() + brokeredLinkRedirectPath
+		err := h.auth.LinkBrokeredIdentity(c.Request.Context(), userID, req.Code, redirectURI, req.Provider)
+		switch {
+		case err == nil:
+			c.JSON(http.StatusOK, gin.H{"message": "identity linked"})
+		case errors.Is(err, services.ErrIdentityClaimed):
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		case errors.Is(err, services.ErrIdentityNotReturned):
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		default:
+			log.Printf("LinkSocial: brokered link of %s for %s failed: %v", req.Provider, userID, err)
+			c.JSON(http.StatusBadRequest, gin.H{"error": "could not connect the account — please try again"})
+		}
 		return
 	}
 
@@ -492,9 +528,17 @@ const subscriptionCancelNotificationWindow = 30 * 24 * time.Hour
 // in the bell dropdown.
 const adminNotificationWindow = 7 * 24 * time.Hour
 
+// roleChangeNotificationWindow bounds how long an admin role assignment keeps
+// showing in the bell dropdown.
+const roleChangeNotificationWindow = 30 * 24 * time.Hour
+
 // emailBackupNotificationWindow bounds how long a completed email backup run
 // (with notifications enabled) keeps showing in the bell dropdown.
 const emailBackupNotificationWindow = 7 * 24 * time.Hour
+
+// googleBackupNotificationWindow is the Google Drive/Photos backup
+// equivalent of emailBackupNotificationWindow.
+const googleBackupNotificationWindow = 7 * 24 * time.Hour
 
 // backupStaleAfter is how old the most recent Google/email backup may get
 // before the opt-in backup reminder (user_preferences.backup_stale_notify)
@@ -517,7 +561,7 @@ func notificationCategory(kind string) string {
 		return "Billing"
 	case "share_received":
 		return "Shares"
-	case "email_backup_completed", "backup_stale":
+	case "email_backup_completed", "google_backup_completed", "backup_stale":
 		return "Backups"
 	case "invitation_accepted":
 		return "Invitations"
@@ -527,6 +571,8 @@ func notificationCategory(kind string) string {
 		return "Emails"
 	case "alarm_triggered":
 		return "Alarms"
+	case "role_changed":
+		return "Account"
 	default:
 		return ""
 	}
@@ -709,6 +755,29 @@ func (h *Handler) gatherNotificationItems(ctx context.Context, username, userID 
 		})
 	}
 
+	// Completed Google backup runs where the user asked to be notified.
+	googleRuns, err := h.queries.ListRecentGoogleBackupRunsForUser(ctx, username, time.Now().Add(-googleBackupNotificationWindow))
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range googleRuns {
+		body := fmt.Sprintf("%d file%s backed up from Google.", r.Uploaded, plural(r.Uploaded))
+		if r.Duplicates > 0 {
+			body += fmt.Sprintf(" %d duplicate%s skipped.", r.Duplicates, plural(r.Duplicates))
+		}
+		if r.Errors > 0 {
+			body += fmt.Sprintf(" %d failed.", r.Errors)
+		}
+		items = append(items, notificationItem{
+			ID:        r.ID.String() + ":google-backup",
+			Kind:      "google_backup_completed",
+			Title:     "Google backup complete",
+			Body:      body,
+			Link:      "/client",
+			CreatedAt: r.CompletedAt,
+		})
+	}
+
 	// Opt-in backup reminder: warn when the most recent Google/email backup is
 	// more than 30 days old. Only fires for backup types the user has actually
 	// used at least once — "never backed up" is not "out of date". The item ID
@@ -765,6 +834,23 @@ func (h *Handler) gatherNotificationItems(ctx context.Context, username, userID 
 			Link:      "/client/profile",
 			CreatedAt: qc.CreatedAt,
 			Details:   qc.Details,
+		})
+	}
+
+	// Role assignments an admin made via the Users page's role editor, within
+	// the same window as the admin-cancelled-subscription notice above.
+	roleChanges, err := h.queries.ListRecentRoleChangeNotificationsForUser(ctx, username, time.Now().Add(-roleChangeNotificationWindow))
+	if err != nil {
+		return nil, err
+	}
+	for _, rc := range roleChanges {
+		items = append(items, notificationItem{
+			ID:        rc.ID.String() + ":role-changed",
+			Kind:      "role_changed",
+			Title:     "Account role updated",
+			Body:      describeRoleChange(rc),
+			Link:      "/client/profile",
+			CreatedAt: rc.CreatedAt,
 		})
 	}
 
@@ -832,6 +918,35 @@ func (h *Handler) UpdateBackupReminderPreference(c *gin.Context) {
 	username := c.GetString("username")
 	prefs, err := h.queries.SetBackupStaleNotify(c.Request.Context(), username, *req.BackupStaleNotify)
 	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not save preferences"})
+		return
+	}
+	c.JSON(http.StatusOK, prefs)
+}
+
+type markOnboardingGuideSeenRequest struct {
+	Guide string `json:"guide" binding:"required,oneof=base premium"`
+}
+
+// MarkOnboardingGuideSeen handles PUT /api/v1/me/preferences/onboarding.
+// Records that the caller has been shown one of the onboarding spotlight
+// tours so it never auto-plays again. Body: {"guide": "base"|"premium"}.
+//
+// Account state, not browser state — the flags used to live in localStorage,
+// which replayed the tour on every new browser/device or cleared-site-data
+// login. The Profile page's "Replay guide" links don't touch this; they open
+// the tour directly.
+func (h *Handler) MarkOnboardingGuideSeen(c *gin.Context) {
+	var req markOnboardingGuideSeenRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": `guide must be "base" or "premium"`})
+		return
+	}
+
+	username := c.GetString("username")
+	prefs, err := h.queries.SetOnboardingGuideSeen(c.Request.Context(), username, req.Guide)
+	if err != nil {
+		log.Printf("MarkOnboardingGuideSeen: user=%s guide=%s err=%v", username, req.Guide, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not save preferences"})
 		return
 	}
@@ -1027,6 +1142,40 @@ func summarizeQuotaChange(raw json.RawMessage) string {
 		"An admin updated your storage across %d %s: %s → %s total.",
 		n, drives, formatCapacityShort(before), formatCapacityShort(after),
 	)
+}
+
+// roleLabel maps a role value ("admin"|"premium"|"user") to the display
+// label used in bell/email copy — mirrors GroupBadge's THEME on the frontend.
+func roleLabel(role string) string {
+	switch role {
+	case "admin":
+		return "Admin"
+	case "premium":
+		return "Premium"
+	default:
+		return "User"
+	}
+}
+
+// describeRoleChange builds the bell body for a role_change_notifications
+// row: the role transition, the admin's reason, and — for a demotion away
+// from Premium — the trial-expiry/purchase-block notes.
+func describeRoleChange(rc db.RoleChangeNotification) string {
+	body := fmt.Sprintf("Your account role was changed from %s to %s by an admin.", roleLabel(rc.PreviousRole), roleLabel(rc.NewRole))
+	if rc.NewRole == "premium" {
+		if rc.PremiumExpiresAt != nil {
+			body += fmt.Sprintf(" Your Premium trial expires on %s.", rc.PremiumExpiresAt.Format("Jan 2, 2006"))
+		} else {
+			body += " Premium access does not expire."
+		}
+	}
+	if rc.BlockFuturePremium {
+		body += " You have also been restricted from purchasing a new Premium subscription."
+	}
+	if rc.Reason != "" {
+		body += fmt.Sprintf(" Reason: %s", rc.Reason)
+	}
+	return body
 }
 
 func formatCapacityShort(bytes int64) string {

@@ -209,6 +209,8 @@ func (s *EmailBackupService) BackupMessage(ctx context.Context, in EmailBackupMe
 		HasAttachments:    len(in.Message.Attachments) > 0,
 		Starred:           in.Starred,
 		ReceivedAt:        receivedAt,
+		FileName:          file.Name,
+		FileSizeBytes:     file.SizeBytes,
 	}
 
 	q, tx, err = s.queries.ForUser(ctx, in.UserID)

@@ -61,7 +61,8 @@ type FileServicer interface {
 type FolderServicer interface {
 	ListRoot(ctx context.Context, userID uuid.UUID, folderPage, filePage db.PageInput, drive *services.DriveFilter) (*services.FolderContents, error)
 	GetContents(ctx context.Context, folderID, userID uuid.UUID, folderPage, filePage db.PageInput) (*services.FolderContents, error)
-	GetMediaContents(ctx context.Context, folderID, userID uuid.UUID, sort db.MediaSort, hidden db.HiddenFilter, folderPage, filePage db.PageInput) (*services.FolderContents, error)
+	GetMediaContents(ctx context.Context, folderID, userID uuid.UUID, sort db.MediaSort, hidden db.HiddenFilter, filter db.MediaFilter, folderPage, filePage db.PageInput) (*services.FolderContents, error)
+	ListMediaFileIDs(ctx context.Context, folderID, userID uuid.UUID, sort db.MediaSort, hidden db.HiddenFilter, filter db.MediaFilter) ([]uuid.UUID, error)
 	Create(ctx context.Context, userID uuid.UUID, parentID *uuid.UUID, name, kind, username string, driveID *uuid.UUID) (*models.Folder, error)
 	Rename(ctx context.Context, folderID, userID uuid.UUID, name string) (*models.Folder, error)
 	Move(ctx context.Context, folderID, targetID, userID uuid.UUID, username string) (*models.Folder, error)
@@ -117,6 +118,9 @@ type Handler struct {
 	// throttling entirely rather than failing closed.
 	bandwidth       *services.BandwidthManager
 	turnstileSecret string
+	// regGroups backs the public group-invite endpoints (nil is tolerated and
+	// causes them to return 503).
+	regGroups *services.RegistrationGroupService
 	// paypal is used for the interest-form deposit (nil is tolerated and
 	// causes the deposit endpoints to return 503).
 	paypal *services.PayPalClient
@@ -204,6 +208,14 @@ func SetInviteService(h *Handler, svc InviteService) {
 // tests that need to bypass real Keycloak API calls.
 func SetKcIDResolver(h *Handler, fn func(ctx context.Context, username string) (uuid.UUID, error)) {
 	h.resolveKcID = fn
+}
+
+// SetRegistrationGroupService installs the limited-user-group-registration
+// service on an existing Handler. Wired from main once the service is
+// constructed; nil is tolerated and causes the public group-invite endpoints
+// to return 503 (configured, not crash).
+func SetRegistrationGroupService(h *Handler, svc *services.RegistrationGroupService) {
+	h.regGroups = svc
 }
 
 // InterestDepositConfig holds the PayPal redirect URLs for the interest-form

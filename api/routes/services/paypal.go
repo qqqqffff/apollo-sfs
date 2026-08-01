@@ -65,6 +65,18 @@ type PayPalClients struct {
 	Sandbox *PayPalClient
 }
 
+// ChargeClientFor adapts PayPalClients to the renewal loop's narrow
+// PayPalChargeClients interface. The explicit nil check matters: returning a
+// typed nil *PayPalClient straight into an interface would produce a non-nil
+// interface value that panics on first use.
+func (p PayPalClients) ChargeClientFor(env string) PayPalChargeClient {
+	c := p.For(env)
+	if c == nil {
+		return nil
+	}
+	return c
+}
+
 // For returns the client for the given environment ("sandbox" | "live").
 // Deliberately does NOT fall back to Live when Sandbox is nil — callers keep
 // their existing nil-check ("payments not configured") so a toggled-on admin
@@ -194,9 +206,14 @@ func (p *PayPalClient) BrowserSafeClientToken(ctx context.Context, domains []str
 type CreateOrderInput struct {
 	AmountCents   int
 	Currency      string
-	PaymentMethod string // "apple_pay" or "card"
+	PaymentMethod string // "apple_pay", "google_pay" or "card"
 	ReturnURL     string // browser redirect target on approval
 	CancelURL     string // browser redirect target on cancel
+	// Vault asks PayPal to save the payment method when this order is
+	// captured, so it can be charged again later with no shopper present —
+	// how a self-billed premium subscription opens. The token comes back on
+	// the *capture* response as CaptureOrderResult.VaultID.
+	Vault bool
 }
 
 // CreateOrderResult is the relevant subset of the PayPal CreateOrder
@@ -218,12 +235,19 @@ func (p *PayPalClient) CreateOrder(ctx context.Context, in CreateOrderInput) (*C
 	}
 	value := fmt.Sprintf("%d.%02d", in.AmountCents/100, in.AmountCents%100)
 
+	// The payment_source key has to match the funding source the shopper will
+	// actually confirm the order with — PayPal nests the vault attributes
+	// under it, and returns the resulting token under the same key.
+	src := map[string]any{}
+	if in.Vault {
+		src["attributes"] = map[string]any{
+			"vault": map[string]any{"store_in_vault": "ON_SUCCESS"},
+		}
+	}
 	ps := map[string]any{}
 	switch in.PaymentMethod {
-	case "apple_pay":
-		ps["apple_pay"] = map[string]any{}
-	case "card":
-		ps["card"] = map[string]any{}
+	case "apple_pay", "google_pay", "card":
+		ps[in.PaymentMethod] = src
 	default:
 		return nil, fmt.Errorf("paypal: unknown payment_method %q", in.PaymentMethod)
 	}
@@ -284,6 +308,11 @@ type CaptureOrderResult struct {
 	Currency    string
 	Status      string
 	Raw         json.RawMessage
+	// VaultID is PayPal's saved-payment-method token, set only when the order
+	// was created with vaulting on (see directOrder's vault flag). It is what
+	// later merchant-initiated renewals charge against — see ChargeVaulted.
+	// Empty on every ordinary one-off charge.
+	VaultID string
 }
 
 // CaptureOrder finalises payment on a previously approved order. The
@@ -299,8 +328,16 @@ func (p *PayPalClient) CaptureOrder(ctx context.Context, orderID string) (*Captu
 		return nil, fmt.Errorf("paypal capture: %s: %s", resp.Status, string(body))
 	}
 	var parsed struct {
-		ID            string `json:"id"`
-		Status        string `json:"status"`
+		ID     string `json:"id"`
+		Status string `json:"status"`
+		// Present only when the order was created with Vault set — see
+		// CreateOrderInput.Vault. PayPal returns the token under whichever
+		// payment source funded the order.
+		PaymentSource struct {
+			Card      vaultedSource `json:"card"`
+			ApplePay  vaultedSource `json:"apple_pay"`
+			GooglePay vaultedSource `json:"google_pay"`
+		} `json:"payment_source"`
 		PurchaseUnits []struct {
 			Payments struct {
 				Captures []struct {
@@ -324,6 +361,17 @@ func (p *PayPalClient) CaptureOrder(ctx context.Context, orderID string) (*Captu
 	if err != nil {
 		return nil, fmt.Errorf("paypal capture amount: %w", err)
 	}
+	vaultID := ""
+	for _, s := range []vaultedSource{
+		parsed.PaymentSource.Card,
+		parsed.PaymentSource.ApplePay,
+		parsed.PaymentSource.GooglePay,
+	} {
+		if s.Attributes.Vault.ID != "" {
+			vaultID = s.Attributes.Vault.ID
+			break
+		}
+	}
 	return &CaptureOrderResult{
 		OrderID:     parsed.ID,
 		CaptureID:   cap.ID,
@@ -331,6 +379,7 @@ func (p *PayPalClient) CaptureOrder(ctx context.Context, orderID string) (*Captu
 		Currency:    cap.Amount.CurrencyCode,
 		Status:      parsed.Status,
 		Raw:         body,
+		VaultID:     vaultID,
 	}, nil
 }
 
@@ -501,7 +550,11 @@ func (p *PayPalClient) DirectChargeCard(ctx context.Context, in CardOrderInput) 
 	if in.Currency == "" {
 		in.Currency = "USD"
 	}
-	ps := map[string]any{
+	return p.directOrder(ctx, in.AmountCents, in.Currency, cardPaymentSource(in), false)
+}
+
+func cardPaymentSource(in CardOrderInput) map[string]any {
+	return map[string]any{
 		"card": map[string]any{
 			"number":        in.Number,
 			"expiry":        in.ExpiryYear + "-" + in.ExpiryMonth,
@@ -509,7 +562,6 @@ func (p *PayPalClient) DirectChargeCard(ctx context.Context, in CardOrderInput) 
 			"name":          in.Name,
 		},
 	}
-	return p.directOrder(ctx, in.AmountCents, in.Currency, ps)
 }
 
 // ApplePayTokenInput holds fields decoded from a PKPaymentToken for
@@ -533,7 +585,11 @@ func (p *PayPalClient) DirectChargeApplePay(ctx context.Context, in ApplePayToke
 	if in.Currency == "" {
 		in.Currency = "USD"
 	}
-	ps := map[string]any{
+	return p.directOrder(ctx, in.AmountCents, in.Currency, applePayPaymentSource(in), false)
+}
+
+func applePayPaymentSource(in ApplePayTokenInput) map[string]any {
+	return map[string]any{
 		"apple_pay": map[string]any{
 			"token": map[string]any{
 				"payment_data": map[string]any{
@@ -550,7 +606,6 @@ func (p *PayPalClient) DirectChargeApplePay(ctx context.Context, in ApplePayToke
 			},
 		},
 	}
-	return p.directOrder(ctx, in.AmountCents, in.Currency, ps)
 }
 
 // DirectChargeGooglePay creates and immediately captures a PayPal order using
@@ -560,7 +615,11 @@ func (p *PayPalClient) DirectChargeGooglePay(ctx context.Context, amountCents in
 	if currency == "" {
 		currency = "USD"
 	}
-	ps := map[string]any{
+	return p.directOrder(ctx, amountCents, currency, googlePayPaymentSource(googlePayToken), false)
+}
+
+func googlePayPaymentSource(googlePayToken string) map[string]any {
+	return map[string]any{
 		"google_pay": map[string]any{
 			"payment_data": map[string]any{
 				"payment_method_data": map[string]any{
@@ -573,7 +632,113 @@ func (p *PayPalClient) DirectChargeGooglePay(ctx context.Context, amountCents in
 			},
 		},
 	}
-	return p.directOrder(ctx, amountCents, currency, ps)
+}
+
+// ── Self-billed recurring (vaulted payment methods) ───────────────────────────
+
+// Premium subscriptions funded by a card or wallet can't be PayPal-managed:
+// POST /v1/billing/subscriptions ignores `payment_source` entirely, so there
+// is no way to bind one to a Subscriptions v1 subscription. Those three
+// funding sources are billed by us instead, over Orders v2:
+//
+//	VaultAndCharge  — first period: an ordinary create+capture that also asks
+//	                  PayPal to save the payment method, returning a vault id.
+//	ChargeVaulted   — every period after: create+capture against that vault id
+//	                  with no shopper present.
+//
+// See docs/paypal_setup.md §9 and db/migrations/063_self_billed_subscriptions.sql.
+
+// VaultSourceCard and friends name the funding source a vaulted subscription
+// was opened with. Wallet tokens vault as the underlying card, so renewals
+// always charge through the `card` payment source regardless — this is kept
+// for display and support, not for rebuilding the renewal request.
+const (
+	VaultSourceCard      = "card"
+	VaultSourceApplePay  = "apple_pay"
+	VaultSourceGooglePay = "google_pay"
+)
+
+// VaultAndChargeInput selects one funding source for the opening charge of a
+// self-billed subscription. Exactly one of Card/ApplePay/GooglePayToken is set;
+// Source records which, and must match.
+type VaultAndChargeInput struct {
+	AmountCents int
+	Currency    string
+	Source      string // VaultSource*
+	Card        *CardOrderInput
+	ApplePay    *ApplePayTokenInput
+	GooglePay   string // raw Google Pay token
+}
+
+// VaultAndCharge captures the first subscription period and saves the payment
+// method in the same call. The returned CaptureOrderResult carries VaultID —
+// without it the subscription can never renew, so callers must treat an empty
+// VaultID as a failure rather than granting access.
+func (p *PayPalClient) VaultAndCharge(ctx context.Context, in VaultAndChargeInput) (*CaptureOrderResult, error) {
+	if in.Currency == "" {
+		in.Currency = "USD"
+	}
+	var ps map[string]any
+	switch in.Source {
+	case VaultSourceCard:
+		if in.Card == nil {
+			return nil, errors.New("paypal: card details required")
+		}
+		ps = cardPaymentSource(*in.Card)
+	case VaultSourceApplePay:
+		if in.ApplePay == nil {
+			return nil, errors.New("paypal: apple pay token required")
+		}
+		ps = applePayPaymentSource(*in.ApplePay)
+	case VaultSourceGooglePay:
+		if in.GooglePay == "" {
+			return nil, errors.New("paypal: google pay token required")
+		}
+		ps = googlePayPaymentSource(in.GooglePay)
+	default:
+		return nil, fmt.Errorf("paypal: unknown vault source %q", in.Source)
+	}
+	return p.directOrder(ctx, in.AmountCents, in.Currency, ps, true)
+}
+
+// vaultedSource is the slice of a payment source in an Orders v2 response that
+// carries the saved-payment-method token, for whichever source funded it.
+type vaultedSource struct {
+	Attributes struct {
+		Vault struct {
+			ID     string `json:"id"`
+			Status string `json:"status"`
+		} `json:"vault"`
+	} `json:"attributes"`
+}
+
+// ChargeVaulted bills a saved payment method with no shopper present — the
+// renewal path for a self-billed subscription. The stored_credential block is
+// what makes this a legitimate merchant-initiated recurring charge rather than
+// an unauthenticated card-not-present one; PayPal rejects the call outright
+// without payment_type.
+//
+// Always charges through the `card` payment source: an Apple Pay or Google Pay
+// purchase vaults the underlying card, and the wallet token itself is single-use.
+func (p *PayPalClient) ChargeVaulted(ctx context.Context, vaultID string, amountCents int, currency string) (*CaptureOrderResult, error) {
+	if vaultID == "" {
+		return nil, errors.New("paypal: vault id required")
+	}
+	if currency == "" {
+		currency = "USD"
+	}
+	ps := map[string]any{
+		"card": map[string]any{
+			"vault_id": vaultID,
+			"stored_credential": map[string]any{
+				"payment_initiator": "MERCHANT",
+				"payment_type":      "RECURRING",
+				"usage":             "SUBSEQUENT",
+				"usage_pattern":     "SUBSCRIPTION_PREPAID",
+			},
+		},
+	}
+	return p.directOrder(ctx, amountCents, currency, ps, false)
 }
 
 // directOrder is the shared POST-to-v2/checkout/orders implementation for all
@@ -581,9 +746,28 @@ func (p *PayPalClient) DirectChargeGooglePay(ctx context.Context, amountCents in
 // and captures the order in a single call, returning status COMPLETED on
 // success. Returns an error if 3DS is required (PAYER_ACTION_REQUIRED) —
 // callers should surface an alternative payment option to the user.
-func (p *PayPalClient) directOrder(ctx context.Context, amountCents int, currency string, paymentSource map[string]any) (*CaptureOrderResult, error) {
+//
+// When vault is true the payment method is also saved on success, and the
+// resulting token comes back as CaptureOrderResult.VaultID — see
+// VaultAndCharge. paymentSource must be a single-key map (the PayPal payment
+// source name), since the vault attributes are nested inside that key.
+func (p *PayPalClient) directOrder(ctx context.Context, amountCents int, currency string, paymentSource map[string]any, vault bool) (*CaptureOrderResult, error) {
 	if amountCents <= 0 {
 		return nil, errors.New("paypal: amount must be > 0")
+	}
+	if vault {
+		if len(paymentSource) != 1 {
+			return nil, fmt.Errorf("paypal: vaulting needs exactly one payment source, got %d", len(paymentSource))
+		}
+		for _, v := range paymentSource {
+			src, ok := v.(map[string]any)
+			if !ok {
+				return nil, errors.New("paypal: malformed payment source")
+			}
+			src["attributes"] = map[string]any{
+				"vault": map[string]any{"store_in_vault": "ON_SUCCESS"},
+			}
+		}
 	}
 	value := fmt.Sprintf("%d.%02d", amountCents/100, amountCents%100)
 	payload := map[string]any{
@@ -621,8 +805,16 @@ func (p *PayPalClient) directOrder(ctx context.Context, amountCents int, currenc
 		return nil, fmt.Errorf("paypal direct charge: %s: %s", resp.Status, string(raw))
 	}
 	var parsed struct {
-		ID            string `json:"id"`
-		Status        string `json:"status"`
+		ID     string `json:"id"`
+		Status string `json:"status"`
+		// Vaulted token, when the order asked for one. PayPal nests it under
+		// whichever payment source funded the order, so every source we can
+		// vault is listed and the first non-empty id wins.
+		PaymentSource struct {
+			Card      vaultedSource `json:"card"`
+			ApplePay  vaultedSource `json:"apple_pay"`
+			GooglePay vaultedSource `json:"google_pay"`
+		} `json:"payment_source"`
 		PurchaseUnits []struct {
 			Payments struct {
 				Captures []struct {
@@ -649,6 +841,17 @@ func (p *PayPalClient) directOrder(ctx context.Context, amountCents int, currenc
 	if err != nil {
 		return nil, fmt.Errorf("paypal direct charge amount: %w", err)
 	}
+	vaultID := ""
+	for _, s := range []vaultedSource{
+		parsed.PaymentSource.Card,
+		parsed.PaymentSource.ApplePay,
+		parsed.PaymentSource.GooglePay,
+	} {
+		if s.Attributes.Vault.ID != "" {
+			vaultID = s.Attributes.Vault.ID
+			break
+		}
+	}
 	return &CaptureOrderResult{
 		OrderID:     parsed.ID,
 		CaptureID:   cap.ID,
@@ -656,6 +859,7 @@ func (p *PayPalClient) directOrder(ctx context.Context, amountCents int, currenc
 		Currency:    cap.Amount.CurrencyCode,
 		Status:      parsed.Status,
 		Raw:         raw,
+		VaultID:     vaultID,
 	}, nil
 }
 

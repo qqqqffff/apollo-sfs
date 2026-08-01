@@ -63,8 +63,11 @@ func (q *Queries) DeltaSyncDeleted(ctx context.Context, userID uuid.UUID, since 
 // FindFileByHash looks up a file owned by userID whose sha256_hash matches hash.
 // Returns sql.ErrNoRows when no match is found.
 func (q *Queries) FindFileByHash(ctx context.Context, userID uuid.UUID, hash string) (*models.File, error) {
-	row := q.db.QueryRowContext(ctx,
-		`SELECT`+fileColumns+`FROM files WHERE user_id = $1 AND sha256_hash = $2 LIMIT 1`,
+	// fileColumns has no trailing whitespace — the newline before FROM is what
+	// keeps the last column name from being glued to it ("sourceFROM files").
+	row := q.db.QueryRowContext(ctx, `
+		SELECT`+fileColumns+`
+		FROM files WHERE user_id = $1 AND sha256_hash = $2 LIMIT 1`,
 		userID, hash,
 	)
 	f, err := scanFile(row)

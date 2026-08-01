@@ -29,13 +29,15 @@ const prefColumns = `user_id, media_autoupload_folder_id, show_storage_buttons,
 		ORDER BY uda.allocated_at ASC
 		LIMIT 1
 	)) AS default_drive_id,
-	hide_benchmark_promo, created_at, updated_at`
+	hide_benchmark_promo, onboarding_base_seen, onboarding_premium_seen,
+	created_at, updated_at`
 
 // scanPrefs scans a row projected with prefColumns into p.
 func scanPrefs(row interface{ Scan(...any) error }, p *models.UserPreferences) error {
 	var folderID, driveID uuid.NullUUID
 	if err := row.Scan(&p.UserID, &folderID, &p.ShowStorageButtons,
 		&p.StoragePromptEnabled, &p.BackupStaleNotify, &driveID, &p.HideBenchmarkPromo,
+		&p.OnboardingBaseSeen, &p.OnboardingPremiumSeen,
 		&p.CreatedAt, &p.UpdatedAt); err != nil {
 		return err
 	}
@@ -166,6 +168,39 @@ func (q *Queries) SetDefaultDrive(ctx context.Context, userID string, driveID *u
 	`, userID, nd), &p)
 	if err != nil {
 		return nil, fmt.Errorf("SetDefaultDrive: %w", err)
+	}
+	return &p, nil
+}
+
+// SetOnboardingGuideSeen marks one of the two onboarding spotlight tours as
+// already shown for this account, so it never auto-plays again. guide is
+// "base" or "premium"; any other value is rejected rather than silently
+// writing nothing, since the column name is interpolated below.
+//
+// Only ever flips false → true: the write is OR-ed with the stored value so a
+// stale client (e.g. a second tab that loaded before the first one finished
+// the tour) can't un-see a guide.
+func (q *Queries) SetOnboardingGuideSeen(ctx context.Context, userID, guide string) (*models.UserPreferences, error) {
+	var col string
+	switch guide {
+	case "base":
+		col = "onboarding_base_seen"
+	case "premium":
+		col = "onboarding_premium_seen"
+	default:
+		return nil, fmt.Errorf("SetOnboardingGuideSeen: unknown guide %q", guide)
+	}
+	var p models.UserPreferences
+	err := scanPrefs(q.db.QueryRowContext(ctx, `
+		INSERT INTO user_preferences (user_id, `+col+`, created_at, updated_at)
+		VALUES ($1, TRUE, NOW(), NOW())
+		ON CONFLICT (user_id) DO UPDATE
+			SET `+col+` = TRUE,
+			    updated_at = NOW()
+		RETURNING `+prefColumns+`
+	`, userID), &p)
+	if err != nil {
+		return nil, fmt.Errorf("SetOnboardingGuideSeen: %w", err)
 	}
 	return &p, nil
 }

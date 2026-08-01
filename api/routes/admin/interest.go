@@ -113,7 +113,7 @@ func (h *Handler) ProvisionInterestSubmission(c *gin.Context) {
 	}
 
 	// Create the invitation via the invite service (same as standard invite flow).
-	inv, err := h.invites.Create(ctx, adminID, invitedByUsername.(string), submission.Email, req.InitialQuotaBytes, req.GrantAdmin, false, nil)
+	inv, err := h.invites.Create(ctx, adminID, invitedByUsername.(string), submission.Email, req.InitialQuotaBytes, req.GrantAdmin, false, nil, nil)
 	if err != nil {
 		if errors.Is(err, services.ErrInviteAlreadyPending) {
 			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})

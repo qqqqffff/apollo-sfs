@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 
 	"apollo-sfs.com/api/models"
 )
@@ -15,7 +16,8 @@ import (
 const premiumSubscriptionColumns = `id, username, paypal_subscription_id, plan,
 	status, environment, current_period_end, cancelled_at, created_at, updated_at,
 	amount_cents, currency, payment_method, refund_id, refund_amount_cents, refunded_at,
-	cancellation_reason`
+	cancellation_reason, billing_mode, vault_id, vault_source, next_charge_at,
+	failed_charge_count, last_charge_error, last_capture_id`
 
 // CreatePendingSubscription inserts an "approval_pending" subscription row
 // immediately after PayPal returns a subscription id. Mirrors
@@ -131,6 +133,9 @@ func (q *Queries) MarkSubscriptionStatus(ctx context.Context, paypalSubscription
 		UPDATE premium_subscriptions
 		SET status       = $2,
 		    cancelled_at = CASE WHEN $2 IN ('cancelled', 'expired') THEN NOW() ELSE cancelled_at END,
+		    -- Terminal status stops a self-billed subscription's renewal loop;
+		    -- the PayPal-managed path leaves this NULL throughout.
+		    next_charge_at = CASE WHEN $2 IN ('cancelled', 'expired') THEN NULL ELSE next_charge_at END,
 		    updated_at   = NOW()
 		WHERE paypal_subscription_id = $1
 		RETURNING id, username
@@ -268,6 +273,11 @@ func (q *Queries) ListPastDueActiveSubscriptions(ctx context.Context, cutoff tim
 		SELECT `+premiumSubscriptionColumns+`
 		FROM premium_subscriptions
 		WHERE status = 'active' AND current_period_end IS NOT NULL AND current_period_end < $1
+		  -- Self-billed rows are excluded: this is a missed-PayPal-webhook
+		  -- safety net, and they have no PayPal subscription to re-check
+		  -- (their id is a synthetic 'self:<uuid>'). A late renewal on one of
+		  -- those is the renewal loop's business, not this one's.
+		  AND billing_mode <> 'self'
 	`, cutoff)
 	if err != nil {
 		return nil, fmt.Errorf("ListPastDueActiveSubscriptions: %w", err)
@@ -289,19 +299,207 @@ type rowScanner interface {
 	Scan(dest ...any) error
 }
 
-func scanPremiumSubscription(row rowScanner) (*models.PremiumSubscription, error) {
+// ── Self-billed subscriptions ────────────────────────────────────────────────
+
+// CreateSelfBilledSubscription inserts an already-active subscription funded by
+// a vaulted card or wallet. Unlike the PayPal-managed flow there is no
+// approval-pending step: the opening period is captured before this is called,
+// so the row is born active with its first renewal already scheduled.
+//
+// s must carry Username, Plan, Environment, AmountCents, Currency,
+// PaymentMethod, VaultID, VaultSource and CurrentPeriodEnd. The synthetic
+// paypal_subscription_id ('self:<uuid>') keeps the column's NOT NULL UNIQUE
+// contract without ever colliding with a real PayPal id — see
+// db/migrations/063_self_billed_subscriptions.sql.
+//
+// Returns ErrSubscriptionExists if the user already holds a live subscription,
+// so a double-submit can't open a second one (the partial unique index
+// premium_subscriptions_one_live_idx is the actual guard).
+func (q *Queries) CreateSelfBilledSubscription(ctx context.Context, s *models.PremiumSubscription) error {
+	if s.VaultID == nil || *s.VaultID == "" {
+		return errors.New("CreateSelfBilledSubscription: vault id required")
+	}
+	env := s.Environment
+	if env == "" {
+		env = "live"
+	}
+	currency := s.Currency
+	if currency == "" {
+		currency = "USD"
+	}
+	s.PayPalSubscriptionID = "self:" + uuid.NewString()
+	err := q.db.QueryRowContext(ctx, `
+		INSERT INTO premium_subscriptions (
+			username, paypal_subscription_id, plan, status, environment,
+			amount_cents, currency, payment_method, billing_mode,
+			vault_id, vault_source, current_period_end, next_charge_at, last_capture_id
+		)
+		VALUES ($1, $2, $3, 'active', $4, $5, $6, $7, 'self', $8, $9, $10, $10, $11)
+		RETURNING id, created_at, updated_at
+	`, s.Username, s.PayPalSubscriptionID, s.Plan, env, s.AmountCents, currency,
+		s.PaymentMethod, *s.VaultID, s.VaultSource, s.CurrentPeriodEnd, s.LastCaptureID,
+	).Scan(&s.ID, &s.CreatedAt, &s.UpdatedAt)
+	var pqErr *pq.Error
+	if errors.As(err, &pqErr) && pqErr.Code == "23505" {
+		return ErrSubscriptionExists
+	}
+	if err != nil {
+		return fmt.Errorf("CreateSelfBilledSubscription: %w", err)
+	}
+	s.Status = "active"
+	s.Environment = env
+	s.Currency = currency
+	s.BillingMode = "self"
+	s.NextChargeAt = s.CurrentPeriodEnd
+	return nil
+}
+
+// ErrSubscriptionExists reports that the user already holds an active or
+// suspended subscription, so another one can't be opened.
+var ErrSubscriptionExists = errors.New("user already has a live subscription")
+
+// ListDueSelfBilledSubscriptions returns live self-billed subscriptions whose
+// next charge is due as of now, oldest-due first. Drives the renewal loop;
+// limit caps how many one pass will attempt so a large backlog is worked
+// through over several ticks rather than in one long burst of PayPal calls.
+func (q *Queries) ListDueSelfBilledSubscriptions(ctx context.Context, now time.Time, limit int) ([]models.PremiumSubscription, error) {
+	rows, err := q.db.QueryContext(ctx, `
+		SELECT `+premiumSubscriptionColumns+`
+		FROM premium_subscriptions
+		WHERE billing_mode = 'self'
+		  AND status IN ('active', 'suspended')
+		  AND next_charge_at IS NOT NULL
+		  AND next_charge_at <= $1
+		ORDER BY next_charge_at ASC
+		LIMIT $2
+	`, now, limit)
+	if err != nil {
+		return nil, fmt.Errorf("ListDueSelfBilledSubscriptions: %w", err)
+	}
+	defer rows.Close()
+	var out []models.PremiumSubscription
+	for rows.Next() {
+		s, err := scanPremiumSubscriptionRow(rows)
+		if err != nil {
+			return nil, fmt.Errorf("ListDueSelfBilledSubscriptions scan: %w", err)
+		}
+		out = append(out, *s)
+	}
+	return out, rows.Err()
+}
+
+// RecordSelfBilledRenewal advances a subscription after a successful renewal
+// charge: new period end, next charge scheduled for it, failure state cleared,
+// and status returned to active if a previous failure had suspended it.
+func (q *Queries) RecordSelfBilledRenewal(ctx context.Context, id uuid.UUID, periodEnd time.Time, captureID string) error {
+	_, err := q.db.ExecContext(ctx, `
+		UPDATE premium_subscriptions
+		SET status              = 'active',
+		    current_period_end  = $2,
+		    next_charge_at      = $2,
+		    failed_charge_count = 0,
+		    last_charge_error   = NULL,
+		    last_capture_id     = $3,
+		    updated_at          = NOW()
+		WHERE id = $1
+	`, id, periodEnd, captureID)
+	if err != nil {
+		return fmt.Errorf("RecordSelfBilledRenewal %s: %w", id, err)
+	}
+	return nil
+}
+
+// RecordSelfBilledChargeFailure books a failed renewal attempt: bumps the
+// consecutive-failure count, records the error, and reschedules the retry.
+// Passing a nil retryAt means "no more retries" — next_charge_at is cleared so
+// the loop stops picking the row up, which the caller pairs with suspending or
+// cancelling the subscription.
+func (q *Queries) RecordSelfBilledChargeFailure(ctx context.Context, id uuid.UUID, reason string, retryAt *time.Time) (failedCount int, err error) {
+	var next sql.NullTime
+	if retryAt != nil {
+		next = sql.NullTime{Time: *retryAt, Valid: true}
+	}
+	err = q.db.QueryRowContext(ctx, `
+		UPDATE premium_subscriptions
+		SET failed_charge_count = failed_charge_count + 1,
+		    last_charge_error   = $2,
+		    next_charge_at      = $3,
+		    updated_at          = NOW()
+		WHERE id = $1
+		RETURNING failed_charge_count
+	`, id, truncateError(reason), next).Scan(&failedCount)
+	if err != nil {
+		return 0, fmt.Errorf("RecordSelfBilledChargeFailure %s: %w", id, err)
+	}
+	return failedCount, nil
+}
+
+// MarkSelfBilledStatus sets a self-billed subscription's status directly (the
+// PayPal-managed path gets these transitions from webhooks instead). Clearing
+// next_charge_at on a terminal status keeps the renewal loop from ever
+// reconsidering the row.
+func (q *Queries) MarkSelfBilledStatus(ctx context.Context, id uuid.UUID, status string) error {
+	terminal := status == "cancelled" || status == "expired"
+	_, err := q.db.ExecContext(ctx, `
+		UPDATE premium_subscriptions
+		SET status         = $2,
+		    cancelled_at   = CASE WHEN $2 = 'cancelled' THEN NOW() ELSE cancelled_at END,
+		    next_charge_at = CASE WHEN $3 THEN NULL ELSE next_charge_at END,
+		    updated_at     = NOW()
+		WHERE id = $1
+	`, id, status, terminal)
+	if err != nil {
+		return fmt.Errorf("MarkSelfBilledStatus %s: %w", id, err)
+	}
+	return nil
+}
+
+// truncateError keeps a PayPal error message short enough to be a useful
+// column value — these can carry long debug payloads.
+func truncateError(s string) string {
+	const max = 500
+	if len(s) <= max {
+		return s
+	}
+	return s[:max]
+}
+
+// scanPremiumSubscription reads a row projected with premiumSubscriptionColumns.
+// extra receives destinations for any columns a caller appended after that
+// list (e.g. ListSubscriptionsForUser's computed reference) — they have to be
+// scanned in the same call, and routing them through here keeps every caller
+// in step with the column list instead of duplicating it.
+func scanPremiumSubscription(row rowScanner, extra ...any) (*models.PremiumSubscription, error) {
 	var s models.PremiumSubscription
-	var periodEnd, cancelledAt, refundedAt sql.NullTime
+	var periodEnd, cancelledAt, refundedAt, nextChargeAt sql.NullTime
 	var refundID, cancellationReason sql.NullString
+	var vaultID, vaultSource, lastChargeError, lastCaptureID sql.NullString
 	var refundAmountCents sql.NullInt64
-	if err := row.Scan(
+	dest := []any{
 		&s.ID, &s.Username, &s.PayPalSubscriptionID, &s.Plan,
 		&s.Status, &s.Environment, &periodEnd, &cancelledAt, &s.CreatedAt, &s.UpdatedAt,
 		&s.AmountCents, &s.Currency, &s.PaymentMethod,
 		&refundID, &refundAmountCents, &refundedAt,
-		&cancellationReason,
-	); err != nil {
+		&cancellationReason, &s.BillingMode, &vaultID, &vaultSource, &nextChargeAt,
+		&s.FailedChargeCount, &lastChargeError, &lastCaptureID,
+	}
+	if err := row.Scan(append(dest, extra...)...); err != nil {
 		return nil, err
+	}
+	if vaultID.Valid {
+		s.VaultID = &vaultID.String
+	}
+	if vaultSource.Valid {
+		s.VaultSource = &vaultSource.String
+	}
+	if nextChargeAt.Valid {
+		s.NextChargeAt = &nextChargeAt.Time
+	}
+	if lastChargeError.Valid {
+		s.LastChargeError = &lastChargeError.String
+	}
+	if lastCaptureID.Valid {
+		s.LastCaptureID = &lastCaptureID.String
 	}
 	if periodEnd.Valid {
 		s.CurrentPeriodEnd = &periodEnd.Time
@@ -355,40 +553,12 @@ func (q *Queries) ListSubscriptionsForUser(ctx context.Context, username string)
 	defer rows.Close()
 	var out []SubscriptionOrderSummary
 	for rows.Next() {
-		var s models.PremiumSubscription
-		var periodEnd, cancelledAt, refundedAt sql.NullTime
-		var refundID, cancellationReason sql.NullString
-		var refundAmountCents sql.NullInt64
 		var reference string
-		if err := rows.Scan(
-			&s.ID, &s.Username, &s.PayPalSubscriptionID, &s.Plan,
-			&s.Status, &s.Environment, &periodEnd, &cancelledAt, &s.CreatedAt, &s.UpdatedAt,
-			&s.AmountCents, &s.Currency, &s.PaymentMethod,
-			&refundID, &refundAmountCents, &refundedAt,
-			&cancellationReason, &reference,
-		); err != nil {
+		s, err := scanPremiumSubscription(rows, &reference)
+		if err != nil {
 			return nil, fmt.Errorf("ListSubscriptionsForUser scan: %w", err)
 		}
-		if periodEnd.Valid {
-			s.CurrentPeriodEnd = &periodEnd.Time
-		}
-		if cancelledAt.Valid {
-			s.CancelledAt = &cancelledAt.Time
-		}
-		if refundID.Valid {
-			s.RefundID = &refundID.String
-		}
-		if refundAmountCents.Valid {
-			v := int(refundAmountCents.Int64)
-			s.RefundAmountCents = &v
-		}
-		if refundedAt.Valid {
-			s.RefundedAt = &refundedAt.Time
-		}
-		if cancellationReason.Valid {
-			s.CancellationReason = &cancellationReason.String
-		}
-		out = append(out, SubscriptionOrderSummary{PremiumSubscription: s, Reference: reference})
+		out = append(out, SubscriptionOrderSummary{PremiumSubscription: *s, Reference: reference})
 	}
 	return out, rows.Err()
 }

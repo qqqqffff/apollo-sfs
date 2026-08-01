@@ -10,8 +10,11 @@ type resetPasswordRequest struct {
 	// Token is the `key` query parameter from the Keycloak password-reset email
 	// link. The frontend should extract it from the Keycloak action URL and pass
 	// it here alongside the new password.
-	Token    string `json:"token"    binding:"required"`
-	Password string `json:"password" binding:"required,min=8"`
+	Token string `json:"token" binding:"required"`
+	// min mirrors the Keycloak realm's length(12) policy — see
+	// keycloak/import/realm.json. Keycloak rejects anything shorter anyway;
+	// checking here turns that into a clear 400 instead of an admin-API error.
+	Password string `json:"password" binding:"required,min=12"`
 }
 
 // ResetPassword handles POST /api/v1/auth/reset_password.
@@ -21,7 +24,7 @@ type resetPasswordRequest struct {
 func (h *Handler) ResetPassword(c *gin.Context) {
 	var req resetPasswordRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "token and a password of at least 8 characters are required"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "token and a password of at least 12 characters are required"})
 		return
 	}
 

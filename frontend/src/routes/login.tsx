@@ -4,6 +4,7 @@ import { MdClose } from 'react-icons/md'
 import { useAuth } from '../auth'
 import { forgotPassword, resetPassword } from '../api/auth'
 import { post } from '../api/client'
+import { socialLoginUrl } from '../utils/socialAuth'
 
 export const Route = createFileRoute('/login')({
   validateSearch: (search: Record<string, unknown>) => ({
@@ -26,28 +27,6 @@ export const Route = createFileRoute('/login')({
   },
   component: RouteComponent,
 })
-
-const KC_REALM = 'apollo-sfs-realm'
-const KC_CLIENT_ID = 'apollo-sfs-api'
-// Keycloak runs on its own hostname (see nginx auth.apollo-sfs.com vhost). The
-// browser is redirected here to start the OIDC code flow; the callback returns
-// to this app's own origin (redirect_uri below).
-const KC_BASE_URL = 'https://auth.apollo-sfs.com'
-
-function socialLoginUrl(provider: 'google' | 'apple' | 'microsoft') {
-  const params = new URLSearchParams({
-    client_id: KC_CLIENT_ID,
-    redirect_uri: `${window.location.origin}/api/v1/auth/social/callback`,
-    response_type: 'code',
-    scope: 'openid',
-    kc_idp_hint: provider,
-    // Force re-authentication instead of silently reusing a Keycloak SSO session,
-    // so clicking the button always goes through the provider.
-    prompt: 'login',
-    state: provider, // echoed back by KC so the callback knows which provider returned
-  })
-  return `${KC_BASE_URL}/realms/${KC_REALM}/protocol/openid-connect/auth?${params}`
-}
 
 const SOCIAL_ERROR_MESSAGES: Record<string, string> = {
   access_denied:    'Sign-in was cancelled.',

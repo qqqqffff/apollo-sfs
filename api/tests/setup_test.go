@@ -222,8 +222,17 @@ func (s *stubQuerier) InsertQuotaChangeNotification(_ context.Context, _ db.Inse
 func (s *stubQuerier) ListRecentQuotaChangeNotificationsForUser(_ context.Context, _ string, _ time.Time) ([]db.QuotaChangeNotification, error) {
 	return s.recentQuotaChanges, s.recentQuotaChangesErr
 }
+func (s *stubQuerier) ListRecentRoleChangeNotificationsForUser(_ context.Context, _ string, _ time.Time) ([]db.RoleChangeNotification, error) {
+	return nil, nil
+}
 func (s *stubQuerier) ListRecentEmailBackupRunsForUser(_ context.Context, _ string, _ time.Time) ([]models.EmailBackupRun, error) {
 	return nil, nil
+}
+func (s *stubQuerier) ListRecentGoogleBackupRunsForUser(_ context.Context, _ string, _ time.Time) ([]models.GoogleBackupRun, error) {
+	return nil, nil
+}
+func (s *stubQuerier) InsertGoogleBackupRun(_ context.Context, _ *models.GoogleBackupRun) error {
+	return nil
 }
 func (s *stubQuerier) GetLastGoogleBackupSync(_ context.Context, _ uuid.UUID) (*time.Time, error) {
 	return nil, nil
@@ -233,6 +242,16 @@ func (s *stubQuerier) GetLastEmailBackupSync(_ context.Context, _ string) (*time
 }
 func (s *stubQuerier) SetBackupStaleNotify(_ context.Context, _ string, enabled bool) (*models.UserPreferences, error) {
 	return &models.UserPreferences{BackupStaleNotify: enabled, ShowStorageButtons: true, StoragePromptEnabled: true}, nil
+}
+func (s *stubQuerier) SetOnboardingGuideSeen(_ context.Context, _, guide string) (*models.UserPreferences, error) {
+	p := &models.UserPreferences{ShowStorageButtons: true, StoragePromptEnabled: true}
+	switch guide {
+	case "base":
+		p.OnboardingBaseSeen = true
+	case "premium":
+		p.OnboardingPremiumSeen = true
+	}
+	return p, nil
 }
 func (s *stubQuerier) AutoPardonExpiredSuspension(_ context.Context, _ string) error { return nil }
 func (s *stubQuerier) AddBannedIP(_ context.Context, _, _ string) error              { return nil }
@@ -426,6 +445,25 @@ func (s *stubAdminQuerier) GetUserDrive(_ context.Context, _ string) (*models.Us
 func (s *stubAdminQuerier) GetDriveAvailableBytes(_ context.Context, _ uuid.UUID) (int64, error) {
 	return s.driveAvail, s.driveAvailErr
 }
+func (s *stubAdminQuerier) SetUserAdmin(_ context.Context, _ string, _ bool) error { return nil }
+func (s *stubAdminQuerier) SetUserPremium(_ context.Context, _ string, _ bool) error {
+	return nil
+}
+func (s *stubAdminQuerier) SetPremiumExpiry(_ context.Context, _ string, _ *time.Time) error {
+	return nil
+}
+func (s *stubAdminQuerier) SetPremiumPurchaseBlocked(_ context.Context, _ string, _ bool) error {
+	return nil
+}
+func (s *stubAdminQuerier) InsertRoleChangeNotification(_ context.Context, _ db.InsertRoleChangeNotificationParams) error {
+	return nil
+}
+func (s *stubAdminQuerier) GetActiveSubscriptionForUser(_ context.Context, _ string) (*models.PremiumSubscription, error) {
+	return nil, nil
+}
+func (s *stubAdminQuerier) InsertAuditLog(_ context.Context, _ db.AuditInput) error { return nil }
+func (s *stubAdminQuerier) DeleteUserRecord(_ context.Context, _ string) error      { return nil }
+func (s *stubAdminQuerier) DeleteAllUserFolders(_ context.Context, _ string) error  { return nil }
 func (s *stubAdminQuerier) ListBannedIPs(_ context.Context, _ bool, _ db.PageInput) (*db.PageResult[models.BannedIP], error) {
 	return &db.PageResult[models.BannedIP]{Items: []models.BannedIP{}}, nil
 }
@@ -525,8 +563,14 @@ func (s *stubAdminQuerier) ListAllNodeDisks(_ context.Context) ([]models.NodeDis
 
 // Drive benchmark
 func (s *stubAdminQuerier) RequestBenchmarkOnAllNodes(_ context.Context) error { return nil }
-func (s *stubAdminQuerier) CountPendingBenchmarkRequests(_ context.Context) (int, error) {
+func (s *stubAdminQuerier) CountInFlightBenchmarkNodes(_ context.Context) (int, error) {
 	return 0, nil
+}
+func (s *stubAdminQuerier) CountActiveNodes(_ context.Context) (int, error) {
+	return 0, nil
+}
+func (s *stubAdminQuerier) ListRunningBenchmarkNodes(_ context.Context) ([]db.NodeBenchmarkProgress, error) {
+	return nil, nil
 }
 func (s *stubAdminQuerier) ListNodeDiskBenchmarks(_ context.Context) ([]db.NodeDiskBenchmarkRow, error) {
 	return nil, nil
@@ -670,7 +714,7 @@ type stubAdminInviteService struct {
 	revokeErr error
 }
 
-func (s *stubAdminInviteService) Create(_ context.Context, _ uuid.UUID, _, _ string, _ int64, _ bool, _ bool, _ *uuid.UUID) (*models.Invitation, error) {
+func (s *stubAdminInviteService) Create(_ context.Context, _ uuid.UUID, _, _ string, _ int64, _ bool, _ bool, _ *uuid.UUID, _ *time.Time) (*models.Invitation, error) {
 	return s.inv, s.invErr
 }
 func (s *stubAdminInviteService) List(_ context.Context, _ db.PageInput) (*db.PageResult[models.Invitation], error) {
@@ -760,6 +804,12 @@ type stubFolderService struct {
 	folder    *models.Folder
 	folderErr error
 	contents  *services.FolderContents
+	// Ids returned by ListMediaFileIDs, plus the sort/hidden/filter the last
+	// media call was made with — asserted by the media listing tests.
+	mediaFileIDs []uuid.UUID
+	mediaSort    db.MediaSort
+	mediaHidden  db.HiddenFilter
+	mediaFilter  db.MediaFilter
 }
 
 func (s *stubFolderService) ListRoot(_ context.Context, _ uuid.UUID, _, _ db.PageInput, _ *services.DriveFilter) (*services.FolderContents, error) {
@@ -784,7 +834,10 @@ func (s *stubFolderService) GetContents(_ context.Context, _, _ uuid.UUID, _, _ 
 		Files:      &db.PageResult[models.File]{Items: []models.File{}},
 	}, nil
 }
-func (s *stubFolderService) GetMediaContents(_ context.Context, _, _ uuid.UUID, _ db.MediaSort, _ db.HiddenFilter, _, _ db.PageInput) (*services.FolderContents, error) {
+func (s *stubFolderService) GetMediaContents(_ context.Context, _, _ uuid.UUID, sort db.MediaSort, hidden db.HiddenFilter, filter db.MediaFilter, _, _ db.PageInput) (*services.FolderContents, error) {
+	s.mediaSort = sort
+	s.mediaHidden = hidden
+	s.mediaFilter = filter
 	if s.folderErr != nil {
 		return nil, s.folderErr
 	}
@@ -796,6 +849,15 @@ func (s *stubFolderService) GetMediaContents(_ context.Context, _, _ uuid.UUID, 
 		Subfolders: &db.PageResult[models.Folder]{Items: []models.Folder{}},
 		Files:      &db.PageResult[models.File]{Items: []models.File{}},
 	}, nil
+}
+func (s *stubFolderService) ListMediaFileIDs(_ context.Context, _, _ uuid.UUID, sort db.MediaSort, hidden db.HiddenFilter, filter db.MediaFilter) ([]uuid.UUID, error) {
+	s.mediaSort = sort
+	s.mediaHidden = hidden
+	s.mediaFilter = filter
+	if s.folderErr != nil {
+		return nil, s.folderErr
+	}
+	return s.mediaFileIDs, nil
 }
 func (s *stubFolderService) Create(_ context.Context, _ uuid.UUID, _ *uuid.UUID, _, _, _ string, _ *uuid.UUID) (*models.Folder, error) {
 	return s.folder, s.folderErr

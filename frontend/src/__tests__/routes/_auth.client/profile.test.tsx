@@ -1,9 +1,13 @@
 import React from 'react'
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import '@testing-library/jest-dom'
 
+// mockSearch stands in for the route's search params — the account-linking
+// callback comes back to this page with ?code=&state= on it.
+let mockSearch: Record<string, string | undefined> = {}
+
 jest.mock('@tanstack/react-router', () => ({
-  createFileRoute: () => (opts: any) => ({ options: opts }),
+  createFileRoute: () => (opts: any) => ({ options: opts, useSearch: () => mockSearch }),
   useNavigate: () => jest.fn(),
 }))
 
@@ -25,6 +29,7 @@ jest.mock('../../../api/me', () => ({
   updateStorageUIPreferences: jest.fn(),
   updateSandboxPayments: jest.fn(),
   unlinkProvider: jest.fn(),
+  linkProvider: jest.fn(),
 }))
 
 jest.mock('../../../api/auth', () => ({
@@ -33,6 +38,10 @@ jest.mock('../../../api/auth', () => ({
 
 jest.mock('../../../context/NotificationContext', () => ({
   useNotification: () => ({ notify: jest.fn() }),
+}))
+
+jest.mock('../../../context/OnboardingGuideContext', () => ({
+  useOnboardingGuide: () => ({ openGuide: jest.fn() }),
 }))
 
 jest.mock('../../../api/folders', () => ({
@@ -47,7 +56,18 @@ jest.mock('../../../api/client', () => ({
 }))
 
 import { Route } from '../../../routes/_auth.client/profile'
+import { linkProvider } from '../../../api/me'
 const Page = Route.options.component as React.ComponentType
+
+// "Connect" navigates the whole browser to Keycloak; jsdom can't, so capture
+// the URL it would have gone to instead.
+let assignedHref = ''
+delete (window as unknown as { location?: unknown }).location
+;(window as unknown as { location: unknown }).location = {
+  origin: 'http://localhost',
+  get href() { return assignedHref },
+  set href(value: string) { assignedHref = value },
+}
 
 const GB = 1024 ** 3
 
@@ -79,6 +99,12 @@ function setup(user: typeof USER | null = USER, overrides: { isLoading?: boolean
   mockMutation.mockReturnValue({ mutate: jest.fn(), isPending })
   return render(<Page />)
 }
+
+beforeEach(() => {
+  jest.clearAllMocks()
+  mockSearch = {}
+  assignedHref = ''
+})
 
 describe('Client Profile page', () => {
   test('shows loading state', () => {
@@ -133,5 +159,43 @@ describe('Client Profile page', () => {
     // The current username becomes editable in a text input.
     expect(screen.getByDisplayValue('alice')).toBeInTheDocument()
     expect(screen.getByText(/signs you out/i)).toBeInTheDocument()
+  })
+
+  describe('Linked accounts', () => {
+    test('offers a Connect button for every unconnected provider', () => {
+      setup()
+      expect(screen.getAllByRole('button', { name: /^connect$/i })).toHaveLength(3)
+    })
+
+    test('a connected provider shows Remove instead of Connect', () => {
+      setup({ ...USER, linked_providers: ['google'] })
+      expect(screen.getByText(/connected/i)).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /remove/i })).toBeInTheDocument()
+      expect(screen.getAllByRole('button', { name: /^connect$/i })).toHaveLength(2)
+    })
+
+    test('sends Keycloak to the provider when Connect is clicked', () => {
+      setup()
+      fireEvent.click(screen.getAllByRole('button', { name: /^connect$/i })[0])
+      expect(assignedHref).toContain('kc_idp_hint=google')
+      // Keycloak must send the code back to the page itself, not to an API
+      // callback — the SameSite=Strict session cookie wouldn't survive that.
+      expect(decodeURIComponent(assignedHref)).toContain('redirect_uri=http://localhost/client/profile')
+    })
+
+    test('redeems the authorization code Keycloak redirects back with', async () => {
+      mockSearch = { code: 'auth-code-1', state: 'google' }
+      ;(linkProvider as jest.Mock).mockResolvedValue({ message: 'identity linked' })
+      setup()
+      await waitFor(() => expect(linkProvider).toHaveBeenCalledWith('google', 'auth-code-1'))
+      expect(await screen.findByText(/google account connected/i)).toBeInTheDocument()
+    })
+
+    test('reports a cancelled provider sign-in without calling the API', async () => {
+      mockSearch = { error: 'access_denied', state: 'google' }
+      setup()
+      expect(await screen.findByText(/connecting was cancelled/i)).toBeInTheDocument()
+      expect(linkProvider).not.toHaveBeenCalled()
+    })
   })
 })

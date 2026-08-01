@@ -1,10 +1,11 @@
 import { createFileRoute, useNavigate, useSearch } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   MdAddCircleOutline,
   MdAlternateEmail,
   MdArrowBack,
+  MdArrowUpward,
   MdBolt,
   MdAutoAwesome,
   MdCheck,
@@ -46,6 +47,7 @@ import { StorageBreakdownModal } from '../../components/StorageBreakdownModal'
 import { ShareModal } from '../../components/ShareModal'
 import { DeleteConfirmModal, readSkipDeleteCookie } from '../../components/DeleteConfirmModal'
 import { FolderBreadcrumb } from '../../components/FolderBreadcrumb'
+import { HoverDonut } from '../../components/HoverDonut'
 import { AccountBadges } from '../../components/GroupBadge'
 import { RowActionsMenu, MenuRow } from '../../components/RowActionsMenu'
 import { TierIcon } from '../../components/TierIcon'
@@ -59,7 +61,7 @@ import { BulkMoveModal, type BulkMoveItem } from '../../components/BulkMoveModal
 import { BulkDeleteConfirmModal } from '../../components/BulkDeleteConfirmModal'
 import { useFileUpload } from '../../hooks/useFileUpload'
 import { useDragDrop } from '../../hooks/useDragDrop'
-import { useFileDrag } from '../../hooks/useFileDrag'
+import { useFileDrag, HOVER_OPEN_DELAY_MS } from '../../hooks/useFileDrag'
 import { useSort, sortedFolders, sortedFiles } from '../../hooks/useSort'
 import { useInfiniteFolderContents } from '../../hooks/useInfiniteFolderContents'
 import { useFavorites } from '../../hooks/useFavorites'
@@ -75,22 +77,39 @@ import {
   getGoogleUserEmail,
   listGoogleDriveFiles,
   pickGooglePhotosWeb,
+  removeBackedUpFiles,
   uploadGoogleEntries,
+  completeGoogleBackupRun,
+  loadGoogleBackupSettings,
   type BackupEntry,
   type GoogleBackupItem,
 } from '../../api/googleBackup'
 import { EmailProviderSelectModal } from '../../components/EmailProviderSelectModal'
+import { EmailRetrievalCriteriaModal } from '../../components/EmailRetrievalCriteriaModal'
 import { EmailBackupModal } from '../../components/EmailBackupModal'
 import { EmailBackupView } from '../../components/EmailBackupView'
 import {
+  fetchProgressFor,
   getGmailUserEmail,
   getMicrosoftUserEmail,
   listProviderMessages,
   requestGmailAccessToken,
   requestMicrosoftAccessToken,
   type EmailProvider,
+  type EmailRetrievalCriteria,
+  type FetchProgress,
   type ProviderEmailItem,
 } from '../../api/emailProviders'
+import {
+  backupEmailEntries,
+  completeEmailBackupRun,
+  deleteProviderMessages,
+  loadEmailBackupSettings,
+  removeBackedUpMessages,
+} from '../../api/emailBackup'
+import { useBackgroundBackup, type BackgroundBackupState } from '../../hooks/useBackgroundBackup'
+import { BackupProgressDetails, BackupRunControls } from '../../components/BackupProgress'
+import { BackupCancelModal } from '../../components/BackupCancelModal'
 
 export const Route = createFileRoute('/_auth/client/')({
   // All keys optional so navigations to /client elsewhere need not pass every
@@ -303,7 +322,12 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
   const [renameValue, setRenameValue] = useState('')
   const [newFolderKind, setNewFolderKind] = useState<FolderKind>('regular')
   const [newFolderDriveId, setNewFolderDriveId] = useState<string | null>(null)
-  const { progress, startUpload, dismiss } = useFileUpload()
+  const { progress, startUpload, retryFailed, dismiss } = useFileUpload()
+  const onUploadSuccess = useCallback(() => {
+    queryClient.invalidateQueries({ queryKey: ['folders', folderId] })
+    queryClient.invalidateQueries({ queryKey: ['me'] })
+    queryClient.invalidateQueries({ queryKey: ['storage', 'my-servers'] })
+  }, [queryClient, folderId])
   const { isDragging } = useDragDrop((dropped) => { if (!readOnly) setPendingFiles(dropped) })
 
   // ── Multi-select state ─────────────────────────────────────────────────────
@@ -390,23 +414,31 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
   const [googleAccessToken, setGoogleAccessToken]   = useState('')
   const [googleBackupItems, setGoogleBackupItems]   = useState<GoogleBackupItem[] | null>(null)
   const googleCancelRef = useRef<(() => void) | null>(null)
-  const [bgBackupState, setBgBackupState] = useState<{
-    running: boolean; done: number; total: number
-    uploaded: number; duplicates: number; errors: number
-    driveIds: string[]
-  } | null>(null)
+  // Background (window-closed) Google run: progress card, pause/cancel, and the
+  // keep-or-remove outcome of a cancel.
+  const googleBg = useBackgroundBackup()
 
   // ── Email Backup state ─────────────────────────────────────────────────────
   const [emailSelectOpen, setEmailSelectOpen] = useState(false)
+  const [emailCriteriaFor, setEmailCriteriaFor] = useState<EmailProvider | null>(null)
   const [emailLoading, setEmailLoading] = useState(false)
+  const [emailLoadingMsg, setEmailLoadingMsg] = useState('Loading your emails')
   const [emailError, setEmailError] = useState<string | null>(null)
   const [emailBackup, setEmailBackup] = useState<{
     provider: EmailProvider
     accessToken: string
     accountEmail: string
+    // Grows page by page — the picker opens as soon as the account is known
+    // and fills in while the rest of the mailbox is still being retrieved.
     items: ProviderEmailItem[]
+    fetching: boolean
+    fetchProgress: FetchProgress | null
   } | null>(null)
   const emailCancelRef = useRef<(() => void) | null>(null)
+  // Flipped by the picker's "Stop" button to end paging early, keeping what
+  // has already arrived.
+  const emailFetchStopRef = useRef(false)
+  const emailBg = useBackgroundBackup([['email-backup']])
 
   // Trigger the action requested from the side control panel (?action=…), then
   // strip the param so refreshes/back-navigation don't re-trigger it. Waits for
@@ -463,6 +495,11 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
       queryClient.invalidateQueries({ queryKey: ['folders'] })
       navigate({ to: '/client', search: { file: undefined, folder: targetFolderId } })
     },
+    // Drag-and-drop had no failure feedback at all — a rejected move (e.g.
+    // the target folder vanished mid-drag) silently did nothing, which reads
+    // to the user as "drag and drop doesn't work" rather than an explained
+    // failure.
+    onError: (err) => notify('error', err instanceof ApiError ? err.message : 'Failed to move file'),
   })
 
   const moveFolderMutation = useMutation({
@@ -472,6 +509,17 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
       queryClient.invalidateQueries({ queryKey: ['folders'] })
       navigate({ to: '/client', search: { file: undefined, folder: targetFolderId } })
     },
+    // Same as moveFileMutation above — and folder moves have a real,
+    // frequently-hit rejection case a silent failure would otherwise hide:
+    // ErrCrossDriveMove (api/routes/services/folder.go) rejects reparenting
+    // a folder onto a target on a different drive/tier (a plain move only
+    // rewrites parent_id — it can't relocate the subtree's bytes between
+    // MinIO instances; that needs the drive-migration flow instead). Since
+    // subfolders inherit their exact parent's drive, this fires whenever a
+    // drag crosses a drive boundary, which is far more reachable once you're
+    // navigating between nested folders than at a single drive's root
+    // listing — previously that just looked like "drop did nothing."
+    onError: (err) => notify('error', err instanceof ApiError ? err.message : 'Failed to move folder'),
   })
 
   // Shared by both bulk-move paths: the toolbar's Move modal (ids come from
@@ -790,9 +838,16 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
 
   // ── Email Backup handlers ──────────────────────────────────────────────────
 
-  async function handleEmailProviderContinue(provider: EmailProvider) {
+  function handleEmailProviderContinue(provider: EmailProvider) {
     setEmailSelectOpen(false)
+    setEmailError(null)
+    setEmailCriteriaFor(provider)
+  }
+
+  async function handleEmailCriteriaContinue(provider: EmailProvider, criteria: EmailRetrievalCriteria) {
+    setEmailCriteriaFor(null)
     setEmailLoading(true)
+    setEmailLoadingMsg('Signing in to your email account')
     setEmailError(null)
 
     let cancelled = false
@@ -802,8 +857,10 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
     if (provider === 'microsoft') {
       msPopup = window.open('about:blank', '_blank', 'width=480,height=640')
     }
+    emailFetchStopRef.current = false
     emailCancelRef.current = () => {
       cancelled = true
+      emailFetchStopRef.current = true
       msPopup?.close()
     }
 
@@ -822,15 +879,38 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
         return
       }
 
-      const items = await listProviderMessages(provider, token)
-      if (cancelled) return
+      // Retrieval pages 200 at a time and a large criteria can take minutes, so
+      // the picker opens on an empty table right away and each page is dropped
+      // into it as it lands — the user can filter and select while the rest is
+      // still downloading, instead of watching a spinner.
+      setEmailBackup({ provider, accessToken: token, accountEmail, items: [], fetching: true, fetchProgress: null })
+      setEmailLoading(false)
+
+      const { items, truncated } = await listProviderMessages(provider, token, criteria, {
+        onPage: (page, fetchProgress) => {
+          if (cancelled) return
+          setEmailBackup((s) => (s ? { ...s, items: page, fetchProgress } : s))
+        },
+        shouldStop: () => cancelled || emailFetchStopRef.current,
+      })
+      if (cancelled) { setEmailBackup(null); return }
+
+      setEmailBackup((s) => (s
+        ? { ...s, items, fetching: false, fetchProgress: fetchProgressFor(criteria, items) }
+        : s))
+
       if (items.length === 0) {
-        setEmailError('No emails were found in this account.')
+        setEmailBackup(null)
+        setEmailError('No emails were found matching your criteria.')
         return
       }
-
-      setEmailBackup({ provider, accessToken: token, accountEmail, items })
+      if (truncated) {
+        setEmailError(
+          `Stopped after the ${items.length.toLocaleString()}-email safety limit — your criteria may not be fully covered.`,
+        )
+      }
     } catch (e: any) {
+      setEmailBackup(null)
       if (cancelled) return
       const msg: string = e?.message ?? ''
       // Swallow silent dismissals (popup closed, user cancelled)
@@ -843,6 +923,13 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
     }
   }
 
+  // Ends an in-flight retrieval: the picker's "Stop" button, and closing the
+  // picker outright — otherwise paging would carry on against the provider for
+  // a window nobody is looking at any more.
+  function stopEmailFetch() {
+    emailFetchStopRef.current = true
+  }
+
   function handleEmailBackupDone(backupFolderId: string | null) {
     setEmailBackup(null)
     queryClient.invalidateQueries({ queryKey: ['folders'] })
@@ -853,16 +940,63 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
     }
   }
 
+  function handleStartEmailBackground(items: ProviderEmailItem[], folder: { id: string; drive_id: string | null }) {
+    if (!emailBackup) return
+    const { provider, accessToken, accountEmail } = emailBackup
+    setEmailBackup(null)
+    const settings = loadEmailBackupSettings()
+
+    emailBg.start({
+      total: items.length,
+      totalBytes: items.reduce((sum, i) => sum + i.sizeEstimate, 0),
+      unit: 'email',
+      // Every message lands on the backup folder's own drive, so its quota bar
+      // can be credited as each one arrives.
+      driveId: folder.drive_id ?? myServers?.find((s) => s.is_primary)?.drive_id ?? null,
+      run: ({ control, onProgress }) =>
+        backupEmailEntries(items, provider, accessToken, folder.id, {
+          control,
+          folderName: accountEmail,
+          onProgress,
+        }),
+      rollback: (res) => removeBackedUpMessages(res.uploadedMessageIds),
+      onSettled: async (res, removed) => {
+        // A rollback just deleted the copies that would have justified
+        // trashing the originals provider-side.
+        if (settings.deleteAfter && removed === 0 && res.backedUpIds.length > 0) {
+          await deleteProviderMessages(provider, accessToken, res.backedUpIds)
+        }
+        // Best effort — the backup itself already succeeded.
+        completeEmailBackupRun({
+          folder_id: folder.id,
+          email_address: accountEmail,
+          provider,
+          uploaded: Math.max(0, res.uploaded - removed),
+          duplicates: res.duplicates,
+          errors: res.errors,
+          notify: settings.notify,
+        }).catch(() => {})
+      },
+    })
+  }
+
   function handleStartBackground(entries: BackupEntry[], token: string) {
     setGoogleBackupItems(null)
-    const driveIds = entries.filter((e) => e.googleItem.source === 'drive').map((e) => e.googleItem.id)
-    setBgBackupState({ running: true, done: 0, total: entries.length, uploaded: 0, duplicates: 0, errors: 0, driveIds })
-    uploadGoogleEntries(entries, token, (done, total) =>
-      setBgBackupState((s) => (s ? { ...s, done, total } : s)),
-    ).then(({ uploaded, duplicates, errors }) => {
-      setBgBackupState((s) => (s ? { ...s, running: false, uploaded, duplicates, errors } : s))
-      queryClient.invalidateQueries({ queryKey: ['folders', folderId] })
-      queryClient.invalidateQueries({ queryKey: ['me'] })
+    googleBg.start({
+      total: entries.length,
+      totalBytes: entries.reduce((sum, e) => sum + (e.googleItem.size ?? 0), 0),
+      unit: 'file',
+      run: ({ control, onProgress }) => uploadGoogleEntries(entries, token, { control, onProgress }),
+      rollback: (res) => removeBackedUpFiles(res.uploadedFileIds),
+      onSettled: (res, removed) => {
+        // Best effort — the backup itself already succeeded.
+        completeGoogleBackupRun({
+          uploaded: Math.max(0, res.uploaded - removed),
+          duplicates: res.duplicates,
+          errors: res.errors,
+          notify: loadGoogleBackupSettings().notify,
+        }).catch(() => {})
+      },
     })
   }
 
@@ -1013,15 +1147,40 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
                 )}
               </div>
             )}
+            {/* Persistent, stacked drop targets — both stay mounted for the
+                whole time a file/folder is being dragged (not just once the
+                pointer happens to be over them), so there's always somewhere
+                obvious to drop regardless of how the drag got here (e.g. a
+                spring-loaded hover-navigate that left no sibling row under
+                the pointer). Each row lights up independently via its own
+                dragOver state when the drag is actually inside it.
+
+                Deliberately `fixed`, not part of the flow. Appearing mid-drag
+                is the whole point of this panel, so anywhere in the document
+                flow it would shove the row list down the instant the drag
+                began — moving the folder the user was already aiming at out
+                from under the pointer, and landing the drop on whichever row
+                slid into its place. (Real-Chromium proof of exactly that
+                mis-drop, from when this was an inline block, is in
+                src/__tests__/e2e/dnd-depth.spec.ts.) Pinned to the viewport it
+                shifts nothing, and it stays reachable without scrolling
+                mid-drag in a long folder. */}
             {!readOnly && folder && (draggingFileId || draggingFolderId) && (
-              <div
-                {...getCurrentFolderDropHandlers(folder.id)}
-                className={`mt-2 flex items-center gap-2 rounded-lg border-2 border-dashed px-3 py-2 text-sm transition-colors ${
-                  dragOverCurrent ? 'bg-blue-50 border-blue-400 text-blue-700' : 'border-gray-200 text-gray-400'
-                }`}
-              >
-                <MdFolderOpen className="text-base shrink-0" />
-                Drop here to move into &ldquo;{folder.name}&rdquo;
+              <div className="fixed bottom-5 left-1/2 -translate-x-1/2 z-70 flex w-[min(30rem,92vw)] flex-col gap-1.5">
+                <DropZoneRow
+                  icon={<MdFolderOpen className="text-base shrink-0" />}
+                  label={`Drop here to move into "${folder.name}"`}
+                  active={dragOverCurrent}
+                  handlers={getCurrentFolderDropHandlers(folder.id)}
+                />
+                {folder.parent_id && (
+                  <DropZoneRow
+                    icon={<MdArrowUpward className="text-base shrink-0" />}
+                    label="Drop here to move to the parent folder"
+                    active={dragOverBackground}
+                    handlers={getListBackgroundDropHandlers(folder.parent_id)}
+                  />
+                )}
               </div>
             )}
           </div>
@@ -1073,6 +1232,7 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
           />
           <button
             onClick={() => fileRef.current?.click()}
+            data-tour="upload-button"
             className="inline-flex items-center gap-1.5 px-3 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium cursor-pointer transition-colors"
           >
             <MdUploadFile className="text-base" /> Upload
@@ -1137,66 +1297,67 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
       )}
 
       {/* Background Google Backup progress card */}
-      {bgBackupState && (
-        <div className="mb-3 px-3 py-2.5 bg-white border border-gray-200 rounded-lg shadow-sm flex flex-col gap-1.5">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-1.5">
-              <svg viewBox="0 0 24 24" className="w-3.5 h-3.5 shrink-0" aria-hidden="true">
-                <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
-                <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
-                <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z" fill="#FBBC05"/>
-                <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
-              </svg>
-              <span className="text-xs font-semibold text-gray-700">
-                {bgBackupState.running ? 'Backing up from Google…' : 'Google Backup complete'}
-              </span>
-            </div>
-            {!bgBackupState.running && (
-              <button onClick={() => setBgBackupState(null)} className="text-gray-400 hover:text-gray-600 cursor-pointer"><MdClose className="text-sm" /></button>
-            )}
-          </div>
-          <div className="flex items-center gap-2">
-            <div className="flex-1 h-1.5 bg-gray-200 rounded-full overflow-hidden">
-              <div
-                className={`h-full rounded-full transition-all ${bgBackupState.running ? 'bg-blue-500' : bgBackupState.errors > 0 ? 'bg-amber-500' : 'bg-green-500'}`}
-                style={{ width: `${bgBackupState.total > 0 ? Math.round((bgBackupState.done / bgBackupState.total) * 100) : 0}%` }}
-              />
-            </div>
-            <span className="text-xs text-gray-500 shrink-0">{bgBackupState.done}/{bgBackupState.total}</span>
-          </div>
-          {!bgBackupState.running && (
-            <p className={`text-xs ${bgBackupState.errors > 0 ? 'text-amber-600' : 'text-green-600'}`}>
-              {[
-                `${bgBackupState.uploaded} backed up`,
-                bgBackupState.duplicates > 0 ? `${bgBackupState.duplicates} duplicate${bgBackupState.duplicates !== 1 ? 's' : ''}` : null,
-                bgBackupState.errors > 0 ? `${bgBackupState.errors} failed` : null,
-              ].filter(Boolean).join(' · ')}
-            </p>
-          )}
-        </div>
+      {googleBg.state && (
+        <BackgroundBackupCard
+          state={googleBg.state}
+          title={googleBg.state.running ? 'Backing up from Google…' : 'Google Backup complete'}
+          icon={
+            <svg viewBox="0 0 24 24" className="w-3.5 h-3.5 shrink-0" aria-hidden="true">
+              <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
+              <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
+              <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z" fill="#FBBC05"/>
+              <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
+            </svg>
+          }
+          onTogglePause={googleBg.togglePause}
+          onCancel={googleBg.requestCancel}
+          onDismiss={googleBg.dismiss}
+          busy={googleBg.rollbackBusy}
+        />
       )}
 
-      <SearchBar value={search} onChange={setSearch} />
+      {/* Background Email Backup progress card */}
+      {emailBg.state && (
+        <BackgroundBackupCard
+          state={emailBg.state}
+          title={emailBg.state.running ? 'Backing up your email…' : 'Email Backup complete'}
+          icon={<MdAlternateEmail className="text-teal-500 text-sm shrink-0" />}
+          onTogglePause={emailBg.togglePause}
+          onCancel={emailBg.requestCancel}
+          onDismiss={emailBg.dismiss}
+          busy={emailBg.rollbackBusy}
+        />
+      )}
 
-      {/* The whole list area — including empty space below/around the rows —
-          is a drop target: dropping anywhere here that isn't a specific
-          subfolder row moves the dragged item(s) up to the parent folder (a
-          much bigger, closer target than the breadcrumb crumb that already
-          does the same thing). Generous padding + a min-height keep that
-          target comfortably sized even when the folder is nearly empty. */}
-      <div
-        {...(!readOnly ? getListBackgroundDropHandlers(folder?.parent_id ?? null) : {})}
-        className={`relative rounded-xl p-4 min-h-52 border-2 transition-colors ${
-          dragOverBackground ? 'bg-blue-50/40 border-dashed border-blue-300' : 'border-transparent'
-        }`}
-      >
-        {dragOverBackground && (
-          <div className="pointer-events-none absolute inset-x-0 top-1 flex justify-center">
-            <span className="px-3 py-1 rounded-full bg-blue-600 text-white text-xs font-medium shadow">
-              Drop to move to the parent folder
-            </span>
-          </div>
-        )}
+      {/* Cancel confirmations for the background runs */}
+      {googleBg.cancelPrompt && googleBg.state && (
+        <BackupCancelModal
+          storedCount={googleBg.state.storedCount}
+          storedBytes={googleBg.state.storedBytes}
+          unit="file"
+          busy={googleBg.rollbackBusy}
+          onRemove={() => googleBg.resolveCancel('remove')}
+          onKeep={() => googleBg.resolveCancel('keep')}
+          onResume={googleBg.resumeFromPrompt}
+        />
+      )}
+      {emailBg.cancelPrompt && emailBg.state && (
+        <BackupCancelModal
+          storedCount={emailBg.state.storedCount}
+          storedBytes={emailBg.state.storedBytes}
+          unit="email"
+          busy={emailBg.rollbackBusy}
+          onRemove={() => emailBg.resolveCancel('remove')}
+          onKeep={() => emailBg.resolveCancel('keep')}
+          onResume={emailBg.resumeFromPrompt}
+        />
+      )}
+
+      <div data-tour="search-bar">
+        <SearchBar value={search} onChange={setSearch} />
+      </div>
+
+      <div className="relative rounded-xl p-4 min-h-52">
       {!search && !hasContent && (
         <p className="text-sm text-gray-400 mt-4">
           {folderId === 'root' ? 'No files yet. Upload something to get started.' : 'This folder is empty.'}
@@ -1357,6 +1518,9 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
                           ? <MdAlternateEmail className="text-teal-500 text-lg shrink-0" title="Email backup" />
                           : <MdFolder className="text-blue-400 text-lg shrink-0" />}
                       <span className="truncate">{f.name}</span>
+                      {!readOnly && dragOverFolderId === f.id && (
+                        <HoverDonut durationMs={HOVER_OPEN_DELAY_MS} className="text-blue-500" />
+                      )}
                     </button>
                     <span className="text-xs text-gray-400 shrink-0 hidden sm:inline">
                       {new Date(f.created_at).toLocaleDateString()}
@@ -1548,17 +1712,13 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
             setPendingFiles([])
             // Pin root uploads to the drive whose view we're in; inside a folder
             // the folder's own drive governs (pass undefined).
-            startUpload(filesToUpload, uploadFolderId, () => {
-              queryClient.invalidateQueries({ queryKey: ['folders', folderId] })
-              queryClient.invalidateQueries({ queryKey: ['me'] })
-              queryClient.invalidateQueries({ queryKey: ['storage', 'my-servers'] })
-            }, ignoreRedirectIndices, folderId === 'root' ? driveId : undefined)
+            startUpload(filesToUpload, uploadFolderId, onUploadSuccess, ignoreRedirectIndices, folderId === 'root' ? driveId : undefined)
           }}
           onCancel={() => setPendingFiles([])}
         />
       )}
 
-      <UploadToast progress={progress} onDismiss={dismiss} />
+      <UploadToast progress={progress} onDismiss={dismiss} onRetry={() => retryFailed(onUploadSuccess)} />
 
       {storageModalReason && !readOnly && (
         <StorageUpgradeModal
@@ -1621,10 +1781,19 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
         />
       )}
 
+      {/* Email Backup — retrieval criteria (amount / date / size) */}
+      {emailCriteriaFor && (
+        <EmailRetrievalCriteriaModal
+          provider={emailCriteriaFor}
+          onCancel={() => setEmailCriteriaFor(null)}
+          onContinue={(criteria) => handleEmailCriteriaContinue(emailCriteriaFor, criteria)}
+        />
+      )}
+
       {/* Email Backup — signing in / loading messages */}
       {emailLoading && !emailBackup && (
         <GooglePhotosLoadingModal
-          message="Loading your emails"
+          message={emailLoadingMsg}
           hint="Finish signing in to your email account in the popup, then come back here — your inbox loads automatically."
           onCancel={() => emailCancelRef.current?.()}
         />
@@ -1637,11 +1806,15 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
           accessToken={emailBackup.accessToken}
           accountEmail={emailBackup.accountEmail}
           items={emailBackup.items}
+          fetching={emailBackup.fetching}
+          fetchProgress={emailBackup.fetchProgress}
+          onStopFetching={stopEmailFetch}
           quotaBytes={user.storage_quota_bytes}
           usedBytes={user.storage_used_bytes}
           myServers={myServers}
-          onClose={() => setEmailBackup(null)}
+          onClose={() => { stopEmailFetch(); setEmailBackup(null) }}
           onDone={handleEmailBackupDone}
+          onStartBackground={handleStartEmailBackground}
         />
       )}
 
@@ -1719,6 +1892,37 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
 
 // ── Shared components ─────────────────────────────────────────────────────────
 
+// One row of the persistent stacked drag-and-drop target panel (current
+// folder / parent folder) floating over the page while a drag is active — see
+// FolderView, including why it floats rather than sitting in the flow.
+// `active` drives the hover highlight; `handlers` come straight from
+// useFileDrag (getCurrentFolderDropHandlers / getListBackgroundDropHandlers).
+function DropZoneRow({
+  icon, label, active, handlers,
+}: {
+  icon: React.ReactNode
+  label: string
+  active: boolean
+  handlers: {
+    onDragEnter: (e: React.DragEvent) => void
+    onDragOver: (e: React.DragEvent) => void
+    onDragLeave: (e: React.DragEvent) => void
+    onDrop: (e: React.DragEvent) => void
+  }
+}) {
+  return (
+    <div
+      {...handlers}
+      className={`flex items-center gap-2 rounded-lg border-2 border-dashed px-3 py-2 text-sm shadow-lg transition-colors ${
+        active ? 'bg-blue-50 border-blue-400 text-blue-700' : 'bg-white/95 border-gray-300 text-gray-500'
+      }`}
+    >
+      {icon}
+      {label}
+    </div>
+  )
+}
+
 function QuotaBar({ used, quota, onAddStorage, label }: { used: number; quota: number; onAddStorage?: () => void; label?: string }) {
   const pct = quota > 0 ? (used / quota) * 100 : 0
   const color =
@@ -1746,6 +1950,75 @@ function QuotaBar({ used, quota, onAddStorage, label }: { used: number; quota: n
       <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
         <div className={`h-full rounded-full transition-all ${color}`} style={{ width: `${pct}%` }} />
       </div>
+    </div>
+  )
+}
+
+// BackgroundBackupCard is the toolbar card a backup keeps running behind once
+// its picker window is closed: counts, the file currently being written, the
+// run's total size, and the pause/cancel controls. Shared by the Google and
+// email flows, which differ only in icon and wording.
+function BackgroundBackupCard({ state, title, icon, onTogglePause, onCancel, onDismiss, busy }: {
+  state: BackgroundBackupState
+  title: string
+  icon: React.ReactNode
+  onTogglePause: () => void
+  onCancel: () => void
+  onDismiss: () => void
+  busy: boolean
+}) {
+  const pct = state.total > 0 ? Math.round((state.done / state.total) * 100) : 0
+  const barColor = state.running
+    ? (state.paused ? 'bg-amber-400' : 'bg-blue-500')
+    : state.errors > 0 ? 'bg-amber-500' : 'bg-green-500'
+
+  return (
+    <div className="mb-3 px-3 py-2.5 bg-white border border-gray-200 rounded-lg shadow-sm flex flex-col gap-1.5">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-1.5 min-w-0">
+          {icon}
+          <span className="text-xs font-semibold text-gray-700 truncate">
+            {state.paused && state.running ? 'Backup paused' : title}
+          </span>
+        </div>
+        {state.running ? (
+          <BackupRunControls
+            paused={state.paused}
+            busy={busy}
+            onTogglePause={onTogglePause}
+            onCancel={onCancel}
+            compact
+          />
+        ) : (
+          <button onClick={onDismiss} className="text-gray-400 hover:text-gray-600 cursor-pointer">
+            <MdClose className="text-sm" />
+          </button>
+        )}
+      </div>
+      <div className="flex items-center gap-2">
+        <div className="flex-1 h-1.5 bg-gray-200 rounded-full overflow-hidden">
+          <div className={`h-full rounded-full transition-all ${barColor}`} style={{ width: `${pct}%` }} />
+        </div>
+        <span className="text-xs text-gray-500 shrink-0">{state.done}/{state.total}</span>
+      </div>
+      {state.running && (
+        <BackupProgressDetails
+          currentPath={state.currentPath}
+          storedBytes={state.storedBytes}
+          totalBytes={state.totalBytes}
+          paused={state.paused}
+        />
+      )}
+      {state.note && <p className="text-xs text-amber-600 m-0">{state.note}</p>}
+      {!state.running && !state.note && (
+        <p className={`text-xs m-0 ${state.errors > 0 ? 'text-amber-600' : 'text-green-600'}`}>
+          {[
+            `${state.uploaded} backed up`,
+            state.duplicates > 0 ? `${state.duplicates} duplicate${state.duplicates !== 1 ? 's' : ''}` : null,
+            state.errors > 0 ? `${state.errors} failed` : null,
+          ].filter(Boolean).join(' · ')}
+        </p>
+      )}
     </div>
   )
 }

@@ -36,7 +36,7 @@ $CURL -X POST "$BASE_URL/api/v1/auth/register" \
   -d '{
     "username":     "alice",
     "email":        "alice@example.com",
-    "password":     "hunter2!!",
+    "password":     "Hunter2Hunter2!",
     "invite_token": "REPLACE_WITH_INVITE_TOKEN"
   }'
 

@@ -13,13 +13,13 @@ import (
 
 func scanInvitation(row *sql.Row) (*models.Invitation, error) {
 	var inv models.Invitation
-	var acceptedAt, revokedAt sql.NullTime
+	var acceptedAt, revokedAt, premiumExpiresAt sql.NullTime
 	var driveID uuid.NullUUID
 	err := row.Scan(
 		&inv.ID, &inv.InvitedByUserID, &inv.Email, &inv.Token,
 		&inv.TokenExpiresAt, &acceptedAt, &revokedAt, &inv.CreatedAt,
 		&inv.InitialQuotaBytes, &inv.GrantAdmin, &inv.GrantPremium,
-		&driveID,
+		&driveID, &premiumExpiresAt,
 	)
 	if err != nil {
 		return nil, err
@@ -32,19 +32,22 @@ func scanInvitation(row *sql.Row) (*models.Invitation, error) {
 	}
 	if driveID.Valid {
 		inv.InitialDriveID = &driveID.UUID
+	}
+	if premiumExpiresAt.Valid {
+		inv.PremiumExpiresAt = &premiumExpiresAt.Time
 	}
 	return &inv, nil
 }
 
 func scanInvitationRow(rows *sql.Rows) (*models.Invitation, error) {
 	var inv models.Invitation
-	var acceptedAt, revokedAt sql.NullTime
+	var acceptedAt, revokedAt, premiumExpiresAt sql.NullTime
 	var driveID uuid.NullUUID
 	err := rows.Scan(
 		&inv.ID, &inv.InvitedByUserID, &inv.Email, &inv.Token,
 		&inv.TokenExpiresAt, &acceptedAt, &revokedAt, &inv.CreatedAt,
 		&inv.InitialQuotaBytes, &inv.GrantAdmin, &inv.GrantPremium,
-		&driveID,
+		&driveID, &premiumExpiresAt,
 	)
 	if err != nil {
 		return nil, err
@@ -57,6 +60,9 @@ func scanInvitationRow(rows *sql.Rows) (*models.Invitation, error) {
 	}
 	if driveID.Valid {
 		inv.InitialDriveID = &driveID.UUID
+	}
+	if premiumExpiresAt.Valid {
+		inv.PremiumExpiresAt = &premiumExpiresAt.Time
 	}
 	return &inv, nil
 }
@@ -70,9 +76,10 @@ func (q *Queries) CreateInvitation(ctx context.Context, inv *models.Invitation) 
 	_, err := q.db.ExecContext(ctx, `
 		INSERT INTO invitations (
 			id, invited_by_user_id, email, token, token_expires_at,
-			initial_quota_bytes, grant_admin, grant_premium, initial_drive_id, created_at
-		) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, NOW())
-	`, inv.InvitedByUserID, inv.Email, inv.Token, inv.TokenExpiresAt, inv.InitialQuotaBytes, inv.GrantAdmin, inv.GrantPremium, driveID)
+			initial_quota_bytes, grant_admin, grant_premium, initial_drive_id,
+			premium_expires_at, created_at
+		) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+	`, inv.InvitedByUserID, inv.Email, inv.Token, inv.TokenExpiresAt, inv.InitialQuotaBytes, inv.GrantAdmin, inv.GrantPremium, driveID, inv.PremiumExpiresAt)
 	if err != nil {
 		return fmt.Errorf("CreateInvitation: %w", err)
 	}
@@ -82,13 +89,15 @@ func (q *Queries) CreateInvitation(ctx context.Context, inv *models.Invitation) 
 const invitationColumns = `
 	id, invited_by_user_id, email, token,
 	token_expires_at, accepted_at, revoked_at, created_at,
-	initial_quota_bytes, grant_admin, grant_premium, initial_drive_id`
+	initial_quota_bytes, grant_admin, grant_premium, initial_drive_id,
+	premium_expires_at`
 
 // GetInvitationByID returns an invitation by its UUID regardless of status.
 // Returns sql.ErrNoRows if not found.
 func (q *Queries) GetInvitationByID(ctx context.Context, id uuid.UUID) (*models.Invitation, error) {
-	row := q.db.QueryRowContext(ctx,
-		`SELECT`+invitationColumns+`FROM invitations WHERE id = $1`, id)
+	row := q.db.QueryRowContext(ctx, `
+		SELECT`+invitationColumns+`
+		FROM invitations WHERE id = $1`, id)
 	inv, err := scanInvitation(row)
 	if err != nil {
 		return nil, fmt.Errorf("GetInvitationByID: %w", err)

@@ -147,6 +147,7 @@ Docker logging uses the JSON file driver with rotation (10 MB max, 3 files). Ngi
 - `docs/email_backup_setup.md` — Gmail/Microsoft email backup feature (OAuth setup, architecture)
 - `docs/ai_recognition_setup.md` — premium AI recognition (models, resource pool, GPU enablement)
 - `docs/sfs_api.md` — SFS public API reference
+- `docs/cicd_setup.md` — GitHub Actions "Deploy All" workflow: self-hosted runner on the manager (required — the registry/Swarm are LAN-only), how it loads the manager's existing `.env` instead of duplicating secrets into GitHub, and how it relates to (and stays in sync with) `deploy.sh`
 - `docs/file_server_links.md` — premium WebDAV mount links (file server feature)
 - `docs/storage_reconciliation.md` — MinIO <-> Postgres reconciliation: drift sources, the daily 4am-local heartbeat, and the admin endpoints for it
 - `docs/drive_benchmark_setup.md` — on-demand fast (NVMe) vs standard (HDD) drive speed benchmark: how the trigger reaches node-agent, the writable scratch-directory host setup, the sequential + random-access (`O_DIRECT`, page-cache-bypassing) methodology, live per-node/per-disk progress reporting, and the promo blog post/cards it feeds

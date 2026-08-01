@@ -1,0 +1,148 @@
+name: Deploy All (Apollo SFS)
+description: >
+  Builds, pushes, and deploys every Apollo SFS service to the Swarm stack.
+  Intentionally mirrors deploy.sh's per-service tables (ORDER/IMAGE_REPO/
+  IMAGE_CONTEXT/IMAGE_DOCKERFILE/IMAGE_PLATFORMS/BUNDLE) but with no
+  per-service selection — every run always builds and deploys all of them
+  under one fresh tag. deploy.sh remains the tool for selective/manual
+  redeploys and rollbacks (see docs/registry_setup.md); this action is only
+  for "deploy everything" from CI. Update both files together if a service
+  is added, renamed, or its build config changes.
+
+runs:
+  using: composite
+  steps:
+    - name: Preflight checks
+      shell: bash
+      run: |
+        set -euo pipefail
+        command -v docker >/dev/null || { echo "docker not found in PATH" >&2; exit 1; }
+        docker buildx version >/dev/null 2>&1 || { echo "docker buildx not available" >&2; exit 1; }
+        test -f .env || { echo "Missing .env in $(pwd) — see docs/cicd_setup.md" >&2; exit 1; }
+
+        # Docker's size parser silently reads a bare number as BYTES when no unit
+        # suffix is given (e.g. "8" meant as 8G becomes an 8-byte limit), which
+        # fails deep inside `docker stack deploy` with a cryptic "Must be at
+        # least 4MiB" — catch it here instead, same check as deploy.sh.
+        set -a; source .env; set +a
+        if [[ -n "${RECOGNITION_MEM_LIMIT:-}" ]]; then
+          if [[ "$RECOGNITION_MEM_LIMIT" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+            echo "RECOGNITION_MEM_LIMIT=\"$RECOGNITION_MEM_LIMIT\" has no unit — use e.g. \"${RECOGNITION_MEM_LIMIT}G\"." >&2
+            exit 1
+          fi
+          if ! [[ "$RECOGNITION_MEM_LIMIT" =~ ^[0-9]+(\.[0-9]+)?[bBkKmMgGtT][bB]?$ ]]; then
+            echo "RECOGNITION_MEM_LIMIT=\"$RECOGNITION_MEM_LIMIT\" is not a valid Docker memory size." >&2
+            exit 1
+          fi
+        fi
+
+    - name: Resolve build tag
+      shell: bash
+      run: |
+        set -euo pipefail
+        set -a; source .env; set +a
+        echo "REGISTRY=${REGISTRY:-192.168.68.57:5000}" >> "$GITHUB_ENV"
+        echo "TAG=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+        echo "GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD)" >> "$GITHUB_ENV"
+
+    - name: Ensure buildx builder
+      shell: bash
+      run: |
+        set -euo pipefail
+        if docker buildx inspect apollo-builder >/dev/null 2>&1; then
+          docker buildx use apollo-builder
+        else
+          toml="$(mktemp)"
+          cat > "$toml" <<EOF
+        [registry."${REGISTRY}"]
+          http = true
+          insecure = true
+        EOF
+          docker buildx create --name apollo-builder --driver docker-container \
+            --driver-opt network=host --config "$toml" --bootstrap --use
+        fi
+
+    - name: Apply DB migrations
+      shell: bash
+      run: |
+        set -euo pipefail
+        set -a; source .env; set +a
+        STACK_NAME="apollo-sfs" ./db/apply-migrations.sh
+
+    - name: Build & push frontend
+      shell: bash
+      run: |
+        set -euo pipefail
+        set -a; source .env; set +a
+        docker buildx build --platform linux/amd64 \
+          -t "${REGISTRY}/apollo-sfs_frontend:${TAG}" \
+          --build-arg "VITE_MS_CLIENT_ID=${VITE_MS_CLIENT_ID:-}" \
+          frontend/ --push
+
+    - name: Build & push api
+      shell: bash
+      run: |
+        set -euo pipefail
+        set -a; source .env; set +a
+        docker buildx build --platform linux/amd64,linux/arm64 \
+          -t "${REGISTRY}/apollo-sfs_api:${TAG}" \
+          --build-arg "APP_VERSION=${TAG}" --build-arg "APP_GIT_BRANCH=${GIT_BRANCH}" \
+          api/ --push
+
+    - name: Build & push node-agent
+      shell: bash
+      run: |
+        set -euo pipefail
+        set -a; source .env; set +a
+        docker buildx build --platform linux/amd64,linux/arm64 \
+          -f api/Dockerfile.node-agent \
+          -t "${REGISTRY}/apollo-sfs-node-agent:${TAG}" \
+          api/ --push
+
+    - name: Build & push node-metrics-ingest
+      shell: bash
+      run: |
+        set -euo pipefail
+        set -a; source .env; set +a
+        docker buildx build --platform linux/amd64 \
+          -f api/Dockerfile.node-metrics-ingest \
+          -t "${REGISTRY}/apollo-sfs_node-metrics-ingest:${TAG}" \
+          api/ --push
+
+    - name: Build & push recognition
+      shell: bash
+      run: |
+        set -euo pipefail
+        set -a; source .env; set +a
+        docker buildx build --platform linux/amd64 \
+          -f recognition/Dockerfile \
+          -t "${REGISTRY}/apollo-sfs_recognition:${TAG}" \
+          recognition/ --push
+
+    - name: Build & push test-runner
+      shell: bash
+      run: |
+        set -euo pipefail
+        set -a; source .env; set +a
+        docker buildx build --platform linux/amd64 \
+          -f test-runner/Dockerfile \
+          -t "${REGISTRY}/apollo-sfs_test-runner:${TAG}" \
+          . --push
+
+    - name: Deploy stack
+      shell: bash
+      run: |
+        set -euo pipefail
+        set -a; source .env; set +a
+        export REGISTRY
+        export API_TAG="${TAG}"
+        export FRONTEND_TAG="${TAG}"
+        export NODE_AGENT_TAG="${TAG}"
+        export NODE_METRICS_INGEST_TAG="${TAG}"
+        export RECOGNITION_TAG="${TAG}"
+        export TEST_RUNNER_TAG="${TAG}"
+        docker stack deploy -c docker-stack.yml apollo-sfs
+
+    - name: Show rollout
+      shell: bash
+      run: docker stack services apollo-sfs

@@ -1,0 +1,33 @@
+name: Deploy All
+
+# Manual only — this deploys every service to production Swarm infrastructure
+# on real hardware (see CLAUDE.md's Docker Swarm section). No push/PR triggers;
+# trigger it from the Actions tab (or `gh workflow run`) once you're ready to ship.
+on:
+  workflow_dispatch: {}
+
+# Refuse to run two deploys at once against the same Swarm stack.
+concurrency:
+  group: apollo-sfs-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    # Must run on the manager itself: the registry (192.168.68.57:5000) and
+    # Swarm are LAN-only and unreachable from GitHub-hosted runners. See
+    # docs/cicd_setup.md for registering a self-hosted runner with this label.
+    runs-on: [self-hosted, apollo-manager]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Load production .env
+        shell: bash
+        run: |
+          set -euo pipefail
+          env_path="${APOLLO_SFS_ENV_PATH:-/home/apollo/apollo-sfs/.env}"
+          test -f "$env_path" || { echo "Production .env not found at $env_path — set APOLLO_SFS_ENV_PATH on the runner if it lives elsewhere." >&2; exit 1; }
+          cp "$env_path" .env
+
+      - name: Deploy all services
+        uses: ./.github/actions/deploy-all

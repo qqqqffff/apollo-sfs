@@ -92,6 +92,27 @@ describe('useDeleteJob', () => {
     expect(result.current.progress.items[0]).toMatchObject({ status: 'failed' })
   })
 
+  test('fails an item with a timeout instead of hanging forever on a stuck request', async () => {
+    jest.useFakeTimers()
+    mockDeleteFile.mockImplementation(() => new Promise(() => {})) // never resolves
+
+    const { result } = renderHook(() => useDeleteJob())
+
+    let outcome: { succeeded: number; failed: number } | undefined
+    await act(async () => {
+      const p = result.current.startDelete([{ type: 'file', id: 'f1', name: 'a.txt', sizeBytes: 10 }])
+      await jest.advanceTimersByTimeAsync(20_000)
+      outcome = await p
+    })
+
+    expect(outcome).toEqual({ succeeded: 0, failed: 1 })
+    expect(result.current.progress.status).toBe('allFailed')
+    expect(result.current.progress.items[0]).toMatchObject({ status: 'failed' })
+    expect(result.current.progress.items[0].error).toMatch(/Timed out/)
+
+    jest.useRealTimers()
+  })
+
   test('dismiss resets progress back to idle', async () => {
     const { result } = renderHook(() => useDeleteJob())
 

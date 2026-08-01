@@ -18,11 +18,26 @@ const IDLE: UploadProgress = {
 const DELETE_CONCURRENCY = 6
 const PAGE_SIZE = 200
 
+// A stuck request (dropped connection, a MinIO/Postgres hang) would otherwise
+// stall the whole job — every network call the job makes is raced against
+// this and fails fast instead, so one bad request costs 20s, not forever.
+const DELETE_TIMEOUT_MS = 20_000
+
 export interface DeleteTarget {
   type: 'file' | 'folder'
   id: string
   name: string
   sizeBytes: number
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number = DELETE_TIMEOUT_MS): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`Timed out after ${Math.round(ms / 1000)}s`)), ms)
+    promise.then(
+      (v) => { clearTimeout(timer); resolve(v) },
+      (e) => { clearTimeout(timer); reject(e) },
+    )
+  })
 }
 
 // Pages through one folder's direct contents (both cursors independently,
@@ -36,12 +51,12 @@ async function listAllContents(folderId: string): Promise<{ files: ApiFile[]; fo
   let fileDone = false
 
   for (;;) {
-    const page = await getFolder(folderId, {
+    const page = await withTimeout(getFolder(folderId, {
       folderCursor,
       fileCursor,
       folderLimit: folderDone ? 0 : PAGE_SIZE,
       fileLimit: fileDone ? 0 : PAGE_SIZE,
-    })
+    }))
     if (!folderDone) {
       folders.push(...page.subfolders.items)
       folderCursor = page.subfolders.next_token || undefined
@@ -59,13 +74,15 @@ async function listAllContents(folderId: string): Promise<{ files: ApiFile[]; fo
 
 // Recursively walks a folder's subtree, returning every file under it plus
 // every subfolder id in post-order (children before their parent) so each
-// folder is only deleted once it's already empty.
-async function enumerateSubtree(folderId: string): Promise<{ files: ApiFile[]; folderIdsPostOrder: string[] }> {
+// folder is only deleted once it's already empty. Exported so the delete
+// confirmation modal can build the same "what's about to be deleted" preview
+// (file list + quota impact) the job itself will act on.
+export async function enumerateFolderContents(folderId: string): Promise<{ files: ApiFile[]; folderIdsPostOrder: string[] }> {
   const { files, folders } = await listAllContents(folderId)
   const allFiles = [...files]
   const folderIdsPostOrder: string[] = []
   for (const sub of folders) {
-    const nested = await enumerateSubtree(sub.id)
+    const nested = await enumerateFolderContents(sub.id)
     allFiles.push(...nested.files)
     folderIdsPostOrder.push(...nested.folderIdsPostOrder)
   }
@@ -114,18 +131,18 @@ export function useDeleteJob() {
       patchItem(i, { status: 'uploading' })
       try {
         if (target.type === 'file') {
-          await deleteFile(target.id)
+          await withTimeout(deleteFile(target.id))
         } else {
-          const { files, folderIdsPostOrder } = await enumerateSubtree(target.id)
+          const { files, folderIdsPostOrder } = await enumerateFolderContents(target.id)
           let anyFileFailed = false
           for (let b = 0; b < files.length; b += DELETE_CONCURRENCY) {
             const batch = files.slice(b, b + DELETE_CONCURRENCY)
-            const results = await Promise.allSettled(batch.map((f) => deleteFile(f.id)))
+            const results = await Promise.allSettled(batch.map((f) => withTimeout(deleteFile(f.id))))
             if (results.some((r) => r.status === 'rejected')) anyFileFailed = true
           }
           if (anyFileFailed) throw new Error('some contents failed to delete')
           for (const folderId of folderIdsPostOrder) {
-            await deleteFolder(folderId)
+            await withTimeout(deleteFolder(folderId))
           }
         }
         patchItem(i, { status: 'done', loaded: target.sizeBytes })

@@ -85,9 +85,17 @@ interface Props {
   // Re-attempts only the items still in 'failed' status. Omitted for progress
   // sources that don't support retry (e.g. drive migration).
   onRetry?: () => void
+  // 'items' swaps the aggregate summary/progress bar from a byte count to an
+  // object count ("3 / 12 objects deleted") — used by the delete toast, where
+  // how many objects are gone matters more than how many bytes moved.
+  // Defaults to 'bytes' so the existing upload flow is unaffected.
+  unit?: 'bytes' | 'items'
+  // Past-tense verb for the object-count summaries (e.g. "deleted"). Defaults
+  // to "uploaded" so the existing upload flow is unaffected.
+  doneWord?: string
 }
 
-export function UploadToast({ progress, onDismiss, verb = 'Uploading', onRetry }: Props) {
+export function UploadToast({ progress, onDismiss, verb = 'Uploading', onRetry, unit = 'bytes', doneWord = 'uploaded' }: Props) {
   const { status, items, totalBytes, loadedBytes, speedBps, succeeded, failed } = progress
 
   useEffect(() => {
@@ -101,6 +109,9 @@ export function UploadToast({ progress, onDismiss, verb = 'Uploading', onRetry }
   const config = STATUS_CONFIG[status]
   const label = status === 'uploading' ? verb : config.label
   const bytesPct = totalBytes > 0 ? Math.min((loadedBytes / totalBytes) * 100, 100) : 0
+  const doneCount = items.filter((it) => it.status === 'done').length
+  const itemsPct = items.length > 0 ? Math.min((doneCount / items.length) * 100, 100) : 0
+  const overallPct = unit === 'items' ? itemsPct : bytesPct
   const remainingBytes = Math.max(0, totalBytes - loadedBytes)
   const speed = fmtSpeed(speedBps)
   const eta   = fmtEta(remainingBytes, speedBps)
@@ -143,17 +154,26 @@ export function UploadToast({ progress, onDismiss, verb = 'Uploading', onRetry }
         )}
       </div>
 
-      {/* Byte-level summary */}
+      {/* Byte- or object-count summary, depending on unit */}
       <div className="px-4 pb-2 flex items-center justify-between text-xs text-gray-500 gap-2">
         {isUploading ? (
-          <>
-            <span>{fmtBytes(loadedBytes)} / {fmtBytes(totalBytes)}</span>
-            <span className="text-gray-400">{bytesPct.toFixed(0)}%</span>
-          </>
+          unit === 'items' ? (
+            <>
+              <span>{doneCount} / {items.length} object{items.length !== 1 ? 's' : ''} {doneWord}</span>
+              <span className="text-gray-400">{itemsPct.toFixed(0)}%</span>
+            </>
+          ) : (
+            <>
+              <span>{fmtBytes(loadedBytes)} / {fmtBytes(totalBytes)}</span>
+              <span className="text-gray-400">{bytesPct.toFixed(0)}%</span>
+            </>
+          )
         ) : status === 'complete' ? (
-          <span>{items.length} file{items.length !== 1 ? 's' : ''} · {fmtBytes(totalBytes)}</span>
+          unit === 'items'
+            ? <span>{items.length} object{items.length !== 1 ? 's' : ''} {doneWord}</span>
+            : <span>{items.length} file{items.length !== 1 ? 's' : ''} · {fmtBytes(totalBytes)}</span>
         ) : (
-          <span>{succeeded} uploaded · {failed} failed</span>
+          <span>{succeeded} {doneWord} · {failed} failed</span>
         )}
       </div>
 
@@ -162,7 +182,7 @@ export function UploadToast({ progress, onDismiss, verb = 'Uploading', onRetry }
         <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
           <div
             className={`h-full rounded-full transition-all duration-150 ${config.bar}`}
-            style={{ width: isUploading ? `${bytesPct}%` : '100%' }}
+            style={{ width: isUploading ? `${overallPct}%` : '100%' }}
           />
         </div>
       </div>

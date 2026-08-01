@@ -91,3 +91,53 @@ describe('UploadToast', () => {
     jest.useRealTimers()
   })
 })
+
+describe('UploadToast unit="items" (delete toast)', () => {
+  const items: UploadProgress['items'] = [
+    { name: 'a.txt', size: 10, loaded: 10, status: 'done' },
+    { name: 'b.txt', size: 20, loaded: 0, status: 'uploading' },
+    { name: 'c.txt', size: 5, loaded: 0, status: 'queued' },
+  ]
+
+  test('shows an object-count summary instead of bytes while in progress', () => {
+    render(
+      <UploadToast
+        progress={makeProgress({ items, totalBytes: 35, loadedBytes: 10 })}
+        onDismiss={() => {}}
+        unit="items"
+        doneWord="deleted"
+      />,
+    )
+    expect(screen.getByText('1 / 3 objects deleted')).toBeInTheDocument()
+    expect(screen.queryByText(/KB|MB|GB| B$/)).not.toBeInTheDocument()
+  })
+
+  test('shows an object-count summary when complete', () => {
+    render(
+      <UploadToast
+        progress={makeProgress({ status: 'complete', items, succeeded: 3 })}
+        onDismiss={() => {}}
+        unit="items"
+        doneWord="deleted"
+      />,
+    )
+    expect(screen.getByText('3 objects deleted')).toBeInTheDocument()
+  })
+
+  test('shows deleted/failed counts on partial failure', () => {
+    render(
+      <UploadToast
+        progress={makeProgress({ status: 'partial', items, succeeded: 2, failed: 1 })}
+        onDismiss={() => {}}
+        unit="items"
+        doneWord="deleted"
+      />,
+    )
+    expect(screen.getByText('2 deleted · 1 failed')).toBeInTheDocument()
+  })
+
+  test('defaults to bytes when unit is omitted', () => {
+    render(<UploadToast progress={makeProgress()} onDismiss={() => {}} />)
+    expect(screen.getByText('0 B / 1.0 MB')).toBeInTheDocument()
+  })
+})

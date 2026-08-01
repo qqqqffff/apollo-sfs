@@ -30,8 +30,8 @@ import {
   MdUploadFile,
   MdVisibility,
 } from 'react-icons/md'
-import { createFolder, deleteFolder, moveFolder, renameFolder, requestDriveMigration } from '../../api/folders'
-import { deleteFile, downloadUrl, fileQueryOptions, moveFile, previewUrl, renameFile } from '../../api/files'
+import { createFolder, moveFolder, renameFolder, requestDriveMigration } from '../../api/folders'
+import { downloadUrl, fileQueryOptions, moveFile, previewUrl, renameFile } from '../../api/files'
 import { detectionThumbUrl } from '../../api/recognition'
 import { meQueryOptions, preferencesQueryOptions, updatePreferences } from '../../api/me'
 import { listMyServers, resolveDrive, type MyServer } from '../../api/storage'
@@ -46,6 +46,7 @@ import { StorageUpgradeModal, STORAGE_PROMPT_THRESHOLD } from '../../components/
 import { StorageBreakdownModal } from '../../components/StorageBreakdownModal'
 import { ShareModal } from '../../components/ShareModal'
 import { DeleteConfirmModal, readSkipDeleteCookie } from '../../components/DeleteConfirmModal'
+import { FolderDeleteConfirmModal } from '../../components/FolderDeleteConfirmModal'
 import { FolderBreadcrumb } from '../../components/FolderBreadcrumb'
 import { HoverDonut } from '../../components/HoverDonut'
 import { AccountBadges } from '../../components/GroupBadge'
@@ -553,14 +554,17 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
 
   async function runBulkDelete() {
     setBulkDeletePending(true)
-    const fileIds = Array.from(selectedFileIds)
-    const folderIds = Array.from(selectedFolderIds)
-    const results = await Promise.allSettled([
-      ...fileIds.map((id) => deleteFile(id)),
-      ...folderIds.map((id) => deleteFolder(id)),
-    ])
-    const total = results.length
-    const failed = results.filter((r) => r.status === 'rejected').length
+    // Route through the same cascading job single-item delete uses — a
+    // selected folder gets its subtree emptied first instead of a raw
+    // deleteFolder() call that 409s "not empty" (e.g. an email backup folder
+    // full of messages).
+    const targets: DeleteTarget[] = selectedBulkItems.map((item) => ({
+      type: item.kind,
+      id: item.id,
+      name: item.name,
+      sizeBytes: item.size_bytes,
+    }))
+    const { failed } = await startDelete(targets)
     setBulkDeletePending(false)
     setPendingBulkDelete(false)
     clearSelection()
@@ -568,7 +572,7 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
     queryClient.invalidateQueries({ queryKey: ['folders'] })
     queryClient.invalidateQueries({ queryKey: ['me'] })
     queryClient.invalidateQueries({ queryKey: ['storage', 'my-servers'] })
-    if (failed > 0) notify('error', `${total - failed} deleted, ${failed} failed (folders must be empty first)`)
+    if (failed > 0) notify('error', `${targets.length - failed} deleted, ${failed} failed`)
   }
 
   function handleBulkDeleteClick() {
@@ -1713,7 +1717,7 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
       )}
 
       <UploadToast progress={progress} onDismiss={dismiss} onRetry={() => retryFailed(onUploadSuccess)} />
-      <UploadToast progress={deleteProgress} onDismiss={dismissDelete} verb="Deleting" />
+      <UploadToast progress={deleteProgress} onDismiss={dismissDelete} verb="Deleting" unit="items" doneWord="deleted" />
 
       {storageModalReason && !readOnly && (
         <StorageUpgradeModal
@@ -1822,7 +1826,22 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
         />
       )}
 
-      {pendingDelete && (
+      {pendingDelete && pendingDelete.type === 'folder' && (
+        <FolderDeleteConfirmModal
+          folder={{ id: pendingDelete.id, name: pendingDelete.name, sizeBytes: pendingDelete.sizeBytes }}
+          username={user?.username ?? ''}
+          usedBytes={currentDrive ? currentDrive.used_bytes : (viewingUser?.storage_used_bytes ?? 0)}
+          quotaBytes={currentDrive ? currentDrive.quota_bytes : (viewingUser?.storage_quota_bytes ?? 0)}
+          quotaLabel={currentDrive ? `${tierLabel(currentDrive.drive_type)} · ${currentDrive.name}` : undefined}
+          onConfirm={() => {
+            runDelete(pendingDelete)
+            setPendingDelete(null)
+          }}
+          onCancel={() => setPendingDelete(null)}
+        />
+      )}
+
+      {pendingDelete && pendingDelete.type === 'file' && (
         <DeleteConfirmModal
           name={pendingDelete.name}
           username={user?.username ?? ''}

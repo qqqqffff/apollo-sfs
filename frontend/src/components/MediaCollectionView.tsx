@@ -593,7 +593,7 @@ export function MediaCollectionView({
         </div>
 
         <button
-          onClick={() => setShowFilters(true)}
+          onClick={() => { setShowFilters(true); setControlsOpen(false) }}
           title={selectionMode ? 'Select items by filter' : 'Filter this collection'}
           className={`inline-flex items-center gap-1 px-2.5 py-1.5 text-xs border rounded-lg cursor-pointer transition-colors ${
             activeFilterCount > 0

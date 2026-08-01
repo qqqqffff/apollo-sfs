@@ -60,6 +60,7 @@ import { SelectionToolbar } from '../../components/SelectionToolbar'
 import { BulkMoveModal, type BulkMoveItem } from '../../components/BulkMoveModal'
 import { BulkDeleteConfirmModal } from '../../components/BulkDeleteConfirmModal'
 import { useFileUpload } from '../../hooks/useFileUpload'
+import { useDeleteJob, type DeleteTarget } from '../../hooks/useDeleteJob'
 import { useDragDrop } from '../../hooks/useDragDrop'
 import { useFileDrag, HOVER_OPEN_DELAY_MS } from '../../hooks/useFileDrag'
 import { useSort, sortedFolders, sortedFiles } from '../../hooks/useSort'
@@ -313,7 +314,7 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
   const isPremium = user?.is_premium || user?.is_admin
   const fileRef = useRef<HTMLInputElement>(null)
   const [pendingFiles, setPendingFiles] = useState<globalThis.File[]>([])
-  const [pendingDelete, setPendingDelete] = useState<{ type: 'file' | 'folder'; id: string; name: string } | null>(null)
+  const [pendingDelete, setPendingDelete] = useState<DeleteTarget | null>(null)
   const [pendingShare, setPendingShare] = useState<{ type: 'file' | 'folder'; id: string; name: string } | null>(null)
   const [search, setSearch] = useState('')
   const [creatingFolder, setCreatingFolder] = useState(false)
@@ -323,6 +324,7 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
   const [newFolderKind, setNewFolderKind] = useState<FolderKind>('regular')
   const [newFolderDriveId, setNewFolderDriveId] = useState<string | null>(null)
   const { progress, startUpload, retryFailed, dismiss } = useFileUpload()
+  const { progress: deleteProgress, startDelete, dismiss: dismissDelete } = useDeleteJob()
   const onUploadSuccess = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ['folders', folderId] })
     queryClient.invalidateQueries({ queryKey: ['me'] })
@@ -659,25 +661,17 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
     setNewFolderDriveId(null)
   }
 
-  const deleteFolderMutation = useMutation({
-    mutationFn: deleteFolder,
-    onSuccess: () => {
+  // runDelete drives one delete through useDeleteJob's progress-reporting job
+  // (a non-empty folder has its whole subtree emptied first) and reuses the
+  // upload toast to show status instead of a single pass/fail notification.
+  function runDelete(target: DeleteTarget) {
+    void startDelete([target]).then(({ failed }) => {
       queryClient.invalidateQueries({ queryKey: ['folders'] })
       queryClient.invalidateQueries({ queryKey: ['me'] })
       queryClient.invalidateQueries({ queryKey: ['storage', 'my-servers'] })
-    },
-    onError: () => notify('error', 'Failed to delete folder'),
-  })
-
-  const deleteFileMutation = useMutation({
-    mutationFn: deleteFile,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['folders', folderId] })
-      queryClient.invalidateQueries({ queryKey: ['me'] })
-      queryClient.invalidateQueries({ queryKey: ['storage', 'my-servers'] })
-    },
-    onError: () => notify('error', 'Failed to delete file'),
-  })
+      if (failed > 0) notify('error', `Failed to delete "${target.name}"`)
+    })
+  }
 
   const renameFileMutation = useMutation({
     mutationFn: ({ id, name }: { id: string; name: string }) => renameFile(id, name),
@@ -720,12 +714,12 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
     setRenameValue('')
   }
 
-  function handleDeleteClick(type: 'file' | 'folder', id: string, name: string) {
+  function handleDeleteClick(type: 'file' | 'folder', id: string, name: string, sizeBytes: number) {
+    const target: DeleteTarget = { type, id, name, sizeBytes }
     if (user && readSkipDeleteCookie(user.username)) {
-      if (type === 'file') deleteFileMutation.mutate(id)
-      else deleteFolderMutation.mutate(id)
+      runDelete(target)
     } else {
-      setPendingDelete({ type, id, name })
+      setPendingDelete(target)
     }
   }
 
@@ -1539,7 +1533,7 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
                           <RenameButton onClick={() => startRename('folder', f.id, f.name)} title="Rename folder" />
                           <ShareButton onClick={() => setPendingShare({ type: 'folder', id: f.id, name: f.name })} title="Share folder" />
                           <DriveInfoButton folder={f} servers={myServers} isAdmin={!!user?.is_admin} />
-                          <DeleteButton onClick={() => handleDeleteClick('folder', f.id, f.name)} title="Delete folder" />
+                          <DeleteButton onClick={() => handleDeleteClick('folder', f.id, f.name, f.size_bytes)} title="Delete folder" />
                         </div>
                         <div className="sm:hidden">
                           <RowActionsMenu>
@@ -1564,7 +1558,7 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
                               <DriveInfoButton folder={f} servers={myServers} isAdmin={!!user?.is_admin} />
                             </MenuRow>
                             <MenuRow label="Delete folder">
-                              <DeleteButton onClick={() => handleDeleteClick('folder', f.id, f.name)} title="Delete folder" />
+                              <DeleteButton onClick={() => handleDeleteClick('folder', f.id, f.name, f.size_bytes)} title="Delete folder" />
                             </MenuRow>
                           </RowActionsMenu>
                         </div>
@@ -1649,7 +1643,7 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
                           <StarButton active={favoriteFileIds.has(f.id)} onClick={() => toggleFile(f.id)} title={favoriteFileIds.has(f.id) ? 'Remove from favorites' : 'Add to favorites'} />
                           <RenameButton onClick={() => startRename('file', f.id, f.name)} title="Rename file" />
                           <ShareButton onClick={() => setPendingShare({ type: 'file', id: f.id, name: f.name })} title="Share file" />
-                          <DeleteButton onClick={() => handleDeleteClick('file', f.id, f.name)} title="Delete file" />
+                          <DeleteButton onClick={() => handleDeleteClick('file', f.id, f.name, f.size_bytes)} title="Delete file" />
                         </div>
                         <div className="sm:hidden">
                           <RowActionsMenu>
@@ -1663,7 +1657,7 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
                               <ShareButton onClick={() => setPendingShare({ type: 'file', id: f.id, name: f.name })} title="Share file" />
                             </MenuRow>
                             <MenuRow label="Delete file">
-                              <DeleteButton onClick={() => handleDeleteClick('file', f.id, f.name)} title="Delete file" />
+                              <DeleteButton onClick={() => handleDeleteClick('file', f.id, f.name, f.size_bytes)} title="Delete file" />
                             </MenuRow>
                           </RowActionsMenu>
                         </div>
@@ -1719,6 +1713,7 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
       )}
 
       <UploadToast progress={progress} onDismiss={dismiss} onRetry={() => retryFailed(onUploadSuccess)} />
+      <UploadToast progress={deleteProgress} onDismiss={dismissDelete} verb="Deleting" />
 
       {storageModalReason && !readOnly && (
         <StorageUpgradeModal
@@ -1832,8 +1827,7 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
           name={pendingDelete.name}
           username={user?.username ?? ''}
           onConfirm={() => {
-            if (pendingDelete.type === 'file') deleteFileMutation.mutate(pendingDelete.id)
-            else deleteFolderMutation.mutate(pendingDelete.id)
+            runDelete(pendingDelete)
             setPendingDelete(null)
           }}
           onCancel={() => setPendingDelete(null)}

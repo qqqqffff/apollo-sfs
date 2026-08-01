@@ -60,6 +60,15 @@ type EmailBackupSenderSummary struct {
 	UnreadCount int    `json:"unread_count"`
 }
 
+// EmailBackupRecipientSummary is the to_addr counterpart of
+// EmailBackupSenderSummary — one row per distinct to_addr in the backup
+// folder, backing the viewer's mobile "group by recipient" toggle.
+type EmailBackupRecipientSummary struct {
+	ToAddr      string `json:"to_addr"`
+	TotalCount  int    `json:"total_count"`
+	UnreadCount int    `json:"unread_count"`
+}
+
 // EmailBackupRun mirrors the `email_backup_runs` table: one completed backup
 // run. Rows with Notify = true back the notification bell's
 // "email backup completed" items.

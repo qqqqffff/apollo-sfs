@@ -742,6 +742,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 			premiumGroup.POST("/email-backup/folders", h.EnsureEmailBackupFolder)
 			premiumGroup.POST("/email-backup/messages", h.BackupEmailMessage)
 			premiumGroup.GET("/email-backup/folders/:folder_id/senders", h.ListEmailBackupSenders)
+			premiumGroup.GET("/email-backup/folders/:folder_id/recipients", h.ListEmailBackupRecipients)
 			premiumGroup.GET("/email-backup/folders/:folder_id/messages", h.ListEmailBackupMessages)
 			premiumGroup.GET("/email-backup/messages/:id", h.GetEmailBackupMessage)
 			premiumGroup.PATCH("/email-backup/messages/:id/read", h.MarkEmailBackupMessageRead)

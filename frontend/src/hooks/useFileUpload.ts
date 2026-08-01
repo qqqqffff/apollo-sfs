@@ -28,6 +28,19 @@ export interface UploadProgress {
   speedBps: number   // bytes per second, computed from a sliding window
   succeeded: number
   failed: number
+  // Recursive object total/done count for jobs whose real unit of work is
+  // finer-grained than `items` — e.g. deleting a folder recursively
+  // enumerates its whole subtree, so `items` stays one row per top-level
+  // target while these report the true file count. Unset for a plain
+  // upload, where one item already is one object; UploadToast falls back to
+  // items.length / (succeeded+failed) in that case.
+  totalObjects?: number
+  doneObjects?: number
+  // Objects completed per second (sliding window), analogous to speedBps but
+  // for jobs where object count is a more meaningful completion-time basis
+  // than bytes/sec — a delete request costs roughly the same regardless of
+  // the file's size, so bytes/sec would be a poor ETA estimate for one.
+  objectsPerSec?: number
 }
 
 const IDLE: UploadProgress = {

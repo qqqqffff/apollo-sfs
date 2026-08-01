@@ -17,12 +17,20 @@ const mockDeleteFile = deleteFile as jest.Mock
 const mockDeleteFolder = deleteFolder as jest.Mock
 const mockGetFolder = getFolder as jest.Mock
 
-function page(files: { id: string; name: string; size_bytes: number }[], subfolders: { id: string }[] = []) {
+function page(
+  files: { id: string; name: string; size_bytes: number }[],
+  subfolders: { id: string }[] = [],
+  nextToken = '',
+) {
   return {
     folder: null,
     subfolders: { items: subfolders, next_token: '' },
-    files: { items: files, next_token: '' },
+    files: { items: files, next_token: nextToken },
   }
+}
+
+function makeFiles(prefix: string, count: number, sizeEach = 1) {
+  return Array.from({ length: count }, (_, i) => ({ id: `${prefix}${i}`, name: `${prefix}${i}.txt`, size_bytes: sizeEach }))
 }
 
 beforeEach(() => {
@@ -90,6 +98,56 @@ describe('useDeleteJob', () => {
     expect(result.current.progress.status).toBe('allFailed')
     expect(result.current.progress.failed).toBe(1)
     expect(result.current.progress.items[0]).toMatchObject({ status: 'failed' })
+  })
+
+  test('reports the true recursive object count for a large folder, not just the one folder row', async () => {
+    // 250 files split across two pages (page size is 200 internally) — the
+    // exact scenario a ~10,000-message email backup folder hits, scaled down.
+    const page1 = makeFiles('a', 200)
+    const page2 = makeFiles('b', 50)
+    mockGetFolder.mockImplementation((_folderId: string, opts: { fileCursor?: string }) =>
+      Promise.resolve(opts.fileCursor ? page(page2) : page(page1, [], 'cursor-2')),
+    )
+
+    const { result } = renderHook(() => useDeleteJob())
+
+    await act(async () => {
+      await result.current.startDelete([{ type: 'folder', id: 'parent', name: 'Email backup', sizeBytes: 250 }])
+    })
+
+    expect(mockDeleteFile).toHaveBeenCalledTimes(250)
+    expect(result.current.progress.totalObjects).toBe(250)
+    expect(result.current.progress.doneObjects).toBe(250)
+    expect(result.current.progress.loadedBytes).toBe(250)
+    expect(result.current.progress.items[0]).toMatchObject({ status: 'done', loaded: 250 })
+    expect(result.current.progress.status).toBe('complete')
+  })
+
+  test('tallies doneObjects/totalObjects across a mix of file and folder targets, even when one target partially fails', async () => {
+    mockGetFolder.mockResolvedValue(page(makeFiles('m', 3, 10)))
+    // The second of the three subtree files fails; the folder target as a
+    // whole is then marked failed, but the two that did succeed still count.
+    mockDeleteFile.mockImplementation((id: string) =>
+      id === 'm1' ? Promise.reject(new Error('gone')) : Promise.resolve({ message: 'deleted' }),
+    )
+
+    const { result } = renderHook(() => useDeleteJob())
+
+    let outcome: { succeeded: number; failed: number } | undefined
+    await act(async () => {
+      outcome = await result.current.startDelete([
+        { type: 'file', id: 'solo', name: 'solo.txt', sizeBytes: 5 },
+        { type: 'folder', id: 'parent', name: 'Parent', sizeBytes: 30 },
+      ])
+    })
+
+    expect(outcome).toEqual({ succeeded: 1, failed: 1 })
+    expect(result.current.progress.status).toBe('partial')
+    // 1 standalone file + 3 in the folder's subtree = 4 total objects.
+    expect(result.current.progress.totalObjects).toBe(4)
+    // The standalone file + the 2 subtree files that didn't fail = 3 done.
+    expect(result.current.progress.doneObjects).toBe(3)
+    expect(mockDeleteFolder).not.toHaveBeenCalled()
   })
 
   test('fails an item with a timeout instead of hanging forever on a stuck request', async () => {

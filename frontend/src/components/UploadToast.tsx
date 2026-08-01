@@ -20,9 +20,17 @@ function fmtSpeed(bps: number): string {
   return `${Math.round(bps)} B/s`
 }
 
-function fmtEta(remainingBytes: number, speedBps: number): string {
-  if (speedBps < 512 || remainingBytes <= 0) return ''
-  const secs = remainingBytes / speedBps
+function fmtRate(perSec: number): string {
+  if (perSec <= 0) return ''
+  return `~${perSec >= 10 ? Math.round(perSec) : perSec.toFixed(1)}/s`
+}
+
+// Generic "how long until remaining/rate is done" — used both for bytes/sec
+// (uploads) and objects/sec (deletes, where request cost is roughly
+// independent of file size, so an object-count rate estimates better).
+function fmtEta(remaining: number, ratePerSec: number): string {
+  if (ratePerSec <= 0 || remaining <= 0) return ''
+  const secs = remaining / ratePerSec
   if (secs > 3600) return `~${Math.ceil(secs / 3600)}h`
   if (secs > 60)   return `~${Math.ceil(secs / 60)}m`
   if (secs > 5)    return `~${Math.ceil(secs)}s`
@@ -109,12 +117,19 @@ export function UploadToast({ progress, onDismiss, verb = 'Uploading', onRetry, 
   const config = STATUS_CONFIG[status]
   const label = status === 'uploading' ? verb : config.label
   const bytesPct = totalBytes > 0 ? Math.min((loadedBytes / totalBytes) * 100, 100) : 0
-  const doneCount = items.filter((it) => it.status === 'done').length
-  const itemsPct = items.length > 0 ? Math.min((doneCount / items.length) * 100, 100) : 0
-  const overallPct = unit === 'items' ? itemsPct : bytesPct
+  // totalObjects/doneObjects report the true recursive count for jobs whose
+  // real unit of work is finer than `items` (a folder delete); fall back to
+  // items.length / done-item-count for a plain upload, where they're the same.
+  const totalObjects = progress.totalObjects ?? items.length
+  const doneObjects = progress.doneObjects ?? items.filter((it) => it.status === 'done').length
+  const objectsPct = totalObjects > 0 ? Math.min((doneObjects / totalObjects) * 100, 100) : 0
+  const overallPct = unit === 'items' ? objectsPct : bytesPct
   const remainingBytes = Math.max(0, totalBytes - loadedBytes)
-  const speed = fmtSpeed(speedBps)
-  const eta   = fmtEta(remainingBytes, speedBps)
+  const remainingObjects = Math.max(0, totalObjects - doneObjects)
+  const speed = unit === 'items' ? fmtRate(progress.objectsPerSec ?? 0) : fmtSpeed(speedBps)
+  const eta   = unit === 'items'
+    ? fmtEta(remainingObjects, progress.objectsPerSec ?? 0)
+    : fmtEta(remainingBytes, speedBps)
   const isUploading = status === 'uploading'
 
   return (
@@ -159,8 +174,8 @@ export function UploadToast({ progress, onDismiss, verb = 'Uploading', onRetry, 
         {isUploading ? (
           unit === 'items' ? (
             <>
-              <span>{doneCount} / {items.length} object{items.length !== 1 ? 's' : ''} {doneWord}</span>
-              <span className="text-gray-400">{itemsPct.toFixed(0)}%</span>
+              <span>{doneObjects} / {totalObjects} object{totalObjects !== 1 ? 's' : ''} {doneWord}</span>
+              <span className="text-gray-400">{objectsPct.toFixed(0)}%</span>
             </>
           ) : (
             <>
@@ -170,12 +185,22 @@ export function UploadToast({ progress, onDismiss, verb = 'Uploading', onRetry, 
           )
         ) : status === 'complete' ? (
           unit === 'items'
-            ? <span>{items.length} object{items.length !== 1 ? 's' : ''} {doneWord}</span>
+            ? <span>{totalObjects} object{totalObjects !== 1 ? 's' : ''} {doneWord}</span>
             : <span>{items.length} file{items.length !== 1 ? 's' : ''} · {fmtBytes(totalBytes)}</span>
         ) : (
-          <span>{succeeded} {doneWord} · {failed} failed</span>
+          unit === 'items'
+            ? <span>{doneObjects} {doneWord} · {remainingObjects} failed</span>
+            : <span>{succeeded} {doneWord} · {failed} failed</span>
         )}
       </div>
+
+      {/* Bytes freed sits alongside the object count for the delete toast —
+          "how many" and "how much space" both matter there. */}
+      {unit === 'items' && totalBytes > 0 && (
+        <div className="px-4 pb-2 -mt-1.5 text-[11px] text-gray-400">
+          {fmtBytes(loadedBytes)} / {fmtBytes(totalBytes)} freed
+        </div>
+      )}
 
       {/* Overall progress bar */}
       <div className="px-4 pb-2">

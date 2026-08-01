@@ -124,20 +124,74 @@ describe('UploadToast unit="items" (delete toast)', () => {
     expect(screen.getByText('3 objects deleted')).toBeInTheDocument()
   })
 
-  test('shows deleted/failed counts on partial failure', () => {
+  test('shows deleted/failed counts on partial failure, from the recursive object tally', () => {
     render(
       <UploadToast
-        progress={makeProgress({ status: 'partial', items, succeeded: 2, failed: 1 })}
+        // A single folder target (one row in `items`) whose subtree had 10
+        // real files, 8 of which deleted successfully — the object-level
+        // count matters here, not the one-row target-level succeeded/failed.
+        progress={makeProgress({
+          status: 'partial', items, succeeded: 0, failed: 1, totalObjects: 10, doneObjects: 8,
+        })}
         onDismiss={() => {}}
         unit="items"
         doneWord="deleted"
       />,
     )
-    expect(screen.getByText('2 deleted · 1 failed')).toBeInTheDocument()
+    expect(screen.getByText('8 deleted · 2 failed')).toBeInTheDocument()
   })
 
   test('defaults to bytes when unit is omitted', () => {
     render(<UploadToast progress={makeProgress()} onDismiss={() => {}} />)
     expect(screen.getByText('0 B / 1.0 MB')).toBeInTheDocument()
+  })
+
+  test('shows bytes freed alongside the object count', () => {
+    render(
+      <UploadToast
+        progress={makeProgress({ items, totalBytes: 35, loadedBytes: 10 })}
+        onDismiss={() => {}}
+        unit="items"
+        doneWord="deleted"
+      />,
+    )
+    expect(screen.getByText('10 B / 35 B freed')).toBeInTheDocument()
+  })
+
+  test('shows an objects/sec rate and ETA', () => {
+    render(
+      <UploadToast
+        progress={makeProgress({
+          items, totalBytes: 35, loadedBytes: 10, totalObjects: 2000, doneObjects: 800, objectsPerSec: 100,
+        })}
+        onDismiss={() => {}}
+        unit="items"
+      />,
+    )
+    // 1200 objects left at 100/s = 12s.
+    expect(screen.getByText('~100/s · ~12s')).toBeInTheDocument()
+  })
+})
+
+describe('UploadToast ETA (unit="bytes", the upload toast)', () => {
+  test('shows a speed and ETA once a rate is established', () => {
+    render(
+      <UploadToast
+        progress={makeProgress({ totalBytes: 2_000_000, loadedBytes: 800_000, speedBps: 100_000 })}
+        onDismiss={() => {}}
+      />,
+    )
+    // 1.2M bytes left at 100 KB/s (97.7 KB/s exactly) = 12s.
+    expect(screen.getByText('98 KB/s · ~12s')).toBeInTheDocument()
+  })
+
+  test('shows no ETA when there is no throughput yet', () => {
+    render(
+      <UploadToast
+        progress={makeProgress({ totalBytes: 1_000_000, loadedBytes: 0, speedBps: 0 })}
+        onDismiss={() => {}}
+      />,
+    )
+    expect(screen.queryByText(/~/)).not.toBeInTheDocument()
   })
 })

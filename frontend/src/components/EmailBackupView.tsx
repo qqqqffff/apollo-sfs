@@ -10,7 +10,8 @@ import {
 } from '../api/emailBackup'
 import { ApiError } from '../api/client'
 import { useNotification } from '../context/NotificationContext'
-import type { EmailBackupDetail } from '../types/emailBackup'
+import { SearchBar } from './SearchBar'
+import type { EmailBackupDetail, EmailBackupMessage } from '../types/emailBackup'
 import type { Folder } from '../types/api'
 
 interface Props {
@@ -41,6 +42,9 @@ export function EmailBackupView({ folder, readOnly, onBack }: Props) {
   const [selectedSender, setSelectedSender] = useState<string | undefined>(undefined)
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [confirmDelete, setConfirmDelete] = useState(false)
+  // Small-width layout swaps the 3-pane mail client for a search bar over a
+  // single-column subject list; search only narrows what's already loaded.
+  const [mobileSearch, setMobileSearch] = useState('')
 
   // ── Senders (sidebar) ──────────────────────────────────────────────────────
   const { data: sendersData, isLoading: sendersLoading } = useQuery(emailBackupSendersQueryOptions(folder.id))
@@ -58,6 +62,12 @@ export function EmailBackupView({ folder, readOnly, onBack }: Props) {
     fetchNextPage,
   } = useInfiniteQuery(emailBackupMessagesInfiniteQueryOptions(folder.id, selectedSender))
   const emails = useMemo(() => listData?.pages.flatMap(p => p.items ?? []) ?? [], [listData])
+  const mobileFilteredEmails = useMemo(() => {
+    const q = mobileSearch.trim().toLowerCase()
+    if (!q) return emails
+    return emails.filter((e: EmailBackupMessage) =>
+      (e.subject || '').toLowerCase().includes(q) || (e.from_addr || '').toLowerCase().includes(q))
+  }, [emails, mobileSearch])
 
   // ── Detail (right) ─────────────────────────────────────────────────────────
   const { data: detail, isLoading: detailLoading } = useQuery({
@@ -105,6 +115,17 @@ export function EmailBackupView({ folder, readOnly, onBack }: Props) {
     setConfirmDelete(false)
   }
 
+  // On small widths the detail pane becomes a full-screen overlay (see the
+  // mobile branch below) rather than a fixed-width side pane, so body scroll
+  // is locked while it's open — same pattern as DeleteConfirmModal. The list
+  // underneath stays mounted (just display:none'd), so its scroll position
+  // survives untouched for when the back button clears selectedId.
+  useEffect(() => {
+    if (!selectedId || window.innerWidth >= 640) return
+    document.body.style.overflow = 'hidden'
+    return () => { document.body.style.overflow = '' }
+  }, [selectedId])
+
   return (
     <div>
       <div className="flex items-center gap-2 mb-4">
@@ -121,7 +142,8 @@ export function EmailBackupView({ folder, readOnly, onBack }: Props) {
         </span>
       </div>
 
-      <div className="flex gap-4 h-[calc(100vh-220px)] min-h-100">
+      {/* ── Desktop / wide layout: sidebar + list + reading pane ─────────── */}
+      <div className="hidden sm:flex gap-4 h-[calc(100vh-220px)] min-h-100">
         {/* ── Sender sidebar ────────────────────────────────────────────── */}
         <aside className="w-48 shrink-0 bg-white rounded-xl border border-gray-200 overflow-y-auto">
           <SenderButton
@@ -220,6 +242,75 @@ export function EmailBackupView({ folder, readOnly, onBack }: Props) {
             />
           )}
         </div>
+      </div>
+
+      {/* ── Mobile / narrow layout: search bar + one-line subject list ───── */}
+      <div className="sm:hidden">
+        <div className={selectedId ? 'hidden' : 'block'}>
+          <SearchBar value={mobileSearch} onChange={setMobileSearch} placeholder="Search emails…" />
+          <div className="bg-white rounded-xl border border-gray-200 overflow-y-auto h-[calc(100vh-260px)] min-h-60">
+            {listLoading && <p className="px-4 py-3 text-sm text-gray-400">Loading…</p>}
+            {listError && <p className="px-4 py-3 text-sm text-red-500">Failed to load emails.</p>}
+            {!listLoading && mobileFilteredEmails.length === 0 && (
+              <p className="px-4 py-8 text-center text-sm text-gray-400">
+                {mobileSearch ? 'No matching emails.' : 'No emails.'}
+              </p>
+            )}
+            <ul className="divide-y divide-gray-100 list-none m-0 p-0">
+              {mobileFilteredEmails.map((e) => (
+                <li key={e.id}>
+                  <button
+                    onClick={() => selectEmail(e.id)}
+                    className="w-full flex items-center gap-2 px-4 py-3 cursor-pointer transition-colors border-0 bg-transparent hover:bg-gray-50"
+                  >
+                    {!e.read && <span className="w-2 h-2 rounded-full bg-blue-600 shrink-0" aria-label="unread" />}
+                    <span className={`flex-1 min-w-0 truncate text-sm text-left ${e.read ? 'text-gray-600' : 'text-gray-900 font-semibold'}`}>
+                      {e.subject || '(no subject)'}
+                    </span>
+                    {e.has_attachments && <MdAttachFile className="text-gray-400 text-sm shrink-0" title="Has attachment" />}
+                  </button>
+                </li>
+              ))}
+            </ul>
+            {hasNextPage && (
+              <button
+                onClick={() => fetchNextPage()}
+                disabled={isFetchingNextPage}
+                className="w-full py-2 text-sm text-blue-600 hover:text-blue-700 cursor-pointer bg-transparent border-0 disabled:opacity-50"
+              >
+                {isFetchingNextPage ? 'Loading…' : 'Load more'}
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Full-screen reading pane — tapping a row above opens this; back
+            clears selectedId, revealing the list (still mounted above, just
+            display:none'd) with its scroll position exactly as left. */}
+        {selectedId && (
+          <div className="fixed inset-0 z-40 bg-white overflow-y-auto">
+            <div className="sticky top-0 bg-white border-b border-gray-100 px-3 py-2.5 z-10">
+              <button
+                onClick={() => setSelectedId(null)}
+                className="inline-flex items-center gap-1 text-sm text-gray-600 hover:text-gray-900 cursor-pointer bg-transparent border-0 p-0 transition-colors"
+              >
+                <MdArrowBack className="text-lg" /> Back
+              </button>
+            </div>
+            {detailLoading && <p className="px-6 py-4 text-sm text-gray-400">Loading…</p>}
+            {detail && (
+              <EmailBackupDetailView
+                detail={detail}
+                readOnly={readOnly}
+                confirmDelete={confirmDelete}
+                deleting={deleteMutation.isPending}
+                onAskDelete={() => setConfirmDelete(true)}
+                onCancelDelete={() => setConfirmDelete(false)}
+                onConfirmDelete={() => deleteMutation.mutate(detail.id)}
+              />
+            )}
+          </div>
+        )}
       </div>
     </div>
   )

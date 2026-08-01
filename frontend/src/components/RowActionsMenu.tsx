@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import type { MouseEvent as ReactMouseEvent } from 'react'
 import { MdSettings } from 'react-icons/md'
 
 // RowActionsMenu packages a row's action buttons behind a single cog-icon
@@ -48,12 +49,26 @@ export function RowActionsMenu({ children }: { children: React.ReactNode }) {
 }
 
 // MenuRow labels a single action inside the dropdown panel, keeping the
-// actual control (an existing icon button/popover) on the right.
+// actual control (an existing icon button/popover) on the right. The label
+// text is otherwise inert, so a click anywhere in the row that didn't land on
+// the control itself is forwarded to it — the whole row becomes pressable,
+// not just the icon.
 export function MenuRow({ label, children }: { label: string; children: React.ReactNode }) {
+  const controlRef = useRef<HTMLSpanElement>(null)
+
+  function handleRowClick(e: ReactMouseEvent<HTMLDivElement>) {
+    if (controlRef.current?.contains(e.target as Node)) return
+    const control = controlRef.current?.querySelector<HTMLElement>('button, a, [role="button"]')
+    control?.click()
+  }
+
   return (
-    <div className="flex items-center justify-between gap-3 px-3 py-1.5 hover:bg-gray-50">
+    <div
+      onClick={handleRowClick}
+      className="flex items-center justify-between gap-3 px-3 py-1.5 hover:bg-gray-50 cursor-pointer"
+    >
       <span className="text-xs text-gray-600 whitespace-nowrap">{label}</span>
-      {children}
+      <span ref={controlRef} className="inline-flex items-center">{children}</span>
     </div>
   )
 }

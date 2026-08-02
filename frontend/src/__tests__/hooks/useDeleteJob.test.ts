@@ -141,7 +141,7 @@ describe('useDeleteJob', () => {
       ])
     })
 
-    expect(outcome).toEqual({ succeeded: 1, failed: 1 })
+    expect(outcome).toEqual({ succeeded: 1, failed: 1, cancelled: false })
     expect(result.current.progress.status).toBe('partial')
     // 1 standalone file + 3 in the folder's subtree = 4 total objects.
     expect(result.current.progress.totalObjects).toBe(4)
@@ -163,11 +163,88 @@ describe('useDeleteJob', () => {
       outcome = await p
     })
 
-    expect(outcome).toEqual({ succeeded: 0, failed: 1 })
+    expect(outcome).toEqual({ succeeded: 0, failed: 1, cancelled: false })
     expect(result.current.progress.status).toBe('allFailed')
     expect(result.current.progress.items[0]).toMatchObject({ status: 'failed' })
     expect(result.current.progress.items[0].error).toMatch(/Timed out/)
 
+    jest.useRealTimers()
+  })
+
+  test('cancel() finishes the in-flight target but leaves the rest queued', async () => {
+    jest.useFakeTimers()
+    let resolveSecond: (() => void) | undefined
+    mockDeleteFile.mockImplementation((id: string) => {
+      if (id === 'f2') return new Promise((resolve) => { resolveSecond = () => resolve({ message: 'deleted' }) })
+      return Promise.resolve({ message: 'deleted' })
+    })
+
+    const { result } = renderHook(() => useDeleteJob())
+    let resultPromise!: ReturnType<typeof result.current.startDelete>
+    act(() => {
+      resultPromise = result.current.startDelete([
+        { type: 'file', id: 'f1', name: 'a.txt', sizeBytes: 5 },
+        { type: 'file', id: 'f2', name: 'b.txt', sizeBytes: 5 },
+        { type: 'file', id: 'f3', name: 'c.txt', sizeBytes: 5 },
+      ])
+    })
+
+    await act(async () => { await jest.advanceTimersByTimeAsync(200) })
+    expect(result.current.progress.items[0].status).toBe('done')
+    expect(result.current.progress.items[1].status).toBe('uploading') // f2 in flight
+    expect(result.current.progress.items[2].status).toBe('queued')
+
+    act(() => { result.current.cancel() })
+
+    await act(async () => {
+      resolveSecond?.()
+      await jest.advanceTimersByTimeAsync(200)
+      await resultPromise
+    })
+
+    expect(mockDeleteFile).toHaveBeenCalledTimes(2) // f3 never attempted
+    expect(result.current.progress.status).toBe('cancelled')
+    expect(result.current.progress.items[1].status).toBe('done') // let the in-flight one finish
+    expect(result.current.progress.items[2].status).toBe('queued')
+
+    const res = await resultPromise
+    expect(res).toEqual({ succeeded: 2, failed: 0, cancelled: true })
+    jest.useRealTimers()
+  })
+
+  test('pause() blocks a later target from starting until resume()', async () => {
+    jest.useFakeTimers()
+    const { result } = renderHook(() => useDeleteJob())
+    let resultPromise!: ReturnType<typeof result.current.startDelete>
+    act(() => {
+      resultPromise = result.current.startDelete([
+        { type: 'file', id: 'f1', name: 'a.txt', sizeBytes: 5 },
+        { type: 'file', id: 'f2', name: 'b.txt', sizeBytes: 5 },
+      ])
+    })
+    // Pausing in the very same tick the run started races the first
+    // target's already-in-flight gate() check (same as a real pause click
+    // landing after the first item is already underway) — it still runs to
+    // completion; the second target's gate() check hasn't happened yet and
+    // is the one that actually blocks.
+    act(() => { result.current.pause() })
+    expect(result.current.progress.paused).toBe(true)
+
+    await act(async () => { await jest.advanceTimersByTimeAsync(500) })
+    expect(mockDeleteFile).toHaveBeenCalledTimes(1)
+    expect(mockDeleteFile).toHaveBeenCalledWith('f1')
+    expect(result.current.progress.items[1].status).toBe('queued')
+
+    act(() => { result.current.resume() })
+    expect(result.current.progress.paused).toBe(false)
+
+    await act(async () => {
+      await jest.advanceTimersByTimeAsync(200)
+      await resultPromise
+    })
+
+    expect(mockDeleteFile).toHaveBeenCalledTimes(2)
+    expect(result.current.progress.status).toBe('complete')
     jest.useRealTimers()
   })
 

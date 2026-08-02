@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
 import { MdClose } from 'react-icons/md'
 import type { UploadProgress, UploadStatus, FileUploadItem } from '../hooks/useFileUpload'
+import { BackupRunControls } from './BackupProgress'
 
 const AUTO_DISMISS_MS = 5000
 
@@ -46,6 +47,7 @@ const STATUS_CONFIG: Record<Exclude<UploadStatus, 'idle'>, StatusConfig> = {
   complete:  { label: 'Complete',        bar: 'bg-green-500',  accent: 'border-green-500',  labelColor: 'text-green-600' },
   partial:   { label: 'Partial failure', bar: 'bg-orange-400', accent: 'border-orange-400', labelColor: 'text-orange-500'},
   allFailed: { label: 'Failed',          bar: 'bg-red-500',    accent: 'border-red-500',    labelColor: 'text-red-500'   },
+  cancelled: { label: 'Cancelled',       bar: 'bg-amber-400',  accent: 'border-amber-400',  labelColor: 'text-amber-600' },
 }
 
 // ── Per-file row ───────────────────────────────────────────────────────────────
@@ -101,9 +103,24 @@ interface Props {
   // Past-tense verb for the object-count summaries (e.g. "deleted"). Defaults
   // to "uploaded" so the existing upload flow is unaffected.
   doneWord?: string
+  // True while the run is paused. Pause/cancel controls (same
+  // pause/resume/cancel logic the Google/email backup flows use — see
+  // api/backupControl.ts) only render while uploading and only when
+  // onRequestCancel is given, so a read-only progress source (e.g. drive
+  // migration's polled subscription) is unaffected.
+  paused?: boolean
+  onTogglePause?: () => void
+  // Opens the caller's own cancel-confirmation flow (pausing first, same as
+  // the backup flows' Cancel button) rather than cancelling directly, so the
+  // caller can decide what a cancel actually does (e.g. offer to roll back
+  // an upload, or just stop a delete in place).
+  onRequestCancel?: () => void
 }
 
-export function UploadToast({ progress, onDismiss, verb = 'Uploading', onRetry, unit = 'bytes', doneWord = 'uploaded' }: Props) {
+export function UploadToast({
+  progress, onDismiss, verb = 'Uploading', onRetry, unit = 'bytes', doneWord = 'uploaded',
+  paused, onTogglePause, onRequestCancel,
+}: Props) {
   const { status, items, totalBytes, loadedBytes, speedBps, succeeded, failed } = progress
 
   useEffect(() => {
@@ -131,6 +148,7 @@ export function UploadToast({ progress, onDismiss, verb = 'Uploading', onRetry, 
     ? fmtEta(remainingObjects, progress.objectsPerSec ?? 0)
     : fmtEta(remainingBytes, speedBps)
   const isUploading = status === 'uploading'
+  const displayLabel = isUploading && paused ? 'Paused' : label
 
   return (
     <div className={`fixed bottom-6 right-6 w-88 bg-white rounded-lg border-l-4 ${config.accent} border border-gray-200 shadow-xl z-50 overflow-hidden`}
@@ -139,16 +157,27 @@ export function UploadToast({ progress, onDismiss, verb = 'Uploading', onRetry, 
       {/* Header */}
       <div className="px-4 pt-3 pb-2 flex items-center justify-between gap-2">
         <div className="flex items-center gap-2 min-w-0">
-          <span className={`text-xs font-semibold shrink-0 ${config.labelColor}`}>
-            {label}
+          <span className={`text-xs font-semibold shrink-0 ${paused ? 'text-amber-600' : config.labelColor}`}>
+            {displayLabel}
           </span>
-          {isUploading && (speed || eta) && (
+          {isUploading && !paused && (speed || eta) && (
             <span className="text-xs text-gray-400 truncate">
               {[speed, eta].filter(Boolean).join(' · ')}
             </span>
           )}
         </div>
-        {!isUploading && (
+        {isUploading ? (
+          onRequestCancel && (
+            <div className="shrink-0">
+              <BackupRunControls
+                compact
+                paused={!!paused}
+                onTogglePause={onTogglePause ?? (() => {})}
+                onCancel={onRequestCancel}
+              />
+            </div>
+          )
+        ) : (
           <div className="flex items-center gap-2 shrink-0">
             {failed > 0 && onRetry && (
               <button
@@ -187,6 +216,10 @@ export function UploadToast({ progress, onDismiss, verb = 'Uploading', onRetry, 
           unit === 'items'
             ? <span>{totalObjects} object{totalObjects !== 1 ? 's' : ''} {doneWord}</span>
             : <span>{items.length} file{items.length !== 1 ? 's' : ''} · {fmtBytes(totalBytes)}</span>
+        ) : status === 'cancelled' ? (
+          unit === 'items'
+            ? <span>{doneObjects} {doneWord} — cancelled</span>
+            : <span>{succeeded} {doneWord} — cancelled</span>
         ) : (
           unit === 'items'
             ? <span>{doneObjects} {doneWord} · {remainingObjects} failed</span>

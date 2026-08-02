@@ -31,7 +31,7 @@ import {
   MdVisibility,
 } from 'react-icons/md'
 import { createFolder, moveFolder, renameFolder, requestDriveMigration } from '../../api/folders'
-import { downloadUrl, fileQueryOptions, moveFile, previewUrl, renameFile } from '../../api/files'
+import { deleteFile, downloadUrl, fileQueryOptions, moveFile, previewUrl, renameFile } from '../../api/files'
 import { detectionThumbUrl } from '../../api/recognition'
 import { meQueryOptions, preferencesQueryOptions, updatePreferences } from '../../api/me'
 import { listMyServers, resolveDrive, type MyServer } from '../../api/storage'
@@ -47,6 +47,7 @@ import { StorageBreakdownModal } from '../../components/StorageBreakdownModal'
 import { ShareModal } from '../../components/ShareModal'
 import { DeleteConfirmModal, readSkipDeleteCookie } from '../../components/DeleteConfirmModal'
 import { FolderDeleteConfirmModal } from '../../components/FolderDeleteConfirmModal'
+import { StopJobConfirmModal } from '../../components/StopJobConfirmModal'
 import { FolderBreadcrumb } from '../../components/FolderBreadcrumb'
 import { HoverDonut } from '../../components/HoverDonut'
 import { AccountBadges } from '../../components/GroupBadge'
@@ -60,7 +61,7 @@ import { SearchBar } from '../../components/SearchBar'
 import { SelectionToolbar } from '../../components/SelectionToolbar'
 import { BulkMoveModal, type BulkMoveItem } from '../../components/BulkMoveModal'
 import { BulkDeleteConfirmModal } from '../../components/BulkDeleteConfirmModal'
-import { useFileUpload } from '../../hooks/useFileUpload'
+import { useFileUpload, type UploadResult } from '../../hooks/useFileUpload'
 import { useDeleteJob, type DeleteTarget } from '../../hooks/useDeleteJob'
 import { useDragDrop } from '../../hooks/useDragDrop'
 import { useFileDrag, HOVER_OPEN_DELAY_MS } from '../../hooks/useFileDrag'
@@ -324,14 +325,88 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
   const [renameValue, setRenameValue] = useState('')
   const [newFolderKind, setNewFolderKind] = useState<FolderKind>('regular')
   const [newFolderDriveId, setNewFolderDriveId] = useState<string | null>(null)
-  const { progress, startUpload, retryFailed, dismiss } = useFileUpload()
-  const { progress: deleteProgress, startDelete, dismiss: dismissDelete } = useDeleteJob()
+  const {
+    progress, startUpload, retryFailed, dismiss,
+    pause: pauseUpload, resume: resumeUpload, cancel: cancelUpload,
+  } = useFileUpload()
+  const {
+    progress: deleteProgress, startDelete, dismiss: dismissDelete,
+    pause: pauseDelete, resume: resumeDelete, cancel: cancelDelete,
+  } = useDeleteJob()
+  // The in-flight startUpload() promise — cancelling an upload needs to wait
+  // for it to actually wind down before it knows which files landed (the
+  // rollback list), same as the Google/email backup flows awaiting their run
+  // before deciding what to do with the partial result.
+  const uploadRunRef = useRef<Promise<UploadResult> | null>(null)
+  const [uploadCancelPrompt, setUploadCancelPrompt] = useState(false)
+  const [uploadRollbackBusy, setUploadRollbackBusy] = useState(false)
+  const [deleteCancelPrompt, setDeleteCancelPrompt] = useState(false)
   const onUploadSuccess = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ['folders', folderId] })
     queryClient.invalidateQueries({ queryKey: ['me'] })
     queryClient.invalidateQueries({ queryKey: ['storage', 'my-servers'] })
   }, [queryClient, folderId])
   const { isDragging } = useDragDrop((dropped) => { if (!readOnly) setPendingFiles(dropped) })
+
+  // Cancel pauses first, then asks what to do — same two-step flow the
+  // Google/email backup flows use (api/backupControl.ts / BackupCancelModal).
+  function requestUploadCancel() {
+    pauseUpload()
+    setUploadCancelPrompt(true)
+  }
+
+  async function resolveUploadCancelKeep() {
+    setUploadCancelPrompt(false)
+    cancelUpload()
+    const res = await uploadRunRef.current
+    if (res) {
+      notify('success', `Upload cancelled — ${res.succeeded} file${res.succeeded !== 1 ? 's' : ''} kept.`)
+    }
+  }
+
+  async function resolveUploadCancelRemove() {
+    setUploadRollbackBusy(true)
+    cancelUpload()
+    const res = await uploadRunRef.current
+    if (res && res.uploadedFileIds.length > 0) {
+      const results = await Promise.allSettled(res.uploadedFileIds.map((id) => deleteFile(id)))
+      const removed = results.filter((r) => r.status === 'fulfilled').length
+      const failed = res.uploadedFileIds.length - removed
+      queryClient.invalidateQueries({ queryKey: ['folders'] })
+      queryClient.invalidateQueries({ queryKey: ['me'] })
+      queryClient.invalidateQueries({ queryKey: ['storage', 'my-servers'] })
+      notify(
+        failed === 0 ? 'success' : 'error',
+        failed === 0
+          ? `Upload cancelled — ${removed} file${removed !== 1 ? 's' : ''} removed again.`
+          : `Upload cancelled — ${removed} of ${res.uploadedFileIds.length} removed; ${failed} could not be deleted.`,
+      )
+    } else {
+      notify('success', 'Upload cancelled.')
+    }
+    setUploadRollbackBusy(false)
+    setUploadCancelPrompt(false)
+  }
+
+  function resumeFromUploadCancelPrompt() {
+    setUploadCancelPrompt(false)
+    resumeUpload()
+  }
+
+  function requestDeleteCancel() {
+    pauseDelete()
+    setDeleteCancelPrompt(true)
+  }
+
+  function resolveDeleteCancelStop() {
+    setDeleteCancelPrompt(false)
+    cancelDelete()
+  }
+
+  function resumeFromDeleteCancelPrompt() {
+    setDeleteCancelPrompt(false)
+    resumeDelete()
+  }
 
   // ── Multi-select state ─────────────────────────────────────────────────────
   const [selectionMode, setSelectionMode] = useState(false)
@@ -1710,14 +1785,57 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
             setPendingFiles([])
             // Pin root uploads to the drive whose view we're in; inside a folder
             // the folder's own drive governs (pass undefined).
-            startUpload(filesToUpload, uploadFolderId, onUploadSuccess, ignoreRedirectIndices, folderId === 'root' ? driveId : undefined)
+            uploadRunRef.current = startUpload(
+              filesToUpload, uploadFolderId, onUploadSuccess, ignoreRedirectIndices, folderId === 'root' ? driveId : undefined,
+            )
           }}
           onCancel={() => setPendingFiles([])}
         />
       )}
 
-      <UploadToast progress={progress} onDismiss={dismiss} onRetry={() => retryFailed(onUploadSuccess)} />
-      <UploadToast progress={deleteProgress} onDismiss={dismissDelete} verb="Deleting" unit="items" doneWord="deleted" />
+      <UploadToast
+        progress={progress}
+        onDismiss={dismiss}
+        onRetry={() => retryFailed(onUploadSuccess)}
+        paused={progress.paused}
+        onTogglePause={() => (progress.paused ? resumeUpload() : pauseUpload())}
+        onRequestCancel={requestUploadCancel}
+      />
+      <UploadToast
+        progress={deleteProgress}
+        onDismiss={dismissDelete}
+        verb="Deleting"
+        unit="items"
+        doneWord="deleted"
+        paused={deleteProgress.paused}
+        onTogglePause={() => (deleteProgress.paused ? resumeDelete() : pauseDelete())}
+        onRequestCancel={requestDeleteCancel}
+      />
+
+      {uploadCancelPrompt && (
+        <BackupCancelModal
+          storedCount={progress.succeeded}
+          storedBytes={progress.loadedBytes}
+          unit="file"
+          busy={uploadRollbackBusy}
+          onRemove={resolveUploadCancelRemove}
+          onKeep={resolveUploadCancelKeep}
+          onResume={resumeFromUploadCancelPrompt}
+        />
+      )}
+
+      {deleteCancelPrompt && (
+        <StopJobConfirmModal
+          title="Cancel this delete?"
+          message={
+            (deleteProgress.doneObjects ?? 0) > 0
+              ? `The delete is paused. ${deleteProgress.doneObjects} of ${deleteProgress.totalObjects ?? deleteProgress.items.length} object${deleteProgress.doneObjects !== 1 ? 's' : ''} already deleted will stay deleted — cancelling just stops here.`
+              : 'The delete is paused and nothing has been deleted yet — cancelling just stops here.'
+          }
+          onStop={resolveDeleteCancelStop}
+          onResume={resumeFromDeleteCancelPrompt}
+        />
+      )}
 
       {storageModalReason && !readOnly && (
         <StorageUpgradeModal

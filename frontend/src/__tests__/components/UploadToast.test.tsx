@@ -1,4 +1,4 @@
-import { render, screen, act } from '@testing-library/react'
+import { render, screen, act, fireEvent } from '@testing-library/react'
 import '@testing-library/jest-dom'
 import { UploadToast } from '../../components/UploadToast'
 import type { UploadProgress } from '../../hooks/useFileUpload'
@@ -193,5 +193,82 @@ describe('UploadToast ETA (unit="bytes", the upload toast)', () => {
       />,
     )
     expect(screen.queryByText(/~/)).not.toBeInTheDocument()
+  })
+})
+
+describe('UploadToast pause/cancel controls (same control the backup flows use)', () => {
+  test('no pause/cancel controls when onRequestCancel is omitted (e.g. drive migration)', () => {
+    render(<UploadToast progress={makeProgress()} onDismiss={() => {}} />)
+    expect(screen.queryByText('Pause')).not.toBeInTheDocument()
+    expect(screen.queryByText('Cancel')).not.toBeInTheDocument()
+  })
+
+  test('shows Pause and Cancel while uploading when onRequestCancel is given', () => {
+    render(
+      <UploadToast
+        progress={makeProgress()}
+        onDismiss={() => {}}
+        onTogglePause={() => {}}
+        onRequestCancel={() => {}}
+      />,
+    )
+    expect(screen.getByText('Pause')).toBeInTheDocument()
+    expect(screen.getByText('Cancel')).toBeInTheDocument()
+  })
+
+  test('clicking Cancel calls onRequestCancel, not a direct cancel', () => {
+    const onRequestCancel = jest.fn()
+    render(
+      <UploadToast
+        progress={makeProgress()}
+        onDismiss={() => {}}
+        onTogglePause={() => {}}
+        onRequestCancel={onRequestCancel}
+      />,
+    )
+    fireEvent.click(screen.getByText('Cancel'))
+    expect(onRequestCancel).toHaveBeenCalledTimes(1)
+  })
+
+  test('clicking Pause calls onTogglePause', () => {
+    const onTogglePause = jest.fn()
+    render(
+      <UploadToast
+        progress={makeProgress()}
+        onDismiss={() => {}}
+        onTogglePause={onTogglePause}
+        onRequestCancel={() => {}}
+      />,
+    )
+    fireEvent.click(screen.getByText('Pause'))
+    expect(onTogglePause).toHaveBeenCalledTimes(1)
+  })
+
+  test('shows "Paused" label and a Resume button when paused', () => {
+    render(
+      <UploadToast
+        progress={makeProgress()}
+        onDismiss={() => {}}
+        paused
+        onTogglePause={() => {}}
+        onRequestCancel={() => {}}
+      />,
+    )
+    expect(screen.getByText('Paused')).toBeInTheDocument()
+    expect(screen.getByText('Resume')).toBeInTheDocument()
+  })
+
+  test('shows the "Cancelled" label and status once the run stops', () => {
+    render(
+      <UploadToast
+        progress={makeProgress({ status: 'cancelled', succeeded: 2, loadedBytes: 20 })}
+        onDismiss={() => {}}
+      />,
+    )
+    expect(screen.getByText('Cancelled')).toBeInTheDocument()
+    expect(screen.getByText('2 uploaded — cancelled')).toBeInTheDocument()
+    // Not "uploading" any more, so the pause/cancel controls are gone and
+    // dismiss is available again, same as complete/failed/partial.
+    expect(screen.getByLabelText('Dismiss')).toBeInTheDocument()
   })
 })

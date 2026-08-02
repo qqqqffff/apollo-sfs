@@ -37,8 +37,19 @@ jest.mock('../../../context/ImpersonationContext', () => ({
 }))
 
 // Hook mocks
+const IDLE_UPLOAD_PROGRESS = {
+  status: 'idle', items: [], totalBytes: 0, loadedBytes: 0, speedBps: 0, succeeded: 0, failed: 0,
+}
 jest.mock('../../../hooks/useFileUpload', () => ({
-  useFileUpload: () => ({ progress: null, startUpload: jest.fn(), dismiss: jest.fn() }),
+  useFileUpload: () => ({
+    progress: IDLE_UPLOAD_PROGRESS,
+    startUpload: jest.fn(),
+    retryFailed: jest.fn(),
+    dismiss: jest.fn(),
+    pause: jest.fn(),
+    resume: jest.fn(),
+    cancel: jest.fn(),
+  }),
 }))
 jest.mock('../../../hooks/useDragDrop', () => ({
   useDragDrop: (_cb: any) => ({ isDragging: false }),

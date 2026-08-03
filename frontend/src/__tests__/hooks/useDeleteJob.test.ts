@@ -248,6 +248,45 @@ describe('useDeleteJob', () => {
     jest.useRealTimers()
   })
 
+  test('doneObjects (and its rate) advance batch by batch during a folder delete, not just once the whole folder is done', async () => {
+    // Two batches of DELETE_CONCURRENCY (6) files each — batch A resolves
+    // immediately, batch B is held back until released, so we can observe
+    // progress mid-folder rather than only at completion.
+    jest.useFakeTimers()
+    const filesA = makeFiles('a', 6)
+    const filesB = makeFiles('b', 6)
+    mockGetFolder.mockResolvedValue(page([...filesA, ...filesB]))
+    const releaseB: (() => void)[] = []
+    mockDeleteFile.mockImplementation((id: string) => {
+      if (id.startsWith('b')) {
+        return new Promise((resolve) => { releaseB.push(() => resolve({ message: 'deleted' })) })
+      }
+      return Promise.resolve({ message: 'deleted' })
+    })
+
+    const { result } = renderHook(() => useDeleteJob())
+    let resultPromise!: ReturnType<typeof result.current.startDelete>
+    act(() => {
+      resultPromise = result.current.startDelete([
+        { type: 'folder', id: 'parent', name: 'Parent', sizeBytes: 12 },
+      ])
+    })
+
+    await act(async () => { await jest.advanceTimersByTimeAsync(200) })
+    // Batch A is done, batch B is still in flight — doneObjects must reflect
+    // that live, the same way loadedBytes already does.
+    expect(result.current.progress.doneObjects).toBe(6)
+    expect(result.current.progress.totalObjects).toBe(12)
+    expect(result.current.progress.status).toBe('uploading')
+
+    act(() => { releaseB.forEach((r) => r()) })
+    await act(async () => { await jest.advanceTimersByTimeAsync(200); await resultPromise })
+
+    expect(result.current.progress.doneObjects).toBe(12)
+    expect(result.current.progress.status).toBe('complete')
+    jest.useRealTimers()
+  })
+
   test('dismiss resets progress back to idle', async () => {
     const { result } = renderHook(() => useDeleteJob())
 

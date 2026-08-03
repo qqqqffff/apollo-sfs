@@ -256,8 +256,8 @@ func (s *EmailBackupService) ListSenders(ctx context.Context, folderID, userID u
 }
 
 // ListMessages returns a page of index rows for the folder, optionally scoped
-// to one sender address, newest first.
-func (s *EmailBackupService) ListMessages(ctx context.Context, folderID, userID uuid.UUID, fromAddr string, in db.PageInput) (*db.PageResult[models.EmailBackupMessage], error) {
+// to one sender and/or recipient address, newest first.
+func (s *EmailBackupService) ListMessages(ctx context.Context, folderID, userID uuid.UUID, fromAddr, toAddr string, in db.PageInput) (*db.PageResult[models.EmailBackupMessage], error) {
 	if _, err := s.getOwnedEmailFolder(ctx, folderID, userID); err != nil {
 		return nil, err
 	}
@@ -266,7 +266,28 @@ func (s *EmailBackupService) ListMessages(ctx context.Context, folderID, userID 
 		return nil, fmt.Errorf("list messages: begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	return q.ListEmailBackupMessages(ctx, folderID, strings.TrimSpace(fromAddr), in)
+	return q.ListEmailBackupMessages(ctx, folderID, strings.TrimSpace(fromAddr), strings.TrimSpace(toAddr), in)
+}
+
+// ListRecipients returns the folder's distinct recipients with total/unread
+// counts — the to_addr counterpart of ListSenders.
+func (s *EmailBackupService) ListRecipients(ctx context.Context, folderID, userID uuid.UUID) ([]models.EmailBackupRecipientSummary, error) {
+	if _, err := s.getOwnedEmailFolder(ctx, folderID, userID); err != nil {
+		return nil, err
+	}
+	q, tx, err := s.queries.ForUser(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list recipients: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	recipients, err := q.ListEmailBackupRecipients(ctx, folderID)
+	if err != nil {
+		return nil, err
+	}
+	if recipients == nil {
+		recipients = []models.EmailBackupRecipientSummary{}
+	}
+	return recipients, nil
 }
 
 // GetMessage loads the index row and decrypts the backing file into the full

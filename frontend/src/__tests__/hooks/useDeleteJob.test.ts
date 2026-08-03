@@ -17,12 +17,20 @@ const mockDeleteFile = deleteFile as jest.Mock
 const mockDeleteFolder = deleteFolder as jest.Mock
 const mockGetFolder = getFolder as jest.Mock
 
-function page(files: { id: string; name: string; size_bytes: number }[], subfolders: { id: string }[] = []) {
+function page(
+  files: { id: string; name: string; size_bytes: number }[],
+  subfolders: { id: string }[] = [],
+  nextToken = '',
+) {
   return {
     folder: null,
     subfolders: { items: subfolders, next_token: '' },
-    files: { items: files, next_token: '' },
+    files: { items: files, next_token: nextToken },
   }
+}
+
+function makeFiles(prefix: string, count: number, sizeEach = 1) {
+  return Array.from({ length: count }, (_, i) => ({ id: `${prefix}${i}`, name: `${prefix}${i}.txt`, size_bytes: sizeEach }))
 }
 
 beforeEach(() => {
@@ -90,6 +98,154 @@ describe('useDeleteJob', () => {
     expect(result.current.progress.status).toBe('allFailed')
     expect(result.current.progress.failed).toBe(1)
     expect(result.current.progress.items[0]).toMatchObject({ status: 'failed' })
+  })
+
+  test('reports the true recursive object count for a large folder, not just the one folder row', async () => {
+    // 250 files split across two pages (page size is 200 internally) — the
+    // exact scenario a ~10,000-message email backup folder hits, scaled down.
+    const page1 = makeFiles('a', 200)
+    const page2 = makeFiles('b', 50)
+    mockGetFolder.mockImplementation((_folderId: string, opts: { fileCursor?: string }) =>
+      Promise.resolve(opts.fileCursor ? page(page2) : page(page1, [], 'cursor-2')),
+    )
+
+    const { result } = renderHook(() => useDeleteJob())
+
+    await act(async () => {
+      await result.current.startDelete([{ type: 'folder', id: 'parent', name: 'Email backup', sizeBytes: 250 }])
+    })
+
+    expect(mockDeleteFile).toHaveBeenCalledTimes(250)
+    expect(result.current.progress.totalObjects).toBe(250)
+    expect(result.current.progress.doneObjects).toBe(250)
+    expect(result.current.progress.loadedBytes).toBe(250)
+    expect(result.current.progress.items[0]).toMatchObject({ status: 'done', loaded: 250 })
+    expect(result.current.progress.status).toBe('complete')
+  })
+
+  test('tallies doneObjects/totalObjects across a mix of file and folder targets, even when one target partially fails', async () => {
+    mockGetFolder.mockResolvedValue(page(makeFiles('m', 3, 10)))
+    // The second of the three subtree files fails; the folder target as a
+    // whole is then marked failed, but the two that did succeed still count.
+    mockDeleteFile.mockImplementation((id: string) =>
+      id === 'm1' ? Promise.reject(new Error('gone')) : Promise.resolve({ message: 'deleted' }),
+    )
+
+    const { result } = renderHook(() => useDeleteJob())
+
+    let outcome: { succeeded: number; failed: number } | undefined
+    await act(async () => {
+      outcome = await result.current.startDelete([
+        { type: 'file', id: 'solo', name: 'solo.txt', sizeBytes: 5 },
+        { type: 'folder', id: 'parent', name: 'Parent', sizeBytes: 30 },
+      ])
+    })
+
+    expect(outcome).toEqual({ succeeded: 1, failed: 1, cancelled: false })
+    expect(result.current.progress.status).toBe('partial')
+    // 1 standalone file + 3 in the folder's subtree = 4 total objects.
+    expect(result.current.progress.totalObjects).toBe(4)
+    // The standalone file + the 2 subtree files that didn't fail = 3 done.
+    expect(result.current.progress.doneObjects).toBe(3)
+    expect(mockDeleteFolder).not.toHaveBeenCalled()
+  })
+
+  test('fails an item with a timeout instead of hanging forever on a stuck request', async () => {
+    jest.useFakeTimers()
+    mockDeleteFile.mockImplementation(() => new Promise(() => {})) // never resolves
+
+    const { result } = renderHook(() => useDeleteJob())
+
+    let outcome: { succeeded: number; failed: number } | undefined
+    await act(async () => {
+      const p = result.current.startDelete([{ type: 'file', id: 'f1', name: 'a.txt', sizeBytes: 10 }])
+      await jest.advanceTimersByTimeAsync(20_000)
+      outcome = await p
+    })
+
+    expect(outcome).toEqual({ succeeded: 0, failed: 1, cancelled: false })
+    expect(result.current.progress.status).toBe('allFailed')
+    expect(result.current.progress.items[0]).toMatchObject({ status: 'failed' })
+    expect(result.current.progress.items[0].error).toMatch(/Timed out/)
+
+    jest.useRealTimers()
+  })
+
+  test('cancel() finishes the in-flight target but leaves the rest queued', async () => {
+    jest.useFakeTimers()
+    let resolveSecond: (() => void) | undefined
+    mockDeleteFile.mockImplementation((id: string) => {
+      if (id === 'f2') return new Promise((resolve) => { resolveSecond = () => resolve({ message: 'deleted' }) })
+      return Promise.resolve({ message: 'deleted' })
+    })
+
+    const { result } = renderHook(() => useDeleteJob())
+    let resultPromise!: ReturnType<typeof result.current.startDelete>
+    act(() => {
+      resultPromise = result.current.startDelete([
+        { type: 'file', id: 'f1', name: 'a.txt', sizeBytes: 5 },
+        { type: 'file', id: 'f2', name: 'b.txt', sizeBytes: 5 },
+        { type: 'file', id: 'f3', name: 'c.txt', sizeBytes: 5 },
+      ])
+    })
+
+    await act(async () => { await jest.advanceTimersByTimeAsync(200) })
+    expect(result.current.progress.items[0].status).toBe('done')
+    expect(result.current.progress.items[1].status).toBe('uploading') // f2 in flight
+    expect(result.current.progress.items[2].status).toBe('queued')
+
+    act(() => { result.current.cancel() })
+
+    await act(async () => {
+      resolveSecond?.()
+      await jest.advanceTimersByTimeAsync(200)
+      await resultPromise
+    })
+
+    expect(mockDeleteFile).toHaveBeenCalledTimes(2) // f3 never attempted
+    expect(result.current.progress.status).toBe('cancelled')
+    expect(result.current.progress.items[1].status).toBe('done') // let the in-flight one finish
+    expect(result.current.progress.items[2].status).toBe('queued')
+
+    const res = await resultPromise
+    expect(res).toEqual({ succeeded: 2, failed: 0, cancelled: true })
+    jest.useRealTimers()
+  })
+
+  test('pause() blocks a later target from starting until resume()', async () => {
+    jest.useFakeTimers()
+    const { result } = renderHook(() => useDeleteJob())
+    let resultPromise!: ReturnType<typeof result.current.startDelete>
+    act(() => {
+      resultPromise = result.current.startDelete([
+        { type: 'file', id: 'f1', name: 'a.txt', sizeBytes: 5 },
+        { type: 'file', id: 'f2', name: 'b.txt', sizeBytes: 5 },
+      ])
+    })
+    // Pausing in the very same tick the run started races the first
+    // target's already-in-flight gate() check (same as a real pause click
+    // landing after the first item is already underway) — it still runs to
+    // completion; the second target's gate() check hasn't happened yet and
+    // is the one that actually blocks.
+    act(() => { result.current.pause() })
+    expect(result.current.progress.paused).toBe(true)
+
+    await act(async () => { await jest.advanceTimersByTimeAsync(500) })
+    expect(mockDeleteFile).toHaveBeenCalledTimes(1)
+    expect(mockDeleteFile).toHaveBeenCalledWith('f1')
+    expect(result.current.progress.items[1].status).toBe('queued')
+
+    act(() => { result.current.resume() })
+    expect(result.current.progress.paused).toBe(false)
+
+    await act(async () => {
+      await jest.advanceTimersByTimeAsync(200)
+      await resultPromise
+    })
+
+    expect(mockDeleteFile).toHaveBeenCalledTimes(2)
+    expect(result.current.progress.status).toBe('complete')
+    jest.useRealTimers()
   })
 
   test('dismiss resets progress back to idle', async () => {

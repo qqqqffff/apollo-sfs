@@ -9,10 +9,15 @@ let mockSearch = {
   action: undefined as string | undefined,
 }
 
+const mockUseBlocker = jest.fn<any, any[]>(() => ({
+  status: 'idle', current: undefined, next: undefined, action: undefined, proceed: undefined, reset: undefined,
+}))
+
 jest.mock('@tanstack/react-router', () => ({
   createFileRoute: () => (opts: any) => ({ options: opts }),
   useNavigate: () => mockNavigate,
   useSearch: () => mockSearch,
+  useBlocker: (...args: any[]) => mockUseBlocker(...args),
 }))
 
 const mockQuery = jest.fn()
@@ -40,9 +45,13 @@ jest.mock('../../../context/ImpersonationContext', () => ({
 const IDLE_UPLOAD_PROGRESS = {
   status: 'idle', items: [], totalBytes: 0, loadedBytes: 0, speedBps: 0, succeeded: 0, failed: 0,
 }
+// Mutable so a single test can simulate an in-flight upload (status:
+// 'uploading') to exercise the leave-while-uploading navigation blocker;
+// reset to idle in beforeEach so it doesn't leak between tests.
+let mockUploadProgress: any = IDLE_UPLOAD_PROGRESS
 jest.mock('../../../hooks/useFileUpload', () => ({
   useFileUpload: () => ({
-    progress: IDLE_UPLOAD_PROGRESS,
+    progress: mockUploadProgress,
     startUpload: jest.fn(),
     retryFailed: jest.fn(),
     dismiss: jest.fn(),
@@ -217,6 +226,11 @@ describe('Client Files (index) page', () => {
     mockNavigate.mockReset()
     mockNotify.mockReset()
     mockImpersonatedUser = null
+    mockUploadProgress = IDLE_UPLOAD_PROGRESS
+    mockUseBlocker.mockClear()
+    mockUseBlocker.mockReturnValue({
+      status: 'idle', current: undefined, next: undefined, action: undefined, proceed: undefined, reset: undefined,
+    })
   })
 
   test('renders My Storage heading at root', () => {
@@ -329,5 +343,69 @@ describe('Client Files (index) page', () => {
     mockImpersonatedUser = { username: 'bob', email: 'bob@example.com', storage_used_bytes: 0, storage_quota_bytes: 10 * 1024 ** 3 }
     setup()
     expect(screen.queryByRole('button', { name: /delete/i })).not.toBeInTheDocument()
+  })
+})
+
+describe('leaving while an upload/delete is in progress', () => {
+  beforeEach(() => {
+    mockNavigate.mockReset()
+    mockImpersonatedUser = null
+    mockUploadProgress = IDLE_UPLOAD_PROGRESS
+    mockUseBlocker.mockClear()
+    mockUseBlocker.mockReturnValue({
+      status: 'idle', current: undefined, next: undefined, action: undefined, proceed: undefined, reset: undefined,
+    })
+  })
+
+  test('blocks navigation only when leaving the route entirely, not when just switching folders', () => {
+    mockUploadProgress = { ...IDLE_UPLOAD_PROGRESS, status: 'uploading' }
+    setup()
+    const { shouldBlockFn } = mockUseBlocker.mock.calls[0][0]
+    expect(shouldBlockFn({
+      current: { routeId: '/_auth/client/' }, next: { routeId: '/_auth/client/' },
+    })).toBe(false)
+    expect(shouldBlockFn({
+      current: { routeId: '/_auth/client/' }, next: { routeId: '/_auth/profile' },
+    })).toBe(true)
+  })
+
+  test('does not block navigation when idle', () => {
+    setup()
+    const { shouldBlockFn } = mockUseBlocker.mock.calls[0][0]
+    expect(shouldBlockFn({
+      current: { routeId: '/_auth/client/' }, next: { routeId: '/_auth/profile' },
+    })).toBe(false)
+  })
+
+  test('enables the native beforeunload prompt while uploading', () => {
+    mockUploadProgress = { ...IDLE_UPLOAD_PROGRESS, status: 'uploading' }
+    setup()
+    const { enableBeforeUnload } = mockUseBlocker.mock.calls[0][0]
+    expect(enableBeforeUnload()).toBe(true)
+  })
+
+  test('does not enable the native beforeunload prompt when idle', () => {
+    setup()
+    const { enableBeforeUnload } = mockUseBlocker.mock.calls[0][0]
+    expect(enableBeforeUnload()).toBe(false)
+  })
+
+  test('shows the NavigationBlockedModal when the router blocks, and wires Leave/Stay to proceed/reset', () => {
+    const proceed = jest.fn()
+    const reset = jest.fn()
+    mockUseBlocker.mockReturnValue({
+      status: 'blocked', current: {}, next: {}, action: 'PUSH', proceed, reset,
+    })
+    setup()
+    expect(screen.getByText('Leave now?')).toBeInTheDocument()
+    fireEvent.click(screen.getByText('Leave anyway'))
+    expect(proceed).toHaveBeenCalledTimes(1)
+    fireEvent.click(screen.getByText('Stay — let it finish'))
+    expect(reset).toHaveBeenCalledTimes(1)
+  })
+
+  test('renders nothing extra when the blocker is idle', () => {
+    setup()
+    expect(screen.queryByText('Leave now?')).not.toBeInTheDocument()
   })
 })

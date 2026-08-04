@@ -50,17 +50,35 @@ export interface StartBackgroundBackup<R extends BackupRunResult> {
   // Drive the items land on, when known up front (email backups pin a folder
   // to one drive); Google uploads report it per file instead.
   driveId?: string | null
+  // Set when this run continues one interrupted by a page refresh (see
+  // api/backupSnapshot.ts) — `run` here only covers the entries that hadn't
+  // been attempted yet, so state starts from these counts instead of zero,
+  // and the final result is added on top of them rather than replacing them.
+  // `total`/`totalBytes` above should still describe the *whole* original
+  // run so the displayed progress reads continuously across the resume.
+  seed?: {
+    done: number
+    uploaded: number
+    duplicates: number
+    errors: number
+    storedCount: number
+    storedBytes: number
+  }
   run: (opts: {
     control: BackupControl
     onProgress: (e: BackupProgressEvent<unknown>) => void
   }) => Promise<R>
   // Deletes what the run stored — used when the user cancels and asks for the
-  // partial backup to be removed.
+  // partial backup to be removed. Note that after a resume this can only
+  // roll back what the resumed portion uploaded — files from before the
+  // refresh have no surviving ids to delete by.
   rollback?: (res: R) => Promise<{ removed: number; failed: number }>
   // Runs after the result (and any rollback) is in: run bookkeeping,
-  // provider-side cleanup, notifications.
+  // provider-side cleanup, notifications. Receives totals merged with `seed`.
   onSettled?: (res: R, removed: number) => void | Promise<void>
 }
+
+const ZERO_SEED = { done: 0, uploaded: 0, duplicates: 0, errors: 0, storedCount: 0, storedBytes: 0 }
 
 export function useBackgroundBackup(extraInvalidateKeys: readonly (readonly unknown[])[] = []) {
   const [state, setState] = useState<BackgroundBackupState | null>(null)
@@ -75,16 +93,17 @@ export function useBackgroundBackup(extraInvalidateKeys: readonly (readonly unkn
   const transferRate = useTransferRate()
 
   const start = useCallback(async <R extends BackupRunResult>(params: StartBackgroundBackup<R>) => {
+    const seed = params.seed ?? ZERO_SEED
     const control = createBackupControl()
     controlRef.current = control
     cancelActionRef.current = 'keep'
-    storedBytesRef.current = 0
+    storedBytesRef.current = seed.storedBytes
     transferRate.reset()
     setCancelPrompt(false)
     setState({
-      running: true, paused: false, done: 0, total: params.total,
-      uploaded: 0, duplicates: 0, errors: 0,
-      storedCount: 0, storedBytes: 0, totalBytes: params.totalBytes,
+      running: true, paused: false, done: seed.done, total: params.total,
+      uploaded: seed.uploaded, duplicates: seed.duplicates, errors: seed.errors,
+      storedCount: seed.storedCount, storedBytes: seed.storedBytes, totalBytes: params.totalBytes,
       currentPath: null, speedBps: 0, note: null, unit: params.unit,
     })
 
@@ -101,8 +120,12 @@ export function useBackgroundBackup(extraInvalidateKeys: readonly (readonly unkn
           if (!s) return s
           return {
             ...s,
-            done: e.done,
-            total: e.total,
+            // `run` only sees the entries it was actually given (the whole
+            // set, or — after a resume — just what's left), so its own
+            // done/total are relative to that; offset by the seed to keep
+            // the displayed progress continuous across a resume.
+            done: seed.done + e.done,
+            total: params.total,
             currentPath: e.path,
             storedCount: s.storedCount + (stored ? 1 : 0),
             storedBytes: storedBytesRef.current,
@@ -119,10 +142,19 @@ export function useBackgroundBackup(extraInvalidateKeys: readonly (readonly unkn
       },
     })
 
+    // Merge the seed back in so callers (bookkeeping, notifications) see the
+    // whole run's totals, not just the resumed portion's.
+    const merged: R = {
+      ...res,
+      uploaded: seed.uploaded + res.uploaded,
+      duplicates: seed.duplicates + res.duplicates,
+      errors: seed.errors + res.errors,
+    }
+
     let removed = 0
     let note: string | null = null
     const action = readCancelAction(cancelActionRef)
-    if (res.cancelled && action === 'remove' && params.rollback) {
+    if (merged.cancelled && action === 'remove' && params.rollback) {
       setRollbackBusy(true)
       const rollback = await params.rollback(res)
       removed = rollback.removed
@@ -130,8 +162,8 @@ export function useBackgroundBackup(extraInvalidateKeys: readonly (readonly unkn
       note = rollback.failed === 0
         ? `Cancelled — ${removed} ${params.unit}${removed !== 1 ? 's' : ''} removed again.`
         : `Cancelled — ${removed} removed; ${rollback.failed} could not be deleted.`
-    } else if (res.cancelled) {
-      note = `Cancelled — ${res.uploaded} ${params.unit}${res.uploaded !== 1 ? 's' : ''} kept.`
+    } else if (merged.cancelled) {
+      note = `Cancelled — ${merged.uploaded} ${params.unit}${merged.uploaded !== 1 ? 's' : ''} kept.`
     }
 
     controlRef.current = null
@@ -141,14 +173,14 @@ export function useBackgroundBackup(extraInvalidateKeys: readonly (readonly unkn
       running: false,
       paused: false,
       currentPath: null,
-      uploaded: Math.max(0, res.uploaded - removed),
-      duplicates: res.duplicates,
-      errors: res.errors,
+      uploaded: Math.max(0, merged.uploaded - removed),
+      duplicates: merged.duplicates,
+      errors: merged.errors,
       note,
     } : s))
     liveSync.finish()
 
-    await params.onSettled?.(res, removed)
+    await params.onSettled?.(merged, removed)
   }, [liveSync, transferRate])
 
   const togglePause = useCallback(() => {

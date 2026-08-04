@@ -368,7 +368,18 @@ async function sha256Hex(buffer: ArrayBuffer): Promise<string> {
     .join('')
 }
 
-async function downloadGoogleBlob(item: GoogleBackupItem, accessToken: string): Promise<Blob> {
+// Streams the response instead of awaiting res.blob() outright so a large
+// file (a multi-GB Drive/Photos video) reports bytes as they arrive rather
+// than leaving the caller with nothing to show until the whole download
+// completes. onProgress, when given, fires once per chunk the browser hands
+// back; total is 0 when the server didn't send Content-Length (chunked
+// responses, or a Photos item whose size isn't known up front) — callers
+// treat that as "unknown total" rather than a real zero.
+async function downloadGoogleBlob(
+  item: GoogleBackupItem,
+  accessToken: string,
+  onProgress?: (loaded: number, total: number) => void,
+): Promise<Blob> {
   let url: string
 
   if (item.source === 'photos' && item.baseUrl) {
@@ -381,7 +392,21 @@ async function downloadGoogleBlob(item: GoogleBackupItem, accessToken: string): 
 
   const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } })
   if (!res.ok) throw new Error(`Download failed: ${res.status}`)
-  return res.blob()
+
+  const total = Number(res.headers.get('Content-Length')) || item.size || 0
+  if (!onProgress || !res.body) return res.blob()
+
+  const reader = res.body.getReader()
+  const chunks: BlobPart[] = []
+  let loaded = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    chunks.push(value)
+    loaded += value.byteLength
+    onProgress(loaded, total)
+  }
+  return new Blob(chunks, { type: item.mimeType })
 }
 
 function sourceFor(item: GoogleBackupItem): string {
@@ -425,7 +450,12 @@ export async function uploadGoogleEntries(
     onProgress?.({ phase: 'start', entry: e, index: i, done: i, total, path })
 
     try {
-      const blob   = await downloadGoogleBlob(e.googleItem, accessToken)
+      const blob = await downloadGoogleBlob(e.googleItem, accessToken, (loaded, downloadTotal) => {
+        onProgress?.({
+          phase: 'progress', entry: e, index: i, done: i, total, path,
+          stage: 'downloading', loadedBytes: loaded, itemTotalBytes: downloadTotal || undefined,
+        })
+      })
       const buffer = await blob.arrayBuffer()
       const hash   = await sha256Hex(buffer)
 
@@ -444,7 +474,12 @@ export async function uploadGoogleEntries(
         form.append('file', file)
         if (e.destFolderId) form.append('folder_id', e.destFolderId)
         form.append('source', sourceFor(e.googleItem))
-        const res = await uploadWithProgress<UploadResponse>('/files/upload', form, () => {})
+        const res = await uploadWithProgress<UploadResponse>('/files/upload', form, (loaded, uploadTotal) => {
+          onProgress?.({
+            phase: 'progress', entry: e, index: i, done: i, total, path,
+            stage: 'uploading', loadedBytes: loaded, itemTotalBytes: uploadTotal || blob.size,
+          })
+        })
         uploaded++
         status = 'done'
         sizeBytes = res.size_bytes ?? blob.size

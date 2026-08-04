@@ -38,6 +38,7 @@ import {
   type CancelAction,
 } from '../api/backupControl'
 import { useBackupLiveSync } from '../hooks/useBackupLiveSync'
+import { useTransferRate } from '../hooks/useTransferRate'
 import { BackupProgressBar, BackupProgressDetails, BackupRunControls } from './BackupProgress'
 import { BackupCancelModal } from './BackupCancelModal'
 import { SettingToggle } from './SettingToggle'
@@ -129,11 +130,23 @@ export function GoogleBackupModal({
   const [currentPath, setCurrentPath] = useState<string | null>(null)
   const [storedBytes, setStoredBytes] = useState(0)
   const [storedCount, setStoredCount] = useState(0)
+  const [speedBps, setSpeedBps] = useState(0)
+  // The current item's transfer stage/progress — set for a large file's
+  // download or upload, cleared once it settles.
+  const [itemProgress, setItemProgress] = useState<{
+    stage: 'downloading' | 'uploading'
+    loadedBytes: number
+    itemTotalBytes?: number
+  } | null>(null)
   const [paused, setPaused] = useState(false)
   const [cancelPrompt, setCancelPrompt] = useState(false)
   const [rollbackBusy, setRollbackBusy] = useState(false)
   const [cancelNote, setCancelNote] = useState<string | null>(null)
   const controlRef = useRef<BackupControl | null>(null)
+  // Mirrors storedBytes synchronously so the rate estimator always records
+  // off a fresh value rather than one captured by a stale closure.
+  const storedBytesRef = useRef(0)
+  const transferRate = useTransferRate()
   // Set by the cancel dialog before the run is stopped, so the continuation
   // below knows whether to roll the partial backup back.
   const cancelActionRef = useRef<CancelAction>('keep')
@@ -353,25 +366,41 @@ export function GoogleBackupModal({
     setErrorMap({})
     setStoredBytes(0)
     setStoredCount(0)
+    setSpeedBps(0)
+    setItemProgress(null)
     setCancelNote(null)
     setProgress({ done: 0, total: toUpload.length })
+    storedBytesRef.current = 0
+    transferRate.reset()
 
     const res = await uploadGoogleEntries(toUpload, accessToken, {
       control,
       onProgress: (e) => {
         setProgress({ done: e.done, total: e.total })
-        if (e.phase === 'start') { setCurrentPath(e.path); return }
+        if (e.phase === 'start') { setCurrentPath(e.path); setItemProgress(null); return }
+
+        if (e.phase === 'progress') {
+          transferRate.record(storedBytesRef.current + (e.loadedBytes ?? 0))
+          setSpeedBps(transferRate.rate())
+          setItemProgress({ stage: e.stage!, loadedBytes: e.loadedBytes ?? 0, itemTotalBytes: e.itemTotalBytes })
+          return
+        }
+
         const idx = selectedIndices[e.index]
         if (idx !== undefined && e.status) {
           setStatusMap((m) => ({ ...m, [idx]: e.status! }))
           setErrorMap((m) => (e.error ? { ...m, [idx]: e.error! } : m))
         }
         if (e.status === 'done') {
-          setStoredBytes((b) => b + (e.sizeBytes ?? 0))
+          storedBytesRef.current += e.sizeBytes ?? 0
+          transferRate.record(storedBytesRef.current)
+          setSpeedBps(transferRate.rate())
+          setStoredBytes(storedBytesRef.current)
           setStoredCount((c) => c + 1)
           // Show it in the file browser and on the quota bar right away.
           liveSync.itemStored({ sizeBytes: e.sizeBytes ?? 0, driveId: e.driveId })
         }
+        setItemProgress(null)
       },
     })
 
@@ -753,6 +782,10 @@ export function GoogleBackupModal({
                 storedBytes={storedBytes}
                 totalBytes={selectedSize}
                 paused={paused}
+                speedBps={speedBps}
+                itemStage={itemProgress?.stage}
+                itemLoadedBytes={itemProgress?.loadedBytes}
+                itemTotalBytes={itemProgress?.itemTotalBytes}
               />
               <BackupRunControls
                 paused={paused}

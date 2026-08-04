@@ -249,6 +249,7 @@ export function useDeleteJob() {
               }
             })
             patchItem(i, { loaded: targetLoaded })
+            liveRef.current = { ...liveRef.current, doneObjects }
           }
           if (anyFileFailed) throw new Error('some contents failed to delete')
           // The subtree is fully emptied at this point — finish removing the

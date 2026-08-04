@@ -79,11 +79,15 @@ export function readCancelAction(ref: { current: CancelAction }): CancelAction {
 
 export type BackupItemStatus = 'done' | 'duplicate' | 'error'
 
-// One event per item, twice: 'start' just before it is fetched/uploaded (drives
-// the "currently backing up …" line) and 'settled' once it landed or failed
-// (drives the counters, the quota bar, and the file listing refresh).
+// One event per item, at least twice: 'start' just before it is
+// fetched/uploaded (drives the "currently backing up …" line) and 'settled'
+// once it landed or failed (drives the counters, the quota bar, and the file
+// listing refresh). Large items additionally fire 'progress' any number of
+// times in between — the Google backup flow uses this for a big Drive/Photos
+// file's download and upload, each of which can otherwise run for minutes
+// with nothing to show for it.
 export interface BackupProgressEvent<E> {
-  phase: 'start' | 'settled'
+  phase: 'start' | 'progress' | 'settled'
   entry: E
   index: number
   done: number
@@ -103,6 +107,12 @@ export interface BackupProgressEvent<E> {
   // Reason the item failed, when status is 'error' — surfaced in the UI and
   // used to scope a retry to just the items that need it.
   error?: string
+  // Progress only — which half of the transfer this item is in and how far
+  // it has gotten. itemTotalBytes can be unknown even mid-transfer (Google
+  // Photos items don't report a size up front).
+  stage?: 'downloading' | 'uploading'
+  loadedBytes?: number
+  itemTotalBytes?: number
 }
 
 export interface BackupRunResult {

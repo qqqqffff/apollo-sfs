@@ -11,6 +11,25 @@ export function formatBackupBytes(bytes: number): string {
   return `${(bytes / 1024 ** 3).toFixed(2)} GB`
 }
 
+function formatBackupSpeed(bps: number): string {
+  if (bps <= 0) return ''
+  if (bps >= 1024 ** 2) return `${(bps / 1024 ** 2).toFixed(1)} MB/s`
+  if (bps >= 1024) return `${(bps / 1024).toFixed(0)} KB/s`
+  return `${Math.round(bps)} B/s`
+}
+
+// Same "how long until remaining/rate is done" shape as UploadToast's
+// fmtEta — kept as its own copy (mirroring formatBackupBytes vs UploadToast's
+// fmtBytes) so this module doesn't reach into the upload/delete toast's file.
+function formatBackupEta(remaining: number, ratePerSec: number): string {
+  if (ratePerSec <= 0 || remaining <= 0) return ''
+  const secs = remaining / ratePerSec
+  if (secs > 3600) return `~${Math.ceil(secs / 3600)}h`
+  if (secs > 60) return `~${Math.ceil(secs / 60)}m`
+  if (secs > 5) return `~${Math.ceil(secs)}s`
+  return ''
+}
+
 export function BackupProgressBar({ done, total, paused, tone = 'running' }: {
   done: number
   total: number
@@ -34,22 +53,44 @@ export function BackupProgressBar({ done, total, paused, tone = 'running' }: {
 
 // The muted line under the bar: where the item currently in flight is being
 // written, and how much data the run covers in total.
-export function BackupProgressDetails({ currentPath, storedBytes, totalBytes, paused }: {
+export function BackupProgressDetails({
+  currentPath, storedBytes, totalBytes, paused, speedBps,
+  itemStage, itemLoadedBytes, itemTotalBytes,
+}: {
   currentPath: string | null
   storedBytes: number
   totalBytes: number
   paused?: boolean
+  // Bytes/sec estimate for the whole run — omitted (or 0) until enough
+  // samples exist, same as the upload/delete toasts.
+  speedBps?: number
+  // The item currently in flight's transfer stage, when known — the Google
+  // backup flow reports this for a large file's download/upload so the line
+  // moves incrementally instead of sitting on the same file name for minutes.
+  itemStage?: 'downloading' | 'uploading'
+  itemLoadedBytes?: number
+  itemTotalBytes?: number
 }) {
+  const remaining = Math.max(0, totalBytes - storedBytes)
+  const speed = !paused ? formatBackupSpeed(speedBps ?? 0) : ''
+  const eta = !paused ? formatBackupEta(remaining, speedBps ?? 0) : ''
+  const stageLabel = itemStage === 'downloading' ? 'Downloading' : itemStage === 'uploading' ? 'Uploading' : null
+
   return (
     <div className="min-w-0 text-[11px] text-gray-400 leading-snug">
       {currentPath && (
         <p className="m-0 truncate" title={currentPath}>
-          {paused ? 'Paused at' : 'Backing up'} <span className="font-mono">{currentPath}</span>
+          <span>{paused ? 'Paused at' : stageLabel ?? 'Backing up'}</span>{' '}
+          <span className="font-mono">{currentPath}</span>
+          {!paused && stageLabel && itemTotalBytes ? (
+            <span> — {formatBackupBytes(itemLoadedBytes ?? 0)} / {formatBackupBytes(itemTotalBytes)}</span>
+          ) : null}
         </p>
       )}
       <p className="m-0">
         {formatBackupBytes(storedBytes)}
         {totalBytes > 0 && <> of {formatBackupBytes(totalBytes)}</>} transferred
+        {(speed || eta) && <> · {[speed, eta].filter(Boolean).join(' · ')}</>}
       </p>
     </div>
   )

@@ -8,6 +8,7 @@ import {
   type CancelAction,
 } from '../api/backupControl'
 import { useBackupLiveSync } from './useBackupLiveSync'
+import { useTransferRate } from './useTransferRate'
 
 // Drives a backup that keeps running after its picker window closes (the
 // "back up in the background" setting): progress for the toolbar card, the
@@ -30,6 +31,13 @@ export interface BackgroundBackupState {
   totalBytes: number
   // Destination of the item in flight, as a full path.
   currentPath: string | null
+  // Bytes/sec estimate for the run so far — 0 until enough samples exist.
+  speedBps: number
+  // The item currently in flight's transfer stage, when the run reports one
+  // (only the Google backup flow does, for a large file's download/upload).
+  itemStage?: 'downloading' | 'uploading'
+  itemLoadedBytes?: number
+  itemTotalBytes?: number
   // Set once the run ends early (cancelled) — what happened to the partial data.
   note: string | null
   unit: 'file' | 'email'
@@ -61,35 +69,50 @@ export function useBackgroundBackup(extraInvalidateKeys: readonly (readonly unkn
   const controlRef = useRef<BackupControl | null>(null)
   const cancelActionRef = useRef<CancelAction>('keep')
   const liveSync = useBackupLiveSync(extraInvalidateKeys)
+  // Mirrors state.storedBytes synchronously so the rate estimator always
+  // records off a fresh value, not one captured by this closure at start().
+  const storedBytesRef = useRef(0)
+  const transferRate = useTransferRate()
 
   const start = useCallback(async <R extends BackupRunResult>(params: StartBackgroundBackup<R>) => {
     const control = createBackupControl()
     controlRef.current = control
     cancelActionRef.current = 'keep'
+    storedBytesRef.current = 0
+    transferRate.reset()
     setCancelPrompt(false)
     setState({
       running: true, paused: false, done: 0, total: params.total,
       uploaded: 0, duplicates: 0, errors: 0,
       storedCount: 0, storedBytes: 0, totalBytes: params.totalBytes,
-      currentPath: null, note: null, unit: params.unit,
+      currentPath: null, speedBps: 0, note: null, unit: params.unit,
     })
 
     const res = await params.run({
       control,
       onProgress: (e) => {
+        const stored = e.phase === 'settled' && e.status === 'done'
+        if (stored) storedBytesRef.current += e.sizeBytes ?? 0
+        const inFlightBytes = e.phase === 'progress' ? (e.loadedBytes ?? 0) : 0
+        transferRate.record(storedBytesRef.current + inFlightBytes)
+        const speedBps = transferRate.rate()
+
         setState((s) => {
           if (!s) return s
-          const stored = e.phase === 'settled' && e.status === 'done'
           return {
             ...s,
             done: e.done,
             total: e.total,
             currentPath: e.path,
             storedCount: s.storedCount + (stored ? 1 : 0),
-            storedBytes: s.storedBytes + (stored ? (e.sizeBytes ?? 0) : 0),
+            storedBytes: storedBytesRef.current,
+            speedBps,
+            itemStage: e.phase === 'progress' ? e.stage : undefined,
+            itemLoadedBytes: e.phase === 'progress' ? e.loadedBytes : undefined,
+            itemTotalBytes: e.phase === 'progress' ? e.itemTotalBytes : undefined,
           }
         })
-        if (e.phase === 'settled' && e.status === 'done') {
+        if (stored) {
           // Show it in the file browser and on the quota bar right away.
           liveSync.itemStored({ sizeBytes: e.sizeBytes ?? 0, driveId: e.driveId ?? params.driveId })
         }
@@ -126,7 +149,7 @@ export function useBackgroundBackup(extraInvalidateKeys: readonly (readonly unkn
     liveSync.finish()
 
     await params.onSettled?.(res, removed)
-  }, [liveSync])
+  }, [liveSync, transferRate])
 
   const togglePause = useCallback(() => {
     const control = controlRef.current

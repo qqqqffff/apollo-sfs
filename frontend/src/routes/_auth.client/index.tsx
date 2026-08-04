@@ -2138,6 +2138,10 @@ function BackgroundBackupCard({ state, title, icon, onTogglePause, onCancel, onD
           storedBytes={state.storedBytes}
           totalBytes={state.totalBytes}
           paused={state.paused}
+          speedBps={state.speedBps}
+          itemStage={state.itemStage}
+          itemLoadedBytes={state.itemLoadedBytes}
+          itemTotalBytes={state.itemTotalBytes}
         />
       )}
       {state.note && <p className="text-xs text-amber-600 m-0">{state.note}</p>}

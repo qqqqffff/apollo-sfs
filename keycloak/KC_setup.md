@@ -240,14 +240,29 @@ Google):
 1. Open a private window → `https://apollo-sfs.com/login` → **Sign in with
    Microsoft** → complete the Microsoft login.
 2. A brand-new email should land on the invite/registration path like other
-   social sign-ups; an email matching an existing account should auto-link
-   (§5) or show the link-account page.
+   social sign-ups; an email matching an existing account must auto-link
+   silently (§5) — no Keycloak page at any point.
 3. On the profile page, **Linked accounts → Microsoft** should read
    *Connected*.
 
 ---
 
 ## 5. Automatic account linking (skip the "link account" page + email)
+
+**This is required, not optional.** Left unapplied, signing in with a provider
+whose email matches an existing account dead-ends on Keycloak's own
+"Account already exists" page — unbranded UI on `auth.apollo-sfs.com` in the
+middle of a sign-in that otherwise succeeded (the provider's consent email is
+already sent by then). It is the one Keycloak-rendered screen a normal user could
+still reach.
+
+`keycloak/import/realm.json` now ships this flow (`first broker login - auto
+link`, plus its two sub-flows and their authenticator configs), so a **fresh**
+environment gets it from the import. Keycloak does **not** re-import into a realm
+that already exists, so on any running deployment the flow has to be built by
+hand as below — and the IdP binding in step **b** is needed either way, since the
+realm export carries no identity providers (their client secrets are configured
+in the console).
 
 By default, when a social login's email matches an existing account, Keycloak's
 **first broker login** flow shows a "Confirm Link Existing Account" page and then
@@ -288,6 +303,17 @@ first broker login - auto link
 
 After this, a social login whose email matches an existing account links silently
 and proceeds straight to the app — no confirmation page and no email.
+
+**c. Verify no Keycloak page can still appear.** In a private window, sign in
+with a provider using the address of an existing password account. You should
+land back on `https://apollo-sfs.com` signed in, having seen only the provider's
+own consent screen. If an `auth.apollo-sfs.com` page flashes up and bounces you
+to `/login?social_error=account_link_failed`, the IdP is still bound to the
+built-in `first broker login` flow — redo step **b**. (That bounce is the
+backstop from `keycloak/themes/apollo-sfs/login/bounce.ftl`: every user-facing
+Keycloak template is overridden to redirect into the app, so a misconfiguration
+degrades to a returned user with an error message instead of a stranded one on
+unbranded UI. It is a safety net, not a substitute for this section.)
 
 ---
 

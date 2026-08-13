@@ -72,7 +72,9 @@ Every protected route goes through the JWT middleware in `routes/middleware/`. T
 - Extracts the Keycloak user UUID (sub claim) and realm roles
 - Sets `app.current_user_id` on the PostgreSQL session so Row-Level Security applies
 
-Social login (Google, Apple, Microsoft) goes through `routes/auth/social_callback.go`, which exchanges the IdP token via Keycloak's identity-provider brokering API.
+Social login (Google, Apple, Microsoft) goes through `routes/auth/social_callback.go`, which exchanges the IdP token via Keycloak's identity-provider brokering API. The browser enters that flow at `GET /auth/social/start?provider=…` (`routes/auth/social_start.go`), which 302s into Keycloak's authorization endpoint: building the URL server-side keeps Keycloak's hostname and the `redirect_uri` out of the frontend bundle, and `kc_idp_hint` sends Keycloak straight to the provider rather than to its own login page. `mode=link` switches the redirect target to the profile page for the "Connect" flow.
+
+Password reset is owned by the app end to end (`routes/auth/forgot_password.go`, `reset_password.go`): `ForgotPassword` issues a 32-byte single-use token, stores its SHA-256 hash in `password_reset_tokens` (migration 064, mirroring the change-password codes in 035), and emails a link to the frontend's `/reset-password`; `ResetPassword` consumes the token and sets the password through the Keycloak Admin API. Keycloak's `execute-actions-email` is deliberately **not** used — it emails a link to Keycloak's own password form, and the action token it hands back was previously accepted here without any signature check, so a forged JWT naming any `sub` could reset any account. See `keycloak/CLAUDE.md` → "No user-facing Keycloak UI".
 
 Connecting a provider to an account that already exists (profile page → "Linked accounts" → Connect) is `POST /me/social/link`. It takes the identity three ways: a provider ID token (`token` — what the mobile apps' native SDKs return), a Google server auth code (`server_auth_code`), or a Keycloak authorization code (`code`) for the web, which has no provider SDK and so re-runs the same brokered authorization-code flow the sign-in buttons use. `AuthService.LinkBrokeredIdentity` exchanges that code without provisioning an app user or returning tokens — the caller's session must stay on the account already signed in — then moves the federated identity onto it, refusing (`ErrIdentityClaimed`) if the provider account already belongs to another app account. Note the web flow's `redirect_uri` is the **profile page itself**, not an API callback: the session cookie is `SameSite=Strict`, so it isn't sent on the cross-site redirect back from Keycloak and a callback route would arrive unauthenticated; landing on the SPA lets it forward the code over a same-site XHR that does carry the cookie.
 
@@ -281,7 +283,7 @@ The old `api/Dockerfile.test` sidecar image and its `cmd/testserver` entrypoint 
 | `MINIO_BUCKET_NAME` | Primary storage bucket |
 | `KEYCLOAK_REALM` | Keycloak realm name |
 | `KEYCLOAK_CLIENT_ID` / `_CLIENT_SECRET` | Confidential client for token introspection |
-| `KEYCLOAK_PUBLIC_URL` | Used to construct OIDC discovery URL |
+| `KEYCLOAK_PUBLIC_URL` | Keycloak's browser-facing origin. Used to construct the OIDC discovery URL and the brokered social sign-in redirect (`/auth/social/start`); all server-to-server calls use `KEYCLOAK_INTERNAL_URL` instead |
 | `KEY_ENCRYPTION_KEY` | Base64-encoded 32-byte master encryption key |
 | `SESSION_KEY` | Session cookie HMAC signing key |
 | `PAYPAL_CLIENT_ID` / `_CLIENT_SECRET` / `_WEBHOOK_ID` | PayPal primary/live client — Orders v2 (storage add-ons) + Subscriptions v1 (premium). Always used against PayPal's live API; there is no env-driven sandbox mode for this client. |

@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -29,7 +30,12 @@ const defaultQuotaBytes = 10 * 1024 * 1024 * 1024 // 10 GB
 
 // AuthServiceConfig holds the parameters needed to construct an AuthService.
 type AuthServiceConfig struct {
-	KeycloakURL          string
+	KeycloakURL string
+	// KeycloakPublicURL is Keycloak's own public origin (e.g.
+	// "https://auth.example.com"). Only used to build URLs the user's browser
+	// follows — every server-to-server call goes to KeycloakURL over the
+	// overlay network instead.
+	KeycloakPublicURL    string
 	KeycloakRealm        string
 	KeycloakClientID     string
 	KeycloakClientSecret string
@@ -88,6 +94,7 @@ type kcUserResult struct {
 type AuthService struct {
 	queries        *db.Queries
 	kcURL          string
+	kcPublicURL    string
 	kcRealm        string
 	kcClientID     string
 	kcSecret       string
@@ -95,6 +102,7 @@ type AuthService struct {
 	http           *http.Client
 	googleClientID string
 	googleSecret   string
+	resetMailer    PasswordResetMailer
 
 	// ProvisionUserKey is called during registration to generate and wrap the
 	// user's per-file AES key with the current master key. When nil (before the
@@ -108,6 +116,7 @@ func NewAuthService(q *db.Queries, cfg AuthServiceConfig) *AuthService {
 	return &AuthService{
 		queries:        q,
 		kcURL:          cfg.KeycloakURL,
+		kcPublicURL:    strings.TrimRight(cfg.KeycloakPublicURL, "/"),
 		kcRealm:        cfg.KeycloakRealm,
 		kcClientID:     cfg.KeycloakClientID,
 		kcSecret:       cfg.KeycloakClientSecret,
@@ -118,10 +127,59 @@ func NewAuthService(q *db.Queries, cfg AuthServiceConfig) *AuthService {
 	}
 }
 
+// PasswordResetMailer sends the forgot-password email. It is the subset of
+// EmailService the auth service needs, injected after construction because the
+// email service is built later in main.go (same pattern as ProvisionUserKey).
+type PasswordResetMailer interface {
+	SendPasswordReset(ctx context.Context, user *models.User, resetURL, expiresIn string) error
+}
+
+// SetPasswordResetMailer wires the mailer used by ForgotPassword. Until it is
+// set, ForgotPassword fails rather than silently accepting reset requests it
+// cannot deliver.
+func (s *AuthService) SetPasswordResetMailer(m PasswordResetMailer) { s.resetMailer = m }
+
+// ErrInvalidResetToken is returned by ResetPassword when the token is unknown,
+// already used, or expired. Handlers surface it as a 400 without distinguishing
+// the three — they are all "ask for a new link".
+var ErrInvalidResetToken = errors.New("this password reset link is invalid or has expired")
+
+// generateURLSafeToken returns n bytes of CSPRNG output encoded for use in a URL.
+func generateURLSafeToken(n int) (string, error) {
+	buf := make([]byte, n)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(buf), nil
+}
+
 // ── Public methods ────────────────────────────────────────────────────────────
 
 // AppBaseURL returns the public-facing base URL of the application.
 func (s *AuthService) AppBaseURL() string { return s.appBaseURL }
+
+// BrokerAuthorizeURL builds the Keycloak authorization URL that starts a
+// brokered sign-in with the given provider, returning the browser to
+// appBaseURL + redirectPath.
+//
+// kcPublicURL is used rather than the internal overlay address because this URL
+// is followed by the user's browser, not by us. prompt=login stops Keycloak from
+// silently reusing an existing SSO session, so pressing "Sign in with Google"
+// always goes through Google; kc_idp_hint stops it from rendering its own login
+// page on the way.
+func (s *AuthService) BrokerAuthorizeURL(provider, redirectPath string) string {
+	params := url.Values{
+		"client_id":     {s.kcClientID},
+		"redirect_uri":  {s.appBaseURL + redirectPath},
+		"response_type": {"code"},
+		"scope":         {"openid"},
+		"kc_idp_hint":   {provider},
+		"prompt":        {"login"},
+		"state":         {provider}, // echoed back so the callback knows the provider
+	}
+	return fmt.Sprintf("%s/realms/%s/protocol/openid-connect/auth?%s",
+		s.kcPublicURL, s.kcRealm, params.Encode())
+}
 
 // AuthCodeExchange exchanges a Keycloak authorization code for a token pair
 // using the authorization_code grant. redirectURI must match the value used
@@ -883,54 +941,65 @@ func (s *AuthService) Refresh(ctx context.Context, refreshToken string) (*TokenP
 	return tokens, nil
 }
 
-// ForgotPassword looks up the Keycloak user by email and triggers Keycloak's
-// built-in "send reset email" action. Always returns nil to prevent email
-// enumeration — the caller should return 200 regardless of whether the address
-// is registered.
-func (s *AuthService) ForgotPassword(ctx context.Context, email string) error {
-	adminToken, err := s.adminToken(ctx)
-	if err != nil {
-		return fmt.Errorf("forgot password: get admin token: %w", err)
-	}
+// passwordResetTokenTTL bounds how long an emailed reset link stays usable.
+const passwordResetTokenTTL = 30 * time.Minute
 
-	userID, err := s.kcFindUserByEmail(ctx, adminToken, email)
-	if err != nil || userID == "" {
-		// User not found — silently succeed to prevent email enumeration.
+// passwordResetExpiresIn is the same window in the wording the email uses.
+const passwordResetExpiresIn = "30 minutes"
+
+// ForgotPassword issues a single-use reset token for the account with the given
+// email and sends the reset link. Always returns nil for an unknown address so
+// the caller can answer identically either way and not leak which addresses are
+// registered; real failures (mailer down, DB error) are returned so they can be
+// logged.
+//
+// The whole flow is app-owned: the link points at the frontend's /reset-password
+// page and the new password is set through the Keycloak Admin API in
+// ResetPassword below. Keycloak's own execute-actions-email is deliberately not
+// used — it emails a link to Keycloak's password form on auth.apollo-sfs.com,
+// which is exactly the raw Keycloak UI users must never be dropped onto.
+func (s *AuthService) ForgotPassword(ctx context.Context, email string) error {
+	user, err := s.queries.GetUserByEmail(ctx, email)
+	if err != nil || user == nil {
+		// Unknown address — silently succeed to prevent email enumeration.
 		return nil
 	}
 
-	// Pass the app's reset page as the post-completion redirect URI so Keycloak
-	// sends the user back to the frontend after they complete the reset on Keycloak's
-	// built-in page. When s.appBaseURL is empty the redirect defaults to Keycloak's
-	// account console.
-	redirectURI := ""
-	if s.appBaseURL != "" {
-		redirectURI = s.appBaseURL + "/reset-password"
+	if s.resetMailer == nil {
+		return fmt.Errorf("forgot password: no password-reset mailer configured")
 	}
-	if err := s.kcExecuteActionsEmail(ctx, adminToken, userID, redirectURI); err != nil {
+
+	token, err := generateURLSafeToken(32)
+	if err != nil {
+		return fmt.Errorf("forgot password: generate token: %w", err)
+	}
+	if err := s.queries.CreatePasswordResetToken(ctx, user.Username, token, time.Now().Add(passwordResetTokenTTL)); err != nil {
+		return fmt.Errorf("forgot password: store token: %w", err)
+	}
+
+	resetURL := s.appBaseURL + "/reset-password?token=" + url.QueryEscape(token)
+	if err := s.resetMailer.SendPasswordReset(ctx, user, resetURL, passwordResetExpiresIn); err != nil {
 		return fmt.Errorf("forgot password: send reset email: %w", err)
 	}
 	return nil
 }
 
-// ResetPassword validates a Keycloak action token and sets the user's password
-// via the Keycloak Admin API.
+// ResetPassword consumes a reset token issued by ForgotPassword and sets the
+// account's new password via the Keycloak Admin API.
 //
-// The token is the `key` query parameter from the Keycloak password-reset email
-// link. Its JWT payload contains the Keycloak user UUID (sub) and an expiry (exp)
-// that are checked before the Admin API call is made.
-//
-// Note: the token signature is not cryptographically verified here — security
-// relies on the token being delivered exclusively via email. A future improvement
-// is to verify the signature against Keycloak's JWKS endpoint
-// ({keycloakURL}/realms/{realm}/protocol/openid-connect/certs).
+// The token is the `token` query parameter of the emailed reset link. It is
+// matched against its stored SHA-256 hash and consumed in the same statement, so
+// it works exactly once and only before it expires. Nothing about it is
+// self-describing: possession of a token that is present, live, and unconsumed in
+// our own table is the entire proof — unlike the Keycloak action token this
+// replaces, whose unverified JWT payload let anyone name the account to reset.
 func (s *AuthService) ResetPassword(ctx context.Context, token, newPassword string) error {
-	userID, exp, err := parseActionToken(token)
+	username, err := s.queries.ConsumePasswordResetToken(ctx, token)
 	if err != nil {
-		return fmt.Errorf("reset password: invalid token: %w", err)
+		return fmt.Errorf("reset password: %w", err)
 	}
-	if exp > 0 && time.Now().Unix() > exp {
-		return fmt.Errorf("reset password: token has expired")
+	if username == "" {
+		return ErrInvalidResetToken
 	}
 
 	adminToken, err := s.adminToken(ctx)
@@ -938,7 +1007,15 @@ func (s *AuthService) ResetPassword(ctx context.Context, token, newPassword stri
 		return fmt.Errorf("reset password: get admin token: %w", err)
 	}
 
-	if err := s.kcResetPassword(ctx, adminToken, userID, newPassword); err != nil {
+	kcUserID, err := s.kcFindUserByUsername(ctx, adminToken, username)
+	if err != nil {
+		return fmt.Errorf("reset password: find keycloak user: %w", err)
+	}
+	if kcUserID == "" {
+		return fmt.Errorf("reset password: no keycloak user for %q", username)
+	}
+
+	if err := s.kcResetPassword(ctx, adminToken, kcUserID, newPassword); err != nil {
 		return fmt.Errorf("reset password: %w", err)
 	}
 	return nil
@@ -1182,70 +1259,6 @@ func (s *AuthService) kcCreateUser(ctx context.Context, adminToken, username, em
 	return "", fmt.Errorf("could not extract user ID from Location header: %q", loc)
 }
 
-// kcFindUserByEmail looks up a Keycloak user ID by exact email match.
-// Returns an empty string (no error) when the email is not found.
-func (s *AuthService) kcFindUserByEmail(ctx context.Context, adminToken, email string) (string, error) {
-	endpoint := fmt.Sprintf("%s/admin/realms/%s/users?email=%s&exact=true",
-		s.kcURL, s.kcRealm, url.QueryEscape(email))
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Authorization", "Bearer "+adminToken)
-
-	resp, err := s.http.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("keycloak request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("keycloak returned %s", resp.Status)
-	}
-
-	var users []kcUserResult
-	if err := json.NewDecoder(resp.Body).Decode(&users); err != nil {
-		return "", err
-	}
-	if len(users) == 0 {
-		return "", nil
-	}
-	return users[0].ID, nil
-}
-
-// kcExecuteActionsEmail triggers Keycloak's UPDATE_PASSWORD action email.
-// When redirectURI is non-empty it is appended as a redirect_uri query param so
-// Keycloak redirects the user there after the reset completes on Keycloak's UI.
-func (s *AuthService) kcExecuteActionsEmail(ctx context.Context, adminToken, userID, redirectURI string) error {
-	actions := []string{"UPDATE_PASSWORD"}
-	body, _ := json.Marshal(actions)
-
-	endpoint := fmt.Sprintf("%s/admin/realms/%s/users/%s/execute-actions-email",
-		s.kcURL, s.kcRealm, userID)
-	if redirectURI != "" {
-		endpoint += "?redirect_uri=" + url.QueryEscape(redirectURI)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, endpoint, strings.NewReader(string(body)))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+adminToken)
-
-	resp, err := s.http.Do(req)
-	if err != nil {
-		return fmt.Errorf("keycloak request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("keycloak returned %s", resp.Status)
-	}
-	return nil
-}
-
 // kcResetPassword calls PUT /admin/realms/{realm}/users/{id}/reset-password to
 // directly set a new password for the given Keycloak user.
 func (s *AuthService) kcResetPassword(ctx context.Context, adminToken, userID, newPassword string) error {
@@ -1320,31 +1333,6 @@ func decodeTokenClaims(token string) (*kcTokenClaims, error) {
 		return nil, fmt.Errorf("token missing preferred_username claim")
 	}
 	return &claims, nil
-}
-
-// parseActionToken decodes the payload of a Keycloak action token JWT (without
-// verifying the signature) and returns the subject (Keycloak user UUID) and the
-// expiry Unix timestamp. A zero exp means the token carries no expiry claim.
-func parseActionToken(token string) (sub string, exp int64, err error) {
-	parts := strings.SplitN(token, ".", 3)
-	if len(parts) != 3 {
-		return "", 0, fmt.Errorf("not a valid JWT")
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return "", 0, fmt.Errorf("decode payload: %w", err)
-	}
-	var claims struct {
-		Sub string `json:"sub"`
-		Exp int64  `json:"exp"`
-	}
-	if err := json.Unmarshal(payload, &claims); err != nil {
-		return "", 0, fmt.Errorf("parse claims: %w", err)
-	}
-	if claims.Sub == "" {
-		return "", 0, fmt.Errorf("token is missing subject claim")
-	}
-	return claims.Sub, claims.Exp, nil
 }
 
 // GetUserKcID returns the Keycloak subject UUID for the given username.

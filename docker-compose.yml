@@ -73,6 +73,10 @@ services:
       KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID}
       KEYCLOAK_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET}
       KEYCLOAK_INTERNAL_URL: http://keycloak:8180
+      # Browser-facing origin, used to build the brokered social sign-in
+      # redirect (GET /auth/social/start). Required — the API refuses to start
+      # without it.
+      KEYCLOAK_PUBLIC_URL: ${KEYCLOAK_PUBLIC_URL}
       KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN}
       KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
       # Encryption

@@ -1,30 +1,18 @@
 export type SocialProvider = 'google' | 'apple' | 'microsoft'
 
-const KC_REALM = 'apollo-sfs-realm'
-const KC_CLIENT_ID = 'apollo-sfs-api'
-// Keycloak runs on its own hostname (see nginx auth.apollo-sfs.com vhost). The
-// browser is redirected here to start the OIDC code flow; the callback returns
-// to this app's own origin (redirect_uri below).
-const KC_BASE_URL = 'https://auth.apollo-sfs.com'
-
-function authorizeUrl(provider: SocialProvider, callbackPath: string) {
-  const params = new URLSearchParams({
-    client_id: KC_CLIENT_ID,
-    redirect_uri: `${window.location.origin}${callbackPath}`,
-    response_type: 'code',
-    scope: 'openid',
-    kc_idp_hint: provider,
-    // Force re-authentication instead of silently reusing a Keycloak SSO session,
-    // so clicking the button always goes through the provider.
-    prompt: 'login',
-    state: provider, // echoed back by KC so the callback knows which provider returned
-  })
-  return `${KC_BASE_URL}/realms/${KC_REALM}/protocol/openid-connect/auth?${params}`
-}
+// Social sign-in starts at our own API, not at Keycloak. GET /auth/social/start
+// 302s the browser into Keycloak's brokered flow (kc_idp_hint, so Keycloak
+// forwards straight to the provider instead of rendering its own login page).
+//
+// Building that URL server-side keeps Keycloak's hostname, realm, client id and
+// — most importantly — the redirect_uri out of the bundle, so the only address
+// a user ever sees us send them to is this origin. See
+// api/routes/auth/social_start.go.
+const SOCIAL_START = '/api/v1/auth/social/start'
 
 // Sign-in: the callback stores the resulting tokens as the session.
 export function socialLoginUrl(provider: SocialProvider) {
-  return authorizeUrl(provider, '/api/v1/auth/social/callback')
+  return `${SOCIAL_START}?provider=${provider}`
 }
 
 // Account linking from the profile page: the same brokered flow, except the
@@ -37,9 +25,10 @@ export function socialLoginUrl(provider: SocialProvider) {
 // the session cookie is SameSite=Strict, so it is not sent on the cross-site
 // redirect back from Keycloak and an API callback would arrive unauthenticated.
 // The page instead forwards the code over a normal same-site XHR, which does
-// carry the cookie. Keep in sync with brokeredLinkRedirectPath in api/routes/me.go.
+// carry the cookie. mode=link is what selects that redirect target; the path
+// itself lives in linkRedirectPath (api/routes/auth/social_start.go).
 export const SOCIAL_LINK_REDIRECT_PATH = '/client/profile'
 
 export function socialLinkUrl(provider: SocialProvider) {
-  return authorizeUrl(provider, SOCIAL_LINK_REDIRECT_PATH)
+  return `${SOCIAL_START}?provider=${provider}&mode=link`
 }

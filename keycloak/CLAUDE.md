@@ -31,6 +31,12 @@ The realm export is the source of truth for all Keycloak configuration. Import i
 | Session timeout | 86400 s (24 h) |
 | Brute-force protection | Enabled — 10 failures in 900 s → temporary lock |
 | Password policy | Min 12 chars, 1 uppercase, 1 lowercase, 1 digit, 1 special char |
+| First broker login | `first broker login - auto link` — links a social identity to the existing account with the same email silently, with no Keycloak-rendered page (`KC_setup.md` §5) |
+
+> The export ships the auto-link flow but **no identity providers** (their client
+> secrets live in the console), so on a fresh import each IdP still has to be
+> created and pointed at that flow. Keycloak also skips the import entirely when
+> the realm already exists — an existing deployment needs the flow built by hand.
 
 ### OAuth Clients
 
@@ -73,7 +79,9 @@ Assign roles via the Keycloak admin console or the Admin REST API.
 
 ### SMTP
 
-Keycloak sends emails (verification, password reset) via the internal Postfix relay:
+Keycloak sends what little mail it still originates (e.g. verification) via the
+internal Postfix relay. Password-reset mail is the app's, not Keycloak's — see
+the table above:
 
 - Host: `postfix` (Docker service name)
 - Port: `587`
@@ -82,12 +90,35 @@ Keycloak sends emails (verification, password reset) via the internal Postfix re
 
 Postfix relays outbound mail through SendGrid using `SENDGRID_SMTP_PASSWORD`.
 
+## No user-facing Keycloak UI
+
+Keycloak is an OIDC backend here, not a site users visit. Every authentication
+screen lives in the React app, and each Keycloak page that could otherwise appear
+mid-flow has been removed from the user's path:
+
+| Flow | Where it happens | What used to send users to Keycloak |
+|------|------------------|--------------------------------------|
+| Password sign-in | App `/login` → `POST /auth/login` | — |
+| Forgot password | App modal → `POST /auth/forgot_password`, emailed link → app `/reset-password` | Keycloak's `execute-actions-email` emailed a link to *its* password form (also 400'd: a `redirect_uri` without a `client_id` is rejected, so no mail was ever sent) |
+| Social sign-in | App button → `GET /auth/social/start` (API builds the Keycloak URL) → provider | The bundle linked straight to `auth.apollo-sfs.com/...` |
+| Social login onto an existing email | Auto-linked silently by the `first broker login - auto link` flow | Keycloak's "Account already exists" page (see `KC_setup.md` §5) |
+
+`themes/apollo-sfs/login/bounce.ftl` is the backstop for anything missed: the
+login, register, reset/update-password, idp-link, page-expired, info and error
+templates are all overridden to redirect into the app, usually with a
+`?social_error=` code the login page renders. It only fires when something is
+misconfigured — fix the flow, don't rely on the bounce.
+
+This applies to the `apollo-sfs-realm` login theme only. The **admin console
+signs in against the `master` realm** with its own theme, so administering
+Keycloak at `auth.apollo-sfs.com/admin` is unaffected.
+
 ## Custom Theme
 
 `keycloak/themes/apollo-sfs/` overrides the default Keycloak login and email templates to match the Apollo SFS brand.
 
-- **Login theme:** FreeMarker templates in `themes/apollo-sfs/login/` — login page, registration, password reset, error pages
-- **Email theme:** HTML and text templates in `themes/apollo-sfs/email/` — verification emails, password reset links
+- **Login theme:** FreeMarker templates in `themes/apollo-sfs/login/` — brand CSS, plus the bounce overrides above. `theme.properties` carries `appUrl`, the redirect target; keep it in sync with `APP_BASE_URL`
+- **Email theme:** HTML and text templates in `themes/apollo-sfs/email/` — verification emails (Keycloak no longer sends password-reset mail; the API does, from `api/templates/password_reset.html`)
 
 After editing themes, restart or hot-reload Keycloak:
 

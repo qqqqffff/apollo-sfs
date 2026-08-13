@@ -13,7 +13,11 @@ type Config struct {
 
 	DatabaseDSN string
 
-	KeycloakInternalURL  string
+	KeycloakInternalURL string
+	// KeycloakPublicURL is Keycloak's browser-facing origin. Server-to-server
+	// calls use KeycloakInternalURL; this is only for URLs we hand to a browser
+	// (the brokered social sign-in redirect).
+	KeycloakPublicURL    string
 	KeycloakRealm        string
 	KeycloakClientID     string
 	KeycloakClientSecret string
@@ -191,6 +195,7 @@ func loadConfig() Config {
 		),
 
 		KeycloakInternalURL:  requireEnv("KEYCLOAK_INTERNAL_URL"),
+		KeycloakPublicURL:    requireHTTPSURL("KEYCLOAK_PUBLIC_URL"),
 		KeycloakRealm:        requireEnv("KEYCLOAK_REALM"),
 		KeycloakClientID:     requireEnv("KEYCLOAK_CLIENT_ID"),
 		KeycloakClientSecret: requireEnv("KEYCLOAK_CLIENT_SECRET"),

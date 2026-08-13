@@ -85,6 +85,7 @@ func main() {
 
 	authSvc := services.NewAuthService(queries, services.AuthServiceConfig{
 		KeycloakURL:           cfg.KeycloakInternalURL,
+		KeycloakPublicURL:     cfg.KeycloakPublicURL,
 		KeycloakRealm:         cfg.KeycloakRealm,
 		KeycloakClientID:      cfg.KeycloakClientID,
 		KeycloakClientSecret:  cfg.KeycloakClientSecret,
@@ -137,6 +138,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("email service: %v", err)
 	}
+
+	// The forgot-password email is sent by the auth service, which is built
+	// before the email service exists — wire it in now (cf. ProvisionUserKey).
+	authSvc.SetPasswordResetMailer(emailSvc)
 
 	inboundEmailSvc, err := services.NewInboundEmailService(queries, cfg.EmailStoragePath)
 	if err != nil {
@@ -504,6 +509,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		authGroup.POST("/refresh", authHandler.Refresh)
 		authGroup.POST("/forgot_password", authHandler.ForgotPassword)
 		authGroup.POST("/reset_password", authHandler.ResetPassword)
+		authGroup.GET("/social/start", authHandler.SocialStart)
 		authGroup.GET("/social/callback", authHandler.SocialCallback)
 		authGroup.POST("/social/link", authHandler.SocialLinkConfirm)
 	}

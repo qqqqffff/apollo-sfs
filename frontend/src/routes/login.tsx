@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { createFileRoute, redirect, useNavigate, useSearch } from '@tanstack/react-router'
 import { MdClose } from 'react-icons/md'
 import { useAuth } from '../auth'
-import { forgotPassword, resetPassword } from '../api/auth'
+import { forgotPassword } from '../api/auth'
 import { post } from '../api/client'
 import { socialLoginUrl } from '../utils/socialAuth'
 
@@ -306,14 +306,15 @@ function MicrosoftIcon({ className }: { className?: string }) {
 
 // ── Forgot / reset password modal ─────────────────────────────────────────────
 
-type ModalStep = 'request' | 'reset' | 'done'
+// The modal only requests the link. Setting the new password happens on
+// /reset-password, which the emailed link opens with the one-time token — so the
+// reset can be finished in whichever browser opened the email, not just the tab
+// that asked for it.
+type ModalStep = 'request' | 'sent'
 
 function ForgotPasswordModal({ onClose }: { onClose: () => void }) {
   const [step, setStep] = useState<ModalStep>('request')
   const [email, setEmail] = useState('')
-  const [token, setToken] = useState('')
-  const [newPassword, setNewPassword] = useState('')
-  const [confirmPassword, setConfirmPassword] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [isPending, setIsPending] = useState(false)
 
@@ -323,27 +324,9 @@ function ForgotPasswordModal({ onClose }: { onClose: () => void }) {
     setIsPending(true)
     try {
       await forgotPassword(email)
-      setStep('reset')
+      setStep('sent')
     } catch {
       setError('Could not send reset email. Please check the address and try again.')
-    } finally {
-      setIsPending(false)
-    }
-  }
-
-  async function handleReset(e: React.FormEvent) {
-    e.preventDefault()
-    setError(null)
-    if (newPassword !== confirmPassword) {
-      setError('Passwords do not match.')
-      return
-    }
-    setIsPending(true)
-    try {
-      await resetPassword(token, newPassword)
-      setStep('done')
-    } catch {
-      setError('Reset failed. The token may be invalid or expired.')
     } finally {
       setIsPending(false)
     }
@@ -393,79 +376,30 @@ function ForgotPasswordModal({ onClose }: { onClose: () => void }) {
           </>
         )}
 
-        {step === 'reset' && (
-          <>
-            <h2 className="text-lg font-semibold text-gray-900 mb-1">Set a new password</h2>
-            <p className="text-sm text-gray-500 mb-5">
-              Check your email for the reset token, then enter it below along with your new password.
-            </p>
-            <form onSubmit={handleReset} className="flex flex-col gap-4">
-              <label className="flex flex-col gap-1">
-                <span className="text-sm font-medium text-gray-700">Reset token</span>
-                <input
-                  value={token}
-                  onChange={(e) => setToken(e.target.value)}
-                  autoComplete="off"
-                  required
-                  placeholder="Paste token from email"
-                  className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                />
-              </label>
-              <label className="flex flex-col gap-1">
-                <span className="text-sm font-medium text-gray-700">New password</span>
-                <input
-                  type="password"
-                  value={newPassword}
-                  onChange={(e) => setNewPassword(e.target.value)}
-                  autoComplete="new-password"
-                  required
-                  className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                />
-              </label>
-              <label className="flex flex-col gap-1">
-                <span className="text-sm font-medium text-gray-700">Confirm new password</span>
-                <input
-                  type="password"
-                  value={confirmPassword}
-                  onChange={(e) => setConfirmPassword(e.target.value)}
-                  autoComplete="new-password"
-                  required
-                  className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                />
-              </label>
-              {error && <p className="text-sm text-red-500">{error}</p>}
-              <button
-                type="submit"
-                disabled={isPending}
-                className="bg-blue-600 hover:bg-blue-700 text-white rounded-lg py-2 text-sm font-medium disabled:opacity-50 cursor-pointer transition-colors"
-              >
-                {isPending ? 'Resetting…' : 'Reset password'}
-              </button>
-              <button
-                type="button"
-                onClick={() => { setStep('request'); setError(null) }}
-                className="text-sm text-gray-500 hover:text-gray-700 cursor-pointer bg-transparent border-0 p-0 text-center transition-colors"
-              >
-                Didn't get an email? Send again
-              </button>
-            </form>
-          </>
-        )}
-
-        {step === 'done' && (
+        {step === 'sent' && (
           <div className="flex flex-col items-center text-center gap-4 py-2">
             <div className="w-12 h-12 rounded-full bg-green-100 flex items-center justify-center">
               <span className="text-green-600 text-2xl font-bold">✓</span>
             </div>
             <div>
-              <h2 className="text-lg font-semibold text-gray-900 mb-1">Password reset</h2>
-              <p className="text-sm text-gray-500">Your password has been updated. You can now sign in.</p>
+              <h2 className="text-lg font-semibold text-gray-900 mb-1">Check your email</h2>
+              <p className="text-sm text-gray-500">
+                If <span className="font-medium text-gray-700">{email}</span> has an account, a reset
+                link is on its way. The link works once and expires in 30 minutes.
+              </p>
             </div>
             <button
               onClick={onClose}
               className="bg-blue-600 hover:bg-blue-700 text-white rounded-lg px-6 py-2 text-sm font-medium cursor-pointer transition-colors"
             >
               Back to sign in
+            </button>
+            <button
+              type="button"
+              onClick={() => { setStep('request'); setError(null) }}
+              className="text-sm text-gray-500 hover:text-gray-700 cursor-pointer bg-transparent border-0 p-0 transition-colors"
+            >
+              Didn't get an email? Send again
             </button>
           </div>
         )}

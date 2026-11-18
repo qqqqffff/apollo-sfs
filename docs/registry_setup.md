@@ -21,7 +21,7 @@ the per-service tag handling in
 [Per-service tags](#per-service-tags--why-not-one-shared-tag):
 
 ```bash
-./deploy.sh
+./deploy.sh            # menu → release   (or: ./deploy.sh release)
 ```
 
 Run with no arguments in an interactive terminal and it shows a checklist —
@@ -286,7 +286,7 @@ export NODE_AGENT_TAG=$(docker service inspect --format '{{.Spec.TaskTemplate.Co
 
 # 3. Load secrets and deploy.
 set -a && source .env && set +a
-docker stack deploy -c docker-stack.yml apollo-sfs
+docker stack deploy -c docker-stack.yml -c cluster/docker-stack.nodes.yml apollo-sfs
 
 docker stack services apollo-sfs       # watch rollout
 ```
@@ -317,7 +317,7 @@ export API_TAG=<previous-sha-or-version>
 export FRONTEND_TAG=$(docker service inspect --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' apollo-sfs_frontend | sed 's/.*://')
 export NODE_AGENT_TAG=$(docker service inspect --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' apollo-sfs_node-agent-standard | sed 's/.*://')
 set -a && source .env && set +a
-docker stack deploy -c docker-stack.yml apollo-sfs
+docker stack deploy -c docker-stack.yml -c cluster/docker-stack.nodes.yml apollo-sfs
 
 # Or roll back a single service to its immediately-previous spec — simplest option,
 # no tag bookkeeping at all:

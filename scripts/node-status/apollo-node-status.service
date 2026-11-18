@@ -1,0 +1,32 @@
+# apollo-node-status — rewrites @NODE_JSON@ every 5 s with this node's metrics
+# (the same numbers as the admin metrics page) plus component status, so
+# deploy.sh health checks and manager heartbeats can read one file.
+# Installed by `deploy.sh deploy|update` (scripts/deploy/lib/nodestatus.sh);
+# the code runs from @INSTALL_DIR@, never from the user-writable repo.
+[Unit]
+Description=Apollo SFS node status (writes @NODE_JSON@ every 5s)
+After=network-online.target docker.service local-fs.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -I -B @INSTALL_DIR@/apollo_node.py daemon --output @NODE_JSON@ --interval 5 --lock /run/apollo-sfs/node.lock --repo @REPO@
+Restart=always
+RestartSec=3
+# Root is required: SMART needs raw device access, the Docker socket and
+# /proc/<pid>/mountinfo need privileges, and the lock dir is root:docker.
+User=root
+NoNewPrivileges=yes
+PrivateTmp=yes
+# The whole filesystem is read-only to the service except the repo (node.json
+# lives there) and the lock dir. ProtectHome is deliberately NOT set: the repo
+# and the Pi's drive mountpoints live under /home, and the collector must stat
+# them. PrivateDevices is NOT set either: smartctl needs the real block devices.
+ProtectSystem=strict
+# /run/apollo-sfs comes from tmpfiles.d (0775 root:docker); no RuntimeDirectory=,
+# which would re-own it root 0755 and lock out `_remote` ops.
+ReadWritePaths=-@REPO@ -/run/apollo-sfs
+Nice=5
+
+[Install]
+WantedBy=multi-user.target

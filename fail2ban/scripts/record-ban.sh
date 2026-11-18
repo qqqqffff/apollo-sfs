@@ -15,8 +15,18 @@ COMPOSE_DIR="/opt/apollo-sfs/project"
 # shellcheck source=/dev/null
 set -a; source "$COMPOSE_DIR/.env"; set +a
 
+# The values below are interpolated into SQL, so accept only what fail2ban
+# can legitimately pass: an IPv4/IPv6 address and a jail name.
+[[ "$IP" =~ ^[0-9A-Fa-f:.]+$ ]] || { echo "record-ban: refusing invalid IP '$IP'" >&2; exit 1; }
+[[ "$JAIL" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "record-ban: refusing invalid jail '$JAIL'" >&2; exit 1; }
+
+# Under Docker Swarm the app DB container is apollo-sfs_db-app.<slot>.<task-id>
+# (the old compose name apollo-sfs-postgresql-app no longer exists).
+APPDB="$(docker ps -qf "name=apollo-sfs_db-app" | head -n1)"
+
 run_sql() {
-    docker exec -i apollo-sfs-postgresql-app \
+    [ -n "$APPDB" ] || { echo "record-ban: apollo-sfs_db-app is not running" >&2; return 1; }
+    docker exec -i "$APPDB" \
         psql -U "$POSTGRES_APP_USER" -d "$POSTGRES_APP_DB" \
         --no-align --tuples-only -c "$1"
 }

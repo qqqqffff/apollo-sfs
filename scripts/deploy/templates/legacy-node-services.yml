@@ -1,0 +1,151 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# scripts/deploy/templates/legacy-node-services.yml
+#
+# The four per-node services EXACTLY as docker-stack.yml defined them before
+# deploy.sh 2.0 moved per-node services into the generated, gitignored
+# cluster/docker-stack.nodes.yml (copied verbatim, comments included).
+#
+# Why it exists:
+#   * On the first `deploy.sh deploy` (adoption) the manager seeds a node record
+#     per existing node from these definitions, so the generated file renders
+#     the SAME services (names, constraints, env, volumes) and deploying it
+#     changes nothing — no restarts.
+#   * scripts/deploy/tests/python/test_stack_render.py proves that equivalence.
+#   * If cluster/docker-stack.nodes.yml is ever missing, `stack_preflight`
+#     re-seeds from here so a deploy can never silently drop these services.
+# Do not edit by hand unless the legacy services themselves change.
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── MinIO — FAST tier (Pi NVMe, existing blobs reused in place) ──────────────
+  # Named `minio` (not `minio-fast`) on purpose: it matches the API's required
+  # MINIO_ENDPOINT and the existing DB server record's endpoint (`minio:9000`),
+  # so no DB edit is needed. The label `nvme-01` is what classifies it as the
+  # `nvme`/fast tier (drive_type derives from the label — see doc Part 6).
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      # The Pi's EXISTING data dir — do NOT wipe; existing buckets/objects live here.
+      # pool/ is the mergerfs union mount; user files are at its top level (no /data subdir).
+      - /home/apollo/apollo-sfs/minio/pool:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    networks: [app-network]
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.labels.tier == fast]     # → the Pi
+      restart_policy:
+        condition: any
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  # ── MinIO — STANDARD tier (manager 8TB HDD) ──────────────────────────────────
+  minio-standard:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - /srv/minio/hdd-01/data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    networks: [app-network]
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.labels.tier == standard]   # → the manager
+      restart_policy:
+        condition: any
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  # ── Node metrics agent — standard tier (manager, HDD) ───────────────────────
+  # Reads this node's CPU/memory/network/HDD sensors and pushes to the API.
+  # Only mounts paths that exist on the manager; see node-agent-fast for the Pi.
+  node-agent-standard:
+    image: ${REGISTRY:-192.168.68.57:5000}/apollo-sfs-node-agent:${NODE_AGENT_TAG}
+    environment:
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
+      NODE_METRICS_INGEST_URL: http://node-metrics-ingest:8080
+      NODE_AGENT_TOKEN: ${NODE_AGENT_TOKEN}
+      # Physical disks to report, as label:/mount/point (comma-separated). These
+      # point at the bind-mounted data dirs below, so usage is readable inside the
+      # container without resolving /dev/disk/by-label symlinks (whose block-device
+      # targets under /dev are not mounted into the agent).
+      NODE_DISK_MOUNTS: "hdd-01:/srv/minio/hdd-01"
+      # Writable scratch directory for the on-demand drive benchmark (see
+      # docs/drive_benchmark_setup.md) — a small, dedicated subdirectory, not a
+      # blanket reopening of the read-only data mount above. The host path
+      # must be created once (`mkdir -p /srv/minio/hdd-01/.bench`) before
+      # deploying; it is never read by anything else.
+      NODE_BENCHMARK_MOUNTS: "hdd-01:/bench/hdd-01"
+    volumes:
+      - /sys:/sys:ro
+      - /dev/disk/by-label:/dev/disk/by-label:ro
+      - /srv/minio/hdd-01:/srv/minio/hdd-01:ro
+      - /srv/minio/hdd-01/.bench:/bench/hdd-01
+    networks: [app-network]
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.labels.tier == standard]
+      restart_policy:
+        condition: any
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  # ── Node metrics agent — fast tier (Pi 5, NVMe) ──────────────────────────────
+  # Reads the Pi's CPU/memory/network/NVMe sensors and pushes to the API.
+  # Only mounts paths that exist on the Pi; see node-agent-standard for the manager.
+  node-agent-fast:
+    image: ${REGISTRY:-192.168.68.57:5000}/apollo-sfs-node-agent:${NODE_AGENT_TAG}
+    environment:
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
+      NODE_METRICS_INGEST_URL: http://node-metrics-ingest:8080
+      NODE_AGENT_TOKEN: ${NODE_AGENT_TOKEN}
+      # Physical disks to report, as label:/mount/point (comma-separated). The two
+      # NVMe drives are bind-mounted below, so usage is readable inside the
+      # container without resolving /dev/disk/by-label symlinks (whose block-device
+      # targets under /dev are not mounted into the agent).
+      NODE_DISK_MOUNTS: "nvme-01:/home/apollo/apollo-sfs/minio/nvme-01,nvme-02:/home/apollo/apollo-sfs/minio/nvme-02"
+      # Writable scratch directories for the on-demand drive benchmark (see
+      # docs/drive_benchmark_setup.md) — a small, dedicated subdirectory per
+      # physical NVMe, not a blanket reopening of the read-only data mounts
+      # above. Both host paths must be created once (`mkdir -p .../.bench`)
+      # before deploying; neither is read by anything else.
+      NODE_BENCHMARK_MOUNTS: "nvme-01:/bench/nvme-01,nvme-02:/bench/nvme-02"
+    volumes:
+      - /sys:/sys:ro
+      - /dev/disk/by-label:/dev/disk/by-label:ro
+      - /home/apollo/apollo-sfs/minio/nvme-01:/home/apollo/apollo-sfs/minio/nvme-01:ro
+      - /home/apollo/apollo-sfs/minio/nvme-02:/home/apollo/apollo-sfs/minio/nvme-02:ro
+      - /home/apollo/apollo-sfs/minio/nvme-01/.bench:/bench/nvme-01
+      - /home/apollo/apollo-sfs/minio/nvme-02/.bench:/bench/nvme-02
+    networks: [app-network]
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.labels.tier == fast]
+      restart_policy:
+        condition: any
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }

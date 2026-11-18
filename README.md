@@ -125,9 +125,11 @@ KEYCLOAK_ADMIN=admin
 KEYCLOAK_ADMIN_PASSWORD=<strong-password>
 
 # ── Encryption ─────────────────────────────────────────────────────────────────
-# 32 random bytes, hex-encoded. Generate with:
-#   openssl rand -hex 32
-KEY_ENCRYPTION_KEY=<64-hex-chars>
+# Exactly 32 random bytes, BASE64-encoded (the API base64-decodes it and
+# refuses to start unless it decodes to 32 bytes). Generate with:
+#   openssl rand -base64 32
+# Never change it once files exist — they could no longer be decrypted.
+KEY_ENCRYPTION_KEY=<44-char-base64>
 
 # ── Session cookie ─────────────────────────────────────────────────────────────
 # 32 or 64 random bytes, any encoding. Generate with:
@@ -381,16 +383,22 @@ docker buildx create --name apollo-builder --driver docker-container \
 
 ### Building and Deploying Images
 
-> **Use `./deploy.sh`.** It automates everything below — build, push, and
-> `docker stack deploy` — behind an interactive checklist (up/down to move, space
-> to select `frontend`/`api`/`node-agent`, enter to confirm). Tags default to
+> **Use `./deploy.sh release`** (or the old `./deploy.sh --services …` form). It
+> automates everything below — build, push, and `docker stack deploy` — behind an
+> interactive checklist (up/down to move, space to select
+> `frontend`/`api`/`node-agent`, enter to confirm). Tags default to
 > `git rev-parse --short HEAD`; for services you don't select, it asks the running
 > Swarm what tag they're already on and redeploys them unchanged. See
 > [docs/registry_setup.md](docs/registry_setup.md#automated-deploy-script) for
-> flags (`--services`, `--tag`, `--deploy-only`, `--dry-run`, …). Just run it:
+> flags (`--services`, `--tag`, `--deploy-only`, `--test`, …). Just run it:
 > ```bash
-> ./deploy.sh
+> ./deploy.sh release
 > ```
+> Provisioning a node (naming it, joining the cluster, drives, nginx, `.env`, the
+> background status service) is `./deploy.sh deploy`; see
+> [docs/node_provisioning.md](docs/node_provisioning.md). The stack is two files —
+> `docker-stack.yml` plus the generated `cluster/docker-stack.nodes.yml` — so every
+> manual `docker stack deploy` below must pass **both** `-c` files.
 > The manual commands below are what it runs under the hood — useful for the very
 > first deploy, or if you want to see exactly what's happening.
 
@@ -432,7 +440,7 @@ docker buildx build --platform linux/amd64,linux/arm64 \
 
 export API_TAG=${NEW_TAG} FRONTEND_TAG=${NEW_TAG} NODE_AGENT_TAG=${NEW_TAG}
 set -a && source .env && set +a
-docker stack deploy -c docker-stack.yml apollo-sfs
+docker stack deploy -c docker-stack.yml -c cluster/docker-stack.nodes.yml apollo-sfs
 
 # Watch services come up
 docker stack services apollo-sfs
@@ -455,9 +463,9 @@ docker buildx build --platform linux/amd64 \
 
 export FRONTEND_TAG=${NEW_TAG}
 export API_TAG=$(docker service inspect --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' apollo-sfs_api | sed 's/.*://')
-export NODE_AGENT_TAG=$(docker service inspect --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' apollo-sfs_node-agent-standard | sed 's/.*://')
+export NODE_AGENT_TAG=$(docker service inspect --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' $(docker service ls -q --filter name=apollo-sfs_node-agent- | head -n1) | sed 's/.*://')
 set -a && source .env && set +a
-docker stack deploy -c docker-stack.yml apollo-sfs
+docker stack deploy -c docker-stack.yml -c cluster/docker-stack.nodes.yml apollo-sfs
 ```
 
 Swap `FRONTEND_TAG`/`frontend/`/`apollo-sfs_frontend` for `API_TAG`/`api/`/
@@ -501,7 +509,7 @@ Incremental schema changes live in `db/migrations/NNN_name.sql` and must be appl
 ./db/apply-migrations.sh
 
 # Also wired into deploy.sh — pass --migrate to run this before build/deploy
-./deploy.sh --migrate
+./deploy.sh release --migrate      # (or the old form: ./deploy.sh --migrate)
 
 # Apply against a specific database instead (direct psql, or a docker-compose
 # dev stack) by overriding $PSQL
@@ -552,9 +560,9 @@ version back. Resolve the other services' variables live so they're left as-is:
 ```bash
 export API_TAG=<previous-git-sha>   # e.g. a663b28
 export FRONTEND_TAG=$(docker service inspect --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' apollo-sfs_frontend | sed 's/.*://')
-export NODE_AGENT_TAG=$(docker service inspect --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' apollo-sfs_node-agent-standard | sed 's/.*://')
+export NODE_AGENT_TAG=$(docker service inspect --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' $(docker service ls -q --filter name=apollo-sfs_node-agent- | head -n1) | sed 's/.*://')
 set -a && source .env && set +a
-docker stack deploy -c docker-stack.yml apollo-sfs
+docker stack deploy -c docker-stack.yml -c cluster/docker-stack.nodes.yml apollo-sfs
 ```
 
 ### Troubleshooting Failed Updates

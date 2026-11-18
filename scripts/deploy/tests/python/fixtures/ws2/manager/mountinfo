@@ -1,0 +1,3 @@
+21 1 8:1 / / rw,noatime shared:1 - ext4 /dev/nvme0n1p2 rw
+22 1 8:2 / /boot/efi rw,noatime shared:2 - vfat /dev/nvme0n1p1 rw
+23 1 8:3 / /srv/minio/hdd-01 rw,noatime shared:3 - xfs /dev/sda1 rw

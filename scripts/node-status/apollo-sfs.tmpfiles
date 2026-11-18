@@ -1,0 +1,6 @@
+# /etc/tmpfiles.d/apollo-sfs.conf — installed by deploy.sh.
+# Shared lock/runtime dir for deploy.sh (root), the apollo-node-status service
+# (root) and `deploy.sh _remote` ops (the ssh user, a docker-group member).
+# Not sticky on purpose: with fs.protected_regular, a lock file created by one
+# user in a sticky world-writable dir (like /run/lock) can't be reopened by another.
+d /run/apollo-sfs 0775 root docker -

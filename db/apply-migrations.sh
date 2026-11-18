@@ -20,6 +20,22 @@
 #
 set -euo pipefail
 
+# ── In-container (initdb) mode ───────────────────────────────────────────────
+# db/ is mounted as the Postgres image's /docker-entrypoint-initdb.d
+# (docker-stack.yml) and this file is executable, so a BRAND-NEW database runs
+# it during initialisation — inside the container, where there is no docker CLI
+# and POSTGRES_APP_* aren't set. The base schema files (00_…–064_…) have just
+# run (alphabetical order); apply the migrations here too and exit cleanly
+# instead of failing the very first start. Host behaviour below is unchanged.
+if [[ -n "${PG_MAJOR:-}" && -d /docker-entrypoint-initdb.d ]] && ! command -v docker >/dev/null 2>&1; then
+  shopt -s nullglob
+  for f in "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"/migrations/*.sql; do
+    echo "apply-migrations (initdb): $(basename "$f")"
+    psql -v ON_ERROR_STOP=1 --username "${POSTGRES_USER:-postgres}" --dbname "${POSTGRES_DB:-postgres}" -f "$f"
+  done
+  exit 0
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MIGRATIONS_DIR="$SCRIPT_DIR/migrations"
 STACK_NAME="${STACK_NAME:-apollo-sfs}"

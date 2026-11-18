@@ -17,3 +17,6 @@ mobile/android/**/*.iml
 mobile/android/app/debug.keystore
 mobile/android/captures/
 mobile/android/.navigation/
+# deploy.sh runtime state (node-specific; never commit)
+node.json
+/cluster/

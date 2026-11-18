@@ -1,0 +1,1 @@
+{"proto": 1, "op": "reserve-labels", "ok": true, "host": "apollo-sfs-1", "test": true, "data": {"labels": ["hdd-02"]}}

@@ -68,14 +68,16 @@ PSQL="psql postgresql://user:pw@host/db" ./db/apply-migrations.sh
 PSQL="docker compose exec -T db-app psql" ./db/apply-migrations.sh
 ```
 
-The script reads `POSTGRES_APP_USER` and `POSTGRES_APP_DB` from `.env` if present, otherwise uses the `$PSQL` override. It applies every file in `db/migrations/` in numeric order. `deploy.sh --migrate` runs it before build/deploy.
+The script reads `POSTGRES_APP_USER` and `POSTGRES_APP_DB` from `.env` if present, otherwise uses the `$PSQL` override. It applies every file in `db/migrations/` in numeric order. `deploy.sh --migrate` (alias of `./deploy.sh release --migrate`) runs it before build/deploy, and `./deploy.sh deploy` runs it after bootstrapping a brand-new server.
+
+Because `db/` is mounted as the Postgres image's `/docker-entrypoint-initdb.d` and the script is executable, a **brand-new** database also runs it once during initialisation. It detects that context (inside the container, no docker CLI) and applies the migrations with `$POSTGRES_USER`/`$POSTGRES_DB` there, so a fresh install ends up with the base schema **and** every migration.
 
 To add a migration:
 1. Create `db/migrations/<N+1>_description.sql`
 2. Write idempotent SQL (use `IF NOT EXISTS`, `IF EXISTS`, `ON CONFLICT`, etc.)
 3. Run `./db/apply-migrations.sh` against any existing database that needs the change
 
-**Never modify already-applied migration files.** Write a new one instead. Fresh installs apply only the base schema files and do not need migrations.
+**Never modify already-applied migration files.** Write a new one instead. Migrations must stay idempotent: fresh installs apply them right after the base schema files (see above), existing databases apply them on demand.
 
 ## Row-Level Security
 

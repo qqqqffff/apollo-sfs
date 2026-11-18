@@ -1,0 +1,5 @@
+21 1 8:1 / / rw,noatime shared:1 - ext4 /dev/mmcblk0p2 rw
+22 1 8:2 / /boot/firmware rw,noatime shared:2 - vfat /dev/mmcblk0p1 rw
+23 1 8:3 / /home/apollo/apollo-sfs/minio/nvme-01 rw,noatime shared:3 - ext4 /dev/nvme0n1p1 rw
+24 1 8:4 / /home/apollo/apollo-sfs/minio/nvme-02 rw,noatime shared:4 - xfs /dev/nvme1n1 rw
+25 1 8:5 / /home/apollo/apollo-sfs/minio/pool rw,noatime shared:5 - fuse.mergerfs minio-pool rw

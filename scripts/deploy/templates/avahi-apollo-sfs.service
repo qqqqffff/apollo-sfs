@@ -1,0 +1,18 @@
+<?xml version="1.0" standalone='no'?>
+<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+<!-- Written by deploy.sh (scripts/deploy/lib/system.sh). Advertises this
+     Apollo SFS node so other nodes' `deploy.sh deploy` can discover the server
+     name, node name and role without credentials. No secrets in here. -->
+<service-group>
+  <name replace-wildcards="yes">apollo-sfs @NODE@ (%h)</name>
+  <service>
+    <type>_apollo-sfs._tcp</type>
+    <port>22</port>
+    <txt-record>server=@SERVER@</txt-record>
+    <txt-record>node=@NODE@</txt-record>
+    <txt-record>role=@ROLE@</txt-record>
+    <txt-record>swarm=@SWARM@</txt-record>
+    <txt-record>repo=@REPO@</txt-record>
+    <txt-record>proto=@PROTO@</txt-record>
+  </service>
+</service-group>

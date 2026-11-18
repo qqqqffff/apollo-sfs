@@ -1,0 +1,1 @@
+{"proto": 1, "op": "register-node", "ok": true, "host": "apollo-sfs-1", "test": true, "data": {"hostname": "apollo-sfs-3", "labels": {"tier": "standard"}, "db": {"registered": true}, "stack": {"deployed": true, "nodes_file_changed": true, "node_services": ["node-agent-apollo-sfs-3"]}, "warnings": []}}

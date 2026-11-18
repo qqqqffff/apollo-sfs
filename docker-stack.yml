@@ -1,55 +1,54 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# Docker Swarm stack — two-node, two-tier deployment.
+# Docker Swarm stack — cluster-wide (manager-level) services.
 # NOTE: no top-level `name:` here — `docker stack deploy` uses the legacy Compose
 # v3 schema which rejects it ("Additional property name is not allowed"). The
 # stack name comes from the CLI arg: `docker stack deploy ... apollo-sfs`.
 #
-#   manager  apollo-sfs-1 (Ryzen, amd64, node.labels.tier=standard)
-#            → api, frontend, keycloak, postfix, ddns, db-app, db-keycloak,
-#              minio-standard (8TB HDD).  Host nginx terminates TLS in front.
-#   worker   apollo-sfs   (Pi 5, arm64,  node.labels.tier=fast)
-#            → minio-fast (existing 4TB NVMe blobs — reused in place).
+# Two files make up the stack:
+#   docker-stack.yml                  (this file, committed) — every service that
+#       runs on THE manager: api, frontend, keycloak, postfix, ddns, db-app,
+#       db-keycloak, recognition, test-runner, node-metrics-ingest. They are
+#       pinned with `node.labels.apollo-manager == true` (exactly one node has
+#       that label) so a manager handover can move them deliberately.
+#   cluster/docker-stack.nodes.yml    (GENERATED on the manager, gitignored) —
+#       the per-node services: a node-agent per node and the blob-storage MinIO
+#       instances (`minio` = fast tier, `minio-standard` = standard tier),
+#       rendered by deploy.sh from cluster/nodes/*.json. The pre-2.0 per-node
+#       definitions live in scripts/deploy/templates/legacy-node-services.yml
+#       and are what existing nodes keep rendering to.
+# Always deploy BOTH:
+#   docker stack deploy -c docker-stack.yml -c cluster/docker-stack.nodes.yml apollo-sfs
 #
-# Deploy (see docs/registry_setup.md for the full registry workflow):
-#   Each custom image is pinned by its OWN tag variable (API_TAG, FRONTEND_TAG,
-#   NODE_AGENT_TAG, NODE_METRICS_INGEST_TAG, RECOGNITION_TAG, TEST_RUNNER_TAG) —
-#   NOT a single shared TAG. This is what lets you
-#   rebuild/redeploy just one service: point ONLY that service's variable at a
-#   newly built+pushed tag, and set the other two variables to whatever tag is
-#   already running (query with `docker service inspect --format
-#   '{{.Spec.TaskTemplate.ContainerSpec.Image}}' apollo-sfs_api`, etc.) so they
-#   redeploy unchanged instead of silently pointing at a tag that was never
-#   pushed for them.
+# Use deploy.sh rather than deploying by hand:
+#   ./deploy.sh deploy | restart | update   provision / restart / repair a node
+#   ./deploy.sh release [--services a,b]    build + push images and redeploy
+#   (`./deploy.sh --services …`, `--deploy-only`, `--migrate` still work.)
+# deploy.sh exports everything this file interpolates: REGISTRY, the per-image
+# *_TAG variables (API_TAG, FRONTEND_TAG, NODE_AGENT_TAG, NODE_METRICS_INGEST_TAG,
+# RECOGNITION_TAG, TEST_RUNNER_TAG — each image has its OWN tag so one service
+# can be rebuilt without pointing the others at an unpushed tag), the .env
+# secrets, and APOLLO_DISK_STATS_SOURCE/LABEL. See docs/node_provisioning.md and
+# docs/registry_setup.md.
 #
-#   ./deploy.sh   automates exactly this (see docs/registry_setup.md), including
-#   resolving the untouched services' tags live from the running Swarm. Manual
-#   equivalent for a frontend-only change:
-#
-#   export REGISTRY=192.168.68.57:5000          # private registry endpoint
-#   export TAG=$(git rev-parse --short HEAD)
+# Manual equivalent (frontend-only change):
+#   export REGISTRY=192.168.68.57:5000 TAG=$(git rev-parse --short HEAD)
 #   docker buildx build --platform linux/amd64 \
 #     -t ${REGISTRY}/apollo-sfs_frontend:${TAG} frontend/ --push
 #   export FRONTEND_TAG=${TAG}
 #   export API_TAG=$(docker service inspect --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' apollo-sfs_api | sed 's/.*://')
-#   export NODE_AGENT_TAG=$(docker service inspect --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' apollo-sfs_node-agent-standard | sed 's/.*://')
+#   …same for the other *_TAG variables…
 #   set -a && . ./.env && set +a                 # stack deploy does NOT auto-read .env
-#   docker stack deploy -c docker-stack.yml apollo-sfs   # nodes pull from the registry
-#
-# REGISTRY, API_TAG, FRONTEND_TAG, NODE_AGENT_TAG, NODE_METRICS_INGEST_TAG,
-# RECOGNITION_TAG, and TEST_RUNNER_TAG must all be set before
-# `docker stack deploy` — they are substituted from the shell environment (not
-# from .env). REGISTRY defaults to 192.168.68.57:5000 (the manager's LAN IP)
-# when unset; the TAG vars have no default, so a missing one fails the
-# deploy loudly (intentional — better than silently deploying an unpushed tag).
-# Because every node pulls the versioned image from the registry, you no longer
-# build on each node or pass --resolve-image never.
+#   docker stack deploy -c docker-stack.yml -c cluster/docker-stack.nodes.yml apollo-sfs
+# The TAG vars have no default, so a missing one fails the deploy loudly
+# (intentional — better than silently deploying an unpushed tag).
 #
 # NOTE — three Swarm differences vs docker-compose, all called out below:
-#   * `build:` is unsupported → images are pre-built (Part 1 of the doc).
+#   * `build:` is unsupported → images are pre-built (deploy.sh release).
 #   * `privileged:`/`pid: host` are unsupported → the API kill switch cannot run
 #     as a Swarm service (see the api service comment).
 #   * published ports use `mode: host` so they bind only on the pinned node; the
-#     host firewall must block 3000/8080/8180 from outside (see the doc, Part 4).
+#     host firewall must keep 3000/8080/8180 off the internet (only 80/443 are
+#     forwarded to host nginx).
 # ─────────────────────────────────────────────────────────────────────────────
 
 services:
@@ -66,7 +65,7 @@ services:
     deploy:
       replicas: 1
       placement:
-        constraints: [node.labels.tier == standard]
+        constraints: [node.labels.apollo-manager == true]
       update_config:
         parallelism: 1
         order: stop-first   # host-mode ports can't coexist; must stop old task before starting new one
@@ -140,10 +139,13 @@ services:
       EMAIL_STORAGE_PATH: /home/app/service-worker-email
       SENDGRID_WEBHOOK_SECRET: ${SENDGRID_WEBHOOK_SECRET:-}
       QUOTA_WARNING_THRESHOLD_PERCENT: ${QUOTA_WARNING_THRESHOLD_PERCENT:-80}
-      # Local drive stats — the standard (HDD) tier is on this node.
+      # Local drive stats for the manager's own disk. deploy.sh exports
+      # APOLLO_DISK_STATS_SOURCE/LABEL from the manager's node.json (its
+      # standard-tier drive, else a placeholder dir) so the bind source always
+      # exists wherever the manager-level services run (handover-safe).
       # Per-server/per-drive topology is stored in the DB (admin API); see the doc.
       DISK_STATS_PATH: /data
-      DISK_STATS_DRIVE_LABEL: hdd-01
+      DISK_STATS_DRIVE_LABEL: ${APOLLO_DISK_STATS_LABEL:-hdd-01}
       # Cloudflare Turnstile
       CLOUDFLARE_TURNSTILE_SECRET_KEY: ${CLOUDFLARE_TURNSTILE_SECRET_KEY}
       CLOUDFLARE_TURNSTILE_SITE_KEY: ${CLOUDFLARE_TURNSTILE_SITE_KEY}
@@ -174,8 +176,8 @@ services:
       # the image (Dockerfile); defaults to UTC if unset.
       TZ: ${TZ:-UTC}
     volumes:
-      # Local HDD (standard tier) for disk-stats reads
-      - /srv/minio/hdd-01:/data:ro
+      # The manager's own drive (see APOLLO_DISK_STATS_* above), read-only.
+      - ${APOLLO_DISK_STATS_SOURCE:-/srv/minio/hdd-01}:/data:ro
       - /var/lib/GeoIP:/var/lib/GeoIP:ro
       - /var/run/docker.sock:/var/run/docker.sock
       - /home/apollo/service-worker-email:/home/app/service-worker-email
@@ -183,70 +185,12 @@ services:
     deploy:
       replicas: 1
       placement:
-        constraints: [node.labels.tier == standard]
+        constraints: [node.labels.apollo-manager == true]
       update_config:
         parallelism: 1
         order: stop-first   # host-mode port 8080 can only be held by one task at a time
         failure_action: rollback
         delay: 5s
-      restart_policy:
-        condition: any
-    logging:
-      driver: json-file
-      options: { max-size: "10m", max-file: "3" }
-
-  # ── MinIO — FAST tier (Pi NVMe, existing blobs reused in place) ──────────────
-  # Named `minio` (not `minio-fast`) on purpose: it matches the API's required
-  # MINIO_ENDPOINT and the existing DB server record's endpoint (`minio:9000`),
-  # so no DB edit is needed. The label `nvme-01` is what classifies it as the
-  # `nvme`/fast tier (drive_type derives from the label — see doc Part 6).
-  minio:
-    image: minio/minio:latest
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
-    volumes:
-      # The Pi's EXISTING data dir — do NOT wipe; existing buckets/objects live here.
-      # pool/ is the mergerfs union mount; user files are at its top level (no /data subdir).
-      - /home/apollo/apollo-sfs/minio/pool:/data
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 15s
-    networks: [app-network]
-    deploy:
-      replicas: 1
-      placement:
-        constraints: [node.labels.tier == fast]     # → the Pi
-      restart_policy:
-        condition: any
-    logging:
-      driver: json-file
-      options: { max-size: "10m", max-file: "3" }
-
-  # ── MinIO — STANDARD tier (manager 8TB HDD) ──────────────────────────────────
-  minio-standard:
-    image: minio/minio:latest
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
-    volumes:
-      - /srv/minio/hdd-01/data:/data
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 15s
-    networks: [app-network]
-    deploy:
-      replicas: 1
-      placement:
-        constraints: [node.labels.tier == standard]   # → the manager
       restart_policy:
         condition: any
     logging:
@@ -291,7 +235,7 @@ services:
     deploy:
       replicas: 1
       placement:
-        constraints: [node.labels.tier == standard]
+        constraints: [node.labels.apollo-manager == true]
       restart_policy:
         condition: any
     logging:
@@ -313,7 +257,7 @@ services:
     deploy:
       replicas: 1
       placement:
-        constraints: [node.labels.tier == standard]
+        constraints: [node.labels.apollo-manager == true]
       restart_policy:
         condition: any
     logging:
@@ -336,7 +280,7 @@ services:
     deploy:
       replicas: 1
       placement:
-        constraints: [node.labels.tier == standard]
+        constraints: [node.labels.apollo-manager == true]
       restart_policy:
         condition: any
     logging:
@@ -363,7 +307,7 @@ services:
     deploy:
       replicas: 1
       placement:
-        constraints: [node.labels.tier == standard]
+        constraints: [node.labels.apollo-manager == true]
       restart_policy:
         condition: any
     logging:
@@ -389,7 +333,7 @@ services:
     deploy:
       replicas: 1
       placement:
-        constraints: [node.labels.tier == standard]
+        constraints: [node.labels.apollo-manager == true]
       restart_policy:
         condition: any
     logging:
@@ -418,7 +362,7 @@ services:
     deploy:
       replicas: 1
       placement:
-        constraints: [node.labels.tier == standard]
+        constraints: [node.labels.apollo-manager == true]
       restart_policy:
         condition: any
       resources:
@@ -450,7 +394,7 @@ services:
     deploy:
       replicas: 1
       placement:
-        constraints: [node.labels.tier == standard]
+        constraints: [node.labels.apollo-manager == true]
       restart_policy:
         condition: any
     logging:
@@ -475,81 +419,7 @@ services:
     deploy:
       replicas: 1
       placement:
-        constraints: [node.labels.tier == standard]
-      restart_policy:
-        condition: any
-    logging:
-      driver: json-file
-      options: { max-size: "10m", max-file: "3" }
-
-  # ── Node metrics agent — standard tier (manager, HDD) ───────────────────────
-  # Reads this node's CPU/memory/network/HDD sensors and pushes to the API.
-  # Only mounts paths that exist on the manager; see node-agent-fast for the Pi.
-  node-agent-standard:
-    image: ${REGISTRY:-192.168.68.57:5000}/apollo-sfs-node-agent:${NODE_AGENT_TAG}
-    environment:
-      NODE_HOSTNAME: "{{.Node.Hostname}}"
-      NODE_METRICS_INGEST_URL: http://node-metrics-ingest:8080
-      NODE_AGENT_TOKEN: ${NODE_AGENT_TOKEN}
-      # Physical disks to report, as label:/mount/point (comma-separated). These
-      # point at the bind-mounted data dirs below, so usage is readable inside the
-      # container without resolving /dev/disk/by-label symlinks (whose block-device
-      # targets under /dev are not mounted into the agent).
-      NODE_DISK_MOUNTS: "hdd-01:/srv/minio/hdd-01"
-      # Writable scratch directory for the on-demand drive benchmark (see
-      # docs/drive_benchmark_setup.md) — a small, dedicated subdirectory, not a
-      # blanket reopening of the read-only data mount above. The host path
-      # must be created once (`mkdir -p /srv/minio/hdd-01/.bench`) before
-      # deploying; it is never read by anything else.
-      NODE_BENCHMARK_MOUNTS: "hdd-01:/bench/hdd-01"
-    volumes:
-      - /sys:/sys:ro
-      - /dev/disk/by-label:/dev/disk/by-label:ro
-      - /srv/minio/hdd-01:/srv/minio/hdd-01:ro
-      - /srv/minio/hdd-01/.bench:/bench/hdd-01
-    networks: [app-network]
-    deploy:
-      replicas: 1
-      placement:
-        constraints: [node.labels.tier == standard]
-      restart_policy:
-        condition: any
-    logging:
-      driver: json-file
-      options: { max-size: "10m", max-file: "3" }
-
-  # ── Node metrics agent — fast tier (Pi 5, NVMe) ──────────────────────────────
-  # Reads the Pi's CPU/memory/network/NVMe sensors and pushes to the API.
-  # Only mounts paths that exist on the Pi; see node-agent-standard for the manager.
-  node-agent-fast:
-    image: ${REGISTRY:-192.168.68.57:5000}/apollo-sfs-node-agent:${NODE_AGENT_TAG}
-    environment:
-      NODE_HOSTNAME: "{{.Node.Hostname}}"
-      NODE_METRICS_INGEST_URL: http://node-metrics-ingest:8080
-      NODE_AGENT_TOKEN: ${NODE_AGENT_TOKEN}
-      # Physical disks to report, as label:/mount/point (comma-separated). The two
-      # NVMe drives are bind-mounted below, so usage is readable inside the
-      # container without resolving /dev/disk/by-label symlinks (whose block-device
-      # targets under /dev are not mounted into the agent).
-      NODE_DISK_MOUNTS: "nvme-01:/home/apollo/apollo-sfs/minio/nvme-01,nvme-02:/home/apollo/apollo-sfs/minio/nvme-02"
-      # Writable scratch directories for the on-demand drive benchmark (see
-      # docs/drive_benchmark_setup.md) — a small, dedicated subdirectory per
-      # physical NVMe, not a blanket reopening of the read-only data mounts
-      # above. Both host paths must be created once (`mkdir -p .../.bench`)
-      # before deploying; neither is read by anything else.
-      NODE_BENCHMARK_MOUNTS: "nvme-01:/bench/nvme-01,nvme-02:/bench/nvme-02"
-    volumes:
-      - /sys:/sys:ro
-      - /dev/disk/by-label:/dev/disk/by-label:ro
-      - /home/apollo/apollo-sfs/minio/nvme-01:/home/apollo/apollo-sfs/minio/nvme-01:ro
-      - /home/apollo/apollo-sfs/minio/nvme-02:/home/apollo/apollo-sfs/minio/nvme-02:ro
-      - /home/apollo/apollo-sfs/minio/nvme-01/.bench:/bench/nvme-01
-      - /home/apollo/apollo-sfs/minio/nvme-02/.bench:/bench/nvme-02
-    networks: [app-network]
-    deploy:
-      replicas: 1
-      placement:
-        constraints: [node.labels.tier == fast]
+        constraints: [node.labels.apollo-manager == true]
       restart_policy:
         condition: any
     logging:

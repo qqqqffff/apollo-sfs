@@ -257,7 +257,7 @@ docker build -f Dockerfile.node-metrics-ingest -t apollo-sfs_node-metrics-ingest
 GOOS=linux GOARCH=arm64 go build -o api-arm64 ./cmd/...
 ```
 
-`./deploy.sh` (repo root) automates building/pushing/deploying all of these images against the Swarm stack — see its `--help`.
+`./deploy.sh release` (repo root; the old `./deploy.sh --services …` form still works) automates building/pushing/deploying all of these images against the Swarm stack — see `./deploy.sh release --help`. Node provisioning (`./deploy.sh deploy|restart|update`) is documented in `docs/node_provisioning.md`.
 
 ## Testing
 

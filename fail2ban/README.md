@@ -103,8 +103,8 @@ without dropping existing connections.
 /opt/apollo-sfs/scripts/record-ban.sh "<ip>" ban "nginx-api-scan"
 ```
 `record-ban.sh` loads credentials from the project `.env` file and runs the
-following SQL inside the `apollo-sfs-postgresql-app` Docker container via
-`docker exec`:
+following SQL inside the Swarm app-DB container (found with
+`docker ps -qf name=apollo-sfs_db-app`) via `docker exec`:
 
 ```sql
 INSERT INTO banned_ips (ip, jail)
@@ -126,7 +126,7 @@ NOW()` in the database.
 
 ### 6. Database schema
 
-The `banned_ips` table is created by `db/10_banned_ips.sql`:
+The `banned_ips` table is created by `db/23_banned_ips.sql`:
 
 ```sql
 CREATE TABLE banned_ips (
@@ -203,7 +203,7 @@ sudo fail2ban-client set nginx-api-scan banip 1.2.3.4
 grep 1.2.3.4 /etc/nginx/blocklist.d/auto-blocked.conf
 
 # Confirm the DB record
-docker exec -i apollo-sfs-postgresql-app \
+docker exec -i "$(docker ps -qf name=apollo-sfs_db-app | head -n1)" \
   psql -U "$POSTGRES_APP_USER" -d "$POSTGRES_APP_DB" \
   -c "SELECT * FROM banned_ips WHERE ip = '1.2.3.4';"
 
@@ -267,5 +267,5 @@ nginx/
     └── cloudflare-real-ip.conf     → /etc/nginx/conf.d/  (managed by cf-ip-refresh)
 
 db/
-└── 10_banned_ips.sql               ← banned_ips table definition
+└── 23_banned_ips.sql               ← banned_ips table definition
 ```

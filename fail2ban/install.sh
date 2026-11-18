@@ -28,6 +28,18 @@ chmod +x "$SCRIPTS_DIR/record-ban.sh" "$SCRIPTS_DIR/cf-ip-refresh.sh"
 # the repo is checked out.
 ln -sfn "$REPO_DIR" /opt/apollo-sfs/project
 
+echo "==> Ensuring the nginx config directories exist"
+mkdir -p /etc/nginx/conf.d /etc/nginx/blocklist.d
+touch /etc/nginx/blocklist.d/auto-blocked.conf
+
+# Install the repo's starter Cloudflare real-IP list only when none exists:
+# the timer below keeps /etc/nginx/conf.d/cloudflare-real-ip.conf current, and
+# copying the starter over it on every run would undo the latest refresh.
+echo "==> Installing the nginx Cloudflare real-IP config (only if absent)"
+if [ ! -f /etc/nginx/conf.d/cloudflare-real-ip.conf ]; then
+    cp "$REPO_DIR/nginx/conf.d/cloudflare-real-ip.conf" /etc/nginx/conf.d/
+fi
+
 echo "==> Installing Cloudflare IP refresh systemd units"
 cp "$REPO_DIR/fail2ban/systemd/cf-ip-refresh.service" /etc/systemd/system/
 cp "$REPO_DIR/fail2ban/systemd/cf-ip-refresh.timer"   /etc/systemd/system/
@@ -35,21 +47,23 @@ systemctl daemon-reload
 systemctl enable --now cf-ip-refresh.timer
 
 echo "==> Running initial Cloudflare IP refresh"
-systemctl start cf-ip-refresh.service
-
-echo "==> Copying nginx Cloudflare real-IP config"
-cp "$REPO_DIR/nginx/conf.d/cloudflare-real-ip.conf" /etc/nginx/conf.d/
-nginx -t && nginx -s reload
-
-echo "==> Ensuring auto-blocked.conf exists"
-touch /etc/nginx/blocklist.d/auto-blocked.conf
+# Non-fatal: it reloads nginx, which may not be fully configured yet on a
+# brand-new host (deploy.sh installs nginx first; the timer retries weekly).
+systemctl start cf-ip-refresh.service || echo "WARNING: Cloudflare IP refresh failed — the starter list stays in place"
 
 echo "==> Creating banned_ips table"
+# A fresh database already gets it from db/23_banned_ips.sql on first start;
+# this covers databases created before the table existed.
 # shellcheck source=/dev/null
 set -a; source "$REPO_DIR/.env"; set +a
-docker exec -i apollo-sfs-postgresql-app \
-    psql -U "$POSTGRES_APP_USER" -d "$POSTGRES_APP_DB" \
-    < "$REPO_DIR/db/10_banned_ips.sql"
+APPDB="$(docker ps -qf "name=apollo-sfs_db-app" | head -n1)"
+if [ -n "$APPDB" ]; then
+    docker exec -i "$APPDB" \
+        psql -U "$POSTGRES_APP_USER" -d "$POSTGRES_APP_DB" \
+        < "$REPO_DIR/db/23_banned_ips.sql"
+else
+    echo "NOTE: apollo-sfs_db-app is not running — skipped (db/23_banned_ips.sql runs when the database is first created)"
+fi
 
 echo "==> Enabling and restarting fail2ban"
 systemctl enable fail2ban

@@ -47,13 +47,28 @@ docker node update --label-add tier=fast <pi5-node-id>
 
 ### Deployment
 
-```bash
-# Build and push images first (amd64 and arm64)
-docker buildx build --platform linux/amd64,linux/arm64 -t <registry>/apollo-sfs-api:latest api/ --push
-docker buildx build --platform linux/amd64 -t <registry>/apollo-sfs-frontend:latest frontend/ --push
+`deploy.sh` (repo root) is the one entry point — see `docs/node_provisioning.md`:
 
-# Deploy or update the stack
-docker stack deploy -c docker-stack.yml apollo-sfs
+```bash
+sudo ./deploy.sh deploy    # provision/adopt THIS node: name, cluster join/init, manager infra
+                           # (.env, nginx, fail2ban, registry), drives + mergerfs, storage roles,
+                           # services, health check + heartbeat; installs apollo-node-status
+sudo ./deploy.sh restart   # restart this node's services + health check (+ heartbeat on workers)
+sudo ./deploy.sh update    # drift report, then review/update/repair every deployed resource
+./deploy.sh release        # build + push images and redeploy (the original deploy.sh;
+                           # ./deploy.sh --services …, --deploy-only, --migrate still work)
+./deploy.sh --test …       # any of the above, changing nothing (prints mutations, diffs files)
+```
+
+The stack is **two files**: `docker-stack.yml` (committed — manager-level services, pinned with
+`node.labels.apollo-manager == true`) and `cluster/docker-stack.nodes.yml` (generated on the
+manager from `cluster/nodes/*.json`, gitignored — one `node-agent-*` per node plus the blob-storage
+MinIO services `minio`/`minio-standard`; existing nodes keep their legacy service names). Each node
+also has a gitignored `node.json` (its deployment record + live metrics, rewritten every 5 s by the
+`apollo-node-status` systemd service). Manual equivalent:
+
+```bash
+docker stack deploy -c docker-stack.yml -c cluster/docker-stack.nodes.yml apollo-sfs
 
 # Check service status
 docker stack services apollo-sfs
@@ -90,8 +105,8 @@ All services communicate on the `app-network` overlay network. No service ports 
 **`docker-compose.yml` is deprecated.** It predates the two-node storage-tier split: MinIO now runs as two independent instances — fast-tier NVMe on the Pi 5, standard-tier HDD on the manager — and spreading them across two physical nodes is only expressible in `docker-stack.yml`'s two-node Swarm placement; a single-node compose file has no way to pin a second MinIO instance to a second machine. `docker-stack.yml` is now the only stack actually run/maintained — do not assume `docker-compose.yml` is kept in sync with it (e.g. new services added to `docker-stack.yml`, like `test-runner`, may not have a compose equivalent, or vice versa). Treat it as a historical reference, not a working local dev setup, unless told otherwise.
 
 ```bash
-# Copy and populate environment file
-cp .env.example .env  # edit as needed
+# There is no .env.example: `./deploy.sh deploy` creates .env interactively from
+# scripts/deploy/env.catalog (or copy the manager's .env)
 
 # Start everything
 docker compose up -d
@@ -148,6 +163,7 @@ Docker logging uses the JSON file driver with rotation (10 MB max, 3 files). Ngi
 - `docs/ai_recognition_setup.md` — premium AI recognition (models, resource pool, GPU enablement)
 - `docs/sfs_api.md` — SFS public API reference
 - `docs/file_server_links.md` — premium WebDAV mount links (file server feature)
+- `docs/node_provisioning.md` — `deploy.sh deploy | restart | update | release`, `--test`, the node.json schema, the cluster registry and the manager-handover runbook
 - `docs/storage_reconciliation.md` — MinIO <-> Postgres reconciliation: drift sources, the daily 4am-local heartbeat, and the admin endpoints for it
 - `docs/drive_benchmark_setup.md` — on-demand fast (NVMe) vs standard (HDD) drive speed benchmark: how the trigger reaches node-agent, the writable scratch-directory host setup, the sequential + random-access (`O_DIRECT`, page-cache-bypassing) methodology, live per-node/per-disk progress reporting, and the promo blog post/cards it feeds
 - `docs/upload_bandwidth_fairness.md` — fair per-user upload speed cap: budget derived automatically from the periodic WAN speed test (no manual config), the live reserve/user-count split, "clean sample" gating against active uploads, and where it hooks into the request body

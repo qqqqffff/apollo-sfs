@@ -92,6 +92,31 @@ ssh_master_stop() {
   as_owner ssh "${SSH_OPTS[@]}" -O exit "$MGR_USER@$MGR_HOST" </dev/null >/dev/null 2>&1 || true
 }
 
+# ssh_hostkey_reset — forget the manager's saved host key (known_hosts entry
+# and any control socket) so the next attempt re-verifies its fingerprint.
+ssh_hostkey_reset() {
+  local host="${MGR_HOST:-}" home kh
+  [[ -n "$host" ]] || { log_error "no manager address known"; return 1; }
+  home="$(getent passwd "$REPO_OWNER" | cut -d: -f6)"
+  kh="$home/.ssh/known_hosts"; is_test && kh="${SSH_CTL_DIR:-$TEST_SANDBOX/ssh}/known_hosts"
+  ssh_master_stop
+  log_info "Deleting the saved ssh host key for $host from $kh …"
+  run_as_owner -- ssh-keygen -R "$host" -f "$kh" || true
+  run_as_owner -- rm -f "$kh.old" || true
+  log_ok "Saved host key removed — you will be asked to verify the fingerprint again."
+  return 0
+}
+
+# ssh_hostkey_changed — rc 0 when ssh refuses the manager because the saved
+# host key no longer matches (reinstalled OS, new SD card, …).
+ssh_hostkey_changed() {
+  [[ -n "$FIXTURES" || -z "$MGR_HOST" ]] && return 1
+  ((${#SSH_OPTS[@]})) || ssh_prepare
+  local out
+  out="$(as_owner ssh "${SSH_OPTS[@]}" "$MGR_USER@$MGR_HOST" -- true </dev/null 2>&1 || true)"
+  [[ "$out" == *"HOST IDENTIFICATION HAS CHANGED"* || "$out" == *"Host key verification failed"* ]]
+}
+
 # mgr_reachable — rc 0 if we can run commands on the manager over ssh.
 mgr_reachable() {
   if [[ -n "$FIXTURES" ]]; then probe mgr-reachable -- false >/dev/null; return $?; fi
@@ -152,6 +177,7 @@ mgr() {
   fi
   if [[ $rc -eq 255 ]]; then
     [[ $quiet == 1 ]] || log_error "Cannot reach the manager over ssh (${MGR_USER:-?}@${MGR_HOST:-?})."
+    STEP_FIX_FN=ssh_hostkey_reset; STEP_FIX_LABEL="delete the saved ssh host key and reconnect"
     return 255
   fi
   _envelope_check "$op" "$quiet" "$rc"

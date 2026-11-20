@@ -73,6 +73,7 @@ STEP_INDEX=0
 STEP_TOTAL=0
 CURRENT_STEP=""
 STEP_FAIL_REASON=""
+STEP_FIX_FN=""; STEP_FIX_LABEL=""
 
 # ── Colours / logging ────────────────────────────────────────────────────────
 if [[ -t 2 && -z "${NO_COLOR:-}" ]]; then
@@ -528,14 +529,23 @@ _ack_preapproved() {
   [[ ",$ACK_ALERTS," == *",$id,"* ]]
 }
 
-# alert_ack LEVEL ID TITLE BODY [--retry]
+# alert_ack LEVEL ID TITLE BODY [--retry] [--fix LABEL FN]
+#   --fix adds an 'f' choice that runs FN (a repair, e.g. deleting a stale ssh
+#   host key) and then returns 1 so the caller retries.
 #   LEVEL: info|warn|crit. Shows a boxed alert that MUST be acknowledged.
 #   Returns 0 when acknowledged, 1 when the user asked to retry (only offered
 #   with --retry); exits 3 when the user quits. Non-interactive runs only
 #   continue if the ID was pre-acknowledged with --ack=ID (or --ack=all).
 alert_ack() {
-  local level="$1" id="$2" title="$3" body="$4" retry=0
-  [[ "${5:-}" == --retry ]] && retry=1
+  local level="$1" id="$2" title="$3" body="$4" retry=0 fix_label="" fix_fn=""
+  shift 4
+  while (($#)); do
+    case "$1" in
+      --retry) retry=1 ;;
+      --fix) fix_label="$2"; fix_fn="$3"; shift 2 ;;
+    esac
+    shift
+  done
   local col="$C_CYAN"; [[ $level == warn ]] && col="$C_YELLOW"; [[ $level == crit ]] && col="$C_RED"
   local bar; bar="$(printf '━%.0s' $(seq 1 70))"
   {
@@ -557,6 +567,7 @@ alert_ack() {
   fi
   local ans prompt="Type 'ack' to acknowledge and continue"
   [[ $retry == 1 ]] && prompt+=", 'r' to retry"
+  [[ -n "$fix_fn" ]] && prompt+=", 'f' to ${fix_label}"
   prompt+=", or 'q' to quit: "
   while true; do
     printf '%s%s%s' "$C_BOLD" "$prompt" "$C_RESET" >&2
@@ -573,6 +584,7 @@ alert_ack() {
     case "${ans,,}" in
       ack|acknowledge) ALERTS_ACKED+=("$(now_iso)|$level|$id|$title"); log_warn "acknowledged: $id"; return 0 ;;
       r|retry) [[ $retry == 1 ]] && return 1 ;;
+      f|fix) if [[ -n "$fix_fn" ]]; then "$fix_fn" || log_warn "the repair did not complete"; return 1; fi ;;
       q|quit|exit) log_error "aborted at alert $id"; exit 3 ;;
     esac
   done
@@ -602,7 +614,7 @@ step() {
   CURRENT_STEP="$id"
   declare -F "$fn" >/dev/null || { log_error "internal: step function $fn is not defined"; return 1; }
   while true; do
-    STEP_FAIL_REASON=""
+    STEP_FAIL_REASON=""; STEP_FIX_FN=""; STEP_FIX_LABEL=""
     local rc=0
     "$fn" "$@" || rc=$?
     case "$rc" in
@@ -612,9 +624,10 @@ step() {
       *)
         STEP_RESULTS[$id]="failed"
         _flow_record_failure "$id"
-        local arc=0
+        local arc=0; local -a fixargs=()
+        [[ -n "$STEP_FIX_FN" ]] && fixargs=(--fix "$STEP_FIX_LABEL" "$STEP_FIX_FN")
         alert_ack crit "step-$id" "Step failed: $title" \
-          "${STEP_FAIL_REASON:-See the output above for details.}"$'\n'"Retrying re-runs this step; acknowledging continues with it marked failed." --retry || arc=$?
+          "${STEP_FAIL_REASON:-See the output above for details.}"$'\n'"Retrying re-runs this step; acknowledging continues with it marked failed." --retry "${fixargs[@]}" || arc=$?
         if [[ $arc -eq 1 ]]; then log_info "Retrying: $title"; continue; fi
         STEP_RESULTS[$id]="acknowledged-failure"
         return 0 ;;

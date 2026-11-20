@@ -123,7 +123,9 @@ _cluster_owner_home() { getent passwd "$REPO_OWNER" | cut -d: -f6; }
 _cluster_ssh_setup() {
   local host="$1" repo="${2:-}"
   MGR_HOST="$host"
-  ask MGR_USER "SSH user on the manager ($host)" --default "${MGR_USER:-$REPO_OWNER}" \
+  log_info "This node needs ssh access to the manager ($host). Next you choose the manager's"
+  log_info "login USER NAME (not a password) — a password is only asked afterwards, once, to install this node's key."
+  ask MGR_USER "Login user name on the manager ($host)" --default "${MGR_USER:-$REPO_OWNER}" \
     --validate _cluster_validate_user
   MGR_REPO="${repo:-${MGR_REPO:-$APOLLO_ROOT}}"
   ssh_prepare
@@ -132,6 +134,10 @@ _cluster_ssh_setup() {
   local home key kh
   home="$(_cluster_owner_home)"; key="$home/.ssh/id_ed25519"
   kh="$home/.ssh/known_hosts"; is_test && kh="$SSH_CTL_DIR/known_hosts"
+  if ssh_hostkey_changed; then
+    log_warn "The manager's ssh host key differs from the one saved for $host (reinstalled or replaced machine?)."
+    if ask_yn "Delete the saved fingerprint and verify the new one?" y; then ssh_hostkey_reset; fi
+  fi
   if ! probe "ssh-pubkey-$(probe_key "$REPO_OWNER")" -- test -f "$key.pub" >/dev/null 2>&1; then
     log_info "Creating an ssh key for $REPO_OWNER ($key)…"
     run_as_owner -- ssh-keygen -t ed25519 -N '' -C "apollo-sfs@$(node_name)" -f "$key" || return 1
@@ -167,7 +173,8 @@ _cluster_ssh_setup() {
   done
   if mgr_reachable; then ssh_master_start || true; log_ok "ssh to $MGR_USER@$host works."; return 0; fi
   if is_test; then log_test "ssh to the manager is not set up yet — remote steps are simulated"; return 0; fi
-  STEP_FAIL_REASON="could not establish key-based ssh to $MGR_USER@$host"
+  STEP_FAIL_REASON="could not establish key-based ssh to $MGR_USER@$host (choose 'f' to delete the saved host key and try again)"
+  STEP_FIX_FN=ssh_hostkey_reset; STEP_FIX_LABEL="delete the saved ssh host key and reconnect"
   return 1
 }
 

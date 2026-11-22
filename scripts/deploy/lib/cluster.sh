@@ -163,15 +163,37 @@ _cluster_ssh_setup() {
     mgr_reachable && break
     if [[ $attempt == 1 ]]; then
       log_info "Installing this node's ssh key on the manager (ssh-copy-id; you'll be asked for $MGR_USER's password)…"
-      run_as_owner -- ssh-copy-id -i "$key.pub" "$MGR_USER@$host" && continue
+      local methods=""
+      if ! is_test; then
+        methods="$(as_owner ssh -o BatchMode=yes -o ConnectTimeout=8 -o PreferredAuthentications=none \
+          -o StrictHostKeyChecking=yes "$MGR_USER@$host" true </dev/null 2>&1 | sed -n 's/.*Permission denied (\(.*\)).*/\1/p' | head -1)"
+        if [[ -n "$methods" ]]; then
+          log_info "The manager accepts these ssh logins for $MGR_USER: $methods"
+          if [[ ",$methods," != *",password,"* && ",$methods," != *",keyboard-interactive,"* ]]; then
+            log_warn "Password login is DISABLED on the manager, so no password prompt can appear — paste the key manually (next step)."
+          fi
+        else
+          log_warn "Could not read the manager's accepted logins for '$MGR_USER' — is the user name right, and is sshd reachable?"
+        fi
+      fi
+      # ssh-copy-id must read the password from the terminal, not from run's </dev/null.
+      if [[ -r /dev/tty ]] && ! is_test; then
+        run_as_owner --stdin -- ssh-copy-id -o StrictHostKeyChecking=yes -i "$key.pub" "$MGR_USER@$host" </dev/tty && continue
+      else
+        run_as_owner -- ssh-copy-id -i "$key.pub" "$MGR_USER@$host" && continue
+      fi
     fi
-    is_test && { log_test "would retry ssh (no key installed in test mode)"; break; }
+    if is_test; then log_test "the ssh key is not installed in --test mode"; break; fi
     log_warn "Key-based ssh to $MGR_USER@$host still fails (password logins may be disabled there)."
     log_info "Append this line to ~$MGR_USER/.ssh/authorized_keys on the manager, then press Enter:"
     printf '\n    %s\n\n' "$(cat "$key.pub" 2>/dev/null)" >&2
     ui_pause "Press Enter once the key is installed…"
   done
   if mgr_reachable; then ssh_master_start || true; log_ok "ssh to $MGR_USER@$host works."; return 0; fi
+  if [[ -r /dev/tty && -z "$FIXTURES" ]] && ask_yn "Key login isn't available. Use $MGR_USER's password for this session instead?" y; then
+    if ssh_master_start_password && mgr_reachable; then log_ok "Connected to $MGR_USER@$host with a password (session only)."; return 0; fi
+    log_warn "Password login to $MGR_USER@$host failed."
+  fi
   if is_test; then log_test "ssh to the manager is not set up yet — remote steps are simulated"; return 0; fi
   STEP_FAIL_REASON="could not establish key-based ssh to $MGR_USER@$host (choose 'f' to delete the saved host key and try again)"
   STEP_FIX_FN=ssh_hostkey_reset; STEP_FIX_LABEL="delete the saved ssh host key and reconnect"

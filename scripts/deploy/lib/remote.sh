@@ -86,6 +86,22 @@ ssh_master_start() {
     "$MGR_USER@$MGR_HOST" </dev/null >/dev/null 2>&1
 }
 
+# ssh_master_start_password — like ssh_master_start but authenticates with the
+# manager user's password (asked on the terminal, once). Later mgr calls reuse
+# the control socket, so no key has to be installed. Nothing is written to
+# ~/.ssh: the socket lives in $SSH_CTL_DIR (the sandbox in --test).
+ssh_master_start_password() {
+  [[ -n "$MGR_HOST" ]] || return 1
+  ((${#SSH_OPTS[@]})) || ssh_prepare
+  local -a o=()
+  local x
+  for x in "${SSH_OPTS[@]}"; do [[ "$x" == BatchMode=yes ]] && x=BatchMode=no; o+=("${x/ControlMaster=no/ControlMaster=yes}"); done
+  log_info "Enter the password for $MGR_USER@$MGR_HOST when prompted (used once to open a session; nothing is stored)."
+  as_owner ssh "${o[@]}" -o PreferredAuthentications=password,keyboard-interactive \
+    -o PubkeyAuthentication=no -o NumberOfPasswordPrompts=3 -o ControlPersist=600 -fN \
+    "$MGR_USER@$MGR_HOST" </dev/tty
+}
+
 ssh_master_stop() {
   [[ -n "$FIXTURES" ]] && return 0
   [[ -n "$MGR_HOST" && ${#SSH_OPTS[@]} -gt 0 ]] || return 0

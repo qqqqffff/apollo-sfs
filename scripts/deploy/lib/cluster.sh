@@ -224,7 +224,30 @@ _cluster_load_info() {
   if [[ -n "$their" && -n "$mine" && "$their" != "$mine" ]]; then
     log_warn "The manager's repo is at $their, this node's at $mine — keep them on the same commit."
   fi
+  _cluster_check_code_hash || return $?
   return 0
+}
+
+# _cluster_check_code_hash — the manager runs its OWN deploy.sh for every
+# remote op, so different provisioning code there means different behaviour
+# (e.g. an older manager can't handle a rename). Alert until they match or
+# the user acknowledges. rc 0, or the rc of a failed re-check.
+_cluster_check_code_hash() {
+  [[ -n "$FIXTURES" ]] && return 0
+  local theirs mine
+  while :; do
+    theirs="$(mgr_data code_hash "")"; mine="$(deploy_code_hash)"
+    [[ -n "$mine" && "$theirs" == "$mine" ]] && return 0
+    local arc=0
+    alert_ack warn manager-code-differs "The manager runs different deploy.sh code" \
+"This node's provisioning code is ${mine:-unknown}; the manager's is ${theirs:-unknown (an older deploy.sh)}.
+Every cluster operation (registering this node, rendering the stack, heartbeats) runs the
+MANAGER's copy, so differences there cause confusing failures.
+Copy or pull the same scripts onto the manager (${MGR_REPO:-its repo}), then choose 'r'." --retry || arc=$?
+    [[ $arc -eq 1 ]] || return 0
+    local rc=0; mgr info --quiet || rc=$?
+    [[ $rc -eq 0 ]] || return $rc
+  done
 }
 
 # ── membership paths ─────────────────────────────────────────────────────────
@@ -547,12 +570,12 @@ print(json.dumps({
   "repo": {"path": sys.argv[10], "commit": sys.argv[11], "dirty": sys.argv[12] == "1"},
   "registry": sys.argv[5] or ((sw.get("NodeAddr") or "") + ":5000"),
   "nodes": nodes, "tiers": json.loads(sys.argv[3]), "labels_taken": sorted(taken),
-  "stack_running": sys.argv[13] == "1"}))
+  "stack_running": sys.argv[13] == "1", "code_hash": sys.argv[14] or None}))
 ' "$sw" "$nodes" "$tiers" "$labels" "$(node_json_get deployment.cluster.registry "" 2>/dev/null)" \
     "$(node_json_get deployment.cluster.server_name "" 2>/dev/null)" "$PROTO_MIN" "$PROTO" "$SCRIPT_VERSION" \
     "$APOLLO_ROOT" "$(git -C "$APOLLO_ROOT" rev-parse --short HEAD 2>/dev/null || true)" \
     "$([[ -n "$(git -C "$APOLLO_ROOT" status --porcelain --untracked-files=no 2>/dev/null)" ]] && echo 1 || echo 0)" \
-    "$(_stack_running && echo 1 || echo 0)"
+    "$(_stack_running && echo 1 || echo 0)" "$(deploy_code_hash)"
 }
 
 remote_op_join_token() {

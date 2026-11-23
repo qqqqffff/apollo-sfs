@@ -125,6 +125,16 @@ has_systemd()   { [[ "$(ps -p 1 -o comm= 2>/dev/null)" == systemd ]]; }
 now_iso()       { date -u +%Y-%m-%dT%H:%M:%SZ; }
 this_hostname() { probe hostname -- hostname; }   # use instead of `hostname` (fixture-replayable)
 node_name()     { state_get node_name 2>/dev/null || this_hostname; }   # this node's (planned) name during a run
+# deploy_code_hash — short sha256 over the provisioning code (deploy.sh, its
+# libraries/flows/templates and the node-status python). Workers compare it
+# with the manager's: uncommitted edits share a commit but not this hash.
+deploy_code_hash() {
+  ( cd "$APOLLO_ROOT" 2>/dev/null || exit 0
+    find deploy.sh scripts/deploy/lib scripts/deploy/flows scripts/deploy/templates scripts/deploy/env.catalog \
+         scripts/node-status -type f \( -name '*.sh' -o -name '*.py' -o -name '*.yml' -o -name '*.service' \
+         -o -name '*.tmpfiles' -o -name 'env.catalog' -o -name deploy.sh \) 2>/dev/null |
+      LC_ALL=C sort | xargs -r sha256sum 2>/dev/null | sha256sum | cut -c1-12 )
+}
 # node_previous_names — JSON list of names this node had before a rename.
 node_previous_names() { state_get previous_names "$(node_json_get deployment.node.previous_names '[]' 2>/dev/null || echo '[]')"; }
 # node_is_self NAME — rc 0 if NAME is this node: its (planned) name, its live

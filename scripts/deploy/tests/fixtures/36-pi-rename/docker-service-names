@@ -1,0 +1,14 @@
+apollo-sfs_frontend
+apollo-sfs_api
+apollo-sfs_keycloak
+apollo-sfs_postfix
+apollo-sfs_ddns
+apollo-sfs_db-app
+apollo-sfs_db-keycloak
+apollo-sfs_recognition
+apollo-sfs_test-runner
+apollo-sfs_node-metrics-ingest
+apollo-sfs_minio
+apollo-sfs_minio-standard
+apollo-sfs_node-agent-standard
+apollo-sfs_node-agent-fast

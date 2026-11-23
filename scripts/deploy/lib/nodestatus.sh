@@ -129,6 +129,7 @@ _nodestatus_preview() {
   ui_kv "network" "$(printf '%s' "$out" | json_get metrics.network.interfaces '[]')"
   ui_kv "drives" "$(printf '%s' "$out" | json_get metrics.drive_capacity.disk_count 0) recorded"
   ui_kv "docker" "$(printf '%s' "$out" | json_get metrics.docker.daemon '?')"
+  health_show_sample "$(printf '%s' "$out" | json_get metrics '{}')"
   ui_kv "alerts" "$(printf '%s' "$out" | json_get status.alerts '[]' | head -c 300)"
   return 0
 }

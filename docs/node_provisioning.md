@@ -289,6 +289,16 @@ with `probe_key`. With `APOLLO_FIXTURES_STRICT=1` a missing fixture fails with
 rc 127 (and is logged to `$APOLLO_FIXTURE_MISSING_LOG`). Each library documents
 its keys in `scripts/deploy/tests/fixtures/README.md`.
 
+## Renaming a node
+
+Choose a new name at the **System name** step of `deploy` or `update`. On a swarm member, the step first asks to restart Docker, because Swarm only reads the hostname at start-up. The old name is added to `deployment.node.previous_names`, and the rest of the run treats every previous name as this node:
+
+- **Blob storage:** if the tier is held by this node's old name (for example the Pi `apollo-sfs` → `nh-fast-node-001`), the blob storage role stays available and the role simply carries over. The drives, the data, `minio_data_path` and the MinIO service (`minio` / `minio-standard`) are unchanged, so nothing is copied or re-created.
+- **Node record:** `register-node` moves the record in `cluster/nodes/` to the new name and moves `<old>.json` to `cluster/.backups/<old>.json.renamed-<ts>`, so the node's services never render twice. A `node.hostname == <old>` placement is rewritten to the new hostname. Service names (`node-agent-<old>`, legacy `node-agent-fast`) are kept, so no service is recreated. Legacy `node.labels.tier` placements need no change at all, because Swarm labels belong to the node ID.
+- **Database:** the `nodes` row is renamed in place, so metric history stays attached.
+- **Drive labels:** labels reserved under the old name stay this node's.
+- **In `--test`:** the rename is only printed. Swarm and the database still know the node by its current hostname, so the heartbeat runs under that name.
+
 ## Manager handover runbook
 
 Run `sudo ./deploy.sh deploy` on the NEW node (N) and choose "join as the new MANAGER".

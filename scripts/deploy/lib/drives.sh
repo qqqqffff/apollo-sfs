@@ -261,7 +261,7 @@ _drives_reserve_labels() {
   (($#)) || return 0
   local f rc=0
   f="$(mktemp "${TMPDIR:-/tmp}/apollo-labels.XXXXXX")"
-  printf '{"hostname":%s,"classes":%s}' "$(json_escape "$(node_name)")" \
+  printf '{"hostname":%s,"previous_names":%s,"classes":%s}' "$(json_escape "$(node_name)")" "$(node_previous_names)" \
     "$(printf '%s\n' "$@" | python3 -I -c 'import json,sys; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))')" >"$f"
   cluster_call reserve-labels --in "$f" --quiet || rc=$?
   rm -f "$f"
@@ -494,22 +494,33 @@ _drives_validate_metrics() {
   log_info "Validating drive metrics (local collection, then what the manager receives)…"
   while true; do
     local local_ok=1 problems=""
+    local metrics_now
     if is_test; then
-      log_test "would wait for the status service to report: $labels"
+      log_test "measuring the existing drives now (read-only collection; the service is not used)"
+      metrics_now="$(_health_drive_metrics)"
+      log_test "sample metrics collected from this host (drives not formatted/mounted yet in this run can't be measured):"
+      health_show_sample "$metrics_now"
     else
       nodestatus_wait_fresh 10 30 "$(( $(now_epoch) - 1 ))" || true
-      problems="$(python3 -I -c '
+      metrics_now="$(node_json_get metrics '{}')"
+    fi
+    problems="$(python3 -I -c '
 import json, sys
-doc = json.load(open(sys.argv[1]))
-dep = doc.get("deployment") or {}; m = {d.get("label"): d for d in (doc.get("metrics") or {}).get("disks") or []}
+dep = json.loads(sys.argv[1] or "{}"); m = {d.get("label"): d for d in (json.loads(sys.argv[2] or "{}")).get("disks") or []}
 for d in dep.get("drives") or []:
     if d.get("unassigned"): continue
+    if str(d.get("uuid") or "").startswith("planned"):
+        continue   # --test: formatted in this run, nothing to measure yet
     x = m.get(d["label"])
     if not x: print("%s: not reported by the status service yet" % d["label"])
     elif not x.get("mounted"): print("%s: not mounted at %s" % (d["label"], d.get("mountpoint")))
-    elif not x.get("total_bytes"): print("%s: no capacity reading" % d["label"])' "$NODE_JSON" 2>&1)"
-      [[ -z "$problems" ]] || local_ok=0
+    elif not x.get("total_bytes"): print("%s: no capacity reading" % d["label"])' "$(node_json_get deployment '{}')" "${metrics_now:-{\}}" 2>&1)"
+    if is_test && [[ -n "$problems" ]]; then
+      while IFS= read -r l; do log_warn "$l"; done <<<"$problems"
     fi
+    # --test only reports (warns above); a real run must pass before continuing.
+    if ! is_test; then [[ -z "$problems" ]] || local_ok=0; fi
+    is_test && problems=""
     if [[ $local_ok == 1 ]]; then
       local rc=0
       stack_register_node drives || rc=$?

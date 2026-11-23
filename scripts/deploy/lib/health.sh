@@ -69,12 +69,90 @@ _health_check_node_json() {
   return 0
 }
 
+# Drive thresholds (°C): warn / fail. NVMe controllers throttle around 70–80 °C;
+# spinning disks are rated to ~60 °C.
+HEALTH_TEMP_FLASH_WARN=70; HEALTH_TEMP_FLASH_FAIL=80
+HEALTH_TEMP_HDD_WARN=50;   HEALTH_TEMP_HDD_FAIL=60
+# Space: warn at 90 % used (the collector's own alert), fail at 95 %.
+HEALTH_SPACE_WARN=90; HEALTH_SPACE_FAIL=95
+
+# _health_drive_metrics — print a metrics JSON object that covers this node's
+# drives and pools, measured NOW:
+#   real: waits for apollo-node-status to rewrite node.json (≤ 30 s) and for
+#         every recorded drive to appear in metrics.disks.
+#   test: one read-only `collect --once` against the planned deployment, so the
+#         existing drives are really measured (nothing is written).
+_health_drive_metrics() {
+  if is_test; then
+    local -a hr=()
+    if [[ -n "$FIXTURES" ]]; then
+      if [[ -d "$FIXTURES/hostroot" ]]; then hr=(--host-root "$FIXTURES/hostroot")
+      else node_json_get metrics '{}' 2>/dev/null; return 0; fi
+    fi
+    local out
+    if out="$(py collect --once --node-json "$NODE_JSON" --repo "$APOLLO_ROOT" "${hr[@]+"${hr[@]}"}" 2>/dev/null)"; then
+      printf '%s' "$out" | json_get metrics '{}'
+    else
+      node_json_get metrics '{}' 2>/dev/null
+    fi
+    return 0
+  fi
+  local want deadline have
+  want="$(node_json_get deployment.drives '[]' | python3 -I -c 'import json,sys; print(" ".join(sorted(d["label"] for d in json.load(sys.stdin) if d.get("label") and not d.get("unassigned"))))')"
+  nodestatus_wait_fresh 10 30 >/dev/null 2>&1 || log_warn "node.json is not being refreshed — is $NODESTATUS_UNIT running?"
+  deadline=$(( $(now_epoch) + 30 ))
+  while :; do
+    have="$(node_json_get metrics.disks '[]' | python3 -I -c 'import json,sys; print(" ".join(sorted(d["label"] for d in json.load(sys.stdin) if d.get("label") and d.get("total_bytes"))))')"
+    local missing="" l
+    for l in $want; do [[ " $have " == *" $l "* ]] || missing+="$l "; done
+    [[ -z "$missing" ]] && break
+    (( $(now_epoch) >= deadline )) && break
+    sleep 2
+  done
+  node_json_get metrics '{}' 2>/dev/null
+}
+
+# health_show_sample METRICS_JSON — print a table of one metrics sample
+# (per drive: device, temperature, SMART, used/free, I/O; per pool: branches).
+health_show_sample() {
+  local m="${1:-{\}}" rows
+  rows="$(python3 -I -c '
+import json, sys
+m = json.loads(sys.argv[1] or "{}")
+def fmt(n):
+    if n is None: return "n/a"
+    n = float(n)
+    for u in ("B", "KB", "MB", "GB", "TB", "PB"):
+        if n < 1000 or u == "PB": return ("%d B" % n) if u == "B" else "%.1f %s" % (n, u)
+        n /= 1000.0
+for d in m.get("disks") or []:
+    t = d.get("temp_celsius")
+    print("drive %s|%s|%s|%s|%s|%s / %s (%s%%)|r %s/s w %s/s" % (
+        d.get("label"), d.get("device") or "not mounted", "%s°C" % t if t is not None else "n/a",
+        d.get("smart_health") or "unknown", "mounted" if d.get("mounted") else "UNMOUNTED",
+        fmt(d.get("used_bytes")), fmt(d.get("total_bytes")), d.get("used_percent", "n/a"),
+        fmt(d.get("read_bps")), fmt(d.get("write_bps"))))
+for p in m.get("pools") or []:
+    print("pool %s|%s|—|—|%s|%s / %s|branches %s" % (p.get("tier"), p.get("path"),
+        "mounted" if p.get("mounted") else "UNMOUNTED", fmt(p.get("used_bytes")), fmt(p.get("total_bytes")),
+        len(p.get("branches") or []) if p.get("branches") is not None else "n/a"))
+' "$m" 2>/dev/null)"
+  if [[ -z "$rows" ]]; then log_detail "sample: no drive or pool measurements available yet"; return 0; fi
+  local -a t=("SAMPLE|DEVICE|TEMP|SMART|STATE|USED / TOTAL|I/O")
+  local l; while IFS= read -r l; do t+=("$l"); done <<<"$rows"
+  ui_table "${t[@]}"
+}
+
+# _health_check_drives — per drive: metrics present, mounted, SMART health,
+# temperature and free space; per pool: mounted, branches, free space.
+# Missing metrics FAIL (also in --test for drives that already exist; drives
+# that are only planned in this test run are reported as "planned").
 _health_check_drives() {
   local drives metrics
   drives="$(node_json_get deployment.drives '[]' 2>/dev/null)"
-  metrics="$(node_json_get metrics '{}' 2>/dev/null)"
   [[ "$drives" == "[]" ]] && { _health_add drives pass "no drives on this node"; return 0; }
-  local line
+  log_info "Measuring drive health, temperatures and free space…"
+  metrics="$(_health_drive_metrics)"
   while IFS='|' read -r name st detail; do
     [[ -n "$name" ]] && _health_add "$name" "$st" "$detail"
   done < <(python3 -I -c '
@@ -82,34 +160,97 @@ import json, sys
 drives = json.loads(sys.argv[1] or "[]")
 metrics = json.loads(sys.argv[2] or "{}")
 pools = json.loads(sys.argv[3] or "[]")
-test = sys.argv[4] == "1"
+test, root = sys.argv[4] == "1", sys.argv[5] == "1"
+fw, ff, hw, hf, sw, sf = (int(x) for x in sys.argv[6:12])
+
+def fmt(n):
+    if not n:
+        return "0 B"
+    for u in ("B", "KB", "MB", "GB", "TB", "PB"):
+        if n < 1000 or u == "PB":
+            return ("%.1f %s" % (n, u)) if u != "B" else "%d B" % n
+        n /= 1000.0
+
+def planned(d):
+    return str(d.get("uuid") or "").startswith("planned")
+
+def space(m):
+    tot, free, pct = m.get("total_bytes"), m.get("free_bytes"), m.get("used_percent")
+    if not tot or free is None:
+        return "fail", "no capacity reading"
+    if pct is None:
+        pct = round(100.0 * (tot - free) / tot, 1)
+    st = "fail" if pct >= sf else "warn" if pct >= sw else "pass"
+    return st, "%s free of %s (%s%% used)" % (fmt(free), fmt(tot), pct)
+
+worst = {"pass": 0, "planned": 0, "warn": 1, "fail": 2}
+def merge(*sts):
+    return max(sts, key=lambda s: worst.get(s, 0))
+
 disks = {d.get("label"): d for d in metrics.get("disks") or []}
+planned_dirs = set()
 for d in drives:
+    if d.get("unassigned"):
+        continue
     lab = d.get("label")
+    if planned(d):
+        planned_dirs.add(d.get("data_dir"))
+        print("drive %s|planned|formatted in this run — measured once it exists (real run)" % lab)
+        continue
     m = disks.get(lab)
-    if m is None:
-        print("drive %s|%s|no metrics yet for this drive" % (lab, "warn" if test else "fail")); continue
+    if m is None or (m.get("mounted") and not m.get("total_bytes")):
+        print("drive %s|fail|no metrics for this drive (apollo-node-status does not report it)" % lab); continue
     if not m.get("mounted"):
         print("drive %s|fail|not mounted at %s" % (lab, d.get("mountpoint"))); continue
-    st = "pass"; det = "%s mounted, %s%% used" % (m.get("device"), m.get("used_percent"))
-    if m.get("smart_health") == "FAILED":
-        st, det = "fail", "SMART health FAILED on %s" % m.get("device")
-    elif (m.get("used_percent") or 0) >= 95:
-        st = "warn"; det += " (almost full)"
-    if m.get("temp_celsius") is not None:
-        det += ", %s°C" % m["temp_celsius"]
-    print("drive %s|%s|%s" % (lab, st, det))
+    flash = (d.get("class") or "nvme") != "hdd"
+    # health
+    sh = m.get("smart_health") or "unknown"
+    if sh == "FAILED":
+        hs, hd = "fail", "SMART FAILED"
+    elif sh == "PASSED":
+        hs, hd = "pass", "SMART ok"
+    elif not root:
+        hs, hd = "warn", "SMART not readable without root (run with sudo)"
+    else:
+        hs, hd = "warn", "SMART health unavailable (%s)" % sh
+    # temperature
+    t = m.get("temp_celsius")
+    w, f = (fw, ff) if flash else (hw, hf)
+    if t is None:
+        ts, td = ("fail" if (flash and d.get("class") == "nvme") else "warn"), "no temperature reading"
+    else:
+        ts = "fail" if t >= f else "warn" if t >= w else "pass"
+        td = "%s°C" % t + (" (limit %s°C)" % f if ts != "pass" else "")
+    ss, sd = space(m)
+    print("drive %s|%s|%s · %s · %s · %s" % (lab, merge(hs, ts, ss), m.get("device"), hd, td, sd))
+
 mp = {p.get("path"): p for p in metrics.get("pools") or []}
 for p in pools:
-    m = mp.get(p.get("path"))
+    tier, path = p.get("tier"), p.get("path")
+    want = p.get("branches") or []
+    m = mp.get(path)
     if m is None:
-        print("pool %s|warn|no metrics yet" % p.get("tier")); continue
+        print("pool %s|fail|no metrics for %s" % (tier, path)); continue
     if not m.get("mounted"):
-        print("pool %s|fail|%s is not mounted (MinIO stays down)" % (p.get("tier"), p.get("path"))); continue
-    if m.get("branches_ok") is False:
-        print("pool %s|fail|branches %s differ from %s" % (p.get("tier"), m.get("branches"), p.get("branches"))); continue
-    print("pool %s|pass|%s mounted with %d branches" % (p.get("tier"), p.get("path"), len(p.get("branches") or [])))
-' "$drives" "$metrics" "$(node_json_get deployment.pools '[]' 2>/dev/null)" "$([[ $TEST_MODE == 1 ]] && echo 1 || echo 0)")
+        print("pool %s|fail|%s is not mounted (MinIO stays down)" % (tier, path)); continue
+    have = m.get("branches")
+    note = "%d branches" % len(have or want)
+    if have is None:
+        st, note = "fail", "branch list unreadable (.mergerfs xattr)"
+    elif sorted(have) != sorted(want):
+        extra = sorted(set(want) - set(have))
+        if test and set(have) <= set(want) and all(b in planned_dirs for b in extra):
+            st, note = "planned", "%d branches now, %d after this run (adds %s)" % (len(have), len(want), ", ".join(extra))
+        else:
+            st, note = "fail", "branches %s differ from the recorded %s" % (have, want)
+    else:
+        st = "pass"
+    ss, sd = space(m)
+    print("pool %s|%s|%s · %s · %s" % (tier, merge(st, ss), path, note, sd))
+' "$drives" "${metrics:-{\}}" "$(node_json_get deployment.pools '[]' 2>/dev/null)" \
+    "$([[ $TEST_MODE == 1 ]] && echo 1 || echo 0)" "$([[ $EUID -eq 0 ]] && echo 1 || echo 0)" \
+    "$HEALTH_TEMP_FLASH_WARN" "$HEALTH_TEMP_FLASH_FAIL" "$HEALTH_TEMP_HDD_WARN" "$HEALTH_TEMP_HDD_FAIL" \
+    "$HEALTH_SPACE_WARN" "$HEALTH_SPACE_FAIL")
   return 0
 }
 
@@ -188,7 +329,7 @@ for d in dep.get("drives") or []:
     expect.append({"label": d.get("label"), "device": m.get("device"), "size_bytes": m.get("total_bytes")})
 print(json.dumps({"hostname": sys.argv[2], "last_updated_epoch": doc.get("last_updated_epoch"),
                   "metrics": metrics, "expect": {"disks": expect, "services": (dep.get("stack") or {}).get("services") or []}}))
-' "$NODE_JSON" "$(node_name)" >"$f"
+' "$NODE_JSON" "$(node_live_name)" >"$f"
 }
 
 # heartbeat_run [--quiet] — one heartbeat (in-process on the manager, over ssh

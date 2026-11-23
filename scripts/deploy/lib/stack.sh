@@ -35,6 +35,11 @@ _stack_nodes_view() {
     cp "$STACK_NODES_DIR/"*.json "$v/" 2>/dev/null
   fi
   [[ -d "$TEST_SANDBOX/fs$STACK_NODES_DIR" ]] && cp "$TEST_SANDBOX/fs$STACK_NODES_DIR/"*.json "$v/" 2>/dev/null
+  # records retired during this test run (a rename's old name) — `mv` was only printed
+  local gone
+  if [[ -f "$TEST_SANDBOX/nodes-retired" ]]; then
+    while IFS= read -r gone; do [[ -n "$gone" ]] && rm -f "$v/$gone.json"; done <"$TEST_SANDBOX/nodes-retired"
+  fi
   printf '%s' "$v"
 }
 
@@ -378,7 +383,7 @@ stack_wait_converged() {
 _stack_build_request() {
   local phase="$1" f="$2" dep prev
   dep="$(node_json_get deployment '{}')"
-  prev="$(state_get previous_names "$(node_json_get deployment.node.previous_names '[]')")"
+  prev="$(node_previous_names)"
   printf '{"hostname":%s,"previous_names":%s,"phase":%s,"deployment":%s}\n' \
     "$(json_escape "$(node_name)")" "${prev:-[]}" "$(json_escape "$phase")" "${dep:-{\}}" >"$f"
 }
@@ -424,9 +429,16 @@ _stack_register_locked() {
   local warnings; warnings="$(sed -n 's/^warning: //p' "$errf" | python3 -I -c 'import json,sys; print(json.dumps([l.rstrip("\n") for l in sys.stdin]))')"
   rm -f "$reqf" "$errf"
   _stack_write_record "$rec" || { remote_fail write_failed "could not write the node record"; return 1; }
-  local renamed; renamed="$(printf '%s' "$rec" | json_get renamed_from "")"
-  [[ -n "$renamed" && "$renamed" != "$host" && -f "$STACK_NODES_DIR/$renamed.json" ]] &&
-    run -- mv "$STACK_NODES_DIR/$renamed.json" "$CLUSTER_DIR/.backups/$renamed.json.renamed-$(date +%s)" 2>/dev/null
+  # A renamed node's old record is retired (kept in .backups) so the stack
+  # file never renders the same node's services twice.
+  local renamed
+  while IFS= read -r renamed; do
+    [[ -n "$renamed" && "$renamed" != "$host" && -f "$(_stack_nodes_view)/$renamed.json" ]] || continue
+    log_info "Retiring the record for the old name '$renamed' (now '$host')."
+    run -- mkdir -p "$CLUSTER_DIR/.backups"
+    run -- mv "$STACK_NODES_DIR/$renamed.json" "$CLUSTER_DIR/.backups/$renamed.json.renamed-$(date +%s)"
+    is_test && printf '%s\n' "$renamed" >>"$TEST_SANDBOX/nodes-retired"
+  done < <(printf '%s' "$rec" | python3 -I -c 'import json,sys; [print(n) for n in json.load(sys.stdin).get("previous_names") or []]')
 
   local tier role roles addr prev server
   tier="$(printf '%s' "$rec" | json_get tier "")"

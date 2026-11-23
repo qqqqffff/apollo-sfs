@@ -125,6 +125,20 @@ has_systemd()   { [[ "$(ps -p 1 -o comm= 2>/dev/null)" == systemd ]]; }
 now_iso()       { date -u +%Y-%m-%dT%H:%M:%SZ; }
 this_hostname() { probe hostname -- hostname; }   # use instead of `hostname` (fixture-replayable)
 node_name()     { state_get node_name 2>/dev/null || this_hostname; }   # this node's (planned) name during a run
+# node_previous_names — JSON list of names this node had before a rename.
+node_previous_names() { state_get previous_names "$(node_json_get deployment.node.previous_names '[]' 2>/dev/null || echo '[]')"; }
+# node_is_self NAME — rc 0 if NAME is this node: its (planned) name, its live
+# hostname, or a name it had before a rename (records keep the old name until
+# the node re-registers).
+node_is_self() {
+  local n="$1"
+  [[ -n "$n" ]] || return 1
+  [[ "$n" == "$(node_name)" || "$n" == "$(this_hostname)" ]] && return 0
+  node_previous_names | python3 -I -c 'import json,sys; sys.exit(0 if sys.argv[1] in (json.load(sys.stdin) or []) else 1)' "$n" 2>/dev/null
+}
+# node_live_name — the name Swarm and the DB know this node by right now. In
+# --test a rename is never applied, so that is still the current hostname.
+node_live_name() { if is_test; then this_hostname; else node_name; fi; }
 now_epoch()     { date +%s; }
 
 # json_escape STRING — print STRING as a JSON string literal (with quotes).

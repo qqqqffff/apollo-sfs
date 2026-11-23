@@ -68,8 +68,11 @@ deploy_step_roles() {
     local holder="" rc=0
     cluster_call info --quiet || rc=$?
     [[ $rc -eq 0 ]] && holder="$(mgr_data "tiers.$tier" "")"
-    if [[ -n "$holder" && "$holder" != "$(node_name)" ]]; then
+    if [[ -n "$holder" ]] && ! node_is_self "$holder"; then
       dis+=(--disable "blob_storage_shard=the $tier tier is already served by $holder (one blob node per tier)")
+    elif [[ -n "$holder" && "$holder" != "$(node_name)" ]]; then
+      log_info "The $tier tier's blob storage is served by this node under its old name '$holder'."
+      log_info "It carries over to '$(node_name)': same drives, same data, same MinIO service — only the name changes."
     fi
   fi
 

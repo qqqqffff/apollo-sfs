@@ -132,6 +132,42 @@ class Cli(unittest.TestCase):
             out = subprocess.run(py + ["render", "--nodes-dir", d], capture_output=True, text=True, check=True).stdout
             self.assertIn("node-agent-standard:", out)
 
+    def test_cli_rename_carries_blob_storage_over(self):
+        # The Pi (legacy seed "apollo-sfs", serving the fast tier) is renamed:
+        # registering under the new name must not be refused as "tier taken",
+        # and the services/data path must not change.
+        pi_drives = [drive("nvme-01", "/home/apollo/apollo-sfs/minio/nvme-01"),
+                     drive("nvme-02", "/home/apollo/apollo-sfs/minio/nvme-02")]
+        pool = [{"tier": "fast", "path": "/home/apollo/apollo-sfs/minio/pool"}]
+        with tempfile.TemporaryDirectory() as d:
+            seeds = apollo_stack.legacy_seeds("apollo-sfs", "apollo-sfs-1")
+            write_records(d, seeds)
+            req = request("nh-fast-node-001", "fast", pi_drives, pools=pool, blob=True)
+            req["previous_names"] = ["apollo-sfs"]
+            rf = os.path.join(d, "req.json.in")
+            with open(rf, "w") as f:
+                json.dump(req, f)
+            py = [sys.executable, "-I", "-B", os.path.join(ND, "apollo_node.py"), "stack"]
+            p = subprocess.run(py + ["merge-record", "--nodes-dir", d, "--hostname", "nh-fast-node-001", "--request", rf],
+                               capture_output=True, text=True)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            rec = json.loads(p.stdout)
+            self.assertEqual(rec["hostname"], "nh-fast-node-001")
+            self.assertEqual(rec["services"]["minio"], "minio")
+            self.assertEqual(rec["previous_names"], ["apollo-sfs"])
+            fast_seed = next(r for r in seeds if r["tier"] == "fast")
+            self.assertEqual(apollo_stack.compare(apollo_stack.render([fast_seed]), apollo_stack.render([rec])), [])
+
+    def test_rename_moves_hostname_placement(self):
+        rec0, _ = apollo_stack.merge_record(None, request("apollo-sfs-3", "standard", [drive("hdd-02", "/srv/minio/hdd-02", "standard")], blob=True),
+                                            "apollo-sfs-3", {})
+        req = request("nh-std-002", "standard", [drive("hdd-02", "/srv/minio/hdd-02", "standard")], blob=True)
+        rec, w = apollo_stack.merge_record(dict(rec0, renamed_from="apollo-sfs-3"), req, "nh-std-002", {})
+        self.assertEqual(rec["placement"], "node.hostname == nh-std-002")
+        self.assertEqual(rec["services"]["agent"], "node-agent-apollo-sfs-3")   # kept: no service recreation
+        self.assertNotIn("renamed_from", rec)
+        self.assertTrue(any("renamed" in x for x in w))
+
 
 if __name__ == "__main__":
     unittest.main()

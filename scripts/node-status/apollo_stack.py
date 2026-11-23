@@ -234,6 +234,16 @@ def merge_record(existing, request, hostname, tiers_taken, now=None):
     services = dict(rec.get("services") or {})
     if not services.get("agent"):
         services["agent"] = "node-agent-%s" % hostname
+    old_name = rec.pop("renamed_from", None) if existing else None
+    if old_name and rec.get("placement") == "node.hostname == %s" % old_name:
+        # Renamed node: Swarm knows it by the new hostname now. Service names
+        # (node-agent-<old>, minio*) are kept so nothing is recreated.
+        rec["placement"] = "node.hostname == %s" % hostname
+        warnings.append("%s was renamed from %s: its services now follow the new hostname" % (hostname, old_name))
+    if old_name:
+        rec.setdefault("previous_names", [])
+        if old_name not in rec["previous_names"]:
+            rec["previous_names"] = rec["previous_names"] + [old_name]
     if not rec.get("placement"):
         rec["placement"] = "node.hostname == %s" % hostname
 

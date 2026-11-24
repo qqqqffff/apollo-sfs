@@ -596,6 +596,7 @@ _cluster_reserve_locked() {
   [[ "$host" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || { remote_fail bad_request "invalid hostname"; return 1; }
   classes="$(remote_req classes '[]')"
   local prev; prev="$(remote_req previous_names '[]')"
+  local in_use; in_use="$(remote_req in_use '[]')"
   current="$(read_file "$CLUSTER_LABELS_FILE" 2>/dev/null || echo '{}')"
   view="$(_stack_nodes_view)"
   out="$(python3 -I -c '
@@ -605,6 +606,11 @@ prev = {p for p in json.loads(sys.argv[5] or "[]") if isinstance(p, str)}
 # a renamed node keeps the labels it reserved under its old name(s)
 current = {lab: (host if h in prev else h) for lab, h in current.items()}
 used = {}
+# labels that already exist on the requesting node (its drives, duplicates,
+# fstab) — never hand them out, whatever the registry says
+in_use = {l for l in json.loads(sys.argv[6] or "[]") if isinstance(l, str)}
+for lab in in_use:
+    used.setdefault(lab, host)
 for f in glob.glob(os.path.join(view, "*.json")):
     try:
         r = json.load(open(f))
@@ -616,7 +622,7 @@ for lab, h in current.items():
     used.setdefault(lab, h)
 mine_files = [os.path.join(view, n + ".json") for n in [host, *prev]]
 mine_consumed = {m for m, h in used.items() if h == host and m in {x["label"] for f in mine_files if os.path.exists(f) for x in (json.load(open(f)).get("disk_mounts") or [])}}
-spare = sorted(l for l, h in current.items() if h == host and l not in mine_consumed)
+spare = sorted(l for l, h in current.items() if h == host and l not in mine_consumed and l not in in_use)
 out = []
 for cls in classes:
     if cls not in ("nvme", "ssd", "hdd"):
@@ -630,7 +636,7 @@ for cls in classes:
     lab = "%s-%02d" % (cls, n)
     out.append(lab); current[lab] = host; used[lab] = host
 print(json.dumps({"labels": out, "registry": current}))
-' "$host" "$classes" "$current" "$view" "$prev")" || { remote_fail bad_request "could not allocate labels"; return 1; }
+' "$host" "$classes" "$current" "$view" "$prev" "$in_use")" || { remote_fail bad_request "could not allocate labels"; return 1; }
   ensure_dir "$CLUSTER_DIR" 0755 "$REPO_OWNER" >/dev/null || true
   printf '%s' "$out" | json_get registry | write_file "$CLUSTER_LABELS_FILE" 0644 "$REPO_OWNER" >/dev/null || return 1
   printf '{"labels":%s}' "$(printf '%s' "$out" | json_get labels)"

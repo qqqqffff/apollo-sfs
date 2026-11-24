@@ -183,6 +183,36 @@ _drives_fstab_repair() {
   fstab_upsert "$marker" "$fixed" --replace-target "$target"
 }
 
+# _drives_fstab_dedupe TARGET UUID — comment out fstab lines that mount a
+# DIFFERENT filesystem on TARGET (left by adopting a disk that only shared the
+# label). Only offered when UUID is the filesystem actually mounted there.
+_drives_fstab_dedupe() {
+  local target="$1" uuid="$2" cur bad
+  [[ -n "$uuid" ]] || return 0
+  cur="$(fstab_text)"
+  bad="$(awk -v t="$target" -v u="UUID=$uuid" '$1 !~ /^#/ && $2 == t && $1 != u' <<<"$cur")"
+  [[ -n "$bad" ]] || return 0
+  if ! is_test; then
+    local live; live="$(findmnt -no UUID "$target" 2>/dev/null || true)"
+    [[ "$live" == "$uuid" ]] || { log_warn "not cleaning fstab for $target: $uuid is not what is mounted there"; return 0; }
+  fi
+  log_warn "/etc/fstab has other filesystems on $target (from a disk that only shares its label):"
+  while IFS= read -r l; do log_detail "    $l"; done <<<"$bad"
+  ask_yn "Comment these lines out? (they would mount the wrong disk at boot)" y || return 0
+  local out="" l f1 f2 stamp; stamp="$(now_iso)"
+  while IFS= read -r l || [[ -n "$l" ]]; do
+    read -r f1 f2 _ <<<"$l"
+    if [[ ! "$l" =~ ^[[:space:]]*# && "$f2" == "$target" && "$f1" != "UUID=$uuid" ]]; then
+      out+="# disabled by deploy.sh $stamp (not the filesystem at $target): $l"$'\n'
+    else
+      out+="$l"$'\n'
+    fi
+  done <<<"$cur"
+  printf '%s' "$out" | write_file /etc/fstab 0644 root:root || return 1
+  [[ $WRITE_CHANGED == 1 ]] && { run -- systemctl daemon-reload || return 1; }
+  return 0
+}
+
 # ── pools ────────────────────────────────────────────────────────────────────
 # _drives_pool_line BRANCHES(:-joined) POOL TIER MNT… — the mergerfs fstab line.
 _drives_pool_line() {
@@ -257,18 +287,49 @@ _drives_choose() {
 
 # _drives_reserve_labels CLASS… — cluster-unique labels (manager registry);
 # local next-free fallback only when the manager can't be asked.
+# _drives_local_labels — every Apollo-style label already present on THIS node:
+# any filesystem label on any disk (adopted, duplicate, foreign or in use), the
+# labels recorded in node.json, and mountpoint names in /etc/fstab. None of
+# them may be handed out to a new drive.
+_drives_local_labels() {
+  {
+    printf '%s' "${DRIVES_JSON:-{\}}" | python3 -I -c '
+import json, sys
+D = json.load(sys.stdin)
+for d in D.get("disks") or []:
+    for x in [d] + (d.get("children") or []):
+        if x.get("label"): print(x["label"])' 2>/dev/null
+    node_json_get deployment.drives '[]' 2>/dev/null | python3 -I -c 'import json,sys; [print(d.get("label","")) for d in json.load(sys.stdin)]' 2>/dev/null
+    fstab_text 2>/dev/null | awk '$1 !~ /^#/ {n=split($2,a,"/"); print a[n]}'
+  } | { grep -E '^(nvme|ssd|hdd)-[0-9]{2}$' || true; } | sort -u
+}
+
 _drives_reserve_labels() {
   (($#)) || return 0
-  local f rc=0
+  local f rc=0 local_labels
+  local_labels="$(_drives_local_labels)"
   f="$(mktemp "${TMPDIR:-/tmp}/apollo-labels.XXXXXX")"
-  printf '{"hostname":%s,"previous_names":%s,"classes":%s}' "$(json_escape "$(node_name)")" "$(node_previous_names)" \
-    "$(printf '%s\n' "$@" | python3 -I -c 'import json,sys; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))')" >"$f"
+  printf '{"hostname":%s,"previous_names":%s,"classes":%s,"in_use":%s}' "$(json_escape "$(node_name)")" "$(node_previous_names)" \
+    "$(printf '%s\n' "$@" | python3 -I -c 'import json,sys; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))')" \
+    "$(printf '%s\n' "$local_labels" | python3 -I -c 'import json,sys; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))')" >"$f"
   cluster_call reserve-labels --in "$f" --quiet || rc=$?
   rm -f "$f"
-  if [[ $rc -eq 0 ]]; then mgr_data labels | python3 -I -c 'import json,sys; [print(x) for x in json.load(sys.stdin)]'; return 0; fi
+  if [[ $rc -eq 0 ]]; then
+    local got clash="" l
+    got="$(mgr_data labels | python3 -I -c 'import json,sys; [print(x) for x in json.load(sys.stdin)]')"
+    # Never trust a label that already exists here (an older manager doesn't
+    # know this node's existing drives).
+    for l in $got; do grep -qx "$l" <<<"$local_labels" && clash+="$l "; done
+    if [[ -n "$clash" ]]; then
+      log_error "The manager offered label(s) ${clash% } which already exist on this node — refusing to format with them."
+      log_error "Update deploy.sh on the manager (it must receive this node's existing labels) and retry."
+      return 1
+    fi
+    printf '%s\n' "$got"; return 0
+  fi
   if [[ "$(node_role)" != manager ]] && ! is_test; then log_error "the manager could not reserve drive labels"; return 1; fi
   log_warn "Labels picked locally (not reserved cluster-wide)."
-  local taken; taken="$(_drives_q '" ".join(d["label"] for d in D["disks"] if d.get("label"))') $(node_json_get deployment.drives '[]' | python3 -I -c 'import json,sys; print(" ".join(d.get("label","") for d in json.load(sys.stdin)))')"
+  local taken; taken="$(tr '\n' ' ' <<<"$local_labels")"
   local cls n lab
   for cls in "$@"; do
     n=1; while :; do printf -v lab '%s-%02d' "$cls" "$n"; [[ " $taken " == *" $lab "* ]] || break; n=$((n + 1)); done
@@ -295,6 +356,15 @@ _drives_adopt() {
     mnt="$(fstab_text | awk -v u="UUID=$uuid" -v l="LABEL=$label" '$1 == u || $1 == l {print $2; exit}')"
     if [[ -z "$mnt" ]]; then
       mnt="$base/$label"
+      # Never claim a mountpoint another filesystem already owns (a second fstab
+      # line for the same path, or a disk that only shares the label).
+      local other
+      other="$(fstab_text | awk -v t="$mnt" '$1 !~ /^#/ && $2 == t {print $1; exit}')"
+      if [[ -n "$other" ]] || _drives_mounted "$mnt"; then
+        log_error "$mnt already belongs to another filesystem (${other:-mounted now}); $label on $(printf '%s' "$disk" | json_get path) is not that drive."
+        log_error "Relabel or format the extra disk instead of adopting it."
+        return 1
+      fi
       ensure_dir "$mnt" 0755 root:root || return 1
       _drives_protect_mountpoint "$mnt"
       fstab_upsert "drive-$label" "UUID=$uuid  $mnt  $fstype  defaults,noatime,nofail,x-systemd.device-timeout=10  0  2" || return 1
@@ -302,6 +372,7 @@ _drives_adopt() {
     log_info "Mounting $label at $mnt (through its systemd unit)…"
     _drives_start_mount "$mnt" "$uuid" || return 1
   fi
+  _drives_fstab_dedupe "$mnt" "$uuid" || return 1
   _drives_fstab_repair "$mnt" || return 1
   local opts prj=false
   opts="$(probe "findmnt-opts-$(probe_key "$mnt")" -- findmnt -no OPTIONS "$mnt" 2>/dev/null || true)"

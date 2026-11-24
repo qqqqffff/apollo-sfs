@@ -298,6 +298,58 @@ def _listdir(p):
         return []
 
 
+def _label_owner(cands, ctx):
+    """Among disks carrying the same Apollo label, the one that really IS that
+    drive: recorded in node.json > mounted now > named in fstab by UUID/PARTUUID.
+    None when that can't be decided."""
+    recorded = ctx["recorded_uuids"]
+    for test in (lambda d: d.get("uuid") in recorded,
+                 lambda d: bool(d.get("mountpoint")),
+                 lambda d: any(e["spec"].startswith(("UUID=", "PARTUUID=", "/dev/disk/by-uuid/"))
+                               and spec_matches(e["spec"], {"uuid": d.get("uuid"), "partuuid": d.get("partuuid")})
+                               for e in ctx["fstab"])):
+        hits = [d for d in cands if test(d)]
+        if len(hits) == 1:
+            return hits[0]
+        if len(hits) > 1:
+            return None
+    return None
+
+
+def resolve_duplicate_labels(disks, ctx, warnings):
+    """Two filesystems with the same Apollo label (e.g. a new drive prepared by
+    hand as "nvme-01"): only the real one may be adopted. The others become
+    foreign (format to use them) — adopting one would mount the wrong disk."""
+    by_label = {}
+    for d in disks:
+        if d["status"] == "apollo" and d["label"]:
+            by_label.setdefault(d["label"], []).append(d)
+    for lab, cands in by_label.items():
+        if len(cands) < 2:
+            continue
+        owner = _label_owner(cands, ctx)
+        for d in cands:
+            d["duplicate_label"] = True
+            if d is owner:
+                d["reasons"].append("other disks also carry the label %s; this one is the real %s (%s)"
+                                    % (lab, lab, "recorded" if d.get("uuid") in ctx["recorded_uuids"]
+                                       else "mounted" if d.get("mountpoint") else "in /etc/fstab"))
+                continue
+            if owner is not None:
+                d["status"] = "foreign"
+                d["label"] = None
+                d["reasons"] = ["carries the label %s, but %s is the real %s — a duplicate; formatting it gives it a new label "
+                                "(erases its data)" % (lab, owner["name"], lab)]
+            else:
+                d["status"] = "in_use"
+                d["reasons"] = ["label %s is on more than one disk and none is mounted or recorded — relabel the extra one "
+                                "first (xfs_admin -L / e2label) so the right disk is adopted" % lab]
+        warnings.append("label %s is on %s — %s" % (
+            lab, ", ".join(c["name"] for c in cands),
+            ("only %s is adopted; the other(s) can be formatted" % owner["name"]) if owner
+            else "none can be adopted until the duplicates are relabelled"))
+
+
 def cmd_list(args):
     data = json.loads(_read(args.lsblk_json, "{}") or "{}")
     ctx = build_context(args)
@@ -307,17 +359,7 @@ def cmd_list(args):
         if (dev.get("type") or "") != "disk" or SKIP_NAME.match(name):
             continue
         disks.append(classify(dev, ctx))
-    labels = {}
-    for d in disks:
-        if d["label"]:
-            labels.setdefault(d["label"], []).append(d["name"])
-    for lab, names in labels.items():
-        if len(names) > 1:
-            warnings.append("label %s is on %s — relabel all but one (node-agent and by-label lookups need unique labels)"
-                            % (lab, ", ".join(names)))
-            for d in disks:
-                if d["name"] in names:
-                    d["duplicate_label"] = True
+    resolve_duplicate_labels(disks, ctx, warnings)
     print(json.dumps({"disks": disks, "pools": discover_pools(ctx["fstab"], ctx["mounts"]), "warnings": warnings}))
     return 0
 

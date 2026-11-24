@@ -55,6 +55,17 @@ class Classification(unittest.TestCase):
         self.assertFalse(pool["nofail"])
         self.assertEqual(len(pool["branches"]), 2)
 
+    def test_duplicate_label_only_the_mounted_drive_is_adopted(self):
+        # A new disk prepared by hand with the label "nvme-01" (plus the fstab
+        # line an older deploy.sh appended for it) must not be adopted.
+        data, by = run_list("pi-dup")
+        self.assertEqual(by["nvme0n1"]["status"], "apollo")
+        self.assertEqual(by["nvme0n1"]["label"], "nvme-01")
+        self.assertEqual(by["nvme2n1"]["status"], "foreign")
+        self.assertIsNone(by["nvme2n1"]["label"])
+        self.assertIn("duplicate", by["nvme2n1"]["reasons"][0])
+        self.assertTrue(any("nvme-01" in w for w in data["warnings"]))
+
     def test_fresh_node(self):
         _, by = run_list("fresh")
         self.assertEqual(by["nvme0n1"]["status"], "system")

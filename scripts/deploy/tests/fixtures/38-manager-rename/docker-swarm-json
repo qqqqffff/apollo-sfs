@@ -1,0 +1,1 @@
+{"NodeID":"mgr00000000000000000000001","NodeAddr":"192.168.68.57","LocalNodeState":"active","ControlAvailable":true,"RemoteManagers":[{"NodeID":"mgr00000000000000000000001","Addr":"192.168.68.57:2377"}],"Cluster":{"ID":"swarm0000000000000000001","Spec":{"EncryptionConfig":{"AutoLockManagers":false}}}}

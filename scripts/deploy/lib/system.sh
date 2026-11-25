@@ -33,7 +33,9 @@ system_install_packages() {
   log_info "Missing packages: $*"
   ask_yn "Install them now with apt-get?" y || { STEP_FAIL_REASON="required packages are missing: $*"; return 1; }
   run -- env DEBIAN_FRONTEND=noninteractive apt-get update -q || return 1
-  run -- env DEBIAN_FRONTEND=noninteractive apt-get install -y -q "$@" || return 1
+  run -- env DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-remove "$@" || {
+    STEP_FAIL_REASON="apt-get could not install: $* (it may never remove other packages, e.g. an nginx from nginx.org)"; return 1; }
+  undo_note "installed packages stay installed: $*"
   return 0
 }
 
@@ -150,6 +152,120 @@ _system_in_swarm() {
   [[ "$st" == active ]]
 }
 
+# _system_record_rename OLD NEW — run-state + node.json: name and previous_names.
+_system_record_rename() {
+  local prev; prev="$(node_json_get deployment.node.previous_names '[]' 2>/dev/null)"
+  prev="$(python3 -I -c 'import json,sys; p=json.loads(sys.argv[1] or "[]"); c=sys.argv[2]; n=sys.argv[3]
+p=[x for x in p if x != n]
+if c not in p and c != n: p.append(c)
+print(json.dumps(p))' "$prev" "$1" "$2")" || return 1
+  state_set node_name "$2"
+  state_set previous_names "$prev"
+  printf '{"node":{"name":%s,"previous_names":%s}}' "$(json_escape "$2")" "$prev" | node_json_merge deployment >/dev/null
+}
+
+# _system_swarm_ready_ids — IDs of the nodes the swarm reports Ready (manager).
+_system_swarm_ready_ids() {
+  probe docker-node-ready-ids -- docker node ls --format '{{.ID}} {{.Status}}' 2>/dev/null | awk '$2 == "Ready" {print $1}' | tr '\n' ' '
+}
+
+# _system_swarm_check NAME NODE_ID CLUSTER_ID IS_MANAGER "READY_IDS" — one look at
+# the swarm after a rename. rc 0 = same swarm, same node, new name accepted and
+# every node that was Ready is Ready again; else SWARM_WHY says what is missing.
+SWARM_WHY=""
+_system_swarm_check() {
+  local name="$1" nid="$2" cid="$3" mgr="$4" ready="$5" sw st v id now
+  sw="$(docker info --format '{{json .Swarm}}' 2>/dev/null || true)"
+  [[ "$sw" == "{"* ]] || { SWARM_WHY="the Docker daemon does not answer yet"; return 1; }
+  st="$(printf '%s' "$sw" | json_get LocalNodeState "")"
+  if [[ "$st" == locked ]]; then
+    SWARM_WHY="the swarm is LOCKED (autolock): run 'docker swarm unlock' in another terminal, then retry"; return 1
+  fi
+  [[ "$st" == active ]] || { SWARM_WHY="docker reports swarm state '$st' ($(printf '%s' "$sw" | json_get Error ""))"; return 1; }
+  v="$(printf '%s' "$sw" | json_get NodeID "")"
+  [[ -z "$nid" || "$v" == "$nid" ]] || { SWARM_WHY="this node's swarm ID changed ($nid → $v)"; return 1; }
+  v="$(docker info --format '{{.Name}}' 2>/dev/null || true)"
+  [[ "$v" == "$name" ]] || { SWARM_WHY="docker still uses the name '$v'"; return 1; }
+  [[ "$mgr" == true ]] || return 0
+  [[ "$(printf '%s' "$sw" | json_get ControlAvailable false)" == true ]] || { SWARM_WHY="the manager is not in control of the swarm yet"; return 1; }
+  v="$(printf '%s' "$sw" | json_get Cluster.ID "")"
+  [[ -z "$cid" || "$v" == "$cid" ]] || { SWARM_WHY="the swarm ID changed ($cid → $v)"; return 1; }
+  v="$(docker node inspect self --format '{{.Description.Hostname}}' 2>/dev/null || true)"
+  [[ "$v" == "$name" ]] || { SWARM_WHY="the swarm still lists this manager as '${v:-?}'"; return 1; }
+  now="$(_system_swarm_ready_ids)"
+  for id in $ready; do
+    [[ " $now " == *" $id "* ]] || { SWARM_WHY="node $(docker node inspect "$id" --format '{{.Description.Hostname}}' 2>/dev/null || echo "$id") is not back (Ready) yet"; return 1; }
+  done
+  return 0
+}
+
+# _system_rename_in_swarm OLD NEW — restart Docker so the swarm takes the new
+# hostname, then PROVE the swarm survived: same node ID, same swarm ID, still
+# the manager, name accepted, every worker Ready. On a manager the swarm state
+# (/var/lib/docker/swarm) is backed up while Docker is stopped.
+_system_rename_in_swarm() {
+  local old="$1" name="$2" sw nid cid mgr ready="" was_running=0
+  sw="$(probe docker-swarm-json -- docker info --format '{{json .Swarm}}' 2>/dev/null || true)"
+  [[ "$sw" == "{"* ]] || sw="{}"
+  nid="$(printf '%s' "$sw" | json_get NodeID "")"
+  cid="$(printf '%s' "$sw" | json_get Cluster.ID "")"
+  mgr="$(printf '%s' "$sw" | json_get ControlAvailable false)"
+  if [[ "$mgr" == true ]]; then
+    ready="$(_system_swarm_ready_ids)"
+    _stack_running && was_running=1
+    if [[ "$(printf '%s' "$sw" | json_get Cluster.Spec.EncryptionConfig.AutoLockManagers false)" == true ]]; then
+      log_warn "Swarm autolock is on: after the restart the swarm stays locked until you run 'docker swarm unlock'."
+      log_warn "Have the unlock key ready (docker swarm unlock-key)."
+      ask_yn "Continue?" n || { STEP_FAIL_REASON="rename stopped: get the swarm unlock key first"; return 1; }
+    fi
+    local root; root="$(probe docker-root-dir -- docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)"
+    root="${root:-/var/lib/docker}"
+    run -- systemctl stop docker.service docker.socket || true
+    run -- mkdir -p "$BACKUP_DIR"
+    run -- sh -c 'umask 077; tar -C "$1" -czf "$2" swarm' sh "$root" "$BACKUP_DIR/swarm-state.tgz" ||
+      log_warn "the swarm state could not be backed up (continuing)"
+    run -- systemctl start docker.service || { STEP_FAIL_REASON="Docker did not start again (journalctl -u docker); swarm backup: $BACKUP_DIR/swarm-state.tgz"; return 1; }
+  else
+    run -- systemctl restart docker || { STEP_FAIL_REASON="docker restart failed"; return 1; }
+  fi
+  if is_test; then
+    log_test "would verify that the swarm is unchanged: node ID ${nid:0:12}${cid:+, swarm ID ${cid:0:12}}, name '$name' accepted, $(wc -w <<<"$ready" | tr -d ' ') node(s) Ready as before"
+    log_test "the live swarm keeps showing '$old' during this test run — that is expected; '$name' is only planned"
+    return 0
+  fi
+  log_info "Waiting for the swarm to come back with the new name…"
+  local deadline arc
+  while :; do
+    deadline=$(( $(now_epoch) + 150 ))
+    while ! _system_swarm_check "$name" "$nid" "$cid" "$mgr" "$ready"; do
+      (( $(now_epoch) >= deadline )) && break
+      sleep 3
+    done
+    _system_swarm_check "$name" "$nid" "$cid" "$mgr" "$ready" && break
+    arc=0
+    alert_ack crit swarm-after-rename "The swarm is not back to normal after the rename" \
+"$SWARM_WHY
+The rename does not remove anything from the swarm; give it a moment and choose 'r'.
+$([[ "$mgr" == true ]] && echo "A copy of the swarm state from before the restart is in $BACKUP_DIR/swarm-state.tgz.")" --retry || arc=$?
+    [[ $arc -eq 1 ]] || break
+  done
+  _system_swarm_check "$name" "$nid" "$cid" "$mgr" "$ready" &&
+    log_ok "Swarm preserved: same node ID, same swarm$([[ "$mgr" == true ]] && echo ", $(wc -w <<<"$ready" | tr -d ' ') node(s) Ready"), and it now knows this node as '$name'."
+  state_unset discovery_json
+  if [[ $was_running == 1 ]]; then
+    # Services pinned to the OLD hostname only start again at the Services step.
+    local -a all=() want=(); local s pinned=""
+    if grep -qs "node.hostname == $old\"" "$STACK_NODES_DIR/$old.json"; then
+      pinned="$(py stack services --nodes-dir "$STACK_NODES_DIR" --hostname "$old" 2>/dev/null | tr -d '[]",')"
+    fi
+    mapfile -t all < <(docker stack services "$STACK_NAME" --format '{{.Name}}' 2>/dev/null | sed "s/^${STACK_NAME}_//")
+    for s in "${all[@]+"${all[@]}"}"; do [[ " $pinned " == *" $s "* ]] || want+=("$s"); done
+    log_info "Waiting for the services to come back…"
+    ((${#want[@]} == 0)) || stack_wait_converged --timeout 300 "${want[@]}" || log_warn "some services are still starting — the health step checks them again"
+  fi
+  return 0
+}
+
 # deploy_step_identity — STEP: name this system (hostname). Default keeps the
 # current name; a rename inside a swarm needs a docker restart (Docker reads
 # the hostname only at start-up), so the user confirms that first.
@@ -183,8 +299,24 @@ print(" ".join(sorted({n.get("hostname") for n in d.get("nodes", []) if n.get("h
     --hint "Becomes the hostname, the Swarm node name and the name on the metrics page."
 
   if [[ "$name" == "$current" ]]; then
-    state_set node_name "$name"
-    printf '{"node":{"name":%s}}' "$(json_escape "$name")" | node_json_merge deployment >/dev/null || return 1
+    # Recorded under another name (a rolled-back rename, or a hostname changed by
+    # hand): remember that name so the manager carries the records over.
+    if [[ -n "$recorded" && "$recorded" != "$current" ]]; then
+      _system_record_rename "$recorded" "$name" || return 1
+    else
+      state_set node_name "$name"
+      printf '{"node":{"name":%s}}' "$(json_escape "$name")" | node_json_merge deployment >/dev/null || return 1
+    fi
+    # An interrupted rename: the hostname is set but Docker never picked it up.
+    if _system_in_swarm; then
+      local dname; dname="$(probe docker-daemon-name -- docker info --format '{{.Name}}' 2>/dev/null || true)"
+      if [[ -n "$dname" && "$dname" != "$name" ]]; then
+        log_warn "Docker (and so the swarm) still knows this node as '$dname'."
+        if ask_yn "Restart Docker now so the swarm takes the name '$name'?" y; then
+          _system_rename_in_swarm "$dname" "$name" || return 1
+        fi
+      fi
+    fi
     return 0
   fi
 
@@ -198,6 +330,7 @@ print(" ".join(sorted({n.get("hostname") for n in d.get("nodes", []) if n.get("h
     else
       log_warn "which restarts every container on this node."
     fi
+    log_info "The swarm itself is kept: it identifies nodes by ID and address, not by name, so workers stay joined."
     if ! ask_yn "Rename '$current' → '$name' and restart Docker now?" n; then
       log_info "Keeping the current name '$current'."
       state_set node_name "$current"
@@ -207,6 +340,11 @@ print(" ".join(sorted({n.get("hostname") for n in d.get("nodes", []) if n.get("h
   fi
 
   run -- hostnamectl set-hostname "$name" || { STEP_FAIL_REASON="hostnamectl failed"; return 1; }
+  if [[ $in_swarm == 1 ]]; then
+    undo_push "rename this node back to '$current' (and restart Docker)" -- sh -c 'hostnamectl set-hostname "$1" && systemctl try-restart avahi-daemon; systemctl restart docker' sh "$current"
+  else
+    undo_push "rename this node back to '$current'" -- sh -c 'hostnamectl set-hostname "$1" && systemctl try-restart avahi-daemon' sh "$current"
+  fi
   local hosts; hosts="$(read_file /etc/hosts 2>/dev/null || true)"
   if grep -qE '^127\.0\.1\.1[[:space:]]' <<<"$hosts"; then
     sed -E "s/^127\.0\.1\.1[[:space:]].*/127.0.1.1\t$name/" <<<"$hosts" | write_file /etc/hosts 0644 root:root || return 1
@@ -217,27 +355,13 @@ print(" ".join(sorted({n.get("hostname") for n in d.get("nodes", []) if n.get("h
     printf '# Written by deploy.sh — keep the hostname set by `deploy.sh deploy`.\npreserve_hostname: true\n' |
       write_file /etc/cloud/cloud.cfg.d/99-apollo-sfs.cfg 0644 root:root || return 1
   fi
+  # avahi only reads the hostname at start-up (it answers for <name>.local).
+  run -- systemctl try-restart avahi-daemon.service || log_warn "avahi-daemon did not restart — '$name.local' may not resolve yet"
+  # Recorded before Docker restarts: a run interrupted there can pick up again.
+  _system_record_rename "$current" "$name" || return 1
   if [[ $in_swarm == 1 ]]; then
-    run -- systemctl restart docker || { STEP_FAIL_REASON="docker restart failed"; return 1; }
-    if ! is_test && [[ "$role" == true ]]; then
-      local i seen=""
-      for i in $(seq 1 30); do
-        seen="$(docker node inspect self --format '{{.Description.Hostname}}' 2>/dev/null || true)"
-        [[ "$seen" == "$name" ]] && break
-        sleep 2
-      done
-      [[ "$seen" == "$name" ]] || log_warn "Swarm still reports '$seen' for this node — check 'docker node ls'."
-    fi
+    _system_rename_in_swarm "$current" "$name" || return 1
   fi
-
-  local prev; prev="$(node_json_get deployment.node.previous_names '[]' 2>/dev/null)"
-  prev="$(python3 -I -c 'import json,sys; p=json.loads(sys.argv[1] or "[]"); c=sys.argv[2]; n=sys.argv[3]
-p=[x for x in p if x != n]
-if c not in p: p.append(c)
-print(json.dumps(p))' "$prev" "$current" "$name")"
-  state_set node_name "$name"
-  state_set previous_names "$prev"
-  printf '{"node":{"name":%s,"previous_names":%s}}' "$(json_escape "$name")" "$prev" | node_json_merge deployment >/dev/null || return 1
   log_ok "This node is now '$name' (previously '$current')."
   return 0
 }

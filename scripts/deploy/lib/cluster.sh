@@ -27,6 +27,11 @@ _cluster_swarm_json() {
   printf '%s' "$j"
 }
 
+# _cluster_nodes_json — one JSON object per swarm node (managers only).
+_cluster_nodes_json() {
+  probe docker-nodes-json -- sh -c "docker node ls -q | xargs -r docker node inspect --format '{{json .}}'" 2>/dev/null || true
+}
+
 # _cluster_tcp_open HOST PORT — rc 0 if a TCP connect succeeds within 1 s.
 _cluster_tcp_open() {
   probe "tcp-$(probe_key "$1")-$2" -- timeout 1 bash -c "</dev/tcp/$1/$2" >/dev/null 2>&1
@@ -54,11 +59,14 @@ cluster_discover() {
     log_detail "no advertised manager — probing ${ip%.*}.0/24 for swarm managers (TCP 2377)…"
     scan="$(probe "scan-2377-$(probe_key "${ip%.*}")" -- _cluster_scan_2377_raw "${ip%.*}" "$ip" 2>/dev/null || true)"
   fi
+  # A manager knows every node of its swarm, advertised over avahi or not.
+  local swnodes=""
+  if [[ "$(printf '%s' "$sw" | json_get ControlAvailable false)" == true ]]; then swnodes="$(_cluster_nodes_json)"; fi
   local out
   out="$(python3 -I -c '
 import json, re, sys
 sw = json.loads(sys.argv[1] or "{}")
-avahi, scan, self_ip = sys.argv[2], sys.argv[3], sys.argv[4]
+avahi, scan, self_ip, swnodes = sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
 HOST = re.compile(r"^[a-z0-9-]{1,63}$"); REPO = re.compile(r"^/[A-Za-z0-9._/-]+$")
 SERVER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$"); PROTO = re.compile(r"^[0-9]{1,4}$")
 IP = re.compile(r"^[0-9]{1,3}(\.[0-9]{1,3}){3}$")
@@ -86,19 +94,47 @@ for line in avahi.splitlines():
     seen.add(addr); nodes.append(n)
 for rm in sw.get("RemoteManagers") or []:
     addr = (rm.get("Addr") or "").split(":")[0]
+    if rm.get("NodeID") and rm.get("NodeID") == sw.get("NodeID"):
+        continue   # this node itself (whatever its LAN address is thought to be)
     if IP.match(addr) and addr != self_ip and addr not in seen:
         seen.add(addr); nodes.append({"hostname": None, "addr": addr, "role": "manager", "server": None,
                                       "swarm": None, "repo": None, "proto": None, "source": "docker"})
+self_name = None
+for line in swnodes.splitlines():
+    try:
+        sn = json.loads(line)
+    except ValueError:
+        continue
+    spec, st = sn.get("Spec") or {}, sn.get("Status") or {}
+    host = (sn.get("Description") or {}).get("Hostname")
+    if sn.get("ID") and sn.get("ID") == sw.get("NodeID"):
+        self_name = host
+        continue
+    addr = st.get("Addr") or ""
+    if addr in ("", "0.0.0.0"):
+        addr = ((sn.get("ManagerStatus") or {}).get("Addr") or "").split(":")[0]
+    n = next((x for x in nodes if x["addr"] == addr or (host and x["hostname"] == host)), None)
+    if n is None:
+        n = {"hostname": host, "addr": addr, "role": None, "server": None, "swarm": None, "repo": None,
+             "proto": None, "source": "swarm"}
+        nodes.append(n); seen.add(addr)
+    # the swarm is authoritative over an avahi advert (which may predate a rename)
+    n["hostname"] = host or n["hostname"]
+    n["role"] = spec.get("Role") or n["role"]
+    n["swarm"] = ((sw.get("Cluster") or {}).get("ID") or "")[:12] or n["swarm"]
+    n["server"] = n["server"] or (spec.get("Labels") or {}).get("apollo-server")
+    n["state"] = st.get("State")
+    n["node_id"] = sn.get("ID")
 for addr in scan.split():
     if IP.match(addr) and addr not in seen:
         seen.add(addr); nodes.append({"hostname": None, "addr": addr, "role": "manager", "server": None,
                                       "swarm": None, "repo": None, "proto": None, "source": "scan"})
 print(json.dumps({"self": {"state": sw.get("LocalNodeState") or "inactive", "control": bool(sw.get("ControlAvailable")),
-                           "node_id": sw.get("NodeID"), "addr": sw.get("NodeAddr"),
+                           "node_id": sw.get("NodeID"), "addr": sw.get("NodeAddr"), "name": self_name,
                            "cluster_id": (sw.get("Cluster") or {}).get("ID")},
                   "nodes": nodes,
                   "managers": [n["addr"] for n in nodes if n["role"] == "manager"]}))
-' "$sw" "$avahi" "$scan" "$ip")" || out='{"self":{},"nodes":[],"managers":[]}'
+' "$sw" "$avahi" "$scan" "$ip" "$swnodes")" || out='{"self":{},"nodes":[],"managers":[]}'
   state_set discovery_json "$out"
   printf '%s' "$out"
 }
@@ -108,9 +144,14 @@ _cluster_show_discovery() {
   rows="$(printf '%s' "$d" | python3 -I -c '
 import json, sys
 for n in json.load(sys.stdin)["nodes"]:
-    print("%s|%s|%s|%s|%s" % (n.get("hostname") or "?", n["addr"], n.get("role") or "?", n.get("server") or "?", n["source"]))')"
-  if [[ -z "$rows" ]]; then log_info "No other Apollo SFS nodes were found on this network."; return 0; fi
-  local -a t=("NODE|ADDRESS|ROLE|SERVER|FOUND VIA")
+    print("%s|%s|%s|%s|%s|%s" % (n.get("hostname") or "?", n["addr"], n.get("role") or "?", n.get("server") or "?", n.get("state") or "-", n["source"]))')"
+  if [[ -z "$rows" ]]; then
+    if [[ "$(printf '%s' "$d" | json_get self.state inactive)" == active ]]; then log_info "This node is in a swarm; no other nodes were found."
+    else log_info "No other Apollo SFS nodes were found on this network."; fi
+    return 0
+  fi
+  log_info "Other nodes:"
+  local -a t=("NODE|ADDRESS|ROLE|SERVER|SWARM STATE|FOUND VIA")
   while IFS= read -r r; do t+=("$r"); done <<<"$rows"
   ui_table "${t[@]}"
 }
@@ -253,7 +294,7 @@ Copy or pull the same scripts onto the manager (${MGR_REPO:-its repo}), then cho
 # ── membership paths ─────────────────────────────────────────────────────────
 _cluster_set_labels_self() {   # on a manager: apollo-manager + apollo-server
   local server="$1" self cur
-  self="$(node_name)"
+  self="$(swarm_self_id)"; self="${self:-$(node_name)}"   # by ID: valid before and after a rename
   cur="$(probe docker-node-labels-self -- docker node inspect self --format '{{json .Spec.Labels}}' 2>/dev/null || echo '{}')"
   [[ -n "$cur" && "$cur" != null ]] || cur='{}'
   local -a args=()
@@ -287,7 +328,10 @@ _cluster_as_manager_existing() {
   local nodes; nodes="$(probe docker-node-ls -- docker node ls --format '{{.Hostname}}|{{.Status}}|{{.Availability}}|{{.ManagerStatus}}' 2>/dev/null || true)"
   if [[ -n "$nodes" ]]; then
     local -a t=("NODE|STATUS|AVAILABILITY|MANAGER")
-    while IFS='|' read -r h s a m; do [[ -n "$h" ]] && t+=("$h|$s|$a|${m:--}"); done <<<"$nodes"
+    while IFS='|' read -r h s a m; do [[ -n "$h" ]] || continue
+      [[ "$h" == "$(this_hostname)" && "$h" != "$(node_name)" ]] && h="$h -> $(node_name) (planned)"
+      t+=("$h|$s|$a|${m:--}")
+    done <<<"$nodes"
     ui_table "${t[@]}"
   fi
   srv="$(probe docker-node-label-server -- docker node inspect self --format '{{index .Spec.Labels "apollo-server"}}' 2>/dev/null || true)"
@@ -312,6 +356,7 @@ _cluster_init_new() {
   local ip; ip="$(state_get lan_ip "")"
   [[ -n "$ip" ]] || { STEP_FAIL_REASON="no LAN IP known (preflight)"; return 1; }
   run -- docker swarm init --advertise-addr "$ip" >/dev/null || { STEP_FAIL_REASON="docker swarm init failed"; return 1; }
+  undo_push "dissolve the new swarm (docker swarm leave --force)" -- docker swarm leave --force
   local nid cid
   if is_test; then nid="planned-node-id"; cid="planned-swarm-id"
   else
@@ -342,6 +387,7 @@ _cluster_join_worker() {
   local ip; ip="$(state_get lan_ip "")"
   run --redact "$tok" -- docker swarm join --advertise-addr "$ip" --token "$tok" "$addr" >/dev/null ||
     { STEP_FAIL_REASON="docker swarm join failed"; return 1; }
+  undo_push "leave the swarm again (the manager keeps a 'down' entry: docker node rm it there)" -- docker swarm leave
   state_set role worker
   if is_test; then state_set swarm_node_id planned-node-id
   else state_set swarm_node_id "$(docker info --format '{{.Swarm.NodeID}}' 2>/dev/null)"; fi
@@ -533,7 +579,7 @@ The membership step will now run as in a fresh deploy (join or initialise)."
 remote_op_info() {
   local sw nodes svcs view tiers labels
   sw="$(_cluster_swarm_json)"
-  nodes="$(probe docker-nodes-json -- sh -c "docker node ls -q | xargs -r docker node inspect --format '{{json .}}'" 2>/dev/null || true)"
+  nodes="$(_cluster_nodes_json)"
   view="$(_stack_nodes_view)"
   tiers='{"fast":null,"standard":null}'
   if (( $(_stack_records_count "$view") > 0 )); then

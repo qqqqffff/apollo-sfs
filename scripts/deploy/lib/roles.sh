@@ -173,6 +173,7 @@ _roles_apply_quota() {
   log_info "Limiting blob data on $mnt to $(fmt_bytes "$bytes") (XFS project quota)…"
   run -- xfs_quota -x -c "project -s -p $mnt/data $ROLES_PROJECT_ID" "$mnt" >/dev/null || return 1
   run -- xfs_quota -x -c "limit -p bhard=${kib}k $ROLES_PROJECT_ID" "$mnt" >/dev/null || return 1
+  undo_push "remove the blob-storage quota on $mnt" -- xfs_quota -x -c "limit -p bhard=0 $ROLES_PROJECT_ID" "$mnt"
   return 0
 }
 

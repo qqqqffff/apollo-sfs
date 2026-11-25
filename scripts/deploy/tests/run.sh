@@ -67,6 +67,8 @@ run_unit() {
            # shellcheck source=/dev/null
            source "$REPO_SRC/scripts/deploy/lib/ui.sh"
            # shellcheck source=/dev/null
+           source "$REPO_SRC/scripts/deploy/lib/undo.sh"
+           # shellcheck source=/dev/null
            source "$f"
            exec 3</dev/null
            core_init >/dev/null 2>&1

@@ -1,0 +1,23 @@
+{
+ "hostname": "apollo-sfs-1",
+ "seeded": true,
+ "registered_at": "2026-11-24T22:14:21Z",
+ "updated_at": "2026-11-24T22:14:21Z",
+ "role": "manager",
+ "address": null,
+ "arch": null,
+ "tier": "standard",
+ "services": {
+  "agent": "node-agent-standard",
+  "minio": "minio-standard"
+ },
+ "placement": "node.labels.tier == standard",
+ "disk_mounts": [
+  {
+   "label": "hdd-01",
+   "path": "/srv/minio/hdd-01"
+  }
+ ],
+ "minio_data_path": "/srv/minio/hdd-01/data",
+ "deployment": null
+}

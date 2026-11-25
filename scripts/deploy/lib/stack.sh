@@ -162,6 +162,9 @@ UPDATE nodes SET hostname = :'host'
 INSERT INTO nodes (server_id, hostname, role, address, is_active)
 SELECT id, :'host', :'role', :'addr', true FROM servers WHERE is_active ORDER BY created_at LIMIT 1
 ON CONFLICT (server_id, hostname) DO UPDATE SET role = EXCLUDED.role, address = EXCLUDED.address, is_active = true;
+UPDATE nodes SET is_active = false
+ WHERE server_id = (SELECT id FROM servers WHERE is_active ORDER BY created_at LIMIT 1)
+   AND hostname <> :'host' AND hostname = ANY (string_to_array(:'prev', ','));
 UPDATE servers SET name = :'server'
  WHERE id = (SELECT id FROM servers WHERE is_active ORDER BY created_at LIMIT 1) AND :'server' <> '';
 SQL
@@ -348,9 +351,11 @@ stack_deploy() {
   [[ $nodes_only == 1 ]] || shown+=(-c "$STACK_FILE")
   shown+=(-c "$NODES_STACK_FILE")
   if is_test; then
-    run -- docker stack deploy --resolve-image "$mode" "${shown[@]}" "$STACK_NAME"
+    run -- docker stack deploy --resolve-image "$mode" "${shown[@]}" "$STACK_NAME" >&2
   else
-    run -- docker stack deploy --resolve-image "$mode" "${files[@]}" "$STACK_NAME" || return 1
+    # >&2: docker prints "Updating service …" on stdout, which is the JSON
+    # reply channel when this runs inside a _remote op.
+    run -- docker stack deploy --resolve-image "$mode" "${files[@]}" "$STACK_NAME" >&2 || return 1
   fi
   return 0
 }
@@ -384,8 +389,8 @@ _stack_build_request() {
   local phase="$1" f="$2" dep prev
   dep="$(node_json_get deployment '{}')"
   prev="$(node_previous_names)"
-  printf '{"hostname":%s,"previous_names":%s,"phase":%s,"deployment":%s}\n' \
-    "$(json_escape "$(node_name)")" "${prev:-[]}" "$(json_escape "$phase")" "${dep:-{\}}" >"$f"
+  printf '{"hostname":%s,"swarm_node_id":%s,"previous_names":%s,"phase":%s,"deployment":%s}\n' \
+    "$(json_escape "$(node_name)")" "$(json_escape "$(swarm_self_id)")" "${prev:-[]}" "$(json_escape "$phase")" "${dep:-{\}}" >"$f"
 }
 
 # stack_register_node PHASE — send this node's deployment to the manager.
@@ -396,6 +401,7 @@ stack_register_node() {
   cluster_call register-node --in "$f" || rc=$?
   rm -f "$f"
   [[ $rc -eq 0 ]] || return "$rc"
+  undo_note "registered with the manager ($phase): node record, swarm labels, DB row and stack deploy stay (re-run deploy/update to change them)"
   local w; w="$(mgr_data warnings '[]')"
   [[ "$w" == "[]" ]] || printf '%s' "$w" | python3 -I -c 'import json,sys; [print(x) for x in json.load(sys.stdin)]' |
     while IFS= read -r line; do log_warn "$line"; done
@@ -404,6 +410,69 @@ stack_register_node() {
   ui_kv "services" "$(mgr_data stack.node_services '[]')"
   printf '{"stack":{"services":%s,"registered_at":%s,"phase":%s}}' "$(mgr_data stack.node_services '[]')" \
     "$(json_escape "$(now_iso)")" "$(json_escape "$phase")" | node_json_merge deployment >/dev/null || true
+  return 0
+}
+
+# _stack_node_ref HOST NODE_ID — how to address that node in docker commands:
+# its swarm ID when the swarm knows it (valid across renames), else HOST. Sets
+# STACK_REF_NAME to the name the swarm has for it right now.
+STACK_REF_NAME=""
+_stack_node_ref() {
+  local host="$1" id="$2"
+  STACK_REF_NAME="$host"; STACK_REF="$host"
+  [[ "$id" =~ ^[a-z0-9]{8,40}$ ]] || return 0
+  local live; live="$(probe "docker-node-name-$(probe_key "$id")" -- docker node inspect "$id" --format '{{.Description.Hostname}}' 2>/dev/null || true)"
+  [[ -n "$live" ]] || return 0
+  STACK_REF="$id"; STACK_REF_NAME="$live"
+}
+
+# _stack_own_previous_names REQ_JSON_LIST NODE_ID — the request's previous names
+# minus any name ANOTHER live swarm node uses now (a reused name must never make
+# the manager take over that node's record or database row). JSON list.
+_stack_own_previous_names() {
+  local prev="$1" id="$2"
+  [[ -n "$prev" && "$prev" != "[]" ]] || { printf '[]'; return 0; }
+  local live=""
+  [[ -n "$id" ]] && live="$(probe docker-node-ids -- docker node ls --format '{{.ID}} {{.Hostname}}' 2>/dev/null || true)"
+  python3 -I -c '
+import json, sys
+prev, me = json.loads(sys.argv[1] or "[]"), sys.argv[2]
+other = {p[1] for p in (l.split() for l in sys.argv[3].splitlines()) if len(p) == 2 and p[0] != me}
+print(json.dumps([n for n in prev if isinstance(n, str) and n not in other]))' "$prev" "$id" "$live"
+}
+
+# _stack_retire_names HOST PREV_CSV — a renamed node: move its label
+# reservations and last heartbeat to the new name.
+_stack_retire_names() {
+  local host="$1" prev="$2" n cur new
+  [[ -n "$prev" ]] || return 0
+  cur="$(read_file "$CLUSTER_LABELS_FILE" 2>/dev/null || echo '{}')"
+  new="$(python3 -I -c 'import json,sys
+d = json.loads(sys.argv[1] or "{}"); prev = set(sys.argv[2].split(","))
+print(json.dumps({k: (sys.argv[3] if v in prev else v) for k, v in d.items()}))' "$cur" "$prev" "$host" 2>/dev/null || true)"
+  if [[ -n "$new" && "$new" != "{}" ]] && ! python3 -I -c 'import json,sys; sys.exit(0 if json.loads(sys.argv[1]) == json.loads(sys.argv[2]) else 1)' "$cur" "$new" 2>/dev/null; then
+    printf '%s' "$new" | write_file "$CLUSTER_LABELS_FILE" 0644 "$REPO_OWNER" >/dev/null || log_warn "could not update $CLUSTER_LABELS_FILE"
+  fi
+  for n in ${prev//,/ }; do
+    [[ "$n" =~ ^[a-z0-9-]+$ && "$n" != "$host" && -f "$CLUSTER_DIR/heartbeats/$n.json" ]] || continue
+    run -- mkdir -p "$CLUSTER_DIR/.backups"
+    run -- mv "$CLUSTER_DIR/heartbeats/$n.json" "$CLUSTER_DIR/.backups/heartbeat-$n.json.renamed-$(date +%s)" || true
+  done
+  return 0
+}
+
+# _stack_wait_db — right after a Docker restart the database container may not be
+# up yet; without it the node's row would silently keep its old name.
+_stack_wait_db() {
+  is_test && return 0
+  [[ -z "$(_stack_db_container)" ]] || return 0
+  docker service inspect "${STACK_NAME}_db-app" >/dev/null 2>&1 || return 0
+  log_info "Waiting for the app database to start…"
+  local i
+  for i in $(seq 1 30); do
+    [[ -n "$(_stack_db_container)" ]] && { sleep 3; return 0; }
+    sleep 3
+  done
   return 0
 }
 
@@ -416,7 +485,15 @@ _stack_register_locked() {
   phase="$(remote_req phase full)"
   [[ "$host" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || { remote_fail bad_request "invalid hostname '$host'"; return 1; }
   [[ "$phase" == drives || "$phase" == full ]] || { remote_fail bad_request "invalid phase '$phase'"; return 1; }
+  local node_id ref; node_id="$(remote_req swarm_node_id "")"
+  local STACK_REF="$host"; _stack_node_ref "$host" "$node_id"; ref="$STACK_REF"
+  if [[ "$STACK_REF_NAME" != "$host" ]] && ! is_test; then
+    remote_fail name_mismatch "the swarm still knows this node as '$STACK_REF_NAME', not '$host' — restart Docker on it (systemctl restart docker), then retry"
+    return 1
+  fi
+  local prev_json; prev_json="$(_stack_own_previous_names "$(remote_req previous_names '[]')" "$node_id")"
   stack_seed_if_needed || { remote_fail seed_failed "could not seed the node registry"; return 1; }
+  REMOTE_REQ="$(python3 -I -c 'import json,sys; d=json.load(sys.stdin); d["previous_names"]=json.loads(sys.argv[1]); print(json.dumps(d))' "${prev_json:-[]}" <<<"$REMOTE_REQ")"
   reqf="$(remote_req_to_file)"; errf="$(mktemp "${TMPDIR:-/tmp}/apollo-merge.XXXXXX")"
   local view rec
   view="$(_stack_nodes_view)"
@@ -438,7 +515,7 @@ _stack_register_locked() {
     run -- mkdir -p "$CLUSTER_DIR/.backups"
     run -- mv "$STACK_NODES_DIR/$renamed.json" "$CLUSTER_DIR/.backups/$renamed.json.renamed-$(date +%s)"
     is_test && printf '%s\n' "$renamed" >>"$TEST_SANDBOX/nodes-retired"
-  done < <(printf '%s' "$rec" | python3 -I -c 'import json,sys; [print(n) for n in json.load(sys.stdin).get("previous_names") or []]')
+  done < <(python3 -I -c 'import json,sys; [print(n) for n in json.loads(sys.argv[1] or "[]")]' "$prev_json")
 
   local tier role roles addr prev server
   tier="$(printf '%s' "$rec" | json_get tier "")"
@@ -451,9 +528,11 @@ print(",".join(k for k, v in (r or {}).items() if isinstance(v, dict) and v.get(
   prev="$(remote_req previous_names '[]' | python3 -I -c 'import json,sys; print(",".join(json.load(sys.stdin) or []))' 2>/dev/null)"
   server="$(remote_req deployment.cluster.server_name "")"
   [[ -n "$server" ]] || server="$(node_json_get deployment.cluster.server_name "" 2>/dev/null)"
+  _stack_retire_names "$host" "$prev"
   local labels db
-  labels="$(_stack_apply_labels "$host" "$tier" "$role" "$roles")" || { remote_fail labels_failed "could not label $host"; return 1; }
+  labels="$(_stack_apply_labels "$ref" "$tier" "$role" "$roles")" || { remote_fail labels_failed "could not label $host"; return 1; }
   manager_env_load >/dev/null 2>&1 || true
+  _stack_wait_db
   db="$(_stack_db_register "$host" "$role" "$addr" "$prev" "$server")"
 
   stack_render || { remote_fail render_failed "rendering the nodes file failed"; return 1; }

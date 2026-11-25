@@ -1,0 +1,1 @@
+{"schema_version": 1, "deployment": {"node": {"name": "apollo-sfs-1"}, "cluster": {"role": "manager", "server_name": "apollo-sfs"}}}

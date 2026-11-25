@@ -149,6 +149,12 @@ node_is_self() {
 # node_live_name — the name Swarm and the DB know this node by right now. In
 # --test a rename is never applied, so that is still the current hostname.
 node_live_name() { if is_test; then this_hostname; else node_name; fi; }
+# swarm_self_id — this node's Swarm node ID ("" when not in a swarm). Swarm's
+# identity for a node is this ID (and its certificate), never the hostname, so
+# it stays valid across a rename. Always address THIS node by it.
+swarm_self_id() {
+  probe docker-swarm-json -- docker info --format '{{json .Swarm}}' 2>/dev/null | json_get NodeID "" 2>/dev/null || true
+}
 now_epoch()     { date +%s; }
 
 # json_escape STRING — print STRING as a JSON string literal (with quotes).
@@ -314,15 +320,23 @@ write_file() {
     log_test "would write $dest (mode $mode, owner $user:$group)"
     # Diff BEFORE replacing the sandbox render: current may BE that render.
     _show_write_diff "$current" "$tmp" "$dest" "$show"
+    [[ $backup == 1 ]] && undo_file "$dest" "$([[ -f "$dest" ]] && echo "$dest")"
     mkdir -p "$(dirname "$sb")" && cp "$tmp" "$sb"
     rm -f "$tmp"
     return 0
   fi
   mkdir -p "$(dirname "$dest")" || { rm -f "$tmp"; return 1; }
-  if [[ $backup == 1 && -f "$dest" ]]; then
-    mkdir -p "$BACKUP_DIR$(dirname "$dest")" 2>/dev/null &&
-      cp -a "$dest" "$BACKUP_DIR$dest" 2>/dev/null &&
-      log_detail "backup: $BACKUP_DIR$dest"
+  if [[ $backup == 1 ]]; then
+    # Keep the ORIGINAL (first) version: a later write in the same run must not
+    # overwrite the backup the rollback restores.
+    if [[ -f "$dest" && ! -e "$BACKUP_DIR$dest" ]]; then
+      mkdir -p "$BACKUP_DIR$(dirname "$dest")" 2>/dev/null &&
+        cp -a "$dest" "$BACKUP_DIR$dest" 2>/dev/null &&
+        log_detail "backup: $BACKUP_DIR$dest"
+    fi
+    if [[ -f "$BACKUP_DIR$dest" ]]; then undo_file "$dest" "$BACKUP_DIR$dest"
+    elif [[ ! -f "$dest" ]]; then undo_file "$dest" ""
+    fi
   fi
   local staged="$dest.apollo-tmp.$$"
   if ! install -m "$mode" -o "$user" -g "$group" "$tmp" "$staged"; then
@@ -420,6 +434,7 @@ ensure_dir() {
   local p="$1" mode="${2:-}" owner="${3:-}"
   if [[ ! -d "$p" ]]; then
     run -- mkdir -p "$p" || return 1
+    undo_push "remove the directory $p (only if still empty)" -- rmdir --ignore-fail-on-non-empty "$p"
     [[ -n "$mode" ]] && { run -- chmod "$mode" "$p" || return 1; }
     [[ -n "$owner" ]] && { run -- chown "$owner" "$p" || return 1; }
     return 0
@@ -713,6 +728,7 @@ flow_abort_trap() {
   if [[ "${_FLOW_OPEN:-0}" == 1 ]]; then
     printf '{"run":{"state":"failed","finished_at":%s,"exit_code":%d}}' "$(json_escape "$(now_iso)")" "$rc" |
       node_json_merge deployment >/dev/null 2>&1 || true
+    undo_offer "$rc"
   fi
   return "$rc"
 }

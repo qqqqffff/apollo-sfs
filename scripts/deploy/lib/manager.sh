@@ -406,6 +406,7 @@ _mgr_fail2ban_step() {
     return 0
   fi
   log_info "Installing the fail2ban jail (fail2ban/install.sh)…"
+  undo_note "fail2ban/install.sh installed the API-scan jail (not undone; remove it from /etc/fail2ban by hand if needed)"
   run -- bash "$APOLLO_ROOT/fail2ban/install.sh" || { log_warn "fail2ban/install.sh failed — API scan bans are not active"; return 0; }
   return 0
 }
@@ -424,7 +425,8 @@ manager_ensure_registry() {
     false) run -- docker start registry >/dev/null || return 1 ;;
     *)
       ensure_dir "$MGR_REGISTRY_DIR" 0755 root:root || return 1
-      run -- docker run -d --name registry --restart=always -p 5000:5000 -v "$MGR_REGISTRY_DIR:/var/lib/registry" registry:2 >/dev/null || return 1 ;;
+      run -- docker run -d --name registry --restart=always -p 5000:5000 -v "$MGR_REGISTRY_DIR:/var/lib/registry" registry:2 >/dev/null || return 1
+      undo_push "remove the registry container created by this run (its data dir stays)" -- docker rm -f registry ;;
   esac
   local addr prev
   addr="$(state_get lan_ip "$(node_json_get deployment.node.ip "")"):5000"

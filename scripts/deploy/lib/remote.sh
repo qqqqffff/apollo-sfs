@@ -260,10 +260,13 @@ REMOTE_REQ="{}"
 REMOTE_OP=""
 REMOTE_ERR_CODE=""
 REMOTE_ERR_MSG=""
+REMOTE_ERR_FILE=""
 
 # remote_fail CODE MESSAGE — record an op error (returns 1 for `|| return`).
 remote_fail() {
   REMOTE_ERR_CODE="$1"; REMOTE_ERR_MSG="$2"
+  # Ops run in a subshell (their stdout is captured): hand the error over in a file.
+  [[ -n "$REMOTE_ERR_FILE" ]] && printf '%s\n%s' "$1" "$2" >"$REMOTE_ERR_FILE"
   log_error "$2"
   return 1
 }
@@ -290,6 +293,29 @@ _remote_envelope_err() {
   printf '{"proto":%d,"op":%s,"ok":false,"host":%s,"test":%s,"error":{"code":%s,"message":%s}}\n' \
     "$PROTO" "$(json_escape "$REMOTE_OP")" "$(json_escape "$(hostname)")" \
     "$([[ $TEST_MODE == 1 ]] && echo true || echo false)" "$(json_escape "$1")" "$(json_escape "$2")"
+}
+
+# _remote_extract_reply — stdin: an op's stdout polluted by other commands.
+# Prints the last JSON object that starts a line; everything else → stderr.
+# rc 1 when there is none.
+_remote_extract_reply() {
+  python3 -I -c '
+import json, re, sys
+text, dec, pos, found = sys.stdin.read(), json.JSONDecoder(), 0, None
+for m in re.finditer(r"^\{", text, re.M):
+    if m.start() < pos:
+        continue
+    try:
+        obj, end = dec.raw_decode(text, m.start())
+    except ValueError:
+        continue
+    found, pos = (m.start(), end, obj), end
+if found is None:
+    sys.exit(1)
+for line in (text[:found[0]] + "\n" + text[found[1]:]).splitlines():
+    if line.strip():
+        print(line, file=sys.stderr)
+print(json.dumps(found[2]))'
 }
 
 # remote_main OP [--proto N] [ARGS…] — entry point for `deploy.sh _remote`.
@@ -319,15 +345,31 @@ remote_main() {
     return $?
   fi
   local data rc=0
+  REMOTE_ERR_CODE=""; REMOTE_ERR_MSG=""
+  REMOTE_ERR_FILE="$(mktemp "${TMPDIR:-/tmp}/apollo-remote-err.XXXXXX" 2>/dev/null || true)"
   data="$("$fn" "${args[@]+"${args[@]}"}")" || rc=$?
+  if [[ -n "$REMOTE_ERR_FILE" ]]; then
+    if [[ -s "$REMOTE_ERR_FILE" ]]; then
+      REMOTE_ERR_CODE="$(head -n1 "$REMOTE_ERR_FILE")"; REMOTE_ERR_MSG="$(tail -n +2 "$REMOTE_ERR_FILE")"
+    fi
+    rm -f "$REMOTE_ERR_FILE"; REMOTE_ERR_FILE=""
+  fi
   if [[ $rc -ne 0 ]]; then
+    [[ -n "$data" && "$REMOTE_OP" != join-token ]] && printf '%s\n' "$data" >&2
     _remote_envelope_err "${REMOTE_ERR_CODE:-op_failed}" "${REMOTE_ERR_MSG:-op $REMOTE_OP failed (rc $rc)}"
     return 1
   fi
   [[ -n "${data//[[:space:]]/}" ]] || data="{}"
-  if ! printf '%s' "$data" | py json check --file - 2>/dev/null; then
-    _remote_envelope_err bad_data "op $REMOTE_OP produced invalid JSON"
-    return 1
+  if ! printf '%s' "$data" | py json check --file - >/dev/null 2>&1; then
+    # A command inside the op wrote to stdout. The work is done by now, so keep
+    # the reply and send the stray lines to the log instead of failing the op.
+    local clean
+    if ! clean="$(printf '%s' "$data" | _remote_extract_reply)"; then
+      [[ "$REMOTE_OP" == join-token ]] || printf '%s\n' "$data" >&2
+      _remote_envelope_err bad_data "op $REMOTE_OP produced invalid JSON (its output is in the log above)"
+      return 1
+    fi
+    data="$clean"
   fi
   _remote_envelope_ok "$data"
   return 0

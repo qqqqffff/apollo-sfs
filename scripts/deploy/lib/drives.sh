@@ -82,6 +82,7 @@ _drives_protect_mountpoint() {
   local dir="$1"
   if ! probe "mountpoint-$(probe_key "$dir")" -- mountpoint -q "$dir" >/dev/null 2>&1; then
     run -- chattr +i "$dir" || { log_warn "could not make $dir immutable (filesystem without chattr support?)"; return 0; }
+    undo_push "make $dir mutable again" -- chattr -i "$dir"
     return 0
   fi
   local parent_mnt rel tmp
@@ -98,7 +99,9 @@ _drives_protect_mountpoint() {
 _drives_start_mount() {
   local mnt="$1" uuid="$2" unit got
   unit="$(_drives_unit_for "$mnt")"
+  local was=0; _drives_mounted "$mnt" && was=1
   run -- systemctl start "$unit" || { log_error "systemctl start $unit failed"; return 1; }
+  [[ $was == 1 ]] || undo_push "unmount $mnt" -- systemctl stop "$unit"
   is_test && return 0
   got="$(findmnt -no UUID "$mnt" 2>/dev/null || true)"
   if [[ -n "$uuid" && "$got" != "$uuid" ]]; then
@@ -129,6 +132,7 @@ _drives_format() {
   local children; children="$(printf '%s' "$disk" | python3 -I -c 'import json,sys; [print(c["path"]) for c in json.load(sys.stdin)["children"] if c.get("path")]')"
   local c
   while IFS= read -r c; do [[ -n "$c" ]] && { run -- wipefs -a "$c" >/dev/null || return 1; }; done <<<"$children"
+  undo_note "formatted $path ($serial) — its previous contents are erased and cannot be restored"
   run -- wipefs -a "$path" >/dev/null || return 1
   run -- sgdisk --zap-all "$path" >/dev/null || return 1
   local guid; guid="$(python3 -I -c 'import uuid; print(uuid.uuid4())')"
@@ -183,26 +187,37 @@ _drives_fstab_repair() {
   fstab_upsert "$marker" "$fixed" --replace-target "$target"
 }
 
-# _drives_fstab_dedupe TARGET UUID — comment out fstab lines that mount a
-# DIFFERENT filesystem on TARGET (left by adopting a disk that only shared the
-# label). Only offered when UUID is the filesystem actually mounted there.
+# _drives_fstab_foreign TARGET UUID PARTUUID — print the fstab lines that
+# DEFINITELY mount another filesystem on TARGET: a different UUID=, or a
+# PARTUUID= that differs from a known PARTUUID. LABEL=, PARTLABEL=, /dev/… paths,
+# bind mounts and mergerfs lines may well be the right one, so they never match.
+_drives_fstab_foreign() {
+  awk -v t="$1" -v u="${2,,}" -v pu="${3,,}" '
+    $1 ~ /^#/ || $2 != t { next }
+    { spec = tolower($1); gsub(/"/, "", spec)
+      if (spec ~ /^uuid=/ && substr(spec, 6) != u) print
+      else if (spec ~ /^partuuid=/ && pu != "" && substr(spec, 10) != pu) print }'
+}
+
+# _drives_fstab_dedupe TARGET UUID [PARTUUID] — comment out fstab lines that
+# mount a DIFFERENT filesystem on TARGET (left by adopting a disk that only
+# shared the label). Only offered when UUID is the filesystem mounted there.
 _drives_fstab_dedupe() {
-  local target="$1" uuid="$2" cur bad
+  local target="$1" uuid="$2" partuuid="${3:-}" cur bad
   [[ -n "$uuid" ]] || return 0
   cur="$(fstab_text)"
-  bad="$(awk -v t="$target" -v u="UUID=$uuid" '$1 !~ /^#/ && $2 == t && $1 != u' <<<"$cur")"
+  bad="$(_drives_fstab_foreign "$target" "$uuid" "$partuuid" <<<"$cur")"
   [[ -n "$bad" ]] || return 0
   if ! is_test; then
     local live; live="$(findmnt -no UUID "$target" 2>/dev/null || true)"
-    [[ "$live" == "$uuid" ]] || { log_warn "not cleaning fstab for $target: $uuid is not what is mounted there"; return 0; }
+    [[ "${live,,}" == "${uuid,,}" ]] || { log_warn "not cleaning fstab for $target: $uuid is not what is mounted there"; return 0; }
   fi
   log_warn "/etc/fstab has other filesystems on $target (from a disk that only shares its label):"
   while IFS= read -r l; do log_detail "    $l"; done <<<"$bad"
   ask_yn "Comment these lines out? (they would mount the wrong disk at boot)" y || return 0
-  local out="" l f1 f2 stamp; stamp="$(now_iso)"
+  local out="" l stamp; stamp="$(now_iso)"
   while IFS= read -r l || [[ -n "$l" ]]; do
-    read -r f1 f2 _ <<<"$l"
-    if [[ ! "$l" =~ ^[[:space:]]*# && "$f2" == "$target" && "$f1" != "UUID=$uuid" ]]; then
+    if grep -qxF -- "$l" <<<"$bad" && [[ -n "$l" ]]; then
       out+="# disabled by deploy.sh $stamp (not the filesystem at $target): $l"$'\n'
     else
       out+="$l"$'\n'
@@ -232,7 +247,9 @@ _drives_pool_start() {
       mountpoint -q "$m" || { log_error "refusing to start $pool: branch drive $m is not mounted"; return 1; }
     done
   fi
+  local pwas=0; _drives_mounted "$pool" && pwas=1
   run -- systemctl start "$(_drives_unit_for "$pool")" || return 1
+  [[ $pwas == 1 ]] || undo_push "stop the pool $pool" -- systemctl stop "$(_drives_unit_for "$pool")"
   if ! is_test; then
     local have; have="$(getfattr -n user.mergerfs.branches --only-values "$pool/.mergerfs" 2>/dev/null || true)"
     for m in "$@"; do
@@ -372,7 +389,7 @@ _drives_adopt() {
     log_info "Mounting $label at $mnt (through its systemd unit)…"
     _drives_start_mount "$mnt" "$uuid" || return 1
   fi
-  _drives_fstab_dedupe "$mnt" "$uuid" || return 1
+  _drives_fstab_dedupe "$mnt" "$uuid" "$(printf '%s' "$disk" | json_get partuuid "")" || return 1
   _drives_fstab_repair "$mnt" || return 1
   local opts prj=false
   opts="$(probe "findmnt-opts-$(probe_key "$mnt")" -- findmnt -no OPTIONS "$mnt" 2>/dev/null || true)"
@@ -512,6 +529,7 @@ print(json.dumps(next((p for p in D["pools"] if w & set(p["branches"])), None)))
         log_info "Adding $a to the live pool $pool (no remount, MinIO keeps running)…"
         if [[ "$(printf '%s' "$existing" | json_get mounted false)" == true ]]; then
           run -- setfattr -n user.mergerfs.branches -v "+>$a" "$pool/.mergerfs" || return 1
+          undo_push "remove $a from the live pool $pool" -- setfattr -n user.mergerfs.branches -v "-$a" "$pool/.mergerfs"
         fi
         branches+=":$a"
       done
@@ -541,6 +559,7 @@ print(",".join(opts))' "$opts" "${mnts[@]}")"
       ask_yn "Stop $svc briefly to switch it to the pool?" y || { log_info "Keeping a single drive — no pool."; DRIVES_POOL_JSON="[]"; return 0; }
       local f; f="$(mktemp "${TMPDIR:-/tmp}/apollo-scale.XXXXXX")"; printf '{"services":{"%s":0}}' "$svc" >"$f"
       cluster_call scale --in "$f" || { rm -f "$f"; return 1; }
+      undo_push_fn "scale $svc back to 1 replica" -- _undo_scale "$svc" 1
       rm -f "$f"
     fi
     ensure_dir "$pool" 0755 root:root || return 1

@@ -327,9 +327,9 @@ for d in dep.get("drives") or []:
         continue
     m = disks.get(d.get("label")) or {}
     expect.append({"label": d.get("label"), "device": m.get("device"), "size_bytes": m.get("total_bytes")})
-print(json.dumps({"hostname": sys.argv[2], "last_updated_epoch": doc.get("last_updated_epoch"),
+print(json.dumps({"hostname": sys.argv[2], "swarm_node_id": sys.argv[3], "last_updated_epoch": doc.get("last_updated_epoch"),
                   "metrics": metrics, "expect": {"disks": expect, "services": (dep.get("stack") or {}).get("services") or []}}))
-' "$NODE_JSON" "$(node_live_name)" >"$f"
+' "$NODE_JSON" "$(node_live_name)" "$(swarm_self_id)" >"$f"
 }
 
 # heartbeat_run [--quiet] — one heartbeat (in-process on the manager, over ssh
@@ -345,6 +345,7 @@ heartbeat_run() {
   [[ $rc -eq 255 ]] && return 255
   [[ $rc -eq 0 ]] || return 1
   HEARTBEAT_LAST="$MGR_RESPONSE"
+  _heartbeat_learn_manager_name
   local ok checks
   ok="$(mgr_data ok false)"
   checks="$(mgr_data checks '[]')"
@@ -361,6 +362,19 @@ for c in json.load(sys.stdin):
     "$(json_escape "$([[ "$ok" == true ]] && echo pass || echo fail)")" "$checks" \
     "$([[ "$ok" == true ]] && printf ',"last_ok_at":%s' "$(json_escape "$(now_iso)")")" | node_json_merge deployment >/dev/null || true
   [[ "$ok" == true ]]
+}
+
+# _heartbeat_learn_manager_name — workers reach the manager by IP, so a renamed
+# manager needs no change here; only the name shown in node.json is refreshed.
+_heartbeat_learn_manager_name() {
+  [[ "$(node_role)" == worker ]] || return 0
+  local now old
+  now="$(printf '%s' "$MGR_RESPONSE" | json_get host "")"
+  old="$(node_json_get deployment.cluster.manager.hostname "" 2>/dev/null || true)"
+  [[ "$now" =~ ^[a-z0-9-]{1,63}$ && "$now" != "$old" ]] || return 0
+  [[ -z "$old" ]] || log_info "The manager is now called '$now' (was '$old') — recorded in node.json."
+  state_set manager_hostname "$now"
+  printf '{"cluster":{"manager":{"hostname":%s}}}' "$(json_escape "$now")" | node_json_merge deployment >/dev/null || true
 }
 
 # health_wait_disk_metrics [TIMEOUT=60] — wait until the manager sees every
@@ -403,18 +417,17 @@ for c in (json.load(sys.stdin).get("data") or {}).get("checks") or []:
   ui_table "${rows[@]}"
 }
 
-# remote_op_heartbeat — manager side. Request: {hostname, last_updated_epoch,
-# metrics, expect{disks[{label, device, size_bytes}], services[]}}.
-remote_op_heartbeat() {
-  local host; host="$(remote_req hostname "")"
-  [[ "$host" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || { remote_fail bad_request "invalid hostname"; return 1; }
-  HEALTH_CHECKS=()
-  manager_env_load >/dev/null 2>&1 || true
+# _heartbeat_checks HOST REF EXPECT_DISKS_JSON TOLERANCE — what the MANAGER sees
+# of one node (appends to HEALTH_CHECKS). REF is what docker commands use: the
+# swarm node ID when known, else HOST. Used for a node's own heartbeat and for
+# the manager's sweep over its workers.
+_heartbeat_checks() {
+  local host="$1" ref="$2" expect="$3" tol="$4"
   local st
-  st="$(probe "docker-node-state-$(probe_key "$host")" -- docker node inspect "$host" --format '{{.Status.State}} {{.Spec.Availability}}' 2>/dev/null || true)"
+  st="$(probe "docker-node-state-$(probe_key "$host")" -- docker node inspect "$ref" --format '{{.Status.State}} {{.Spec.Availability}}' 2>/dev/null || true)"
   if [[ "$st" == "ready active" ]]; then _health_add swarm pass "ready, active"
   else _health_add swarm fail "swarm reports '${st:-unknown node}'"; fi
-  local tasks; tasks="$(probe "docker-node-ps-state-$(probe_key "$host")" -- docker node ps "$host" --filter desired-state=running --format '{{.Name}} {{.CurrentState}}' 2>/dev/null || true)"
+  local tasks; tasks="$(probe "docker-node-ps-state-$(probe_key "$host")" -- docker node ps "$ref" --filter desired-state=running --format '{{.Name}} {{.CurrentState}}' 2>/dev/null || true)"
   local nt nr
   nt="$(grep -c . <<<"$tasks" || true)"; nr="$(grep -c ' Running' <<<"$tasks" || true)"
   if [[ "$nt" == 0 ]]; then _health_add tasks warn "no tasks scheduled on $host"
@@ -444,7 +457,7 @@ for line in sys.argv[2].splitlines():
     p = line.split("|")
     if len(p) == 4:
         rows[p[0]] = (p[1], int(p[2] or 0), int(float(p[3] or 0)))
-stale = int(sys.argv[3])
+stale, tol = int(sys.argv[3]), float(sys.argv[4])
 for e in expect:
     lab = e.get("label")
     r = rows.get(lab)
@@ -457,11 +470,23 @@ for e in expect:
     if want_dev and os.path.basename(dev) != want_dev:
         print("disk %s|fail|reported from %s, expected %s (not mounted?)" % (lab, dev, want_dev)); continue
     size = e.get("size_bytes") or 0
-    if size and abs(cap - size) > 0.01 * size:
-        print("disk %s|fail|capacity %d B vs %d B on the node (>1%% apart)" % (lab, cap, size)); continue
+    if size and abs(cap - size) > tol * size:
+        print("disk %s|fail|capacity %d B vs %d B on the node (>%d%% apart)" % (lab, cap, size, round(tol * 100))); continue
     print("disk %s|pass|%s, %ss ago" % (lab, dev, age))
-' "$(remote_req expect.disks '[]')" "$disks" "$HEALTH_STALE_S")
+' "$expect" "$disks" "$HEALTH_STALE_S" "$tol")
   fi
+  return 0
+}
+
+# remote_op_heartbeat — manager side. Request: {hostname, last_updated_epoch,
+# metrics, expect{disks[{label, device, size_bytes}], services[]}}.
+remote_op_heartbeat() {
+  local host; host="$(remote_req hostname "")"
+  [[ "$host" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || { remote_fail bad_request "invalid hostname"; return 1; }
+  HEALTH_CHECKS=()
+  manager_env_load >/dev/null 2>&1 || true
+  local STACK_REF="$host"; _stack_node_ref "$host" "$(remote_req swarm_node_id "")"
+  _heartbeat_checks "$host" "$STACK_REF" "$(remote_req expect.disks '[]')" 0.01
 
   local lu skew
   lu="$(remote_req last_updated_epoch 0)"; [[ "$lu" =~ ^[0-9]+$ ]] || lu=0
@@ -479,6 +504,132 @@ for e in expect:
       write_file "$CLUSTER_DIR/heartbeats/$host.json" 0644 "$REPO_OWNER" --no-backup >/dev/null 2>&1 && recorded=true
   fi
   printf '{"ok":%s,"result":%s,"skew_s":%d,"checks":%s,"recorded":%s}' "$ok" "$(json_escape "$result")" "$skew" "$(_health_checks_json)" "$recorded"
+}
+
+# ── manager → workers ────────────────────────────────────────────────────────
+# _health_worker_list — on a manager: every other swarm node (joined with its
+# record in cluster/nodes) as "host|node_id|addr|minio_service|recorded|expect_json",
+# plus recorded nodes the swarm does not know ("host|-|||yes|[]").
+_health_worker_list() {
+  local view; view="$(_stack_nodes_view)"
+  local mine; mine="$(python3 -I -c 'import json,sys; print(json.dumps([sys.argv[1], sys.argv[2], *(json.loads(sys.argv[3] or "[]"))]))' \
+    "$(node_name)" "$(this_hostname)" "$(node_previous_names)")"
+  python3 -I -c '
+import glob, json, os, sys
+nodes, view, me, mine = sys.argv[1], sys.argv[2], sys.argv[3], set(json.loads(sys.argv[4]))
+recs = {}
+for f in sorted(glob.glob(os.path.join(view, "*.json"))):
+    try:
+        r = json.load(open(f))
+    except (OSError, ValueError):
+        continue
+    if r.get("hostname"):
+        recs[r["hostname"]] = r
+seen = set()
+for line in nodes.splitlines():
+    try:
+        n = json.loads(line)
+    except ValueError:
+        continue
+    host = (n.get("Description") or {}).get("Hostname") or "?"
+    seen.add(host)
+    if n.get("ID") == me or host in mine:
+        continue
+    r = recs.get(host) or {}
+    dep = r.get("deployment") or {}
+    size = {d.get("label"): d.get("size_bytes") for d in dep.get("drives") or [] if isinstance(d, dict)}
+    expect = [{"label": m["label"], "size_bytes": size.get(m["label"])} for m in r.get("disk_mounts") or []]
+    print("%s|%s|%s|%s|%s|%s" % (host, n.get("ID"), (n.get("Status") or {}).get("Addr") or "",
+          (r.get("services") or {}).get("minio") or "", "yes" if r else "no", json.dumps(expect)))
+for host in sorted(recs):
+    if host not in seen and host not in mine:
+        print("%s|-|||yes|[]" % host)
+' "$(_cluster_nodes_json)" "$view" "$(swarm_self_id)" "$mine"
+}
+
+# _health_check_worker HOST NODE_ID ADDR MINIO RECORDED EXPECT — every check of one
+# worker, as the manager sees it (fills HEALTH_CHECKS).
+_health_check_worker() {
+  local host="$1" id="$2" addr="$3" minio="$4" recorded="$5" expect="$6"
+  if [[ "$id" == - ]]; then
+    _health_add swarm fail "recorded in cluster/nodes but not in the swarm (removed, or renamed without deploy.sh?)"
+    return 0
+  fi
+  # manager → worker over the LAN: swarm's own control port on the worker.
+  if [[ -z "$addr" ]]; then _health_add network warn "the swarm has no address for it"
+  elif _cluster_tcp_open "$addr" 7946; then _health_add network pass "reachable at $addr (swarm port 7946)"
+  else _health_add network fail "$addr does not answer on swarm port 7946 from the manager"; fi
+  # drive sizes in the record are partition sizes, so allow filesystem overhead
+  _heartbeat_checks "$host" "$id" "$expect" 0.12
+  # manager → worker over the overlay network: the path the API really uses.
+  if [[ -n "$minio" ]]; then
+    local api; api="$(probe docker-api-id -- docker ps -qf "name=${STACK_NAME}_api\\." 2>/dev/null | head -n1)"
+    if [[ -z "$api" ]]; then _health_add overlay warn "the api container is not running here — can't test $minio through the overlay network"
+    elif probe "overlay-$minio" -- docker exec "$api" wget -q -T 5 -O /dev/null "http://$minio:9000/minio/health/live" >/dev/null 2>&1; then
+      _health_add overlay pass "api -> $minio:9000 answers through the overlay network"
+    else _health_add overlay fail "api can't reach $minio:9000 through the overlay network"; fi
+  fi
+  [[ "$recorded" == yes ]] || _health_add record warn "in the swarm, but not deployed with deploy.sh yet (run deploy there)"
+  # the worker's own last heartbeat (worker → manager over ssh); informational
+  local hb="$CLUSTER_DIR/heartbeats/$host.json" at res
+  if [[ -n "$FIXTURES" || ! -f "$hb" ]]; then
+    [[ -n "$FIXTURES" ]] || _health_add own_heartbeat warn "it has not sent one to this manager yet (run ./deploy.sh restart or update there)"
+  else
+    at="$(py json get --file "$hb" --key received_at --default '?' 2>/dev/null)"; res="$(py json get --file "$hb" --key result --default '?' 2>/dev/null)"
+    _health_add own_heartbeat pass "last one it sent: $res at $at"
+  fi
+  return 0
+}
+
+# health_workers_heartbeat [TIMEOUT=90] — manager only: check the connection to
+# every worker, retrying until all pass or TIMEOUT. Adds one "worker <host>" row
+# per worker to the caller's HEALTH_CHECKS and records the details in node.json.
+# rc 0 all fine · 1 some worker failed · 2 not a manager / no workers.
+health_workers_heartbeat() {
+  local timeout="${1:-90}"
+  [[ "$(node_role)" == manager ]] || return 2
+  manager_env_load >/dev/null 2>&1 || true
+  local -a outer=("${HEALTH_CHECKS[@]+"${HEALTH_CHECKS[@]}"}") workers=()
+  mapfile -t workers < <(_health_worker_list)
+  if ((${#workers[@]} == 0)); then
+    log_info "No worker nodes in this swarm — nothing to check from the manager."
+    return 2
+  fi
+  log_info "Checking the connection from this manager to ${#workers[@]} worker(s)…"
+  local deadline=$(( $(now_epoch) + timeout )) bad w host id addr minio rec expect
+  local -a rows=() titles=() tables=(); local json
+  while :; do
+    bad=0; rows=(); titles=(); tables=(); json="["
+    for w in "${workers[@]}"; do
+      IFS='|' read -r host id addr minio rec expect <<<"$w"
+      HEALTH_CHECKS=()
+      _health_check_worker "$host" "$id" "$addr" "$minio" "$rec" "$expect"
+      local result failed st
+      result="$(_health_result)"
+      [[ "$result" == fail ]] && bad=1
+      failed="$(printf '%s\n' "${HEALTH_CHECKS[@]}" | awk -F'|' -v r="$result" '$2 == r && r != "pass" {printf "%s%s", s, $1; s=", "}')"
+      st="$result"; [[ "$st" == fail ]] && is_test && st=warn
+      rows+=("worker $host|$st|$([[ "$result" == pass ]] && echo "${#HEALTH_CHECKS[@]} checks passed" || echo "$result: $failed")")
+      titles+=("Worker $host${addr:+ ($addr)}"); tables+=("$(printf '%s\n' "${HEALTH_CHECKS[@]}")")
+      [[ "$json" == "[" ]] || json+=","
+      json+="{\"hostname\":$(json_escape "$host"),\"addr\":$(json_escape "$addr"),\"result\":$(json_escape "$result"),\"at\":$(json_escape "$(now_iso)"),\"checks\":$(_health_checks_json)}"
+    done
+    json+="]"
+    [[ $bad == 0 ]] && break
+    is_test && break
+    (( $(now_epoch) >= deadline )) && break
+    sleep 5
+  done
+  local i; local -a t=()
+  for i in "${!titles[@]}"; do
+    ui_section "${titles[$i]}"
+    t=("MANAGER TO WORKER|STATUS|DETAIL")
+    mapfile -t -O 1 t <<<"${tables[$i]}"
+    ui_table "${t[@]}"
+  done
+  printf '{"heartbeat":{"workers":%s,"workers_at":%s}}' "$json" "$(json_escape "$(now_iso)")" | node_json_merge deployment >/dev/null || true
+  HEALTH_CHECKS=("${outer[@]+"${outer[@]}"}" "${rows[@]}")
+  return "$bad"
 }
 
 # ── steps ────────────────────────────────────────────────────────────────────
@@ -508,6 +659,7 @@ deploy_step_health() {
     255) _health_add heartbeat fail "manager unreachable over ssh" ;;
     *) _health_add heartbeat "$(is_test && echo warn || echo fail)" "manager reported problems (table below)" ;;
   esac
+  health_workers_heartbeat 90 || true   # manager only; adds one row per worker
   _health_table || true
   [[ $hb -ne 0 && $hb -ne 255 ]] && _health_print_last
   local result; result="$(_health_result)"
@@ -553,8 +705,12 @@ restart_step_heartbeat() {
     local -a rows=("NODE|STATUS|AVAILABILITY|MANAGER")
     while IFS='|' read -r h s a m; do [[ -n "$h" ]] && rows+=("$h|$s|$a|${m:--}"); done <<<"$nodes"
     ui_table "${rows[@]}"
-    local rc=0; heartbeat_run || rc=$?
+    local rc=0 wrc=0; heartbeat_run || rc=$?
+    HEALTH_CHECKS=()
+    health_workers_heartbeat 90 || wrc=$?
+    [[ $wrc -eq 2 ]] || _health_table || true
     [[ $rc -eq 0 ]] || { STEP_FAIL_REASON="the manager's own heartbeat checks failed"; return 1; }
+    if [[ $wrc -eq 1 ]] && ! is_test; then STEP_FAIL_REASON="the manager can't reach every worker properly (tables above)"; return 1; fi
     return 0
   fi
   local rc=0

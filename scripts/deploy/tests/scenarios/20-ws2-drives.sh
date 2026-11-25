@@ -48,6 +48,13 @@ ws2_fresh_format() {
   t_assert_out_matches 'would run: systemctl start srv-minio-hdd.+x2d02\.mount'
   t_assert_out_not_contains "mount -a"
   t_assert_out_not_contains "/dev/sdb"
+  # rollback journal: the format is flagged irreversible, the mount/fstab/dir are undoable
+  local j; j="$(ws2_sandbox)/journal"
+  [[ -s "$j" ]] || { _t_fail "no rollback journal written"; return; }
+  grep -q "formatted /dev/sda" "$j" || _t_fail "format not journaled as irreversible"
+  grep -q "unmount /srv/minio/hdd-02" "$j" || _t_fail "mount not journaled"
+  grep -q "restore /etc/fstab" "$j" || _t_fail "fstab not journaled"
+  grep -q "make /srv/minio/hdd-02 mutable again" "$j" || _t_fail "chattr not journaled"
 }
 
 ws2_foreign_needs_erase() {

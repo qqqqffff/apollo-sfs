@@ -143,3 +143,92 @@ test_remote_main_unknown_op_and_proto() {
   out="$(remote_main nope --proto 99 2>/dev/null)"
   _eq "$(printf '%s' "$out" | json_get error.code)" proto_mismatch
 }
+
+test_remote_op_stray_stdout_does_not_break_the_reply() {
+  source "$APOLLO_ROOT/scripts/deploy/lib/remote.sh"
+  remote_op_chatty() { echo "Updating service apollo-sfs_minio (id: abc)"; echo "{not json"; printf '{"a":{"b":[1,2]}}'; }
+  remote_op_garbage() { echo "no reply at all"; }
+  remote_op_failing() { echo "partial"; remote_fail my_code "the real reason"; return 1; }
+  local out err="$TEST_SANDBOX/err"
+  out="$(remote_main chatty --proto 1 2>"$err")" || { echo "rc: $out"; return 1; }
+  _eq "$(printf '%s' "$out" | json_get data.a.b)" "[1,2]" || _eq "$(printf '%s' "$out" | json_get data.a.b)" "[1, 2]" || return 1
+  grep -q "Updating service" "$err" || { echo "stray line lost"; return 1; }
+  out="$(remote_main garbage --proto 1 2>/dev/null)"
+  _eq "$(printf '%s' "$out" | json_get error.code)" bad_data || return 1
+  # the op's own error code/message survive the subshell
+  out="$(remote_main failing --proto 1 2>/dev/null)"
+  _eq "$(printf '%s' "$out" | json_get error.code)" my_code || return 1
+  _eq "$(printf '%s' "$out" | json_get error.message)" "the real reason"
+}
+
+test_fstab_foreign_only_flags_definite_mismatches() {
+  source "$APOLLO_ROOT/scripts/deploy/lib/drives.sh"
+  local m=/srv/minio/hdd-01 u=68885E19-aaaa p=11-22 l
+  for l in "UUID=68885e19-AAAA $m xfs defaults 0 2" "UUID=\"68885e19-aaaa\" $m xfs defaults 0 2" "LABEL=hdd-01 $m xfs defaults 0 2" \
+           "PARTUUID=11-22 $m xfs defaults 0 2" "/dev/sda1 $m xfs defaults 0 2" "/dev/disk/by-id/ata-x-part1 $m xfs defaults 0 2" \
+           "#UUID=ffff $m xfs defaults 0 2" "UUID=ffff /srv/other xfs defaults 0 2"; do
+    _eq "$(_drives_fstab_foreign "$m" "$u" "$p" <<<"$l")" "" || { echo "wrongly flagged: $l"; return 1; }
+  done
+  for l in "UUID=42aee94f $m xfs defaults 0 2 # apollo-sfs:drive-hdd-01" "PARTUUID=99-99 $m xfs defaults 0 2"; do
+    _eq "$(_drives_fstab_foreign "$m" "$u" "$p" <<<"$l")" "$l" || return 1
+  done
+  _eq "$(_drives_fstab_foreign "$m" "$u" "" <<<"PARTUUID=99-99 $m xfs defaults 0 2")" ""
+}
+
+test_swarm_check_after_rename() {
+  source "$APOLLO_ROOT/scripts/deploy/lib/system.sh"
+  # a fake docker whose answers the test controls
+  D_STATE=active D_ID=n1 D_CID=c1 D_CTL=true D_NAME=new D_SWNAME=new D_READY=$'n1 Ready\nw1 Ready'
+  docker() {
+    case "$*" in
+      *'json .Swarm'*) printf '{"LocalNodeState":"%s","NodeID":"%s","ControlAvailable":%s,"Cluster":{"ID":"%s"}}' "$D_STATE" "$D_ID" "$D_CTL" "$D_CID" ;;
+      *'{{.Name}}'*) echo "$D_NAME" ;;
+      *'node inspect self'*) echo "$D_SWNAME" ;;
+      *'node ls'*) echo "$D_READY" ;;
+      *'node inspect w1'*) echo pi ;;
+    esac
+  }
+  chk() { _system_swarm_check new n1 c1 "${1:-true}" "n1 w1"; }
+  chk || { echo "healthy swarm refused: $SWARM_WHY"; return 1; }
+  (D_STATE=locked; chk) && { echo "locked accepted"; return 1; }
+  (D_STATE=inactive; chk) && { echo "inactive accepted"; return 1; }
+  (D_ID=n2; chk) && { echo "changed node ID accepted"; return 1; }
+  (D_CID=c2; chk) && { echo "changed swarm accepted"; return 1; }
+  (D_CTL=false; chk) && { echo "lost manager accepted"; return 1; }
+  (D_SWNAME=old; chk) && { echo "old swarm name accepted"; return 1; }
+  (D_NAME=old; chk) && { echo "old docker name accepted"; return 1; }
+  (D_READY=$'n1 Ready\nw1 Down'; chk) && { echo "missing worker accepted"; return 1; }
+  D_READY=$'n1 Ready\nw1 Down'; chk; [[ "$SWARM_WHY" == *"node pi is not back"* ]] || { echo "why: $SWARM_WHY"; return 1; }
+  # on a worker only its own identity is checked
+  D_CTL=false D_SWNAME="" D_READY=""; chk false
+}
+
+test_stack_deploy_keeps_stdout_clean() {
+  source "$APOLLO_ROOT/scripts/deploy/lib/stack.sh"
+  _stack_export_env() { return 0; }
+  docker() { [[ "$1 $2" == "stack deploy" ]] && echo "Updating service apollo-sfs_minio (id: abc)"; return 0; }
+  NODES_STACK_FILE="$TEST_SANDBOX/nodes.yml"; : >"$NODES_STACK_FILE"
+  local out
+  out="$(TEST_MODE=0; STACK_NODES_ONLY=1 stack_deploy 2>"$TEST_SANDBOX/err")" || { cat "$TEST_SANDBOX/err"; return 1; }
+  _eq "$out" "" || return 1
+  grep -q "Updating service" "$TEST_SANDBOX/err"
+}
+
+test_undo_journal_and_rollback_plan() {
+  declare -F undo_push >/dev/null || source "$APOLLO_ROOT/scripts/deploy/lib/undo.sh"
+  RUN_OP=deploy
+  printf 'a\n' | write_file /etc/apollo-unit-undo.conf 0644 root:root >/dev/null 2>&1
+  printf 'b\n' | write_file /etc/apollo-unit-undo.conf 0644 root:root >/dev/null 2>&1   # second write: one entry
+  undo_push "stop x" -- systemctl stop "x y.mount"
+  undo_note "formatted /dev/zzz"
+  _eq "$(undo_count)" 3 || return 1
+  local out; out="$(_undo_list "$(undo_journal_path)" 2>&1)"
+  # newest first, irreversible flagged
+  [[ "$(sed -n 1p <<<"$out")" == *"CANNOT UNDO"*"formatted /dev/zzz"* ]] || { echo "bad order: $out"; return 1; }
+  [[ "$(sed -n 3p <<<"$out")" == *"remove /etc/apollo-unit-undo.conf"* ]] || { echo "file entry: $out"; return 1; }
+  _answers y
+  out="$(undo_rollback 2>&1)" || { echo "rollback rc: $out"; return 1; }
+  [[ "$out" == *"would run: systemctl stop x\ y.mount"* ]] || { echo "cmd not replayed: $out"; return 1; }
+  [[ "$out" == *"would remove /etc/apollo-unit-undo.conf"* ]] || { echo "file not undone: $out"; return 1; }
+  [[ ! -e /etc/apollo-unit-undo.conf ]]
+}

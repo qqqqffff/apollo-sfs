@@ -10,6 +10,9 @@
 #   ./deploy.sh update     review / update / repair everything deploy set up
 #   ./deploy.sh release    build + push images and redeploy the stack (the
 #                          original deploy.sh behaviour — manager only)
+#   ./deploy.sh rollback [RUN_ID]
+#                          undo the changes a stopped deploy/update/restart
+#                          made on this node (also offered when a run quits)
 #   ./deploy.sh            interactive menu
 #
 #   restart and update are only available once node.json records a valid
@@ -69,7 +72,7 @@ while [[ $# -gt 0 ]]; do
     --non-interactive) NONINTERACTIVE=1; shift ;;
     --state) TEST_STATE+=("${2:?--state needs KEY=VALUE}"); shift 2 ;;
     -h|--help) want_help=1; shift ;;
-    deploy|restart|update|release|_remote|_step|menu)
+    deploy|restart|update|release|rollback|_remote|_step|menu)
       if [[ -z "$SUBCMD" ]]; then SUBCMD="$1"; else SUB_ARGS+=("$1"); fi
       shift ;;
     *) SUB_ARGS+=("$1"); shift ;;
@@ -106,6 +109,8 @@ source "$LIB/core.sh"
 source "$LIB/ui.sh"
 # shellcheck source=scripts/deploy/lib/remote.sh
 source "$LIB/remote.sh"
+# shellcheck source=scripts/deploy/lib/undo.sh
+source "$LIB/undo.sh"
 for _lib in system nodestatus cluster handover manager drives roles stack health release; do
   # shellcheck disable=SC1090
   source "$LIB/$_lib.sh"
@@ -140,7 +145,7 @@ if [[ "$SUBCMD" == _remote ]]; then
 fi
 
 # ── Interactive commands ─────────────────────────────────────────────────────
-if [[ $TEST_MODE != 1 && "$SUBCMD" =~ ^(deploy|restart|update)$ ]]; then
+if [[ $TEST_MODE != 1 && "$SUBCMD" =~ ^(deploy|restart|update|rollback)$ ]]; then
   if is_wsl; then
     die "This looks like WSL — a WSL host is never an Apollo SFS node. Use --test to walk the flow here."
   fi
@@ -179,10 +184,11 @@ run_menu() {
     restart="restart  — restart this node's services + health check" \
     update="update   — review, update and repair this node" \
     release="release  — build + push images and redeploy the stack (manager)" \
+    rollback="rollback — undo the changes a stopped run made on this node" \
     quit="quit"
   [[ "$choice" == quit ]] && exit 0
   SUBCMD="$choice"
-  if [[ $TEST_MODE != 1 && "$SUBCMD" =~ ^(deploy|restart|update)$ && $EUID -ne 0 ]]; then
+  if [[ $TEST_MODE != 1 && "$SUBCMD" =~ ^(deploy|restart|update|rollback)$ && $EUID -ne 0 ]]; then
     log_info "This needs root — re-running as: sudo ./deploy.sh $SUBCMD"
     exec 0<&3 3<&-
     need_root "$SUBCMD"
@@ -217,6 +223,7 @@ case "$SUBCMD" in
   restart) ui_banner "restart"; with_lock deploy -- flow_restart ;;
   update)  ui_banner "update";  with_lock deploy -- flow_update ;;
   release) RUN_OP=release; release_main "${SUB_ARGS[@]+"${SUB_ARGS[@]}"}" ;;
+  rollback) RUN_OP=rollback; ui_banner "rollback"; with_lock deploy -- cmd_rollback "${SUB_ARGS[@]+"${SUB_ARGS[@]}"}" ;;
   _step)   run_single_step "${SUB_ARGS[@]+"${SUB_ARGS[@]}"}" ;;
   *) usage; exit 2 ;;
 esac

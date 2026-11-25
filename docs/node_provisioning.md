@@ -269,8 +269,8 @@ JSON request on stdin, one JSON envelope on stdout:
 | `info` | `{}` | `{proto_min, proto_max, script_version, server_name, swarm{id, manager{hostname, addr, node_id}}, repo{path, commit, dirty}, registry, nodes[{hostname, id, role, state, availability, addr, labels{}}], tiers{fast, standard}, stack_running}` |
 | `join-token` | `{"role":"worker"}` | `{token, addr}` (token is redacted in logs) |
 | `reserve-labels` | `{"hostname":"…","classes":["nvme","nvme"]}` | `{labels:["nvme-03","nvme-04"]}` |
-| `register-node` | `{"hostname", "previous_names":[], "phase":"drives"\|"full", "deployment":{node, cluster, storage, drives, pools, roles}}` | `{labels{}, db{row_id, created, renamed}, stack{changed_services[], deployed}, warnings[]}` |
-| `heartbeat` | `{"hostname", "last_updated_epoch", "metrics":{…}, "expect":{"disks":[{"label","device","size_bytes"}],"services":[…]}}` | `{ok, skew_s, checks:[{name, status, detail}], recorded}` |
+| `register-node` | `{"hostname", "swarm_node_id", "previous_names":[], "phase":"drives"\|"full", "deployment":{node, cluster, storage, drives, pools, roles}}` | `{labels{}, db{row_id, created, renamed}, stack{changed_services[], deployed}, warnings[]}` |
+| `heartbeat` | `{"hostname", "swarm_node_id", "last_updated_epoch", "metrics":{…}, "expect":{"disks":[{"label","device","size_bytes"}],"services":[…]}}` | `{ok, skew_s, checks:[{name, status, detail}], recorded}` |
 | `restart-node-services` | `{"hostname"}` | `{services:[{name, ok, state}]}` |
 | `scale` | `{"services":{"api":0}}` | `{scaled:[{service, from, to}]}` |
 | `promote` | `{"hostname"}` | `{state}` |
@@ -297,7 +297,65 @@ Choose a new name at the **System name** step of `deploy` or `update`. On a swar
 - **Node record:** `register-node` moves the record in `cluster/nodes/` to the new name and moves `<old>.json` to `cluster/.backups/<old>.json.renamed-<ts>`, so the node's services never render twice. A `node.hostname == <old>` placement is rewritten to the new hostname. Service names (`node-agent-<old>`, legacy `node-agent-fast`) are kept, so no service is recreated. Legacy `node.labels.tier` placements need no change at all, because Swarm labels belong to the node ID.
 - **Database:** the `nodes` row is renamed in place, so metric history stays attached.
 - **Drive labels:** labels reserved under the old name stay this node's.
+- **A name another node uses now** is never treated as this node's old name, so its record and DB row are left alone.
+
+### Renaming the manager
+
+Swarm identifies nodes by node ID, certificate and IP address. The hostname is only a description, so a rename does not affect membership and workers stay joined. The step still proves it:
+
+1. **Before:** it records the node ID, the swarm ID and which nodes are Ready. If autolock is on, it warns you to have the unlock key ready.
+2. **Restart:** it stops Docker, saves `/var/lib/docker/swarm` to `/var/backups/apollo-sfs/<run-id>/swarm-state.tgz` (root only, contains swarm keys), and starts Docker. Every service on the manager is down during this.
+3. **After:** it waits until Docker and the swarm both report the new name, with the same node ID and swarm ID, this node still in control, and every previously Ready node Ready again. If not, the `swarm-after-rename` alert says what is missing and offers a retry. Then it waits for the stack's services, and registration waits for the database.
+
+`deploy.sh` addresses the local node by its swarm node ID, so every command works before and after the rename. If the swarm still has the old name, `register-node` refuses with `name_mismatch` instead of storing a name the metrics would not match.
+
+**Workers need no change and no ssh from the manager.** They use the manager's IP address for the swarm, for ssh and for the registry. The only copy of the name is `deployment.cluster.manager.hostname` in their `node.json` (display only), and each worker refreshes it at its next heartbeat (`restart`, `update` or `deploy`). What does change is the mDNS name you type yourself: `ssh <user>@<new-name>.local`. If the manager's **IP** changes, workers do need attention.
+
+If a manager rename is rolled back after the Services step, run `deploy` again: the manager's record and DB row still carry the new name until the node registers again.
+
 - **In `--test`:** the rename is only printed. Swarm and the database still know the node by its current hostname, so the heartbeat runs under that name.
+
+## Manager-to-worker checks
+
+On a manager, the **Health check & heartbeat** step (`deploy`, `update`) and the **Heartbeat** step (`restart`) also check the connection from the manager to every worker, for up to 90 s:
+
+| Check | What it proves |
+|---|---|
+| `network` | the worker's address answers on swarm port 7946 from the manager |
+| `swarm`, `tasks` | Ready/Active, and all its tasks running |
+| `nodes_row`, `metrics_fresh`, `disk <label>` | its node-agent reports reach the database, fresh, for each recorded drive |
+| `overlay` | the api container reaches that worker's MinIO through the overlay network (blob nodes only) |
+| `own_heartbeat` | when the worker last sent its own heartbeat (informational) |
+
+A record in `cluster/nodes/` with no matching swarm node fails; a swarm node that was never deployed with `deploy.sh` is a warning. A failing worker fails the step, with retry / acknowledge / quit. In `--test` the checks really run (they are read-only), but failures are only warnings. Results are stored in `node.json` under `deployment.heartbeat.workers`.
+
+## Rolling back a run
+
+Each `deploy`, `update` or `restart` keeps a rollback journal of the changes it makes on **this** node, in `/var/backups/apollo-sfs/<run-id>/journal`, next to the backups of the files it changed. In `--test` the journal is kept in the sandbox instead.
+
+**What the journal records**
+- **Files:** every file the run writes. The rollback restores the original from the backup, or removes the file if the run created it. When a run writes the same file more than once, the backup still holds the first, pre-run version.
+- **Changes it can undo:**
+  - mount and pool units started by the run are stopped again;
+  - branches added to a live mergerfs pool are removed (MinIO keeps running);
+  - `chattr +i` on mountpoints is removed, and directories the run created are deleted if they are empty;
+  - a hostname change is reverted (with a Docker restart when the node is in a swarm);
+  - a `swarm init` or `swarm join` is left again;
+  - `apollo-node-status` is disabled if the run enabled it;
+  - a registry container the run created is removed;
+  - XFS blob quotas are lifted;
+  - MinIO that was scaled to 0 for a pool conversion is scaled back up.
+
+  After restoring files, the rollback runs `systemctl daemon-reload` for fstab and unit files, `nginx -t && reload` for nginx files, and `systemctl reload docker` for `daemon.json`.
+- **Changes it cannot undo** (listed as `CANNOT UNDO`):
+  - **Formatted disks:** a wipe erases the data for good.
+  - **Installed packages** stay installed.
+  - **`fail2ban/install.sh`** changes stay.
+  - **Manager-side changes:** the node record, swarm labels, the DB row and the stack deploy. Re-run `deploy` or `update` to change them.
+
+**When you're offered a rollback.** If a run stops after changing something (you quit at an alert, a step fails, or you press Ctrl-C), the script lists the journal newest-first and asks `Roll these changes back now? [y/N]`. The default is **no**. Non-interactive runs print the command to run instead.
+
+**Rolling back later.** `sudo ./deploy.sh rollback` lists the runs that still have a journal and lets you pick one. `sudo ./deploy.sh rollback <run-id>` rolls back that run directly. After a rollback the journal is renamed `journal.rolled-back-<ts>`, so it can't be replayed twice.
 
 ## Manager handover runbook
 

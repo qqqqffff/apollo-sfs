@@ -63,7 +63,9 @@ _nodestatus_install() {
   _nodestatus_render_unit | write_file "$NODESTATUS_UNIT_PATH" 0644 root:root || return 1
   [[ $WRITE_CHANGED == 1 ]] && changed=1
   run -- systemctl daemon-reload || return 1
+  local was_enabled; was_enabled="$(probe nodestatus-enabled -- systemctl is-enabled "$NODESTATUS_UNIT" 2>/dev/null || true)"
   run -- systemctl enable "$NODESTATUS_UNIT" || return 1
+  [[ "$was_enabled" == enabled ]] || undo_push "stop and disable $NODESTATUS_UNIT" -- systemctl disable --now "$NODESTATUS_UNIT"
   if [[ $changed == 1 ]]; then
     run -- systemctl restart "$NODESTATUS_UNIT" || return 1
   else

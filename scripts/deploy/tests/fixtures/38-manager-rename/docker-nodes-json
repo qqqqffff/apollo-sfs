@@ -1,0 +1,2 @@
+{"ID":"mgr00000000000000000000001","Spec":{"Role":"manager","Labels":{"tier":"standard","apollo-manager":"true"}},"Description":{"Hostname":"apollo-sfs-1"},"Status":{"State":"ready","Addr":"192.168.68.57"},"ManagerStatus":{"Leader":true,"Reachability":"reachable","Addr":"192.168.68.57:2377"}}
+{"ID":"pi000000000000000000000001","Spec":{"Role":"worker","Availability":"active","Labels":{"tier":"fast"}},"Description":{"Hostname":"nh-fast-node-001"},"Status":{"State":"ready","Addr":"192.168.68.63"}}

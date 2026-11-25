@@ -22,6 +22,7 @@ import {
   renameGroup,
 } from '../api/recognition'
 import { previewUrl } from '../api/files'
+import { RetryImg } from './RetryImg'
 import { useNotification } from '../context/NotificationContext'
 import type { RecognitionGroup, RecognitionKind } from '../types/api'
 
@@ -62,7 +63,7 @@ function GroupCover({ group }: { group: RecognitionGroup }) {
       </div>
     )
   }
-  return <img src={src} alt={groupLabel(group)} loading="lazy" className="w-full h-full object-cover" />
+  return <RetryImg src={src} alt={groupLabel(group)} loading="lazy" className="w-full h-full object-cover" />
 }
 
 // RecognitionGroupsModal is the tabbed group browser: All groups (with
@@ -397,7 +398,7 @@ function GroupFilesGrid({ group, onOpenFile }: { group: RecognitionGroup; onOpen
                 title={f.name}
               >
                 {f.mime_type.startsWith('image/') ? (
-                  <img src={previewUrl(f.id)} alt={f.name} loading="lazy" className="w-full h-full object-cover" />
+                  <RetryImg src={previewUrl(f.id)} alt={f.name} loading="lazy" className="w-full h-full object-cover" />
                 ) : (
                   <div className="w-full h-full flex items-center justify-center text-gray-300">
                     <MdMovie className="text-3xl" />

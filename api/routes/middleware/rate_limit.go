@@ -105,21 +105,26 @@ func newKeyLimiter(rps rate.Limit, burst int, key func(*gin.Context) string) gin
 // bulkDataRoutes are the authenticated endpoints a single legitimate client
 // hits in a tight per-item loop: the Google/email backup flows (one upload —
 // and, for Google, one dedupe probe — per file), a cancelled backup's rollback,
-// and multi-select delete. They get their own, far more generous per-user
-// budget; every other protected endpoint keeps the standard per-IP one. Abuse
-// here is already bounded by the storage quota these same endpoints enforce.
+// multi-select delete, and the virtualized media grid/recognition group grids,
+// which mount several screens' worth of thumbnail <img> tags at once and so
+// fire that many preview/thumbnail requests back to back. They get their own,
+// far more generous per-user budget; every other protected endpoint keeps the
+// standard per-IP one. Abuse here is already bounded by the storage quota
+// these same endpoints enforce (or, for reads, by the RLS-scoped data itself).
 //
 // Keys are "METHOD <gin route pattern>" — i.e. what c.FullPath() returns, so
 // path parameters stay unexpanded.
 var bulkDataRoutes = map[string]struct{}{
-	"POST /api/v1/files/upload":                     {},
-	"POST /api/v1/files/upload/init":                {},
-	"POST /api/v1/files/upload/:upload_id/chunk":    {},
-	"POST /api/v1/files/upload/:upload_id/complete": {},
-	"POST /api/v1/sync/check-hash":                  {},
-	"POST /api/v1/email-backup/messages":            {},
-	"DELETE /api/v1/email-backup/messages/:id":      {},
-	"DELETE /api/v1/files/:file_id":                 {},
+	"POST /api/v1/files/upload":                              {},
+	"POST /api/v1/files/upload/init":                         {},
+	"POST /api/v1/files/upload/:upload_id/chunk":             {},
+	"POST /api/v1/files/upload/:upload_id/complete":          {},
+	"POST /api/v1/sync/check-hash":                           {},
+	"POST /api/v1/email-backup/messages":                     {},
+	"DELETE /api/v1/email-backup/messages/:id":               {},
+	"DELETE /api/v1/files/:file_id":                          {},
+	"GET /api/v1/files/:file_id/preview":                     {},
+	"GET /api/v1/recognition/detections/:detection_id/thumb": {},
 }
 
 func isBulkDataRoute(c *gin.Context) bool {

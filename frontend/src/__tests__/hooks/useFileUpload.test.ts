@@ -253,6 +253,90 @@ describe('useFileUpload — chunked upload', () => {
   })
 })
 
+describe('useFileUpload — pause/resume/cancel (same control the backup flows use)', () => {
+  const LANDED = { id: 'landed', name: 'x', mime_type: 'text/plain', size_bytes: 10, folder_id: 'f', drive_id: null }
+
+  beforeEach(() => jest.useFakeTimers())
+  afterEach(() => jest.useRealTimers())
+
+  it('cancel() lets already-claimed files finish but keeps queued ones behind the concurrency limit from ever starting', async () => {
+    const files = Array.from({ length: 6 }, (_, i) => makeFile(`f${i}.txt`, 10))
+    const resolvers: (() => void)[] = []
+    mockPresignUpload.mockImplementation(() => new Promise<typeof PRESIGN_UPLOAD_OK>((resolve) => {
+      resolvers.push(() => resolve(PRESIGN_UPLOAD_OK))
+    }))
+    mockUploadFilePresigned.mockResolvedValue(LANDED)
+
+    const { result } = renderHook(() => useFileUpload())
+    let resultPromise!: ReturnType<typeof result.current.startUpload>
+    act(() => { resultPromise = result.current.startUpload(files, null, jest.fn()) })
+
+    // Let the first MAX_CONCURRENT_FILES (4) workers claim a file and call presignUpload.
+    await act(async () => { await jest.advanceTimersByTimeAsync(200) })
+    expect(resolvers).toHaveLength(4)
+    expect(result.current.progress.items.filter((i) => i.status === 'queued')).toHaveLength(2)
+
+    act(() => { result.current.cancel() })
+
+    await act(async () => {
+      resolvers.forEach((r) => r())
+      await jest.advanceTimersByTimeAsync(200)
+      await resultPromise
+    })
+
+    expect(mockPresignUpload).toHaveBeenCalledTimes(4) // the 2 queued files never started
+    expect(result.current.progress.status).toBe('cancelled')
+    expect(result.current.progress.items.filter((i) => i.status === 'done')).toHaveLength(4)
+    expect(result.current.progress.items.filter((i) => i.status === 'queued')).toHaveLength(2)
+
+    const res = await resultPromise
+    expect(res.cancelled).toBe(true)
+    expect(res.succeeded).toBe(4)
+    expect(res.uploadedFileIds).toEqual(['landed', 'landed', 'landed', 'landed'])
+  })
+
+  it('pause() stops new files from starting; resume() lets the rest continue to completion', async () => {
+    const files = Array.from({ length: 5 }, (_, i) => makeFile(`f${i}.txt`, 10))
+    const resolvers: (() => void)[] = []
+    mockPresignUpload.mockImplementation(() => new Promise<typeof PRESIGN_UPLOAD_OK>((resolve) => {
+      resolvers.push(() => resolve(PRESIGN_UPLOAD_OK))
+    }))
+    mockUploadFilePresigned.mockResolvedValue(LANDED)
+
+    const { result } = renderHook(() => useFileUpload())
+    let resultPromise!: ReturnType<typeof result.current.startUpload>
+    act(() => { resultPromise = result.current.startUpload(files, null, jest.fn()) })
+
+    await act(async () => { await jest.advanceTimersByTimeAsync(200) })
+    expect(resolvers).toHaveLength(4)
+
+    act(() => { result.current.pause() })
+    expect(result.current.progress.paused).toBe(true)
+
+    // Finish the 4 already-claimed files while paused — the 5th must not start.
+    await act(async () => {
+      resolvers.forEach((r) => r())
+      await jest.advanceTimersByTimeAsync(200)
+    })
+    expect(resolvers).toHaveLength(4)
+    expect(result.current.progress.items[4].status).toBe('queued')
+
+    act(() => { result.current.resume() })
+    expect(result.current.progress.paused).toBe(false)
+
+    await act(async () => {
+      await jest.advanceTimersByTimeAsync(200)
+      resolvers[4]?.()
+      await jest.advanceTimersByTimeAsync(200)
+      await resultPromise
+    })
+
+    expect(resolvers).toHaveLength(5)
+    expect(result.current.progress.status).toBe('complete')
+    expect(result.current.progress.succeeded).toBe(5)
+  })
+})
+
 describe('useFileUpload — dismiss', () => {
   it('resets progress back to idle', async () => {
     mockPresignUpload.mockResolvedValue(PRESIGN_UPLOAD_OK)

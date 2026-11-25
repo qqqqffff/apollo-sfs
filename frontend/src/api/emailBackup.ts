@@ -11,7 +11,13 @@ import type {
   BackupRunResult,
 } from './backupControl'
 import type { Folder, PageResult } from '../types/api'
-import type { EmailBackupDetail, EmailBackupMessage, EmailBackupRun, EmailBackupSender } from '../types/emailBackup'
+import type {
+  EmailBackupDetail,
+  EmailBackupMessage,
+  EmailBackupRecipient,
+  EmailBackupRun,
+  EmailBackupSender,
+} from '../types/emailBackup'
 import {
   deleteProviderMessages,
   downloadProviderMessage,
@@ -48,9 +54,16 @@ export function listEmailBackupSenders(folderId: string) {
   return get<{ senders: EmailBackupSender[] }>(`/email-backup/folders/${folderId}/senders`)
 }
 
-export function listEmailBackupMessages(folderId: string, sender?: string, cursor?: string, limit?: number) {
+export function listEmailBackupRecipients(folderId: string) {
+  return get<{ recipients: EmailBackupRecipient[] }>(`/email-backup/folders/${folderId}/recipients`)
+}
+
+export function listEmailBackupMessages(
+  folderId: string, sender?: string, cursor?: string, limit?: number, recipient?: string,
+) {
   const params = new URLSearchParams()
   if (sender) params.set('sender', sender)
+  if (recipient) params.set('recipient', recipient)
   if (cursor) params.set('cursor', cursor)
   if (limit) params.set('limit', String(limit))
   const qs = params.size ? `?${params}` : ''
@@ -90,11 +103,21 @@ export function emailBackupSendersQueryOptions(folderId: string) {
   }
 }
 
-export function emailBackupMessagesInfiniteQueryOptions(folderId: string, sender?: string) {
+export function emailBackupRecipientsQueryOptions(folderId: string) {
   return {
-    queryKey: ['email-backup', folderId, 'messages', sender ?? 'all'] as const,
+    queryKey: ['email-backup', folderId, 'recipients'] as const,
+    queryFn: () => listEmailBackupRecipients(folderId),
+  }
+}
+
+// sender and recipient are mutually exclusive in practice (the desktop
+// sender sidebar vs. the mobile "group by recipient" toggle) — both are
+// accepted so the same helper backs either drill-down.
+export function emailBackupMessagesInfiniteQueryOptions(folderId: string, sender?: string, recipient?: string) {
+  return {
+    queryKey: ['email-backup', folderId, 'messages', sender ?? 'all', recipient ?? 'all'] as const,
     queryFn: ({ pageParam }: { pageParam: string | undefined }) =>
-      listEmailBackupMessages(folderId, sender, pageParam),
+      listEmailBackupMessages(folderId, sender, pageParam, undefined, recipient),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (lastPage: PageResult<EmailBackupMessage>) =>
       lastPage.next_token || undefined,

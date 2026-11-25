@@ -1,0 +1,4 @@
+UUID=0b0c1d2e-3f40-4152-8394-a5b6c7d8e9f0 / ext4 errors=remount-ro 0 1
+UUID=A1B2-C3D4 /boot/efi vfat umask=0077 0 1
+UUID=c0ffee00-0000-4000-8000-000000000003 none swap sw 0 0
+UUID=5f1c3b0e-7d2a-4e8b-9c1f-0a1b2c3d4e5f  /srv/minio/hdd-01  xfs  defaults,noatime,nofail,x-systemd.device-timeout=10  0  2

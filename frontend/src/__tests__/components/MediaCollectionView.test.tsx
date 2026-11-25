@@ -258,6 +258,34 @@ describe('MediaCollectionView infinite scroll', () => {
   })
 })
 
+describe('MediaCollectionView mobile controls drawer', () => {
+  it('closes the controls drawer when Filter is pressed, so the filter modal is not hidden behind it', async () => {
+    const { container } = renderView()
+    await findTile('photo-1.jpg')
+
+    fireEvent.click(screen.getByLabelText('Open collection controls'))
+    // The backdrop only exists in the DOM while the drawer is open.
+    expect(container.querySelectorAll('[aria-hidden="true"]').length).toBe(1)
+
+    fireEvent.click(screen.getByTitle('Filter this collection'))
+
+    expect(container.querySelectorAll('[aria-hidden="true"]').length).toBe(0)
+    expect(await screen.findByRole('dialog', { name: 'Filter media' })).toBeInTheDocument()
+  })
+
+  it('also closes the drawer when Filter is pressed in selection mode', async () => {
+    const { container } = renderView()
+    await findTile('photo-1.jpg')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Select' }))
+    fireEvent.click(screen.getByLabelText('Open collection controls'))
+    fireEvent.click(screen.getByTitle('Select items by filter'))
+
+    expect(container.querySelectorAll('[aria-hidden="true"]').length).toBe(0)
+    expect(await screen.findByText('Select by filter')).toBeInTheDocument()
+  })
+})
+
 describe('MediaCollectionView selection', () => {
   it('selects instead of opening while selection mode is on', async () => {
     const { onOpenFile } = renderView()

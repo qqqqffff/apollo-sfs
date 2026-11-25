@@ -174,13 +174,15 @@ describe('Client Profile page', () => {
       expect(screen.getAllByRole('button', { name: /^connect$/i })).toHaveLength(2)
     })
 
-    test('sends Keycloak to the provider when Connect is clicked', () => {
+    test('starts the brokered provider flow via the API when Connect is clicked', () => {
       setup()
       fireEvent.click(screen.getAllByRole('button', { name: /^connect$/i })[0])
-      expect(assignedHref).toContain('kc_idp_hint=google')
-      // Keycloak must send the code back to the page itself, not to an API
-      // callback — the SameSite=Strict session cookie wouldn't survive that.
-      expect(decodeURIComponent(assignedHref)).toContain('redirect_uri=http://localhost/client/profile')
+      // The Keycloak URL is built server-side (api/routes/auth/social_start.go)
+      // so the bundle never carries Keycloak's hostname or the redirect_uri.
+      expect(assignedHref).toBe('/api/v1/auth/social/start?provider=google&mode=link')
+      // mode=link is what makes Keycloak send the code back to the page itself
+      // rather than to an API callback — the SameSite=Strict session cookie
+      // wouldn't survive that.
     })
 
     test('redeems the authorization code Keycloak redirects back with', async () => {

@@ -22,6 +22,7 @@ import {
 } from 'react-icons/md'
 import { getMediaFolder, getMediaFileIds, createFolder } from '../api/folders'
 import { deleteFile, hideFile, unhideFile, previewUrl, streamUrl } from '../api/files'
+import { RetryImg } from './RetryImg'
 import { favoriteFile, favoritesQueryOptions, unfavoriteFile } from '../api/favorites'
 import { copyToCollection, removeFromCollection } from '../api/collections'
 import { listDevices } from '../api/devices'
@@ -593,7 +594,7 @@ export function MediaCollectionView({
         </div>
 
         <button
-          onClick={() => setShowFilters(true)}
+          onClick={() => { setShowFilters(true); setControlsOpen(false) }}
           title={selectionMode ? 'Select items by filter' : 'Filter this collection'}
           className={`inline-flex items-center gap-1 px-2.5 py-1.5 text-xs border rounded-lg cursor-pointer transition-colors ${
             activeFilterCount > 0
@@ -1007,7 +1008,7 @@ function MediaTile({
         title={file.name}
       >
         {isImage ? (
-          <img src={previewUrl(file.id)} alt={file.name} loading="lazy" className="w-full h-full object-cover" />
+          <RetryImg src={previewUrl(file.id)} alt={file.name} loading="lazy" className="w-full h-full object-cover" />
         ) : (
           <span className="flex items-center justify-center w-full h-full text-gray-300">
             {isVideo ? <MdMovie className="text-4xl" /> : <MdInsertDriveFile className="text-4xl" />}
@@ -1176,7 +1177,7 @@ function MediaInfoModal({ file, devices, onClose }: { file: File; devices?: Devi
         </div>
 
         {isImage && (
-          <img
+          <RetryImg
             src={previewUrl(file.id)}
             alt={file.name}
             onLoad={(e) => setDimensions({ w: e.currentTarget.naturalWidth, h: e.currentTarget.naturalHeight })}

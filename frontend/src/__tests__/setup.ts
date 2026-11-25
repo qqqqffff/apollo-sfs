@@ -7,6 +7,15 @@ if (!globalThis.crypto.randomUUID) {
   })
 }
 
+// Polyfill crypto.subtle for jsdom — also missing, unlike real browsers.
+// Node's own webcrypto implementation is a drop-in; used by the Google
+// backup flow to hash a downloaded file before checking for duplicates.
+if (!globalThis.crypto.subtle) {
+  Object.defineProperty(globalThis.crypto, 'subtle', {
+    value: require('node:crypto').webcrypto.subtle,
+  })
+}
+
 // Polyfill AbortSignal.timeout — not implemented in the jsdom version bundled
 // with jest-environment-jsdom but available in Node 17+ and all modern browsers.
 if (!AbortSignal.timeout) {
@@ -41,6 +50,20 @@ if (!('size' in URLSearchParams.prototype)) {
       return n
     },
   })
+}
+
+// Polyfill Blob.prototype.arrayBuffer — jsdom's Blob shim doesn't implement
+// it (unlike real browsers), but the Google backup flow relies on it to hash
+// a downloaded file before upload.
+if (!Blob.prototype.arrayBuffer) {
+  Blob.prototype.arrayBuffer = function (this: Blob) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(reader.result as ArrayBuffer)
+      reader.onerror = () => reject(reader.error)
+      reader.readAsArrayBuffer(this)
+    })
+  }
 }
 
 // Stub a 2D canvas context — jsdom has no real canvas backend without the

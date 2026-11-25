@@ -1,4 +1,4 @@
-import { createFileRoute, useNavigate, useSearch } from '@tanstack/react-router'
+import { createFileRoute, useBlocker, useNavigate, useSearch } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
@@ -30,7 +30,7 @@ import {
   MdUploadFile,
   MdVisibility,
 } from 'react-icons/md'
-import { createFolder, deleteFolder, moveFolder, renameFolder, requestDriveMigration } from '../../api/folders'
+import { createFolder, moveFolder, renameFolder, requestDriveMigration } from '../../api/folders'
 import { deleteFile, downloadUrl, fileQueryOptions, moveFile, previewUrl, renameFile } from '../../api/files'
 import { detectionThumbUrl } from '../../api/recognition'
 import { meQueryOptions, preferencesQueryOptions, updatePreferences } from '../../api/me'
@@ -46,6 +46,8 @@ import { StorageUpgradeModal, STORAGE_PROMPT_THRESHOLD } from '../../components/
 import { StorageBreakdownModal } from '../../components/StorageBreakdownModal'
 import { ShareModal } from '../../components/ShareModal'
 import { DeleteConfirmModal, readSkipDeleteCookie } from '../../components/DeleteConfirmModal'
+import { FolderDeleteConfirmModal } from '../../components/FolderDeleteConfirmModal'
+import { StopJobConfirmModal } from '../../components/StopJobConfirmModal'
 import { FolderBreadcrumb } from '../../components/FolderBreadcrumb'
 import { HoverDonut } from '../../components/HoverDonut'
 import { AccountBadges } from '../../components/GroupBadge'
@@ -59,7 +61,8 @@ import { SearchBar } from '../../components/SearchBar'
 import { SelectionToolbar } from '../../components/SelectionToolbar'
 import { BulkMoveModal, type BulkMoveItem } from '../../components/BulkMoveModal'
 import { BulkDeleteConfirmModal } from '../../components/BulkDeleteConfirmModal'
-import { useFileUpload } from '../../hooks/useFileUpload'
+import { useFileUpload, type UploadResult } from '../../hooks/useFileUpload'
+import { useDeleteJob, type DeleteTarget } from '../../hooks/useDeleteJob'
 import { useDragDrop } from '../../hooks/useDragDrop'
 import { useFileDrag, HOVER_OPEN_DELAY_MS } from '../../hooks/useFileDrag'
 import { useSort, sortedFolders, sortedFiles } from '../../hooks/useSort'
@@ -110,6 +113,21 @@ import {
 import { useBackgroundBackup, type BackgroundBackupState } from '../../hooks/useBackgroundBackup'
 import { BackupProgressDetails, BackupRunControls } from '../../components/BackupProgress'
 import { BackupCancelModal } from '../../components/BackupCancelModal'
+import { makeBackupSnapshotStore, type BackupSnapshot } from '../../api/backupSnapshot'
+import { InterruptedBackupCard } from '../../components/InterruptedBackupCard'
+import { NavigationBlockedModal } from '../../components/NavigationBlockedModal'
+
+// Context a resumed email backup needs besides the message list itself —
+// Google entries already carry their own destination, so that snapshot's
+// context is just null (see api/backupSnapshot.ts).
+interface EmailResumeContext {
+  provider: EmailProvider
+  folderId: string
+  driveId: string | null
+  accountEmail: string
+}
+
+const ZERO_BACKUP_SEED = { done: 0, uploaded: 0, duplicates: 0, errors: 0, storedCount: 0, storedBytes: 0 }
 
 export const Route = createFileRoute('/_auth/client/')({
   // All keys optional so navigations to /client elsewhere need not pass every
@@ -313,7 +331,7 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
   const isPremium = user?.is_premium || user?.is_admin
   const fileRef = useRef<HTMLInputElement>(null)
   const [pendingFiles, setPendingFiles] = useState<globalThis.File[]>([])
-  const [pendingDelete, setPendingDelete] = useState<{ type: 'file' | 'folder'; id: string; name: string } | null>(null)
+  const [pendingDelete, setPendingDelete] = useState<DeleteTarget | null>(null)
   const [pendingShare, setPendingShare] = useState<{ type: 'file' | 'folder'; id: string; name: string } | null>(null)
   const [search, setSearch] = useState('')
   const [creatingFolder, setCreatingFolder] = useState(false)
@@ -322,13 +340,107 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
   const [renameValue, setRenameValue] = useState('')
   const [newFolderKind, setNewFolderKind] = useState<FolderKind>('regular')
   const [newFolderDriveId, setNewFolderDriveId] = useState<string | null>(null)
-  const { progress, startUpload, retryFailed, dismiss } = useFileUpload()
+  const {
+    progress, startUpload, retryFailed, dismiss,
+    pause: pauseUpload, resume: resumeUpload, cancel: cancelUpload,
+  } = useFileUpload()
+  const {
+    progress: deleteProgress, startDelete, dismiss: dismissDelete,
+    pause: pauseDelete, resume: resumeDelete, cancel: cancelDelete,
+  } = useDeleteJob()
+  // The in-flight startUpload() promise — cancelling an upload needs to wait
+  // for it to actually wind down before it knows which files landed (the
+  // rollback list), same as the Google/email backup flows awaiting their run
+  // before deciding what to do with the partial result.
+  const uploadRunRef = useRef<Promise<UploadResult> | null>(null)
+  const [uploadCancelPrompt, setUploadCancelPrompt] = useState(false)
+  const [uploadRollbackBusy, setUploadRollbackBusy] = useState(false)
+  const [deleteCancelPrompt, setDeleteCancelPrompt] = useState(false)
+
+  // Warn before an in-flight upload/delete gets interrupted by leaving the
+  // file browser section entirely (a different top-level route) or by a page
+  // refresh/close — either abandons it mid-transfer with no way to pick back
+  // up, unlike the Google/email backups (see api/backupSnapshot.ts).
+  // Navigating between folders within /client is unaffected — FolderView
+  // doesn't unmount for that, so the job just keeps running as usual; that's
+  // why this only blocks a route change, not every navigate() call.
+  const uploadOrDeleteInProgress = progress.status === 'uploading' || deleteProgress.status === 'uploading'
+  const jobNavBlocker = useBlocker({
+    shouldBlockFn: ({ current, next }) => uploadOrDeleteInProgress && current.routeId !== next.routeId,
+    enableBeforeUnload: () => uploadOrDeleteInProgress,
+    withResolver: true,
+  })
+  const jobNavBlockedMessage = progress.status === 'uploading' && deleteProgress.status === 'uploading'
+    ? 'An upload and a delete are still in progress. Leaving now will cut them off partway through.'
+    : progress.status === 'uploading'
+      ? 'An upload is still in progress. Leaving now will cut it off partway through.'
+      : 'A delete is still in progress. Leaving now will cut it off partway through.'
   const onUploadSuccess = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ['folders', folderId] })
     queryClient.invalidateQueries({ queryKey: ['me'] })
     queryClient.invalidateQueries({ queryKey: ['storage', 'my-servers'] })
   }, [queryClient, folderId])
   const { isDragging } = useDragDrop((dropped) => { if (!readOnly) setPendingFiles(dropped) })
+
+  // Cancel pauses first, then asks what to do — same two-step flow the
+  // Google/email backup flows use (api/backupControl.ts / BackupCancelModal).
+  function requestUploadCancel() {
+    pauseUpload()
+    setUploadCancelPrompt(true)
+  }
+
+  async function resolveUploadCancelKeep() {
+    setUploadCancelPrompt(false)
+    cancelUpload()
+    const res = await uploadRunRef.current
+    if (res) {
+      notify('success', `Upload cancelled — ${res.succeeded} file${res.succeeded !== 1 ? 's' : ''} kept.`)
+    }
+  }
+
+  async function resolveUploadCancelRemove() {
+    setUploadRollbackBusy(true)
+    cancelUpload()
+    const res = await uploadRunRef.current
+    if (res && res.uploadedFileIds.length > 0) {
+      const results = await Promise.allSettled(res.uploadedFileIds.map((id) => deleteFile(id)))
+      const removed = results.filter((r) => r.status === 'fulfilled').length
+      const failed = res.uploadedFileIds.length - removed
+      queryClient.invalidateQueries({ queryKey: ['folders'] })
+      queryClient.invalidateQueries({ queryKey: ['me'] })
+      queryClient.invalidateQueries({ queryKey: ['storage', 'my-servers'] })
+      notify(
+        failed === 0 ? 'success' : 'error',
+        failed === 0
+          ? `Upload cancelled — ${removed} file${removed !== 1 ? 's' : ''} removed again.`
+          : `Upload cancelled — ${removed} of ${res.uploadedFileIds.length} removed; ${failed} could not be deleted.`,
+      )
+    } else {
+      notify('success', 'Upload cancelled.')
+    }
+    setUploadRollbackBusy(false)
+    setUploadCancelPrompt(false)
+  }
+
+  function resumeFromUploadCancelPrompt() {
+    setUploadCancelPrompt(false)
+    resumeUpload()
+  }
+
+  function requestDeleteCancel() {
+    pauseDelete()
+    setDeleteCancelPrompt(true)
+  }
+
+  function resolveDeleteCancelStop() {
+    setDeleteCancelPrompt(false)
+    cancelDelete()
+  }
+
+  function resumeFromDeleteCancelPrompt() {
+    setDeleteCancelPrompt(false)
+    resumeDelete()
+  }
 
   // ── Multi-select state ─────────────────────────────────────────────────────
   const [selectionMode, setSelectionMode] = useState(false)
@@ -439,6 +551,22 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
   // has already arrived.
   const emailFetchStopRef = useRef(false)
   const emailBg = useBackgroundBackup([['email-backup']])
+
+  // ── Interrupted background backup recovery ─────────────────────────────────
+  // A background run persists its progress to localStorage as it goes (see
+  // api/backupSnapshot.ts) so a page refresh mid-run doesn't just make it
+  // vanish — on mount, anything left over means the page went away before the
+  // run finished on its own (completing/cancelling always clears it).
+  const googleSnapshots = useRef(makeBackupSnapshotStore<BackupEntry, null>('apollo_gbackup_pending')).current
+  const emailSnapshots = useRef(makeBackupSnapshotStore<ProviderEmailItem, EmailResumeContext>('apollo_ebackup_pending')).current
+  const [interruptedGoogle, setInterruptedGoogle] =
+    useState<BackupSnapshot<BackupEntry, null> | null>(() => googleSnapshots.load())
+  const [interruptedEmail, setInterruptedEmail] =
+    useState<BackupSnapshot<ProviderEmailItem, EmailResumeContext> | null>(() => emailSnapshots.load())
+  const [googleResumeBusy, setGoogleResumeBusy] = useState(false)
+  const [emailResumeBusy, setEmailResumeBusy] = useState(false)
+  const [googleResumeError, setGoogleResumeError] = useState<string | null>(null)
+  const [emailResumeError, setEmailResumeError] = useState<string | null>(null)
 
   // Trigger the action requested from the side control panel (?action=…), then
   // strip the param so refreshes/back-navigation don't re-trigger it. Waits for
@@ -551,14 +679,17 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
 
   async function runBulkDelete() {
     setBulkDeletePending(true)
-    const fileIds = Array.from(selectedFileIds)
-    const folderIds = Array.from(selectedFolderIds)
-    const results = await Promise.allSettled([
-      ...fileIds.map((id) => deleteFile(id)),
-      ...folderIds.map((id) => deleteFolder(id)),
-    ])
-    const total = results.length
-    const failed = results.filter((r) => r.status === 'rejected').length
+    // Route through the same cascading job single-item delete uses — a
+    // selected folder gets its subtree emptied first instead of a raw
+    // deleteFolder() call that 409s "not empty" (e.g. an email backup folder
+    // full of messages).
+    const targets: DeleteTarget[] = selectedBulkItems.map((item) => ({
+      type: item.kind,
+      id: item.id,
+      name: item.name,
+      sizeBytes: item.size_bytes,
+    }))
+    const { failed } = await startDelete(targets)
     setBulkDeletePending(false)
     setPendingBulkDelete(false)
     clearSelection()
@@ -566,7 +697,7 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
     queryClient.invalidateQueries({ queryKey: ['folders'] })
     queryClient.invalidateQueries({ queryKey: ['me'] })
     queryClient.invalidateQueries({ queryKey: ['storage', 'my-servers'] })
-    if (failed > 0) notify('error', `${total - failed} deleted, ${failed} failed (folders must be empty first)`)
+    if (failed > 0) notify('error', `${targets.length - failed} deleted, ${failed} failed`)
   }
 
   function handleBulkDeleteClick() {
@@ -659,25 +790,17 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
     setNewFolderDriveId(null)
   }
 
-  const deleteFolderMutation = useMutation({
-    mutationFn: deleteFolder,
-    onSuccess: () => {
+  // runDelete drives one delete through useDeleteJob's progress-reporting job
+  // (a non-empty folder has its whole subtree emptied first) and reuses the
+  // upload toast to show status instead of a single pass/fail notification.
+  function runDelete(target: DeleteTarget) {
+    void startDelete([target]).then(({ failed }) => {
       queryClient.invalidateQueries({ queryKey: ['folders'] })
       queryClient.invalidateQueries({ queryKey: ['me'] })
       queryClient.invalidateQueries({ queryKey: ['storage', 'my-servers'] })
-    },
-    onError: () => notify('error', 'Failed to delete folder'),
-  })
-
-  const deleteFileMutation = useMutation({
-    mutationFn: deleteFile,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['folders', folderId] })
-      queryClient.invalidateQueries({ queryKey: ['me'] })
-      queryClient.invalidateQueries({ queryKey: ['storage', 'my-servers'] })
-    },
-    onError: () => notify('error', 'Failed to delete file'),
-  })
+      if (failed > 0) notify('error', `Failed to delete "${target.name}"`)
+    })
+  }
 
   const renameFileMutation = useMutation({
     mutationFn: ({ id, name }: { id: string; name: string }) => renameFile(id, name),
@@ -720,12 +843,12 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
     setRenameValue('')
   }
 
-  function handleDeleteClick(type: 'file' | 'folder', id: string, name: string) {
+  function handleDeleteClick(type: 'file' | 'folder', id: string, name: string, sizeBytes: number) {
+    const target: DeleteTarget = { type, id, name, sizeBytes }
     if (user && readSkipDeleteCookie(user.username)) {
-      if (type === 'file') deleteFileMutation.mutate(id)
-      else deleteFolderMutation.mutate(id)
+      runDelete(target)
     } else {
-      setPendingDelete({ type, id, name })
+      setPendingDelete(target)
     }
   }
 
@@ -940,29 +1063,60 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
     }
   }
 
-  function handleStartEmailBackground(items: ProviderEmailItem[], folder: { id: string; drive_id: string | null }) {
-    if (!emailBackup) return
-    const { provider, accessToken, accountEmail } = emailBackup
-    setEmailBackup(null)
+  // Shared by a fresh email backup start and a resume of an interrupted one —
+  // `items`/`token` cover only what's left to attempt, while `wholeRunTotal`/
+  // `wholeRunTotalBytes`/`seed`/`snapshotEntries` describe the run as a whole
+  // so the displayed progress (and the persisted snapshot) stay continuous
+  // across the resume.
+  function runEmailBackground(
+    items: ProviderEmailItem[],
+    provider: EmailProvider,
+    accessToken: string,
+    folder: { id: string; drive_id: string | null },
+    accountEmail: string,
+    wholeRunTotal: number,
+    wholeRunTotalBytes: number,
+    seed: typeof ZERO_BACKUP_SEED,
+    snapshotEntries: ProviderEmailItem[],
+  ) {
     const settings = loadEmailBackupSettings()
+    const ctx: EmailResumeContext = { provider, folderId: folder.id, driveId: folder.drive_id, accountEmail }
+    let uploaded = seed.uploaded, duplicates = seed.duplicates, errors = seed.errors
+    let storedCount = seed.storedCount, storedBytes = seed.storedBytes
 
     emailBg.start({
-      total: items.length,
-      totalBytes: items.reduce((sum, i) => sum + i.sizeEstimate, 0),
+      total: wholeRunTotal,
+      totalBytes: wholeRunTotalBytes,
       unit: 'email',
       // Every message lands on the backup folder's own drive, so its quota bar
       // can be credited as each one arrives.
       driveId: folder.drive_id ?? myServers?.find((s) => s.is_primary)?.drive_id ?? null,
+      seed,
       run: ({ control, onProgress }) =>
         backupEmailEntries(items, provider, accessToken, folder.id, {
           control,
           folderName: accountEmail,
-          onProgress,
+          onProgress: (e) => {
+            onProgress(e)
+            if (e.phase === 'settled') {
+              if (e.status === 'done') { uploaded++; storedCount++; storedBytes += e.sizeBytes ?? 0 }
+              else if (e.status === 'duplicate') duplicates++
+              else if (e.status === 'error') errors++
+              emailSnapshots.save({
+                entries: snapshotEntries, doneCount: seed.done + e.done, totalBytes: wholeRunTotalBytes,
+                uploaded, duplicates, errors, storedCount, storedBytes,
+                savedAt: new Date().toISOString(), context: ctx,
+              })
+            }
+          },
         }),
       rollback: (res) => removeBackedUpMessages(res.uploadedMessageIds),
       onSettled: async (res, removed) => {
+        emailSnapshots.clear()
         // A rollback just deleted the copies that would have justified
-        // trashing the originals provider-side.
+        // trashing the originals provider-side. Note: after a resume,
+        // backedUpIds only covers the resumed portion — messages backed up
+        // before the refresh have no surviving ids to trash by here.
         if (settings.deleteAfter && removed === 0 && res.backedUpIds.length > 0) {
           await deleteProviderMessages(provider, accessToken, res.backedUpIds)
         }
@@ -980,15 +1134,92 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
     })
   }
 
-  function handleStartBackground(entries: BackupEntry[], token: string) {
-    setGoogleBackupItems(null)
+  function handleStartEmailBackground(items: ProviderEmailItem[], folder: { id: string; drive_id: string | null }) {
+    if (!emailBackup) return
+    const { provider, accessToken, accountEmail } = emailBackup
+    setEmailBackup(null)
+    setInterruptedEmail(null)
+    const totalBytes = items.reduce((sum, i) => sum + i.sizeEstimate, 0)
+    emailSnapshots.saveNow({
+      entries: items, doneCount: 0, totalBytes, ...ZERO_BACKUP_SEED,
+      savedAt: new Date().toISOString(),
+      context: { provider, folderId: folder.id, driveId: folder.drive_id, accountEmail },
+    })
+    runEmailBackground(items, provider, accessToken, folder, accountEmail, items.length, totalBytes, ZERO_BACKUP_SEED, items)
+  }
+
+  async function handleResumeEmailBackground() {
+    const snapshot = interruptedEmail
+    if (!snapshot) return
+    setEmailResumeError(null)
+    setEmailResumeBusy(true)
+    const { provider, folderId, driveId, accountEmail } = snapshot.context
+    // Microsoft needs a popup pre-opened synchronously before any awaits —
+    // same constraint as the Google Photos picker tab.
+    const msPopup = provider === 'microsoft' ? window.open('about:blank', '_blank', 'width=480,height=640') : null
+    try {
+      const token = provider === 'gmail'
+        ? await requestGmailAccessToken()
+        : await requestMicrosoftAccessToken(msPopup)
+      setInterruptedEmail(null)
+      runEmailBackground(
+        snapshot.entries.slice(snapshot.doneCount), provider, token, { id: folderId, drive_id: driveId }, accountEmail,
+        snapshot.entries.length, snapshot.totalBytes,
+        { done: snapshot.doneCount, uploaded: snapshot.uploaded, duplicates: snapshot.duplicates, errors: snapshot.errors, storedCount: snapshot.storedCount, storedBytes: snapshot.storedBytes },
+        snapshot.entries,
+      )
+    } catch (e: any) {
+      const msg: string = e?.message ?? ''
+      if (!msg.toLowerCase().includes('popup_closed') && !msg.toLowerCase().includes('cancel')) {
+        setEmailResumeError('Could not sign in — try again.')
+      }
+    } finally {
+      setEmailResumeBusy(false)
+    }
+  }
+
+  function handleDiscardInterruptedEmail() {
+    emailSnapshots.clear()
+    setInterruptedEmail(null)
+    setEmailResumeError(null)
+  }
+
+  // Shared by a fresh Google backup start and a resume of an interrupted one.
+  function runGoogleBackground(
+    entries: BackupEntry[],
+    token: string,
+    wholeRunTotal: number,
+    wholeRunTotalBytes: number,
+    seed: typeof ZERO_BACKUP_SEED,
+    snapshotEntries: BackupEntry[],
+  ) {
+    let uploaded = seed.uploaded, duplicates = seed.duplicates, errors = seed.errors
+    let storedCount = seed.storedCount, storedBytes = seed.storedBytes
+
     googleBg.start({
-      total: entries.length,
-      totalBytes: entries.reduce((sum, e) => sum + (e.googleItem.size ?? 0), 0),
+      total: wholeRunTotal,
+      totalBytes: wholeRunTotalBytes,
       unit: 'file',
-      run: ({ control, onProgress }) => uploadGoogleEntries(entries, token, { control, onProgress }),
+      seed,
+      run: ({ control, onProgress }) => uploadGoogleEntries(entries, token, {
+        control,
+        onProgress: (e) => {
+          onProgress(e)
+          if (e.phase === 'settled') {
+            if (e.status === 'done') { uploaded++; storedCount++; storedBytes += e.sizeBytes ?? 0 }
+            else if (e.status === 'duplicate') duplicates++
+            else if (e.status === 'error') errors++
+            googleSnapshots.save({
+              entries: snapshotEntries, doneCount: seed.done + e.done, totalBytes: wholeRunTotalBytes,
+              uploaded, duplicates, errors, storedCount, storedBytes,
+              savedAt: new Date().toISOString(), context: null,
+            })
+          }
+        },
+      }),
       rollback: (res) => removeBackedUpFiles(res.uploadedFileIds),
       onSettled: (res, removed) => {
+        googleSnapshots.clear()
         // Best effort — the backup itself already succeeded.
         completeGoogleBackupRun({
           uploaded: Math.max(0, res.uploaded - removed),
@@ -998,6 +1229,46 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
         }).catch(() => {})
       },
     })
+  }
+
+  function handleStartBackground(entries: BackupEntry[], token: string) {
+    setGoogleBackupItems(null)
+    setInterruptedGoogle(null)
+    const totalBytes = entries.reduce((sum, e) => sum + (e.googleItem.size ?? 0), 0)
+    googleSnapshots.saveNow({
+      entries, doneCount: 0, totalBytes, ...ZERO_BACKUP_SEED, savedAt: new Date().toISOString(), context: null,
+    })
+    runGoogleBackground(entries, token, entries.length, totalBytes, ZERO_BACKUP_SEED, entries)
+  }
+
+  async function handleResumeGoogleBackground() {
+    const snapshot = interruptedGoogle
+    if (!snapshot) return
+    setGoogleResumeError(null)
+    setGoogleResumeBusy(true)
+    try {
+      const token = await requestGoogleAccessToken()
+      setInterruptedGoogle(null)
+      runGoogleBackground(
+        snapshot.entries.slice(snapshot.doneCount), token,
+        snapshot.entries.length, snapshot.totalBytes,
+        { done: snapshot.doneCount, uploaded: snapshot.uploaded, duplicates: snapshot.duplicates, errors: snapshot.errors, storedCount: snapshot.storedCount, storedBytes: snapshot.storedBytes },
+        snapshot.entries,
+      )
+    } catch (e: any) {
+      const msg: string = e?.message ?? ''
+      if (!msg.toLowerCase().includes('popup_closed') && !msg.toLowerCase().includes('cancel')) {
+        setGoogleResumeError('Could not sign in to Google — try again.')
+      }
+    } finally {
+      setGoogleResumeBusy(false)
+    }
+  }
+
+  function handleDiscardInterruptedGoogle() {
+    googleSnapshots.clear()
+    setInterruptedGoogle(null)
+    setGoogleResumeError(null)
   }
 
   // Media collections render as a date-sorted gallery with hidden/subcollection
@@ -1296,6 +1567,44 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
         </div>
       )}
 
+      {/* Interrupted background backups — the page went away mid-run before
+          it could finish or be cancelled on its own; see api/backupSnapshot.ts. */}
+      {interruptedGoogle && !googleBg.state && (
+        <InterruptedBackupCard
+          icon={
+            <svg viewBox="0 0 24 24" className="w-3.5 h-3.5 shrink-0" aria-hidden="true">
+              <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
+              <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
+              <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z" fill="#FBBC05"/>
+              <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
+            </svg>
+          }
+          title="Google backup interrupted"
+          doneCount={interruptedGoogle.doneCount}
+          total={interruptedGoogle.entries.length}
+          storedBytes={interruptedGoogle.storedBytes}
+          totalBytes={interruptedGoogle.totalBytes}
+          busy={googleResumeBusy}
+          error={googleResumeError}
+          onResume={handleResumeGoogleBackground}
+          onDiscard={handleDiscardInterruptedGoogle}
+        />
+      )}
+      {interruptedEmail && !emailBg.state && (
+        <InterruptedBackupCard
+          icon={<MdAlternateEmail className="text-teal-500 text-sm shrink-0" />}
+          title="Email backup interrupted"
+          doneCount={interruptedEmail.doneCount}
+          total={interruptedEmail.entries.length}
+          storedBytes={interruptedEmail.storedBytes}
+          totalBytes={interruptedEmail.totalBytes}
+          busy={emailResumeBusy}
+          error={emailResumeError}
+          onResume={handleResumeEmailBackground}
+          onDiscard={handleDiscardInterruptedEmail}
+        />
+      )}
+
       {/* Background Google Backup progress card */}
       {googleBg.state && (
         <BackgroundBackupCard
@@ -1539,7 +1848,7 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
                           <RenameButton onClick={() => startRename('folder', f.id, f.name)} title="Rename folder" />
                           <ShareButton onClick={() => setPendingShare({ type: 'folder', id: f.id, name: f.name })} title="Share folder" />
                           <DriveInfoButton folder={f} servers={myServers} isAdmin={!!user?.is_admin} />
-                          <DeleteButton onClick={() => handleDeleteClick('folder', f.id, f.name)} title="Delete folder" />
+                          <DeleteButton onClick={() => handleDeleteClick('folder', f.id, f.name, f.size_bytes)} title="Delete folder" />
                         </div>
                         <div className="sm:hidden">
                           <RowActionsMenu>
@@ -1564,7 +1873,7 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
                               <DriveInfoButton folder={f} servers={myServers} isAdmin={!!user?.is_admin} />
                             </MenuRow>
                             <MenuRow label="Delete folder">
-                              <DeleteButton onClick={() => handleDeleteClick('folder', f.id, f.name)} title="Delete folder" />
+                              <DeleteButton onClick={() => handleDeleteClick('folder', f.id, f.name, f.size_bytes)} title="Delete folder" />
                             </MenuRow>
                           </RowActionsMenu>
                         </div>
@@ -1649,7 +1958,7 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
                           <StarButton active={favoriteFileIds.has(f.id)} onClick={() => toggleFile(f.id)} title={favoriteFileIds.has(f.id) ? 'Remove from favorites' : 'Add to favorites'} />
                           <RenameButton onClick={() => startRename('file', f.id, f.name)} title="Rename file" />
                           <ShareButton onClick={() => setPendingShare({ type: 'file', id: f.id, name: f.name })} title="Share file" />
-                          <DeleteButton onClick={() => handleDeleteClick('file', f.id, f.name)} title="Delete file" />
+                          <DeleteButton onClick={() => handleDeleteClick('file', f.id, f.name, f.size_bytes)} title="Delete file" />
                         </div>
                         <div className="sm:hidden">
                           <RowActionsMenu>
@@ -1663,7 +1972,7 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
                               <ShareButton onClick={() => setPendingShare({ type: 'file', id: f.id, name: f.name })} title="Share file" />
                             </MenuRow>
                             <MenuRow label="Delete file">
-                              <DeleteButton onClick={() => handleDeleteClick('file', f.id, f.name)} title="Delete file" />
+                              <DeleteButton onClick={() => handleDeleteClick('file', f.id, f.name, f.size_bytes)} title="Delete file" />
                             </MenuRow>
                           </RowActionsMenu>
                         </div>
@@ -1712,13 +2021,65 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
             setPendingFiles([])
             // Pin root uploads to the drive whose view we're in; inside a folder
             // the folder's own drive governs (pass undefined).
-            startUpload(filesToUpload, uploadFolderId, onUploadSuccess, ignoreRedirectIndices, folderId === 'root' ? driveId : undefined)
+            uploadRunRef.current = startUpload(
+              filesToUpload, uploadFolderId, onUploadSuccess, ignoreRedirectIndices, folderId === 'root' ? driveId : undefined,
+            )
           }}
           onCancel={() => setPendingFiles([])}
         />
       )}
 
-      <UploadToast progress={progress} onDismiss={dismiss} onRetry={() => retryFailed(onUploadSuccess)} />
+      <UploadToast
+        progress={progress}
+        onDismiss={dismiss}
+        onRetry={() => retryFailed(onUploadSuccess)}
+        paused={progress.paused}
+        onTogglePause={() => (progress.paused ? resumeUpload() : pauseUpload())}
+        onRequestCancel={requestUploadCancel}
+      />
+      <UploadToast
+        progress={deleteProgress}
+        onDismiss={dismissDelete}
+        verb="Deleting"
+        unit="items"
+        doneWord="deleted"
+        paused={deleteProgress.paused}
+        onTogglePause={() => (deleteProgress.paused ? resumeDelete() : pauseDelete())}
+        onRequestCancel={requestDeleteCancel}
+      />
+
+      {uploadCancelPrompt && (
+        <BackupCancelModal
+          storedCount={progress.succeeded}
+          storedBytes={progress.loadedBytes}
+          unit="file"
+          busy={uploadRollbackBusy}
+          onRemove={resolveUploadCancelRemove}
+          onKeep={resolveUploadCancelKeep}
+          onResume={resumeFromUploadCancelPrompt}
+        />
+      )}
+
+      {deleteCancelPrompt && (
+        <StopJobConfirmModal
+          title="Cancel this delete?"
+          message={
+            (deleteProgress.doneObjects ?? 0) > 0
+              ? `The delete is paused. ${deleteProgress.doneObjects} of ${deleteProgress.totalObjects ?? deleteProgress.items.length} object${deleteProgress.doneObjects !== 1 ? 's' : ''} already deleted will stay deleted — cancelling just stops here.`
+              : 'The delete is paused and nothing has been deleted yet — cancelling just stops here.'
+          }
+          onStop={resolveDeleteCancelStop}
+          onResume={resumeFromDeleteCancelPrompt}
+        />
+      )}
+
+      {jobNavBlocker.status === 'blocked' && (
+        <NavigationBlockedModal
+          message={jobNavBlockedMessage}
+          onLeave={jobNavBlocker.proceed}
+          onStay={jobNavBlocker.reset}
+        />
+      )}
 
       {storageModalReason && !readOnly && (
         <StorageUpgradeModal
@@ -1827,13 +2188,27 @@ function FolderView({ folderId, fileId, driveId }: { folderId: string | 'root'; 
         />
       )}
 
-      {pendingDelete && (
+      {pendingDelete && pendingDelete.type === 'folder' && (
+        <FolderDeleteConfirmModal
+          folder={{ id: pendingDelete.id, name: pendingDelete.name, sizeBytes: pendingDelete.sizeBytes }}
+          username={user?.username ?? ''}
+          usedBytes={currentDrive ? currentDrive.used_bytes : (viewingUser?.storage_used_bytes ?? 0)}
+          quotaBytes={currentDrive ? currentDrive.quota_bytes : (viewingUser?.storage_quota_bytes ?? 0)}
+          quotaLabel={currentDrive ? `${tierLabel(currentDrive.drive_type)} · ${currentDrive.name}` : undefined}
+          onConfirm={() => {
+            runDelete(pendingDelete)
+            setPendingDelete(null)
+          }}
+          onCancel={() => setPendingDelete(null)}
+        />
+      )}
+
+      {pendingDelete && pendingDelete.type === 'file' && (
         <DeleteConfirmModal
           name={pendingDelete.name}
           username={user?.username ?? ''}
           onConfirm={() => {
-            if (pendingDelete.type === 'file') deleteFileMutation.mutate(pendingDelete.id)
-            else deleteFolderMutation.mutate(pendingDelete.id)
+            runDelete(pendingDelete)
             setPendingDelete(null)
           }}
           onCancel={() => setPendingDelete(null)}
@@ -2007,6 +2382,10 @@ function BackgroundBackupCard({ state, title, icon, onTogglePause, onCancel, onD
           storedBytes={state.storedBytes}
           totalBytes={state.totalBytes}
           paused={state.paused}
+          speedBps={state.speedBps}
+          itemStage={state.itemStage}
+          itemLoadedBytes={state.itemLoadedBytes}
+          itemTotalBytes={state.itemTotalBytes}
         />
       )}
       {state.note && <p className="text-xs text-amber-600 m-0">{state.note}</p>}

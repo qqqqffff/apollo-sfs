@@ -1,0 +1,1 @@
+{"proto": 1, "op": "register-node", "ok": true, "host": "apollo-sfs-1", "test": true, "data": {"hostname": "apollo-sfs", "labels": {"tier": "fast"}, "db": {"registered": true}, "stack": {"deployed": false, "nodes_file_changed": false, "node_services": ["minio", "node-agent-fast"]}, "warnings": []}}

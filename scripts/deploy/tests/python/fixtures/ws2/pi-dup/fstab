@@ -1,0 +1,6 @@
+PARTUUID=0a1b2c3d-01  /boot/firmware  vfat    defaults          0       2
+PARTUUID=0a1b2c3d-02  /               ext4    defaults,noatime  0       1
+UUID=8e7d6c5b-4a39-4281-9706-f5e4d3c2b1a0  /home/apollo/apollo-sfs/minio/nvme-01  ext4  defaults,noatime  0  2
+UUID=3c2b1a09-8f7e-4d6c-a5b4-c3d2e1f0a9b8  /home/apollo/apollo-sfs/minio/nvme-02  xfs  defaults,noatime,nofail,x-systemd.device-timeout=10  0  2
+/home/apollo/apollo-sfs/minio/nvme-01/data:/home/apollo/apollo-sfs/minio/nvme-02/data  /home/apollo/apollo-sfs/minio/pool  fuse.mergerfs  defaults,allow_other,use_ino,cache.files=partial,category.create=mfs,minfreespace=20G,fsname=minio-pool,x-systemd.requires=/home/apollo/apollo-sfs/minio/nvme-01,x-systemd.requires=/home/apollo/apollo-sfs/minio/nvme-02  0  0
+UUID=42aee94f-1026-4c05-aec3-e9f40bb8a7fd  /home/apollo/apollo-sfs/minio/nvme-01  xfs  defaults,noatime,nofail,x-systemd.device-timeout=10  0  2  # apollo-sfs:drive-nvme-01

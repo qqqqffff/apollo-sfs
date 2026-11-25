@@ -44,6 +44,7 @@ open-door vulnerabilities.
 | 10 | Info | Remote kill-switch runs host `poweroff` via `nsenter` from a privileged container with `docker.sock` | Claude Fable 5 |
 | 11 | Info | CSP relies on `style-src 'unsafe-inline'` | Claude Sonnet 5 |
 | 12 | Info | Weak password floor (8 chars, no complexity) on register/reset | Claude Haiku 4.5 |
+| 13 | Critical (resolved) | Password reset accepted an unverified action token — a forged JWT naming any user's `sub` took over that account | Claude Opus 4.8 |
 
 ---
 
@@ -337,6 +338,41 @@ drift back below it silently. The `notUsername`/breached-password detectors are 
 
 **Recommended model:** **Claude Haiku 4.5** — small constant change plus a Keycloak realm policy
 note.
+
+---
+
+## 13. Password reset accepted an unverified action token (Critical — resolved)
+
+**Where:** `api/routes/services/auth.go` (`ResetPassword`, `parseActionToken`), reached from the
+unauthenticated `POST /api/v1/auth/reset_password`.
+
+**What’s wrong:** the endpoint took a Keycloak action token, split it on `.`, base64-decoded the
+payload, and used the `sub` claim as the Keycloak user whose password to set — **without verifying
+the signature**. The code said so itself: *"the token signature is not cryptographically verified
+here — security relies on the token being delivered exclusively via email."* It does not: the token
+is supplied by the caller. Anyone could assemble `header.payload.signature` with an arbitrary `sub`
+and a future `exp`, POST it with a new password, and take over any account whose Keycloak UUID they
+knew — no email access required, and UUIDs appear in ordinary API responses. `exp` was equally
+attacker-controlled, so expiry was no obstacle either.
+
+**Recommended fix:** stop trusting a self-describing token. Issue the reset credential ourselves.
+
+**Status:** resolved. Password reset is now app-owned end to end: `ForgotPassword` generates 32
+bytes of CSPRNG output, stores only its SHA-256 hash in `password_reset_tokens` (migration 064) with
+a 30-minute expiry, and emails the link; `ResetPassword` verifies and consumes it in a single
+`UPDATE … RETURNING username` — so it is single-use even under concurrent requests — and resolves
+the Keycloak user from *that* username rather than from anything the caller sent. There is no longer
+a claim in the request that names the account. `parseActionToken` and the `execute-actions-email`
+call it depended on are deleted.
+
+The same change fixed two functional breaks in that flow: the admin call had been passing a
+`redirect_uri` with no `client_id`, which Keycloak 26 rejects with 400 (so no reset mail was ever
+sent — the handler logged it and returned 200 anyway), and the handler bound the field as `password`
+while the frontend sent `new_password`, so any reset attempt 400'd on binding. Both are covered by
+tests in `api/tests/auth_reset_password_test.go`.
+
+**Recommended model:** **Claude Opus 4.8** — security-critical auth logic spanning the API, schema,
+email, and frontend.
 
 ---
 

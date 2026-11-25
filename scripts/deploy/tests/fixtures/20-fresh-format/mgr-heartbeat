@@ -1,0 +1,1 @@
+{"proto": 1, "op": "heartbeat", "ok": true, "host": "apollo-sfs-1", "test": true, "data": {"ok": true, "result": "pass", "skew_s": 0, "recorded": false, "checks": [{"name": "nodes_row", "status": "pass", "detail": "ok"}, {"name": "metrics_fresh", "status": "pass", "detail": "1s"}, {"name": "disk hdd-02", "status": "pass", "detail": "/dev/sda1, 2s ago"}]}}

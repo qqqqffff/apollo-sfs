@@ -205,7 +205,8 @@ func (h *Handler) ListEmailBackupSenders(c *gin.Context) {
 }
 
 // ListEmailBackupMessages handles GET /api/v1/email-backup/folders/:folder_id/messages.
-// Query params: sender (exact from_addr filter), cursor, limit.
+// Query params: sender (exact from_addr filter), recipient (exact to_addr
+// filter), cursor, limit.
 func (h *Handler) ListEmailBackupMessages(c *gin.Context) {
 	svc := h.emailBackupOr503(c)
 	if svc == nil {
@@ -228,12 +229,36 @@ func (h *Handler) ListEmailBackupMessages(c *gin.Context) {
 		pageIn.Limit = n
 	}
 
-	page, err := svc.ListMessages(c.Request.Context(), folderID, userID, c.Query("sender"), pageIn)
+	page, err := svc.ListMessages(c.Request.Context(), folderID, userID, c.Query("sender"), c.Query("recipient"), pageIn)
 	if err != nil {
 		h.emailBackupFolderError(c, err, folderID)
 		return
 	}
 	c.JSON(http.StatusOK, page)
+}
+
+// ListEmailBackupRecipients handles GET /api/v1/email-backup/folders/:folder_id/recipients.
+// Returns the folder's distinct recipients with total and unread counts —
+// the to_addr counterpart of ListEmailBackupSenders, backing the viewer's
+// mobile "group by recipient" toggle.
+func (h *Handler) ListEmailBackupRecipients(c *gin.Context) {
+	svc := h.emailBackupOr503(c)
+	if svc == nil {
+		return
+	}
+	folderID, err := uuid.Parse(c.Param("folder_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid folder_id"})
+		return
+	}
+	userID, _ := uuid.Parse(c.GetString("userID"))
+
+	recipients, err := svc.ListRecipients(c.Request.Context(), folderID, userID)
+	if err != nil {
+		h.emailBackupFolderError(c, err, folderID)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"recipients": recipients})
 }
 
 // GetEmailBackupMessage handles GET /api/v1/email-backup/messages/:id.

@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Test-harness shim: stands in for a command that must never run during a
+# hermetic --test scenario. Records the call and fails loudly.
+#   MUTATION     — a command that changes the machine (must go through `run`)
+#   DIRECT-PROBE — a read-only command called without `probe` (not replayable)
+name="$(basename "$0")"
+kind="MUTATION"
+case "$name" in
+  lsblk|blkid|findmnt|smartctl|avahi-browse|ip|curl|ss|nvme|xfs_info|getfattr|lsattr|mountpoint|docker|ssh|ssh-keyscan|dockerd|nginx)
+    kind="DIRECT-PROBE" ;;
+esac
+printf '%s %s %s\n' "$kind" "$name" "$*" >>"${SHIM_LOG:-/dev/stderr}"
+echo "[harness shim] $kind: '$name $*' was invoked during a hermetic test" >&2
+exit 97

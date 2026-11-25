@@ -30,6 +30,8 @@ func newLimitedRouter() *gin.Engine {
 	r.POST("/api/v1/sync/check-hash", handler)
 	r.POST("/api/v1/email-backup/messages", handler)
 	r.DELETE("/api/v1/files/:file_id", handler)
+	r.GET("/api/v1/files/:file_id/preview", handler)
+	r.GET("/api/v1/recognition/detections/:detection_id/thumb", handler)
 	r.GET("/api/v1/me", handler)
 	return r
 }
@@ -61,12 +63,17 @@ func TestAPIRateLimitThrottlesOrdinaryEndpoints(t *testing.T) {
 
 func TestAPIRateLimitLetsBulkBackupTrafficThrough(t *testing.T) {
 	// One request per backed-up file, back to back — the case that used to
-	// start returning 429s a handful of files into a Google or email backup.
+	// start returning 429s a handful of files into a Google or email backup
+	// (and, for the preview/thumb routes, a handful of tiles into the
+	// virtualized media grid or a recognition group grid mounting several
+	// screens' worth of thumbnails at once).
 	for _, tc := range []struct{ method, path string }{
 		{http.MethodPost, "/api/v1/files/upload"},
 		{http.MethodPost, "/api/v1/sync/check-hash"},
 		{http.MethodPost, "/api/v1/email-backup/messages"},
 		{http.MethodDelete, "/api/v1/files/11111111-1111-1111-1111-111111111111"},
+		{http.MethodGet, "/api/v1/files/11111111-1111-1111-1111-111111111111/preview"},
+		{http.MethodGet, "/api/v1/recognition/detections/11111111-1111-1111-1111-111111111111/thumb"},
 	} {
 		r := newLimitedRouter()
 		allowed := countAllowed(r, tc.method, tc.path, "10.0.0.1", "user-1", bulkRateLimitBurst)

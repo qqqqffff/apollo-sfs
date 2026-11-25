@@ -43,6 +43,14 @@ export interface EmailBackupSender {
   unread_count: number
 }
 
+// EmailBackupRecipient is the to_addr counterpart of EmailBackupSender —
+// backs the mobile viewer's "group by recipient" toggle.
+export interface EmailBackupRecipient {
+  to_addr: string
+  total_count: number
+  unread_count: number
+}
+
 // EmailBackupRun is the completed-run record returned by POST /email-backup/runs.
 export interface EmailBackupRun {
   id: string

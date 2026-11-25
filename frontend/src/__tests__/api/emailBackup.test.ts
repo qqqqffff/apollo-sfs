@@ -2,6 +2,7 @@ import {
   ensureEmailBackupFolder,
   backupEmailMessage,
   listEmailBackupSenders,
+  listEmailBackupRecipients,
   listEmailBackupMessages,
   getEmailBackupMessage,
   markEmailBackupMessageRead,
@@ -9,6 +10,7 @@ import {
   completeEmailBackupRun,
   backupEmailEntries,
   emailBackupSendersQueryOptions,
+  emailBackupRecipientsQueryOptions,
   emailBackupMessagesInfiniteQueryOptions,
   loadEmailBackupSettings,
   removeBackedUpMessages,
@@ -105,6 +107,18 @@ describe('viewer endpoints', () => {
     mockFetch(200, { items: [], next_token: '' })
     await listEmailBackupMessages('f1', 'jane@x.com', 'cur-1', 25)
     expect(lastUrl()).toBe('/api/v1/email-backup/folders/f1/messages?sender=jane%40x.com&cursor=cur-1&limit=25')
+  })
+
+  it('GETs messages with a recipient filter', async () => {
+    mockFetch(200, { items: [], next_token: '' })
+    await listEmailBackupMessages('f1', undefined, undefined, undefined, 'me@y.com')
+    expect(lastUrl()).toBe('/api/v1/email-backup/folders/f1/messages?recipient=me%40y.com')
+  })
+
+  it('GETs recipients', async () => {
+    mockFetch(200, { recipients: [] })
+    await listEmailBackupRecipients('f1')
+    expect(lastUrl()).toBe('/api/v1/email-backup/folders/f1/recipients')
   })
 
   it('GETs message detail', async () => {
@@ -270,15 +284,21 @@ describe('query options', () => {
     expect(emailBackupSendersQueryOptions('f1').queryKey).toEqual(['email-backup', 'f1', 'senders'])
   })
 
-  it('keys messages by folder and sender, deriving next page from next_token', () => {
+  it('keys messages by folder, sender, and recipient, deriving next page from next_token', () => {
     expect(emailBackupMessagesInfiniteQueryOptions('f1').queryKey)
-      .toEqual(['email-backup', 'f1', 'messages', 'all'])
+      .toEqual(['email-backup', 'f1', 'messages', 'all', 'all'])
     expect(emailBackupMessagesInfiniteQueryOptions('f1', 'jane@x.com').queryKey)
-      .toEqual(['email-backup', 'f1', 'messages', 'jane@x.com'])
+      .toEqual(['email-backup', 'f1', 'messages', 'jane@x.com', 'all'])
+    expect(emailBackupMessagesInfiniteQueryOptions('f1', undefined, 'jane@x.com').queryKey)
+      .toEqual(['email-backup', 'f1', 'messages', 'all', 'jane@x.com'])
     const opts = emailBackupMessagesInfiniteQueryOptions('f1')
     const page: PageResult<EmailBackupMessage> = { items: [], next_token: 'tok-2' }
     expect(opts.getNextPageParam(page)).toBe('tok-2')
     expect(opts.getNextPageParam({ items: [], next_token: '' })).toBeUndefined()
+  })
+
+  it('keys recipients by folder', () => {
+    expect(emailBackupRecipientsQueryOptions('f1').queryKey).toEqual(['email-backup', 'f1', 'recipients'])
   })
 })
 

@@ -1,0 +1,27 @@
+{
+ "hostname": "nh-fast-node-001",
+ "seeded": true,
+ "registered_at": "2026-11-24T22:14:21Z",
+ "updated_at": "2026-11-24T22:14:21Z",
+ "role": "worker",
+ "address": null,
+ "arch": null,
+ "tier": "fast",
+ "services": {
+  "agent": "node-agent-fast",
+  "minio": "minio"
+ },
+ "placement": "node.labels.tier == fast",
+ "disk_mounts": [
+  {
+   "label": "nvme-01",
+   "path": "/home/apollo/apollo-sfs/minio/nvme-01"
+  },
+  {
+   "label": "nvme-02",
+   "path": "/home/apollo/apollo-sfs/minio/nvme-02"
+  }
+ ],
+ "minio_data_path": "/home/apollo/apollo-sfs/minio/pool",
+ "deployment": null
+}

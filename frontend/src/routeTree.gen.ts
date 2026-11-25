@@ -11,6 +11,7 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as TermsRouteImport } from './routes/terms'
 import { Route as SuspendedRouteImport } from './routes/suspended'
+import { Route as ResetPasswordRouteImport } from './routes/reset-password'
 import { Route as RegisterRouteImport } from './routes/register'
 import { Route as PrivacyRouteImport } from './routes/privacy'
 import { Route as MathGameRouteImport } from './routes/math-game'
@@ -55,6 +56,11 @@ const TermsRoute = TermsRouteImport.update({
 const SuspendedRoute = SuspendedRouteImport.update({
   id: '/suspended',
   path: '/suspended',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ResetPasswordRoute = ResetPasswordRouteImport.update({
+  id: '/reset-password',
+  path: '/reset-password',
   getParentRoute: () => rootRouteImport,
 } as any)
 const RegisterRoute = RegisterRouteImport.update({
@@ -243,6 +249,7 @@ export interface FileRoutesByFullPath {
   '/math-game': typeof MathGameRoute
   '/privacy': typeof PrivacyRoute
   '/register': typeof RegisterRoute
+  '/reset-password': typeof ResetPasswordRoute
   '/suspended': typeof SuspendedRoute
   '/terms': typeof TermsRoute
   '/premium': typeof AuthPremiumRoute
@@ -281,6 +288,7 @@ export interface FileRoutesByTo {
   '/math-game': typeof MathGameRoute
   '/privacy': typeof PrivacyRoute
   '/register': typeof RegisterRoute
+  '/reset-password': typeof ResetPasswordRoute
   '/suspended': typeof SuspendedRoute
   '/terms': typeof TermsRoute
   '/premium': typeof AuthPremiumRoute
@@ -321,6 +329,7 @@ export interface FileRoutesById {
   '/math-game': typeof MathGameRoute
   '/privacy': typeof PrivacyRoute
   '/register': typeof RegisterRoute
+  '/reset-password': typeof ResetPasswordRoute
   '/suspended': typeof SuspendedRoute
   '/terms': typeof TermsRoute
   '/_auth/premium': typeof AuthPremiumRoute
@@ -361,6 +370,7 @@ export interface FileRouteTypes {
     | '/math-game'
     | '/privacy'
     | '/register'
+    | '/reset-password'
     | '/suspended'
     | '/terms'
     | '/premium'
@@ -399,6 +409,7 @@ export interface FileRouteTypes {
     | '/math-game'
     | '/privacy'
     | '/register'
+    | '/reset-password'
     | '/suspended'
     | '/terms'
     | '/premium'
@@ -438,6 +449,7 @@ export interface FileRouteTypes {
     | '/math-game'
     | '/privacy'
     | '/register'
+    | '/reset-password'
     | '/suspended'
     | '/terms'
     | '/_auth/premium'
@@ -478,6 +490,7 @@ export interface RootRouteChildren {
   MathGameRoute: typeof MathGameRoute
   PrivacyRoute: typeof PrivacyRoute
   RegisterRoute: typeof RegisterRoute
+  ResetPasswordRoute: typeof ResetPasswordRoute
   SuspendedRoute: typeof SuspendedRoute
   TermsRoute: typeof TermsRoute
   BlogDriveSpeedBenchmarkRoute: typeof BlogDriveSpeedBenchmarkRoute
@@ -498,6 +511,13 @@ declare module '@tanstack/react-router' {
       path: '/suspended'
       fullPath: '/suspended'
       preLoaderRoute: typeof SuspendedRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/reset-password': {
+      id: '/reset-password'
+      path: '/reset-password'
+      fullPath: '/reset-password'
+      preLoaderRoute: typeof ResetPasswordRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/register': {
@@ -814,6 +834,7 @@ const rootRouteChildren: RootRouteChildren = {
   MathGameRoute: MathGameRoute,
   PrivacyRoute: PrivacyRoute,
   RegisterRoute: RegisterRoute,
+  ResetPasswordRoute: ResetPasswordRoute,
   SuspendedRoute: SuspendedRoute,
   TermsRoute: TermsRoute,
   BlogDriveSpeedBenchmarkRoute: BlogDriveSpeedBenchmarkRoute,

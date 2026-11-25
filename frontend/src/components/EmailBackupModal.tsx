@@ -35,6 +35,7 @@ import {
   type CancelAction,
 } from '../api/backupControl'
 import { useBackupLiveSync } from '../hooks/useBackupLiveSync'
+import { useTransferRate } from '../hooks/useTransferRate'
 import { BackupProgressBar, BackupProgressDetails, BackupRunControls } from './BackupProgress'
 import { BackupCancelModal } from './BackupCancelModal'
 import { ApiError } from '../api/client'
@@ -131,11 +132,16 @@ export function EmailBackupModal({
   const [currentPath, setCurrentPath] = useState<string | null>(null)
   const [storedBytes, setStoredBytes] = useState(0)
   const [storedCount, setStoredCount] = useState(0)
+  const [speedBps, setSpeedBps] = useState(0)
   const [paused, setPaused] = useState(false)
   const [cancelPrompt, setCancelPrompt] = useState(false)
   const [rollbackBusy, setRollbackBusy] = useState(false)
   const [cancelNote, setCancelNote] = useState<string | null>(null)
   const controlRef = useRef<BackupControl | null>(null)
+  // Mirrors storedBytes synchronously so the rate estimator always records
+  // off a fresh value rather than one captured by a stale closure.
+  const storedBytesRef = useRef(0)
+  const transferRate = useTransferRate()
   // Set by the cancel dialog before the run is stopped, so the continuation in
   // handleBackUp knows whether to roll the partial backup back.
   const cancelActionRef = useRef<CancelAction>('keep')
@@ -293,8 +299,11 @@ export function EmailBackupModal({
     setErrorMap({})
     setStoredBytes(0)
     setStoredCount(0)
+    setSpeedBps(0)
     setCancelNote(null)
     setProgress({ done: 0, total: selectedItems.length })
+    storedBytesRef.current = 0
+    transferRate.reset()
 
     const res = await backupEmailEntries(selectedItems, provider, accessToken, folder.id, {
       control,
@@ -307,8 +316,11 @@ export function EmailBackupModal({
           setErrorMap((m) => (e.error ? { ...m, [e.entry.id]: e.error! } : m))
         }
         if (e.status === 'done') {
+          storedBytesRef.current += e.sizeBytes ?? 0
+          transferRate.record(storedBytesRef.current)
+          setSpeedBps(transferRate.rate())
           setCurrentPath(e.path)
-          setStoredBytes((b) => b + (e.sizeBytes ?? 0))
+          setStoredBytes(storedBytesRef.current)
           setStoredCount((c) => c + 1)
           // Show it in the file browser and on the quota bar right away.
           liveSync.itemStored({ sizeBytes: e.sizeBytes ?? 0, driveId: destDriveId })
@@ -832,6 +844,7 @@ export function EmailBackupModal({
                 storedBytes={storedBytes}
                 totalBytes={selectedSize}
                 paused={paused}
+                speedBps={speedBps}
               />
               <BackupRunControls
                 paused={paused}

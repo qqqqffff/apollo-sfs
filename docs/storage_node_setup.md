@@ -1,5 +1,12 @@
 # Storage Cluster Setup — Two-Node Swarm with Tiered MinIO
 
+> **Automated path (deploy.sh 2.0):** `sudo ./deploy.sh deploy` on each node performs this runbook —
+> naming, swarm init/join + labels, `daemon.json`, the drive recipe below (classification, GPT + XFS,
+> fstab by UUID with `nofail`, mergerfs pools, `.bench`), manager infrastructure (.env, nginx,
+> fail2ban, registry), DB node registration and a health check/heartbeat. `./deploy.sh --test deploy`
+> shows every command without running it. See [node_provisioning.md](node_provisioning.md). The
+> manual steps below remain the reference for what it does.
+
 This guide sets up Apollo SFS as a **two-node Docker Swarm** with **two storage tiers**,
 and migrates the running deployment off the single Raspberry Pi onto the new node.
 
@@ -218,7 +225,7 @@ pinned to the manager.
 ```bash
 cd /home/apollo/apollo-sfs
 set -a && . ./.env && set +a          # stack deploy does NOT auto-read .env
-docker stack deploy -c docker-stack.yml --resolve-image never apollo-sfs
+docker stack deploy -c docker-stack.yml -c cluster/docker-stack.nodes.yml apollo-sfs
 docker stack services apollo-sfs      # watch replicas reach 1/1
 docker stack ps apollo-sfs            # confirm each task landed on the right node
 ```
@@ -418,7 +425,7 @@ node-agent so it can read each disk's usage.
 ### 8.6 Redeploy
 A stack deploy rolls only the services whose image/spec changed:
 ```bash
-docker stack deploy -c docker-stack.yml --resolve-image never apollo-sfs
+docker stack deploy -c docker-stack.yml -c cluster/docker-stack.nodes.yml apollo-sfs
 docker stack services apollo-sfs        # watch replicas reach 1/1
 ```
 To roll a single service instead of the whole stack (local image, no registry):

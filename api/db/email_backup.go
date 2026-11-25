@@ -72,33 +72,32 @@ func (q *Queries) ExistsEmailBackupMessage(ctx context.Context, folderID uuid.UU
 }
 
 // ListEmailBackupMessages returns a page of index rows for one backup folder,
-// newest first. A non-empty fromAddr scopes the page to that sender (the
-// viewer's sender sidebar). Call on a ForUser-derived Queries.
-func (q *Queries) ListEmailBackupMessages(ctx context.Context, folderID uuid.UUID, fromAddr string, in PageInput) (*PageResult[models.EmailBackupMessage], error) {
+// newest first. A non-empty fromAddr/toAddr scopes the page to that sender
+// (the viewer's sender sidebar) or recipient (the mobile "group by
+// recipient" toggle) respectively — at most one is expected to be set at a
+// time, but both are honored together if passed. Call on a ForUser-derived
+// Queries.
+func (q *Queries) ListEmailBackupMessages(ctx context.Context, folderID uuid.UUID, fromAddr, toAddr string, in PageInput) (*PageResult[models.EmailBackupMessage], error) {
 	limit := clampLimit(in.Limit)
 	offset, err := decodeOffsetCursor(in.Cursor)
 	if err != nil {
 		return nil, fmt.Errorf("ListEmailBackupMessages: %w", err)
 	}
 
-	var rows *sql.Rows
-	if fromAddr == "" {
-		rows, err = q.db.QueryContext(ctx, `
-			SELECT `+emailBackupMessageCols+`
-			FROM email_backup_messages
-			WHERE folder_id = $1
-			ORDER BY received_at DESC
-			LIMIT $2 OFFSET $3
-		`, folderID, limit, offset)
-	} else {
-		rows, err = q.db.QueryContext(ctx, `
-			SELECT `+emailBackupMessageCols+`
-			FROM email_backup_messages
-			WHERE folder_id = $1 AND from_addr = $4
-			ORDER BY received_at DESC
-			LIMIT $2 OFFSET $3
-		`, folderID, limit, offset, fromAddr)
+	query := `SELECT ` + emailBackupMessageCols + ` FROM email_backup_messages WHERE folder_id = $1`
+	args := []interface{}{folderID}
+	if fromAddr != "" {
+		args = append(args, fromAddr)
+		query += fmt.Sprintf(" AND from_addr = $%d", len(args))
 	}
+	if toAddr != "" {
+		args = append(args, toAddr)
+		query += fmt.Sprintf(" AND to_addr = $%d", len(args))
+	}
+	args = append(args, limit, offset)
+	query += fmt.Sprintf(" ORDER BY received_at DESC LIMIT $%d OFFSET $%d", len(args)-1, len(args))
+
+	rows, err := q.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("ListEmailBackupMessages: %w", err)
 	}
@@ -200,6 +199,39 @@ func (q *Queries) ListEmailBackupSenders(ctx context.Context, folderID uuid.UUID
 		return nil, fmt.Errorf("ListEmailBackupSenders: %w", err)
 	}
 	return senders, nil
+}
+
+// ListEmailBackupRecipients returns one summary per distinct to_addr in the
+// folder with total and unread counts, most mail first — the to_addr
+// counterpart of ListEmailBackupSenders, backing the viewer's mobile
+// "group by recipient" toggle. Call on a ForUser-derived Queries.
+func (q *Queries) ListEmailBackupRecipients(ctx context.Context, folderID uuid.UUID) ([]models.EmailBackupRecipientSummary, error) {
+	rows, err := q.db.QueryContext(ctx, `
+		SELECT to_addr,
+		       COUNT(*)                             AS total_count,
+		       COUNT(*) FILTER (WHERE read = FALSE) AS unread_count
+		FROM email_backup_messages
+		WHERE folder_id = $1
+		GROUP BY to_addr
+		ORDER BY total_count DESC, to_addr ASC
+	`, folderID)
+	if err != nil {
+		return nil, fmt.Errorf("ListEmailBackupRecipients: %w", err)
+	}
+	defer rows.Close()
+
+	var recipients []models.EmailBackupRecipientSummary
+	for rows.Next() {
+		var r models.EmailBackupRecipientSummary
+		if err := rows.Scan(&r.ToAddr, &r.TotalCount, &r.UnreadCount); err != nil {
+			return nil, fmt.Errorf("ListEmailBackupRecipients scan: %w", err)
+		}
+		recipients = append(recipients, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("ListEmailBackupRecipients: %w", err)
+	}
+	return recipients, nil
 }
 
 // InsertEmailBackupRun records a completed backup run. Runs with Notify = true

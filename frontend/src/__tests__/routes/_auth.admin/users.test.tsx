@@ -40,6 +40,8 @@ jest.mock('../../../api/admin', () => ({
   updateUsername: jest.fn(),
   logImpersonationAccess: jest.fn().mockResolvedValue({ ok: true }),
   getAdminAuditLogs: jest.fn(),
+  getDuplicateUsers: jest.fn(),
+  reconcileDuplicateUsers: jest.fn(),
   banUser: jest.fn(),
   suspendUser: jest.fn(),
   pardonUser: jest.fn(),
@@ -72,6 +74,9 @@ function setup(overrides: { isLoading?: boolean; error?: Error | null; users?: t
     }
     if (options?.queryKey?.[0] === 'admin' && options?.queryKey?.[1] === 'infrastructure') {
       return { data: { nodes: [], drives: [], disks: [] } }
+    }
+    if (options?.queryKey?.[0] === 'admin' && options?.queryKey?.[2] === 'duplicates') {
+      return { data: { groups: [], run: null } }
     }
     return {
       data: isLoading || error ? undefined : { items: users, total, page, page_size: 25 },
@@ -181,5 +186,35 @@ describe('Admin Users page', () => {
     fireEvent.click(screen.getAllByTitle(/view files as this user/i)[0])
     expect(mockImpersonate).toHaveBeenCalledWith(expect.objectContaining({ username: 'alice' }))
     expect(mockNavigate).toHaveBeenCalledWith(expect.objectContaining({ to: '/client' }))
+  })
+
+  test('audit log shows timing, upload speed, failures and premium expiry', () => {
+    mockInfiniteQuery.mockReturnValue({
+      isLoading: false, error: null, hasNextPage: false, isFetchingNextPage: false, fetchNextPage: jest.fn(),
+      data: { pages: [{ items: [
+        { id: '1', target_username: 'alice', actor_username: 'alice', action: 'file_uploaded', resource_type: 'file',
+          resource_id: null, resource_name: 'movie.mp4', created_at: '2026-11-25T10:00:00Z',
+          details: { duration_ms: 12_500, transfer_ms: 12_000, size_bytes: 100 * 1024 ** 2, avg_speed_bps: 8_738_133 } },
+        { id: '2', target_username: 'alice', actor_username: 'alice', action: 'file_renamed', resource_type: 'file',
+          resource_id: null, resource_name: 'new.txt', created_at: '2026-11-25T10:00:00Z',
+          details: { duration_ms: 3.4, previous_name: 'old.txt' } },
+        { id: '3', target_username: 'alice', actor_username: 'alice', action: 'file_upload_failed', resource_type: 'file',
+          resource_id: null, resource_name: 'big.iso', created_at: '2026-11-25T10:00:00Z',
+          details: { status: 413, method: 'POST', route: '/api/v1/files/upload/init', error: 'storage quota exceeded', duration_ms: 4 } },
+        { id: '4', target_username: 'alice', actor_username: 'system', action: 'premium.expired', resource_type: 'user',
+          resource_id: null, resource_name: 'Premium trial expired', created_at: '2026-11-25T10:00:00Z',
+          details: { source: 'admin_trial', reason: 'trial period ended' } },
+      ] }] },
+    })
+    setup()
+    fireEvent.click(screen.getAllByTitle('View audit log')[0])
+
+    expect(screen.getByText('100 MB in 12.5 s · avg 8.3 MB/s')).toBeInTheDocument()
+    expect(screen.getByText(/was “old.txt” · took 3.4 ms/)).toBeInTheDocument()
+    expect(screen.getByText('Upload failed')).toBeInTheDocument()
+    expect(screen.getByText('413 · POST /files/upload/init — storage quota exceeded')).toBeInTheDocument()
+    expect(screen.getByText('Premium expired')).toBeInTheDocument()
+    expect(screen.getByText('premium trial — trial period ended')).toBeInTheDocument()
+    expect(screen.queryByText(/Show breakdown/)).not.toBeInTheDocument()
   })
 })

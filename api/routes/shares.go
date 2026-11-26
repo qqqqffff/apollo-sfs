@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -344,7 +345,9 @@ func (h *Handler) UploadToShare(c *gin.Context) {
 		return
 	}
 
+	start := time.Now()
 	fileHeader, err := c.FormFile("file")
+	transfer := time.Since(start)
 	if err != nil {
 		if errors.Is(err, http.ErrMissingFile) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "file field is required"})
@@ -408,6 +411,7 @@ func (h *Handler) UploadToShare(c *gin.Context) {
 		ResourceType:   strPtr("file"),
 		ResourceID:     &file.ID,
 		ResourceName:   &file.Name,
+		Details:        models.NewUploadDetails(start, transfer, file.SizeBytes).JSON(),
 	})
 
 	var folderIDStr *string

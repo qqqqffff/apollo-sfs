@@ -1,5 +1,5 @@
 import { del, get, patch, post, put } from './client'
-import type { AuditLog, BannedIP, Feedback, FeedbackStatus, FavoriteList, Folder, FolderContents, Invitation, InterestSubmission, InterestFormSettings, PageResult, ServerExpansionRequest, User, UserBan } from '../types/api'
+import type { AuditLog, BannedIP, DuplicateAccountsResponse, Feedback, FeedbackStatus, FavoriteList, Folder, FolderContents, Invitation, InterestSubmission, InterestFormSettings, PageResult, ServerExpansionRequest, User, UserBan } from '../types/api'
 
 // ── Admin user file browsing ───────────────────────────────────────────────────
 
@@ -44,6 +44,16 @@ export function getAdminAuditLogs(username: string, cursor?: string) {
 
 export function logImpersonationAccess(username: string) {
   return post<{ ok: boolean }>(`/admin/users/${encodeURIComponent(username)}/audit-logs`, {})
+}
+
+// ── Duplicate accounts ────────────────────────────────────────────────────────
+
+export function getDuplicateUsers() {
+  return get<DuplicateAccountsResponse>('/admin/users/duplicates')
+}
+
+export function reconcileDuplicateUsers() {
+  return post<DuplicateAccountsResponse>('/admin/users/duplicates/reconcile', {})
 }
 
 // ── Per-user storage view ────────────────────────────────────────────────────

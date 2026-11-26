@@ -86,7 +86,44 @@ The admin Users page can reassign a user's role or permanently delete their acco
 
 - **`PATCH /admin/users/:user_id/role`** (`routes/admin/users_role.go`) moves a user between exactly one of `admin`/`premium`/`user`. Keycloak is the source of truth — `SetAdminRealmRole`/`AddUserToGroupByName`/`RemoveUserFromGroupByName("premium")` grant or revoke the underlying realm role or group — with the `users` table's `is_admin`/`is_premium` columns set alongside for immediate read consistency (the auth middleware resyncs both from the JWT on every request regardless, so a DB-only change would just be overwritten). Demoting a real subscriber away from `premium` cancels their PayPal subscription first — aborting the whole request on a PayPal failure before any Keycloak/DB write lands — and sends a mandatory cancellation email; demoting straight to `user` can also set `block_future_premium` to stop them from immediately re-purchasing. Promoting to `premium` can set an optional `premium_expires_at` for an admin-granted trial. Every change requires a `reason` string, recorded in `role_change_notifications` (`db/role_change_notifications.go`) and surfaced to the affected user as a `role_changed` notification-bell item.
 - **`DELETE /admin/users/:user_id`** (`routes/admin/users_delete.go`) permanently removes an account: cancels any real PayPal subscription, sends the mandatory deletion email (before the row is gone — `email_queue` keeps its own copy of the address), purges files and folders, deletes the Keycloak identity, then deletes the `users` row. Every step but the final row deletion is best-effort/logged rather than a hard failure, mirroring `BanUser`'s tolerance for partial failure.
-- **Premium trial expiry**: `PaymentService.PremiumExpiryLoop` (`routes/services/payment.go`), started from `cmd/main.go` alongside the other background loops, sweeps `premium_expires_at` every 15 minutes and revokes access the same way a manual demotion would once a trial lapses.
+- **Premium trial expiry**: `PaymentService.PremiumExpiryLoop` (`routes/services/payment.go`), started from `cmd/main.go` alongside the other background loops, sweeps `premium_expires_at` every 15 minutes and revokes access the same way a manual demotion would once a trial lapses, writing a `premium.expired` audit entry. Revocation removes both the `premium` group and a directly mapped `premium` realm role: invitations and registration slots grant the role directly, and removing only the group left it in their tokens.
+
+## Identity Canonicalization & Duplicate Accounts
+
+Usernames and emails are stored **lower-cased** (`sanitize.Username`/`Email`),
+the only spelling Keycloak ever puts in a token. Login resolves the app row
+ignoring case and renames a mismatched row in place
+(`AuthService.resolveAppUser`) instead of provisioning a second one; migration
+065 adds case-insensitive unique indexes once no duplicate remains. Duplicates
+created before this are reconciled from the admin Users page
+(`GET /admin/users/duplicates`, `POST /admin/users/duplicates/reconcile` →
+`services.UserReconcileService`), which re-encrypts blobs under the surviving
+row's key and folds the rows together (`db.Queries.MergeUsers`). Any new table
+holding a username must be added to the lists in `db/user_merge.go`;
+`TestIntegrationUserRefsCoverSchema` fails otherwise. See
+`docs/duplicate_accounts.md`.
+
+## Audit Log
+
+`audit_logs` is the per-user trail shown in the admin Users page's audit modal.
+`details` (JSONB) is action-specific:
+
+- **File/folder operations** (`file_uploaded`, `file_renamed`, `file_moved`,
+  `file_deleted`, `folder_*`, `shared_file_uploaded`, `dav.*`, `sfs.delete`/`move`)
+  carry `models.OperationAuditDetails`: `duration_ms`, plus for uploads
+  `size_bytes`, `transfer_ms` (time spent receiving bytes; for chunked uploads
+  the union of chunk-receive intervals, so pauses and parallelism don't skew it)
+  and `avg_speed_bps`.
+- **Failures:** `middleware.FailureAuditor` records every 4xx/5xx a known user
+  hits (`file_upload_failed`, `file_delete_failed`, …, else `request_failed`)
+  with status, route template (never the raw path: some carry tokens), the
+  response's error message, and the internal cause for 5xx (`c.Error(err)`).
+  Identical failures within a minute fold into one entry plus a `repeats`
+  summary. Presigned and WebDAV handlers attribute themselves with
+  `middleware.SetAuditUser`.
+- **Premium:** `premium.granted` / `premium.revoked` / `premium.expired`
+  (subscription ran out, self-billed renewal failed for good, or an admin trial
+  lapsed) carry `models.PremiumAuditDetails`.
 
 ## Encryption Model
 

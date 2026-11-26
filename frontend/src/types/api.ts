@@ -436,6 +436,55 @@ export interface StorageAllocationChangeDetails {
   after: QuotaAllocationSnapshot[]
 }
 
+// OperationAuditDetails rides on file/folder operation entries (uploads,
+// renames, moves, deletes): how long the server took and, for uploads, how
+// fast the bytes arrived. Mirrors models.OperationAuditDetails.
+export interface OperationAuditDetails {
+  duration_ms: number
+  size_bytes?: number
+  transfer_ms?: number
+  avg_speed_bps?: number
+  chunks?: number
+  previous_name?: string
+  destination?: string
+}
+
+// RequestFailureDetails rides on *_failed / request_failed entries — a request
+// by this user that ended in a 4xx/5xx. Mirrors models.RequestFailureDetails.
+export interface RequestFailureDetails {
+  status: number
+  method: string
+  route: string
+  error?: string
+  cause?: string
+  duration_ms: number
+  repeats?: number
+}
+
+// PremiumAuditDetails rides on premium.granted/revoked/expired entries.
+export interface PremiumAuditDetails {
+  source: 'subscription' | 'self_billed' | 'admin_trial'
+  status?: string
+  reason?: string
+  plan?: string
+  period_end?: string
+}
+
+export interface AccountMergeDetails {
+  merged_accounts: DuplicateAccount[]
+  previous_username?: string
+  username: string
+  email: string
+  quota_bytes: number
+}
+
+export type AuditDetails =
+  | StorageAllocationChangeDetails
+  | OperationAuditDetails
+  | RequestFailureDetails
+  | PremiumAuditDetails
+  | AccountMergeDetails
+
 export interface AuditLog {
   id: string
   target_username: string
@@ -444,8 +493,64 @@ export interface AuditLog {
   resource_type: string | null
   resource_id: string | null
   resource_name: string | null
-  details?: StorageAllocationChangeDetails
+  details?: AuditDetails
   created_at: string
+}
+
+// ── Duplicate accounts (admin reconcile) ───────────────────────────────────
+
+export interface DuplicateAccount {
+  username: string
+  email: string
+  is_admin: boolean
+  is_premium: boolean
+  premium_expires_at?: string
+  storage_quota_bytes: number
+  storage_used_bytes: number
+  allocations: number
+  created_at: string
+  last_seen_at?: string
+  keep: boolean
+}
+
+export interface DuplicateGroup {
+  action: 'merge' | 'normalize'
+  accounts: DuplicateAccount[]
+  username: string
+  email: string
+  quota_bytes: number
+  keycloak_id?: string
+  blocker?: string
+}
+
+export interface RekeyResult {
+  checked: number
+  current: number
+  rekeyed: number
+  rekey_bytes: number
+  missing: number
+  unreadable?: string[]
+}
+
+export interface DuplicateOutcome extends DuplicateGroup {
+  status: 'merged' | 'normalized' | 'skipped' | 'failed'
+  error?: string
+  rekey?: RekeyResult
+}
+
+export interface DuplicateReconcileRun {
+  running: boolean
+  started_by: string
+  started_at: string
+  finished_at?: string
+  outcomes: DuplicateOutcome[]
+  indexes_created: boolean
+  error?: string
+}
+
+export interface DuplicateAccountsResponse {
+  groups: DuplicateGroup[]
+  run: DuplicateReconcileRun | null
 }
 
 export type BanType = 'banned' | 'suspended'

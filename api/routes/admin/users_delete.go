@@ -61,6 +61,14 @@ func (h *Handler) DeleteUser(c *gin.Context) {
 		return
 	}
 
+	// A duplicate of another row (same name ignoring case) shares that row's
+	// Keycloak login — Keycloak looks usernames up ignoring case — so deleting
+	// it here would delete the real account's login. Reconcile it instead.
+	if twins, err := h.queries.FindUsersByUsernameFold(ctx, target); err == nil && len(twins) > 1 {
+		c.JSON(http.StatusConflict, gin.H{"error": "this account is a duplicate of another — use \"Reconcile duplicates\" on the Users page instead of deleting it"})
+		return
+	}
+
 	// Cancel any real PayPal subscription (no refund) so the customer isn't
 	// billed forever after their account is gone. Best-effort — the account
 	// is being erased regardless of a PayPal hiccup.

@@ -105,6 +105,10 @@ type Handler struct {
 	// SetDiscountMailer). nil skips notifications.
 	discountMailer DiscountMailer
 
+	// duplicates finds and folds duplicate user accounts (see
+	// SetDuplicateReconciler); nil causes those endpoints to 503.
+	duplicates DuplicateReconciler
+
 	// reconcile drives the MinIO <-> Postgres reconciliation heartbeat (see
 	// SetReconciliationService); nil causes the endpoints to 503.
 	reconcile *services.ReconciliationService

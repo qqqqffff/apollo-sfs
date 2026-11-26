@@ -19,6 +19,7 @@ import (
 
 	"apollo-sfs.com/api/db"
 	"apollo-sfs.com/api/models"
+	"apollo-sfs.com/api/sanitize"
 )
 
 // ErrNoCapacity is re-exported so handlers can check it without importing db.
@@ -83,8 +84,9 @@ type kcCredential struct {
 
 // kcUserResult is a single item from GET /admin/realms/{realm}/users.
 type kcUserResult struct {
-	ID    string `json:"id"`
-	Email string `json:"email"`
+	ID       string `json:"id"`
+	Username string `json:"username"`
+	Email    string `json:"email"`
 }
 
 // ── Service ───────────────────────────────────────────────────────────────────
@@ -222,25 +224,16 @@ func (s *AuthService) checkEmailConflict(ctx context.Context, accessToken, provi
 	if err != nil || claims.Email == "" {
 		return nil
 	}
-	// If this KC user already has an app DB record, no conflict.
-	_, err = s.queries.GetUserByUsername(ctx, claims.PreferredUsername)
-	if err == nil {
-		return nil
+	// resolveAppUser finds this Keycloak user's app record — healing one that
+	// only differs by case or was left behind by a rename — and reports an
+	// email that genuinely belongs to a different account as a conflict.
+	_, err = s.resolveAppUser(ctx, claims)
+	var conflict *ErrEmailConflict
+	if errors.As(err, &conflict) {
+		conflict.Provider = provider
+		return conflict
 	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return nil // unexpected DB error — let provisioning handle it
-	}
-	// KC user has no app record yet. Check if the email belongs to another account.
-	existing, err := s.queries.GetUserByEmail(ctx, claims.Email)
-	if err != nil {
-		return nil // email not found — no conflict
-	}
-	return &ErrEmailConflict{
-		Email:            claims.Email,
-		ExistingUsername: existing.Username,
-		PendingKcUserID:  claims.Sub,
-		Provider:         provider,
-	}
+	return nil // found, healed, absent, or a DB error provisioning will surface
 }
 
 // LinkSocialAccount links a social identity (whose temp KC user is identified by
@@ -343,10 +336,12 @@ func (s *AuthService) LinkBrokeredIdentity(ctx context.Context, currentKcUserID,
 		return nil // already linked to this very account
 	}
 
-	if _, err := s.queries.GetUserByUsername(ctx, claims.PreferredUsername); err == nil {
-		return ErrIdentityClaimed
-	} else if !errors.Is(err, sql.ErrNoRows) {
+	// Ignoring case: an app row stored as "Zoe" belongs to Keycloak user
+	// "zoe", and treating it as unclaimed would delete that user's login below.
+	if matches, err := s.queries.FindUsersByUsernameFold(ctx, claims.PreferredUsername); err != nil {
 		return fmt.Errorf("link brokered identity: look up brokered user: %w", err)
+	} else if len(matches) > 0 {
+		return ErrIdentityClaimed
 	}
 
 	adminToken, err := s.adminToken(ctx)
@@ -509,11 +504,11 @@ func (s *AuthService) ensureUserProvisioned(ctx context.Context, accessToken str
 		return fmt.Errorf("decode token claims: %w", err)
 	}
 
-	_, err = s.queries.GetUserByUsername(ctx, claims.PreferredUsername)
-	if err == nil {
-		return nil // record already exists
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
+	if _, err := s.resolveAppUser(ctx, claims); err == nil {
+		return nil // record already exists (or was just healed)
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		// Includes *ErrEmailConflict: the address belongs to another account,
+		// and creating a second row for it is exactly the duplicate bug.
 		return fmt.Errorf("check user: %w", err)
 	}
 
@@ -523,14 +518,117 @@ func (s *AuthService) ensureUserProvisioned(ctx context.Context, accessToken str
 	}
 
 	return s.queries.CreateUser(ctx, &models.User{
-		Username:          claims.PreferredUsername,
-		Email:             claims.Email,
+		Username:          sanitize.Username(claims.PreferredUsername),
+		Email:             sanitize.Email(claims.Email),
 		EncryptedKey:      encKey,
 		KeyNonce:          nonce,
 		MasterKeyVersion:  masterKeyVer,
 		StorageUsedBytes:  0,
 		StorageQuotaBytes: defaultQuotaBytes,
 	})
+}
+
+// resolveAppUser returns the app DB record belonging to the Keycloak user the
+// token was issued for, or sql.ErrNoRows if there is none yet.
+//
+// Keycloak lower-cases usernames and emails, so a row stored with the case the
+// user typed ("Zoe" / "Zoe@x.com") never matched preferred_username exactly, and
+// login used to provision a second row for the same person. A row is likewise
+// orphaned when a username rename updates Keycloak but not the app DB. Both are
+// healed in place here — the existing row (files, quota, subscription, key) is
+// renamed to Keycloak's spelling — instead of being duplicated:
+//
+//   - a row with the same username in different case is always this user:
+//     Keycloak usernames are unique ignoring case;
+//   - a row with the same email but a different username is adopted only when
+//     its username no longer exists in Keycloak and the token's email is
+//     verified (Keycloak emails are unique too, so that row's owner can only be
+//     this user). Otherwise it is another live account: *ErrEmailConflict.
+func (s *AuthService) resolveAppUser(ctx context.Context, claims *kcTokenClaims) (*models.User, error) {
+	canonical := sanitize.Username(claims.PreferredUsername)
+	matches, err := s.queries.FindUsersByUsernameFold(ctx, canonical)
+	if err != nil {
+		return nil, err
+	}
+	if len(matches) > 0 {
+		u := &matches[0]
+		if len(matches) > 1 {
+			// Already duplicated; healing one would collide with the other.
+			// Use the canonical row and leave the rest to the admin reconcile.
+			log.Printf("auth: %d accounts match %q ignoring case — reconcile duplicates on the admin Users page", len(matches), canonical)
+			return u, nil
+		}
+		if err := s.healAppUser(ctx, u, canonical, claims.Email); err != nil {
+			log.Printf("auth: normalize %q: %v", u.Username, err)
+		}
+		return u, nil
+	}
+
+	if claims.Email == "" {
+		return nil, sql.ErrNoRows
+	}
+	existing, err := s.queries.GetUserByEmail(ctx, claims.Email)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, sql.ErrNoRows
+	}
+	if err != nil {
+		return nil, err
+	}
+	conflict := &ErrEmailConflict{Email: claims.Email, ExistingUsername: existing.Username, PendingKcUserID: claims.Sub}
+	if !claims.EmailVerified {
+		return nil, conflict
+	}
+	ident, err := s.LookupIdentity(ctx, existing.Username)
+	if err != nil {
+		return nil, fmt.Errorf("resolve app user: look up %q: %w", existing.Username, err)
+	}
+	if ident != nil && ident.ID != claims.Sub {
+		return nil, conflict
+	}
+	log.Printf("auth: adopting orphaned account %q as %q (same email, old username no longer in Keycloak)", existing.Username, canonical)
+	if err := s.healAppUser(ctx, existing, canonical, claims.Email); err != nil {
+		return nil, fmt.Errorf("resolve app user: adopt %q: %w", existing.Username, err)
+	}
+	return existing, nil
+}
+
+// healAppUser renames u to Keycloak's spelling of its username and email,
+// updating u in place. A no-op when both already match.
+func (s *AuthService) healAppUser(ctx context.Context, u *models.User, canonical, email string) error {
+	if u.Username != canonical {
+		if err := s.queries.UpdateUsername(ctx, u.Username, canonical); err != nil {
+			return err
+		}
+		u.Username = canonical
+	}
+	if email != "" && u.Email != sanitize.Email(email) {
+		if err := s.queries.SetUserEmail(ctx, u.Username, sanitize.Email(email)); err != nil {
+			return err
+		}
+		u.Email = sanitize.Email(email)
+	}
+	return nil
+}
+
+// KeycloakIdentity is the subset of a Keycloak user record the app needs.
+type KeycloakIdentity struct {
+	ID       string // subject UUID — files.user_id
+	Username string // lower-cased, as in every token's preferred_username
+	Email    string
+}
+
+// LookupIdentity returns the Keycloak user whose username matches (Keycloak
+// compares ignoring case), or nil if there is none.
+func (s *AuthService) LookupIdentity(ctx context.Context, username string) (*KeycloakIdentity, error) {
+	adminToken, err := s.adminToken(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("lookup identity: admin token: %w", err)
+	}
+	u, err := s.kcFindUser(ctx, adminToken, username)
+	if err != nil || u == nil {
+		return nil, err
+	}
+	return &KeycloakIdentity{ID: u.ID, Username: strings.ToLower(u.Username), Email: strings.ToLower(u.Email)}, nil
 }
 
 // ErrInvitationRequired is returned by ProvisionBrokeredUser when a new (social)
@@ -555,7 +653,7 @@ func (s *AuthService) validateInvitation(ctx context.Context, token, email strin
 	if err != nil {
 		return nil, fmt.Errorf("invalid or expired invitation")
 	}
-	if inv.Email != email {
+	if !strings.EqualFold(strings.TrimSpace(inv.Email), strings.TrimSpace(email)) {
 		return nil, fmt.Errorf("email does not match invitation")
 	}
 	if time.Now().After(inv.TokenExpiresAt) {
@@ -703,11 +801,14 @@ func (s *AuthService) ProvisionBrokeredUser(ctx context.Context, accessToken, in
 	}
 
 	// Existing user → ordinary login, no invitation required.
-	if _, err := s.queries.GetUserByUsername(ctx, claims.PreferredUsername); err == nil {
+	var conflict *ErrEmailConflict
+	if _, err := s.resolveAppUser(ctx, claims); err == nil {
 		return nil
-	} else if !errors.Is(err, sql.ErrNoRows) {
+	} else if !errors.Is(err, sql.ErrNoRows) && !errors.As(err, &conflict) {
 		return fmt.Errorf("check user: %w", err)
 	}
+	// No app account of its own (an email that belongs to a different account
+	// doesn't count): this is a registration, and must pass the invite gate.
 
 	adminToken, err := s.adminToken(ctx)
 	if err != nil {
@@ -725,7 +826,7 @@ func (s *AuthService) ProvisionBrokeredUser(ctx context.Context, accessToken, in
 	// Past this point the invitation is accepted and partial app state may be
 	// created; on failure we leave the Keycloak account in place (matching
 	// Register) rather than risk orphaning an app DB record.
-	if err := s.provisionInvitedAppUser(ctx, adminToken, claims.Sub, claims.PreferredUsername, claims.Email, inviteToken, inv); err != nil {
+	if err := s.provisionInvitedAppUser(ctx, adminToken, claims.Sub, sanitize.Username(claims.PreferredUsername), sanitize.Email(claims.Email), inviteToken, inv); err != nil {
 		return err
 	}
 	return nil
@@ -746,6 +847,10 @@ func (s *AuthService) rollbackBrokeredUser(ctx context.Context, adminToken, kcUs
 // The invitation token must correspond to a pending, non-expired invitation for
 // the given email address.
 func (s *AuthService) Register(ctx context.Context, username, email, password, inviteToken string) (*TokenPair, error) {
+	// Keycloak stores both lower-cased and the login below gets the lower-cased
+	// form back; storing what was typed ("Zoe") is what used to duplicate the
+	// account on that very login.
+	username, email = sanitize.Username(username), sanitize.Email(email)
 	// 1. Validate invitation.
 	inv, err := s.validateInvitation(ctx, inviteToken, email)
 	if err != nil {
@@ -808,6 +913,7 @@ func (s *AuthService) EmailInUse(ctx context.Context, email string) (bool, error
 // BEFORE any app DB state is written or the slot consumed, so a failed grant
 // leaves the reservation valid for a retry.
 func (s *AuthService) RegisterWithReservation(ctx context.Context, username, email, password, reservationToken string) (*TokenPair, error) {
+	username, email = sanitize.Username(username), sanitize.Email(email) // see Register
 	// Sweep expired holds so the validity check below is accurate.
 	if _, err := s.queries.ReleaseExpiredSlotReservations(ctx); err != nil {
 		log.Printf("register with reservation: sweep: %v", err)
@@ -1296,6 +1402,7 @@ type kcTokenClaims struct {
 	Sub               string `json:"sub"` // Keycloak user UUID
 	PreferredUsername string `json:"preferred_username"`
 	Email             string `json:"email"`
+	EmailVerified     bool   `json:"email_verified"`
 }
 
 // ErrEmailConflict is returned by AuthCodeExchange when the social login email
@@ -1396,12 +1503,19 @@ func (s *AuthService) ChangePassword(ctx context.Context, username, currentPassw
 // ErrWrongPassword is returned by ChangePassword when the current password is incorrect.
 var ErrWrongPassword = errors.New("current password is incorrect")
 
-// RenameUser updates the username in both Keycloak and the app DB atomically
-// from the caller's perspective — Keycloak is updated first, then the DB.
-// If the DB update fails after a successful Keycloak update the error is returned
-// so the caller can surface it; the Keycloak change will stand but admins can
-// retry the DB rename.
+// RenameUser updates the username in both Keycloak and the app DB — Keycloak
+// first, then the DB. If the DB update fails the Keycloak rename is reverted:
+// left in place, the next login would carry a username with no app record and
+// (before resolveAppUser) provision a duplicate account.
+//
+// newUsername is stored lower-cased, the only form Keycloak keeps. A rename
+// that differs only by case is therefore a no-op.
 func (s *AuthService) RenameUser(ctx context.Context, oldUsername, newUsername string) error {
+	newUsername = sanitize.Username(newUsername)
+	if newUsername == oldUsername {
+		return nil
+	}
+
 	adminToken, err := s.adminToken(ctx)
 	if err != nil {
 		return fmt.Errorf("rename user: get admin token: %w", err)
@@ -1415,46 +1529,86 @@ func (s *AuthService) RenameUser(ctx context.Context, oldUsername, newUsername s
 		return fmt.Errorf("rename user: user %q not found in keycloak", oldUsername)
 	}
 
-	if err := s.kcUpdateUsername(ctx, adminToken, kcID, newUsername); err != nil {
-		return fmt.Errorf("rename user: update keycloak: %w", err)
+	if !strings.EqualFold(newUsername, oldUsername) {
+		if err := s.kcUpdateUsername(ctx, adminToken, kcID, newUsername); err != nil {
+			return fmt.Errorf("rename user: update keycloak: %w", err)
+		}
 	}
 
 	if err := s.queries.UpdateUsername(ctx, oldUsername, newUsername); err != nil {
+		if !strings.EqualFold(newUsername, oldUsername) {
+			if rbErr := s.kcUpdateUsername(ctx, adminToken, kcID, oldUsername); rbErr != nil {
+				log.Printf("rename user: ROLLBACK FAILED, keycloak has %q but app DB has %q: %v", newUsername, oldUsername, rbErr)
+			}
+		}
 		return fmt.Errorf("rename user: update db: %w", err)
 	}
 	return nil
 }
 
-// kcFindUserByUsername looks up a Keycloak user ID by exact username match.
-// Returns an empty string (no error) when the username is not found.
+// RevokeRealmRoleByName removes a realm role mapped directly onto the user
+// (not one inherited through a group — see RemoveUserFromGroupByName). A no-op
+// when the user doesn't hold it directly.
+func (s *AuthService) RevokeRealmRoleByName(ctx context.Context, username, roleName string) error {
+	adminToken, err := s.adminToken(ctx)
+	if err != nil {
+		return fmt.Errorf("revoke realm role: admin token: %w", err)
+	}
+	kcID, err := s.kcFindUserByUsername(ctx, adminToken, username)
+	if err != nil {
+		return fmt.Errorf("revoke realm role: look up %q: %w", username, err)
+	}
+	if kcID == "" {
+		return fmt.Errorf("revoke realm role: user %q not found in keycloak", username)
+	}
+	role, err := s.kcGetRealmRole(ctx, adminToken, roleName)
+	if err != nil {
+		return fmt.Errorf("revoke realm role: %w", err)
+	}
+	return s.kcRevokeRealmRoles(ctx, adminToken, kcID, []kcRoleRef{*role})
+}
+
+// kcFindUserByUsername looks up a Keycloak user ID by username (Keycloak
+// matches ignoring case). Returns an empty string (no error) when not found.
 func (s *AuthService) kcFindUserByUsername(ctx context.Context, adminToken, username string) (string, error) {
+	u, err := s.kcFindUser(ctx, adminToken, username)
+	if err != nil || u == nil {
+		return "", err
+	}
+	return u.ID, nil
+}
+
+// kcFindUser returns the Keycloak user with exactly this username, or nil.
+func (s *AuthService) kcFindUser(ctx context.Context, adminToken, username string) (*kcUserResult, error) {
 	endpoint := fmt.Sprintf("%s/admin/realms/%s/users?username=%s&exact=true",
 		s.kcURL, s.kcRealm, url.QueryEscape(username))
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+adminToken)
 
 	resp, err := s.http.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("keycloak request: %w", err)
+		return nil, fmt.Errorf("keycloak request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("keycloak returned %s", resp.Status)
+		return nil, fmt.Errorf("keycloak returned %s", resp.Status)
 	}
 
 	var users []kcUserResult
 	if err := json.NewDecoder(resp.Body).Decode(&users); err != nil {
-		return "", err
+		return nil, err
 	}
-	if len(users) == 0 {
-		return "", nil
+	for i := range users {
+		if strings.EqualFold(users[i].Username, username) || users[i].Username == "" {
+			return &users[i], nil
+		}
 	}
-	return users[0].ID, nil
+	return nil, nil
 }
 
 // ExchangeGoogleServerAuthCode exchanges a one-time server auth code (obtained by
@@ -1670,8 +1824,11 @@ func (s *AuthService) AddUserToGroupByName(ctx context.Context, username, groupN
 		return fmt.Errorf("group add: admin token: %w", err)
 	}
 	userID, err := s.kcFindUserByUsername(ctx, adminToken, username)
-	if err != nil || userID == "" {
+	if err != nil {
 		return fmt.Errorf("group add: find user %q: %w", username, err)
+	}
+	if userID == "" {
+		return fmt.Errorf("group add: user %q not found in keycloak", username)
 	}
 	groupID, err := s.kcFindGroupByName(ctx, adminToken, groupName)
 	if err != nil || groupID == "" {
@@ -1704,8 +1861,11 @@ func (s *AuthService) RemoveUserFromGroupByName(ctx context.Context, username, g
 		return fmt.Errorf("group remove: admin token: %w", err)
 	}
 	userID, err := s.kcFindUserByUsername(ctx, adminToken, username)
-	if err != nil || userID == "" {
+	if err != nil {
 		return fmt.Errorf("group remove: find user %q: %w", username, err)
+	}
+	if userID == "" {
+		return fmt.Errorf("group remove: user %q not found in keycloak", username)
 	}
 	groupID, err := s.kcFindGroupByName(ctx, adminToken, groupName)
 	if err != nil || groupID == "" {

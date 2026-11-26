@@ -184,6 +184,12 @@ func (h *Handler) UpdateUserRole(c *gin.Context) {
 		if err := h.auth.RemoveUserFromGroupByName(ctx, target, "premium"); err != nil {
 			log.Printf("UpdateUserRole: KC premium group remove for %q: %v", target, err)
 		}
+		// Invited/slot users hold the role directly rather than via the group.
+		if losingPremium {
+			if err := h.auth.RevokeRealmRoleByName(ctx, target, "premium"); err != nil {
+				log.Printf("UpdateUserRole: KC premium role revoke for %q: %v", target, err)
+			}
+		}
 	}
 
 	// Premium teardown (real subscription vs. admin-granted trial only) +

@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -109,16 +110,58 @@ func (s *PaymentService) revokePremiumEffects(ctx context.Context, username stri
 		if err := s.queries.SetUserPremium(ctx, username, false); err != nil {
 			return fmt.Errorf("revoke premium effects: clear flag: %w", err)
 		}
-		if s.kc != nil {
-			if err := s.kc.RemoveUserFromGroupByName(ctx, username, "premium"); err != nil {
-				log.Printf("revoke premium effects: KC group remove for %q: %v", username, err)
-			}
-		}
+		s.revokeKeycloakPremium(ctx, username)
 	}
 	if err := s.queries.RevokeAllAPIKeysForUser(ctx, username); err != nil {
 		return fmt.Errorf("revoke premium effects: revoke api keys: %w", err)
 	}
 	return nil
+}
+
+// directRoleRevoker is implemented by *AuthService. Kept optional so test
+// doubles of GroupAdmin don't all have to grow the method.
+type directRoleRevoker interface {
+	RevokeRealmRoleByName(ctx context.Context, username, roleName string) error
+}
+
+// revokeKeycloakPremium removes every way the user's token can carry the
+// premium role. Purchases grant it through the "premium" group, but invitations
+// and registration slots map the realm role onto the user directly
+// (grantInvitationRoles) — removing only the group left those users premium in
+// every token, so the auth middleware flipped is_premium straight back on and
+// an expired trial never actually ended.
+func (s *PaymentService) revokeKeycloakPremium(ctx context.Context, username string) {
+	if s.kc == nil {
+		return
+	}
+	if err := s.kc.RemoveUserFromGroupByName(ctx, username, "premium"); err != nil {
+		log.Printf("revoke premium effects: KC group remove for %q: %v", username, err)
+	}
+	if r, ok := s.kc.(directRoleRevoker); ok {
+		if err := r.RevokeRealmRoleByName(ctx, username, "premium"); err != nil {
+			log.Printf("revoke premium effects: KC direct role revoke for %q: %v", username, err)
+		}
+	}
+}
+
+// premiumAudit writes a premium.* audit entry with structured details.
+func (s *PaymentService) premiumAudit(ctx context.Context, action, target, actor, resourceType string, resourceID *uuid.UUID, resourceName string, d models.PremiumAuditDetails) {
+	in := db.AuditInput{
+		TargetUsername: target,
+		ActorUsername:  actor,
+		Action:         action,
+		ResourceType:   &resourceType,
+		ResourceID:     resourceID,
+	}
+	if resourceName != "" {
+		in.ResourceName = &resourceName
+	}
+	if raw, err := json.Marshal(d); err == nil {
+		in.Details = raw
+	}
+	if err := s.queries.InsertAuditLog(ctx, in); err != nil {
+		log.Printf("%s audit log for %q: %v", action, target, err)
+	}
 }
 
 // RevokePremium is the inverse of ApplyCapture: called from the webhook
@@ -182,10 +225,16 @@ func (s *PaymentService) ExpireAdminGrantedPremium(ctx context.Context) error {
 		return fmt.Errorf("expire admin granted premium: list: %w", err)
 	}
 	for _, username := range usernames {
+		var expiredAt *time.Time
+		if u, err := s.queries.GetUserByUsername(ctx, username); err == nil {
+			expiredAt = u.PremiumExpiresAt
+		}
 		if err := s.RevokePremiumAllocation(ctx, username); err != nil {
 			log.Printf("expire admin granted premium: revoke %q: %v", username, err)
 			continue
 		}
+		s.premiumAudit(ctx, "premium.expired", username, "system", "user", nil, "Premium trial expired",
+			models.PremiumAuditDetails{Source: "admin_trial", Reason: "trial period ended", PeriodEnd: expiredAt})
 		if err := s.queries.SetPremiumExpiry(ctx, username, nil); err != nil {
 			log.Printf("expire admin granted premium: clear expiry %q: %v", username, err)
 		}
@@ -498,18 +547,11 @@ func (s *PaymentService) failRenewalTerminally(ctx context.Context, sub *models.
 	}
 	log.Printf("subscription %s cancelled for %s after %d failed renewals: %s",
 		sub.ID, sub.Username, selfBilledMaxAttempts, reason)
-	resourceType := "premium_subscription"
-	resourceName := sub.PayPalSubscriptionID
-	if err := s.queries.InsertAuditLog(ctx, db.AuditInput{
-		TargetUsername: sub.Username,
-		ActorUsername:  sub.Username,
-		Action:         "premium.revoked",
-		ResourceType:   &resourceType,
-		ResourceID:     &sub.ID,
-		ResourceName:   &resourceName,
-	}); err != nil {
-		log.Printf("failed renewal: audit log: %v", err)
-	}
+	s.premiumAudit(ctx, "premium.expired", sub.Username, "system", "premium_subscription", &sub.ID, sub.PayPalSubscriptionID,
+		models.PremiumAuditDetails{
+			Source: "self_billed", Status: "cancelled", Plan: sub.Plan, PeriodEnd: sub.CurrentPeriodEnd,
+			Reason: fmt.Sprintf("renewal payment failed %d times: %s", selfBilledMaxAttempts, reason),
+		})
 	return nil
 }
 
@@ -529,6 +571,9 @@ func (s *PaymentService) ExtendSubscriptionPeriod(ctx context.Context, subscript
 // BILLING.SUBSCRIPTION.CANCELLED/.SUSPENDED/.EXPIRED webhooks. status must be
 // one of premium_subscriptions' CHECK-constrained values.
 func (s *PaymentService) RevokeSubscription(ctx context.Context, subscriptionID, status, reason string) error {
+	// Read first: the plan/period go in the audit entry, and the previous
+	// status tells a fresh transition apart from PayPal re-delivering a webhook.
+	prev, prevErr := s.queries.GetSubscriptionByPayPalID(ctx, subscriptionID)
 	id, username, err := s.queries.MarkSubscriptionStatus(ctx, subscriptionID, status)
 	if err != nil {
 		return fmt.Errorf("revoke subscription: mark status: %w", err)
@@ -540,19 +585,24 @@ func (s *PaymentService) RevokeSubscription(ctx context.Context, subscriptionID,
 	if err := s.revokePremiumEffects(ctx, username); err != nil {
 		return fmt.Errorf("revoke subscription: %w", err)
 	}
-	action := "premium.revoked"
-	resourceType := "premium_subscription"
-	resourceName := reason
-	if err := s.queries.InsertAuditLog(ctx, db.AuditInput{
-		TargetUsername: username,
-		ActorUsername:  username,
-		Action:         action,
-		ResourceType:   &resourceType,
-		ResourceID:     &id,
-		ResourceName:   &resourceName,
-	}); err != nil {
-		log.Printf("revoke subscription: audit log: %v", err)
+	if prevErr == nil && prev.Status == status {
+		return nil // repeat delivery: effects re-applied idempotently, already audited
 	}
+	// A subscription that ran its course is an expiry, not a revocation, so it
+	// reads as one in the user's audit trail.
+	action := "premium.revoked"
+	actor := username
+	if status == "expired" {
+		action, actor = "premium.expired", "system"
+	}
+	d := models.PremiumAuditDetails{Source: "subscription", Status: status, Reason: reason}
+	if prevErr == nil {
+		d.Plan, d.PeriodEnd = prev.Plan, prev.CurrentPeriodEnd
+		if prev.BillingMode == "self" {
+			d.Source = "self_billed"
+		}
+	}
+	s.premiumAudit(ctx, action, username, actor, "premium_subscription", &id, reason, d)
 	return nil
 }
 

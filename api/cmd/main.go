@@ -307,6 +307,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	adminHandler.SetRegistrationGroupService(regGroupSvc)
 	adminHandler.SetDiscountMailer(emailSvc)
 	adminHandler.SetReconciliationService(reconcileSvc)
+	adminHandler.SetDuplicateReconciler(services.NewUserReconcileService(queries, authSvc, fileSvc))
 	// The speed test (below) needs to know about active uploads to avoid
 	// caching a probe result that overlapped real upload traffic as the
 	// "clean" sample the budget above is computed from.
@@ -410,6 +411,11 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	alarmSvc, apiCounter := services.NewAlarmService(queries, emailSvc, adminHandler)
 	go alarmSvc.Start(context.Background())
 
+	// Every 4xx/5xx a known user hits goes into their audit log (see
+	// middleware.FailureAuditor). Mounted after authentication on each group
+	// so the user is known, and before rate limiting so 429s are seen.
+	failures := middleware.NewFailureAuditor(context.Background(), queries)
+
 	v1 := r.Group("/api/v1")
 
 	// ── Unauthenticated ──────────────────────────────────────────────────────
@@ -467,11 +473,12 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	// so it is deployed, scaled, and isolated independently of this API.
 
 	// ── Presigned file endpoints (token auth, no session cookie required) ────
-	v1.GET("/files/:file_id/download/p", h.DownloadFilePresigned)
-	v1.GET("/files/:file_id/preview/p", h.PreviewFilePresigned)
-	v1.POST("/files/upload/p", h.UploadFilePresigned)
-	v1.POST("/files/upload/:upload_id/chunk/p", h.UploadChunkPresigned)
-	v1.POST("/files/upload/:upload_id/complete/p", h.CompleteUploadPresigned)
+	// (They attribute themselves to the token's user via middleware.SetAuditUser.)
+	v1.GET("/files/:file_id/download/p", failures.Middleware(), h.DownloadFilePresigned)
+	v1.GET("/files/:file_id/preview/p", failures.Middleware(), h.PreviewFilePresigned)
+	v1.POST("/files/upload/p", failures.Middleware(), h.UploadFilePresigned)
+	v1.POST("/files/upload/:upload_id/chunk/p", failures.Middleware(), h.UploadChunkPresigned)
+	v1.POST("/files/upload/:upload_id/complete/p", failures.Middleware(), h.CompleteUploadPresigned)
 
 	// ── SFS S3-like API (API-key auth, premium only) ─────────────────────────
 	// Authenticated via Authorization: Bearer <sfs_..._...> (NOT cookie).
@@ -479,7 +486,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	// limit (owner-configurable up to 1000/min) runs after RequireAPIKey
 	// since it needs the resolved key row.
 	sfsGroup := v1.Group("/sfs")
-	sfsGroup.Use(mw.RateLimit(), apiKeyMW.RequireAPIKey(), apiKeyMW.RequirePremiumAPI(), apiKeyMW.RequireKeyRateLimit())
+	sfsGroup.Use(mw.RateLimit(), apiKeyMW.RequireAPIKey(), failures.Middleware(), apiKeyMW.RequirePremiumAPI(), apiKeyMW.RequireKeyRateLimit())
 	{
 		sfsGroup.POST("/buckets/:bucket_id/put", sfsHandler.Put)
 		sfsGroup.POST("/buckets/:bucket_id/get", sfsHandler.Get)
@@ -493,7 +500,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	// Lives at the router root (not /api/v1) so mount URLs stay short:
 	// https://<host>/dav/<token>. Authenticated per request via HTTP Basic
 	// against Keycloak — never the session cookie. Upload/download only.
-	davHandler.Register(r, mw.APIRateLimit())
+	davHandler.Register(r, failures.Middleware(), mw.APIRateLimit())
 
 	// ── Auth — rate-limited, no JWT required ─────────────────────────────────
 	// Logout is the exception: it requires a valid session to invalidate.
@@ -528,7 +535,7 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 	// RequireAuth validates the token; if the access token is expired it
 	// transparently refreshes it via the refresh token before continuing.
 	protected := v1.Group("")
-	protected.Use(mw.RequireAuth(), mw.APIRateLimit(), func(c *gin.Context) {
+	protected.Use(mw.RequireAuth(), failures.Middleware(), mw.APIRateLimit(), func(c *gin.Context) {
 		c.Next()
 		apiCounter.RecordRequest(c.Writer.Status() >= 500)
 	})
@@ -766,6 +773,8 @@ func setupRouter(cfg Config, queries *db.Queries, oidcVerifier *oidc.IDTokenVeri
 		{
 			adminGroup.GET("/users", adminHandler.GetUsers)
 			adminGroup.GET("/users/search", adminHandler.SearchUsers)
+			adminGroup.GET("/users/duplicates", adminHandler.ListDuplicateUsers)
+			adminGroup.POST("/users/duplicates/reconcile", adminHandler.ReconcileDuplicateUsers)
 			adminGroup.GET("/users/:user_id", adminHandler.GetUser)
 			adminGroup.PATCH("/users/:user_id/quota", adminHandler.UpdateUserQuota)
 			adminGroup.PATCH("/users/:user_id/username", adminHandler.UpdateUsername)

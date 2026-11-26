@@ -31,6 +31,11 @@ import { AccountBadges, type AccountGroup } from '../../components/GroupBadge'
 import { AllocationChangeBreakdown } from '../../components/AllocationChangeBreakdown'
 import { RoleAssignModal, type RoleAssignConfirm } from '../../components/RoleAssignModal'
 import { DeleteUserModal } from '../../components/DeleteUserModal'
+import { DuplicateAccountsBanner } from '../../components/DuplicateAccountsPanel'
+import {
+  failureSummary, isAllocationDetails, isFailureDetails, isMergeDetails, isOperationDetails,
+  isPremiumDetails, operationSummary, premiumSummary,
+} from '../../utils/auditFormat'
 
 const PAGE_SIZE = 25
 
@@ -71,8 +76,32 @@ const ACTION_LABELS: Record<string, string> = {
   folder_unfavorited:   'Folder unfavorited',
   file_deleted:         'File deleted',
   file_renamed:         'File renamed',
+  file_moved:           'File moved',
   folder_renamed:       'Folder renamed',
+  folder_moved:         'Folder moved',
+  folder_deleted:       'Folder deleted',
+  shared_file_uploaded: 'File uploaded via share',
   storage_allocations_updated: 'Storage allocations updated',
+  'premium.granted':    'Premium granted',
+  'premium.revoked':    'Premium revoked',
+  'premium.expired':    'Premium expired',
+  'premium_subscription.allocation_reverted': 'Premium reverted by admin',
+  role_changed:         'Role changed',
+  account_merged:       'Duplicate accounts merged',
+  account_normalized:   'Account name normalized',
+  file_upload_failed:   'Upload failed',
+  file_rename_failed:   'Rename failed',
+  file_move_failed:     'Move failed',
+  file_delete_failed:   'Delete failed',
+  file_download_failed: 'Download failed',
+  folder_create_failed: 'Folder create failed',
+  folder_rename_failed: 'Folder rename failed',
+  folder_move_failed:   'Folder move failed',
+  folder_delete_failed: 'Folder delete failed',
+  folder_drive_migration_failed: 'Storage change failed',
+  sfs_request_failed:   'API request failed',
+  dav_request_failed:   'File server request failed',
+  request_failed:       'Request failed',
 }
 
 const ACTION_COLOURS: Record<string, string> = {
@@ -86,8 +115,57 @@ const ACTION_COLOURS: Record<string, string> = {
   folder_unfavorited:   'bg-gray-100 text-gray-500',
   file_deleted:         'bg-red-100 text-red-700',
   file_renamed:         'bg-purple-100 text-purple-700',
+  file_moved:           'bg-purple-100 text-purple-700',
   folder_renamed:       'bg-purple-100 text-purple-700',
+  folder_moved:         'bg-purple-100 text-purple-700',
+  folder_deleted:       'bg-red-100 text-red-700',
+  shared_file_uploaded: 'bg-green-100 text-green-700',
   storage_allocations_updated: 'bg-sky-100 text-sky-700',
+  'premium.granted':    'bg-amber-100 text-amber-700',
+  'premium.revoked':    'bg-gray-200 text-gray-700',
+  'premium.expired':    'bg-gray-200 text-gray-700',
+  account_merged:       'bg-indigo-100 text-indigo-700',
+  account_normalized:   'bg-indigo-100 text-indigo-700',
+}
+
+// actionColour: failures share one style, so new *_failed actions need no entry.
+function actionColour(action: string): string {
+  if (action.endsWith('_failed')) return 'bg-red-600 text-white'
+  return ACTION_COLOURS[action] ?? 'bg-gray-100 text-gray-600'
+}
+
+// AuditDetailLine is the one-line summary under an entry: timing and speed
+// for file/folder operations, status + message for failures, cause for
+// premium changes. Allocation breakdowns keep their expandable table below.
+function AuditDetailLine({ log }: { log: AuditLog }) {
+  const d = log.details
+  if (isFailureDetails(d)) {
+    return (
+      <>
+        <p className="text-xs text-red-600 mt-0.5 break-words">{failureSummary(d)}</p>
+        {d.cause && <p className="text-[11px] text-gray-500 mt-0.5 font-mono break-all">{d.cause}</p>}
+      </>
+    )
+  }
+  if (isOperationDetails(d)) {
+    return (
+      <p className="text-xs text-gray-500 mt-0.5">
+        {d.previous_name && <>was “{d.previous_name}” · </>}
+        {operationSummary(d)}
+      </p>
+    )
+  }
+  if (isPremiumDetails(d)) {
+    return <p className="text-xs text-gray-500 mt-0.5">{premiumSummary(d)}</p>
+  }
+  if (isMergeDetails(d)) {
+    return (
+      <p className="text-xs text-gray-500 mt-0.5">
+        now {d.username} · {d.email} · quota {fmtGB(d.quota_bytes)}
+      </p>
+    )
+  }
+  return null
 }
 
 // ── Audit log modal ───────────────────────────────────────────────────────────
@@ -120,7 +198,7 @@ function AuditLogModal({ username, onClose }: { username: string; onClose: () =>
       onClick={onClose}
     >
       <div
-        className="bg-white rounded-xl shadow-2xl w-full max-w-lg mx-4 flex flex-col max-h-[80vh]"
+        className="bg-white rounded-xl shadow-2xl w-full max-w-2xl mx-4 flex flex-col max-h-[80vh]"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
@@ -148,7 +226,7 @@ function AuditLogModal({ username, onClose }: { username: string; onClose: () =>
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 flex-wrap">
                     <span
-                      className={`text-xs font-medium px-2 py-0.5 rounded-full whitespace-nowrap ${ACTION_COLOURS[log.action] ?? 'bg-gray-100 text-gray-600'}`}
+                      className={`text-xs font-medium px-2 py-0.5 rounded-full whitespace-nowrap ${actionColour(log.action)}`}
                     >
                       {ACTION_LABELS[log.action] ?? log.action}
                     </span>
@@ -161,7 +239,8 @@ function AuditLogModal({ username, onClose }: { username: string; onClose: () =>
                   {log.resource_name && (
                     <p className="text-xs text-gray-600 mt-0.5 truncate">{log.resource_name}</p>
                   )}
-                  {log.details && (
+                  <AuditDetailLine log={log} />
+                  {isAllocationDetails(log.details) && (
                     <>
                       <button
                         onClick={() => toggleBreakdown(log.id)}
@@ -169,7 +248,7 @@ function AuditLogModal({ username, onClose }: { username: string; onClose: () =>
                       >
                         {expandedIds.has(log.id) ? 'Hide breakdown' : 'Show breakdown'}
                       </button>
-                      {expandedIds.has(log.id) && <AllocationChangeBreakdown details={log.details} />}
+                      {expandedIds.has(log.id) && isAllocationDetails(log.details) && <AllocationChangeBreakdown details={log.details} />}
                     </>
                   )}
                 </div>
@@ -952,6 +1031,8 @@ function RouteComponent() {
   return (
     <div>
       <h2 className="text-lg font-semibold text-gray-900 mb-6 mt-0">Users</h2>
+
+      <DuplicateAccountsBanner />
 
       <UsersListControls
         search={search} onSearch={(v) => { setSearch(v); setPage(1) }}

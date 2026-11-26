@@ -44,3 +44,17 @@ func ContentDispositionFilename(s string) string {
 	s = strings.ReplaceAll(s, `"`, `'`)
 	return s
 }
+
+// Username canonicalizes a login name. Keycloak stores usernames lower-cased
+// and puts the lower-cased form in every token's preferred_username, so this is
+// the only spelling under which an app DB row will ever be looked up again.
+func Username(s string) string {
+	return strings.ToLower(String(s))
+}
+
+// Email canonicalizes an email address. Keycloak lower-cases these too; the
+// local part is technically case-sensitive, but no provider in use treats it
+// that way and Keycloak already refuses two accounts that differ only by case.
+func Email(s string) string {
+	return strings.ToLower(String(s))
+}

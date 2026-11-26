@@ -16,6 +16,7 @@ import (
 
 	"apollo-sfs.com/api/db"
 	"apollo-sfs.com/api/models"
+	"apollo-sfs.com/api/sanitize"
 )
 
 const defaultInviteTokenTTL = 7 * 24 * time.Hour
@@ -102,6 +103,9 @@ func (s *InviteService) Create(
 		premiumExpiresAt = nil
 	}
 
+	// Lower-cased like every other stored address: Keycloak will hand the
+	// registration back lower-cased whatever was typed here.
+	email = sanitize.Email(email)
 	inv := &models.Invitation{
 		InvitedByUserID:   invitedByUserID,
 		Email:             email,

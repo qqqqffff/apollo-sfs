@@ -632,10 +632,36 @@ health_workers_heartbeat() {
   return "$bad"
 }
 
+# _health_wait_services [TIMEOUT=300] — manager only, real runs only: give
+# services that are still starting (a large image pull shows as "Preparing") time
+# to converge before the snapshot, so a slow start isn't reported as a failure.
+# Never fails; the check right after reports whatever is still wrong.
+_health_wait_services() {
+  local timeout="${1:-300}"
+  [[ "$(node_role)" == manager ]] || return 0
+  is_test && return 0
+  [[ -n "$FIXTURES" ]] && return 0
+  local deadline=$(( $(now_epoch) + timeout )) bad last="" first=1
+  while :; do
+    bad="$(docker stack services "$STACK_NAME" --format '{{.Name}} {{.Replicas}}' 2>/dev/null |
+      awk '{ split($2, r, "/"); if (r[1] != r[2]) printf "%s(%s) ", $1, $2 }')"
+    [[ -z "$bad" ]] && return 0
+    if [[ "$bad" != "$last" ]]; then
+      ((first)) && log_info "Waiting up to ${timeout}s for services that are still starting (large images can take a few minutes to pull)…"
+      first=0
+      log_detail "still starting: $bad"
+      last="$bad"
+    fi
+    (( $(now_epoch) >= deadline )) && return 0
+    sleep 5
+  done
+}
+
 # ── steps ────────────────────────────────────────────────────────────────────
 # deploy_step_health — STEP (deploy/update).
 deploy_step_health() {
   HEALTH_CHECKS=()
+  _health_wait_services 300
   _health_check_node_json
   _health_check_services
   _health_check_http
@@ -685,6 +711,7 @@ restart_step_summary() {
 # restart_step_health — STEP (restart): services + drives + node.json.
 restart_step_health() {
   HEALTH_CHECKS=()
+  _health_wait_services 300
   _health_check_node_json
   _health_check_services
   _health_check_http

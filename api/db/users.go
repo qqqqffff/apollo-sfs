@@ -9,6 +9,7 @@ import (
 	"github.com/lib/pq"
 
 	"apollo-sfs.com/api/models"
+	"apollo-sfs.com/api/sanitize"
 )
 
 const userColumns = `
@@ -79,12 +80,16 @@ func (q *Queries) GetUserByUsername(ctx context.Context, username string) (*mode
 	return u, nil
 }
 
-// GetUserByEmail returns a user by their email address.
+// GetUserByEmail returns a user by their email address, ignoring case (Keycloak
+// treats addresses that way too). An exact match wins if a not-yet-reconciled
+// duplicate means there is more than one.
 // Returns sql.ErrNoRows if no user has that email.
 func (q *Queries) GetUserByEmail(ctx context.Context, email string) (*models.User, error) {
 	row := q.db.QueryRowContext(ctx, `
 		SELECT`+userColumns+`
-		FROM users WHERE email = $1
+		FROM users WHERE LOWER(email) = LOWER($1)
+		ORDER BY (email = $1) DESC, last_seen_at DESC NULLS LAST
+		LIMIT 1
 	`, email)
 	u, err := scanUser(row)
 	if err != nil {
@@ -94,14 +99,17 @@ func (q *Queries) GetUserByEmail(ctx context.Context, email string) (*models.Use
 }
 
 // CreateUser inserts a new user row. The caller is responsible for generating
-// the encrypted_key and key_nonce before calling this.
+// the encrypted_key and key_nonce before calling this, and for passing the
+// username in the canonical form (sanitize.Username) it will use afterwards —
+// it is normalized here as well so no caller can store a spelling that the
+// token's preferred_username will never match.
 func (q *Queries) CreateUser(ctx context.Context, u *models.User) error {
 	_, err := q.db.ExecContext(ctx, `
 		INSERT INTO users (
 			username, email, encrypted_key, key_nonce, master_key_version,
 			storage_used_bytes, storage_quota_bytes, created_at
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
-	`, u.Username, u.Email, u.EncryptedKey, u.KeyNonce, u.MasterKeyVersion,
+	`, sanitize.Username(u.Username), sanitize.Email(u.Email), u.EncryptedKey, u.KeyNonce, u.MasterKeyVersion,
 		u.StorageUsedBytes, u.StorageQuotaBytes,
 	)
 	if err != nil {
@@ -440,21 +448,20 @@ func (q *Queries) SetUserFeedbackAccess(ctx context.Context, username string, en
 	return nil
 }
 
-// UpdateUsername renames a user in the app DB. The caller must also rename the
-// user in Keycloak so the preferred_username claim stays in sync.
+// UpdateUsername renames a user in the app DB, carrying along the columns that
+// hold a username without a foreign key (audit history, preferences, …). The
+// caller must also rename the user in Keycloak so the preferred_username claim
+// stays in sync.
 func (q *Queries) UpdateUsername(ctx context.Context, oldUsername, newUsername string) error {
-	res, err := q.db.ExecContext(ctx,
-		`UPDATE users SET username = $2 WHERE username = $1`,
-		oldUsername, newUsername,
-	)
+	tx, err := q.pool.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("UpdateUsername %q→%q: %w", oldUsername, newUsername, err)
+		return fmt.Errorf("UpdateUsername: begin: %w", err)
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return fmt.Errorf("UpdateUsername: user %q not found", oldUsername)
+	defer func() { _ = tx.Rollback() }()
+	if err := (&Queries{db: tx, pool: q.pool}).renameUser(ctx, oldUsername, newUsername); err != nil {
+		return err
 	}
-	return nil
+	return tx.Commit()
 }
 
 // AddStorageUsed atomically adjusts storage_used_bytes by delta (negative to subtract).

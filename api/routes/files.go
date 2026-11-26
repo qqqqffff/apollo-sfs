@@ -17,6 +17,7 @@ import (
 
 	"apollo-sfs.com/api/db"
 	"apollo-sfs.com/api/models"
+	"apollo-sfs.com/api/routes/middleware"
 	"apollo-sfs.com/api/routes/services"
 	"apollo-sfs.com/api/sanitize"
 )
@@ -78,10 +79,14 @@ func (h *Handler) throttleUploadBody(c *gin.Context, userID string) func() {
 //   - "folder_id" — UUID of the destination folder
 //   - "name"      — optional display name; defaults to the original filename
 func (h *Handler) UploadFile(c *gin.Context) {
+	start := time.Now()
 	release := h.throttleUploadBody(c, c.GetString("userID"))
 	defer release()
 
+	// FormFile parses the whole multipart body, so when it returns the file's
+	// bytes have all arrived: that's the transfer time.
 	fileHeader, err := c.FormFile("file")
+	transfer := time.Since(start)
 	if err != nil {
 		if errors.Is(err, http.ErrMissingFile) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "file field is required"})
@@ -144,6 +149,7 @@ func (h *Handler) UploadFile(c *gin.Context) {
 
 	userID, _ := uuid.Parse(c.GetString("userID"))
 	username := c.GetString("username")
+	middleware.SetAuditResource(c, "file", nil, name)
 
 	// Client-provided Content-Type is a hint; the service re-detects from content.
 	file, err := h.files.Upload(c.Request.Context(), services.UploadInput{
@@ -171,6 +177,7 @@ func (h *Handler) UploadFile(c *gin.Context) {
 			return
 		}
 		log.Printf("upload: %v", err)
+		_ = c.Error(err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "upload failed"})
 		return
 	}
@@ -182,6 +189,7 @@ func (h *Handler) UploadFile(c *gin.Context) {
 		ResourceType:   strPtr("file"),
 		ResourceID:     &file.ID,
 		ResourceName:   &file.Name,
+		Details:        models.NewUploadDetails(start, transfer, file.SizeBytes).JSON(),
 	})
 
 	c.JSON(http.StatusCreated, newUploadResponse(file))
@@ -488,6 +496,7 @@ func (h *Handler) MoveFile(c *gin.Context) {
 
 	userID, _ := uuid.Parse(c.GetString("userID"))
 
+	start := time.Now()
 	moved, err := h.files.Move(c.Request.Context(), fileID, userID, targetFolderID)
 	if err != nil {
 		if errors.Is(err, services.ErrNotFound) {
@@ -498,9 +507,23 @@ func (h *Handler) MoveFile(c *gin.Context) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "target folder not found"})
 			return
 		}
+		_ = c.Error(err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not move file"})
 		return
 	}
+
+	username := c.GetString("username")
+	details := models.NewOperationDetails(start)
+	details.Destination = targetFolderID.String()
+	h.logAudit(db.AuditInput{
+		TargetUsername: username,
+		ActorUsername:  username,
+		Action:         "file_moved",
+		ResourceType:   strPtr("file"),
+		ResourceID:     &fileID,
+		ResourceName:   &moved.Name,
+		Details:        details.JSON(),
+	})
 
 	c.JSON(http.StatusOK, moved)
 }
@@ -534,17 +557,27 @@ func (h *Handler) UpdateFile(c *gin.Context) {
 
 	userID, _ := uuid.Parse(c.GetString("userID"))
 
+	// The old name, for the audit entry; read before the timed operation.
+	var previousName string
+	if meta, err := h.files.GetMetadata(c.Request.Context(), fileID, userID); err == nil && meta != nil {
+		previousName = meta.Name
+	}
+
+	start := time.Now()
 	updated, err := h.files.Rename(c.Request.Context(), fileID, userID, req.Name)
 	if err != nil {
 		if errors.Is(err, services.ErrNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "file not found"})
 			return
 		}
+		_ = c.Error(err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not rename file"})
 		return
 	}
 
 	username := c.GetString("username")
+	details := models.NewOperationDetails(start)
+	details.PreviousName = previousName
 	h.logAudit(db.AuditInput{
 		TargetUsername: username,
 		ActorUsername:  username,
@@ -552,6 +585,7 @@ func (h *Handler) UpdateFile(c *gin.Context) {
 		ResourceType:   strPtr("file"),
 		ResourceID:     &fileID,
 		ResourceName:   &updated.Name,
+		Details:        details.JSON(),
 	})
 
 	c.JSON(http.StatusOK, updated)
@@ -577,11 +611,17 @@ func (h *Handler) DeleteFile(c *gin.Context) {
 		deletedName = meta.Name
 	}
 
+	if deletedName != "" {
+		middleware.SetAuditResource(c, "file", &fileID, deletedName)
+	}
+
+	start := time.Now()
 	if err := h.files.Delete(c.Request.Context(), fileID, userID, username); err != nil {
 		if errors.Is(err, services.ErrNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "file not found"})
 			return
 		}
+		_ = c.Error(err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not delete file"})
 		return
 	}
@@ -592,6 +632,7 @@ func (h *Handler) DeleteFile(c *gin.Context) {
 		Action:         "file_deleted",
 		ResourceType:   strPtr("file"),
 		ResourceID:     &fileID,
+		Details:        models.NewOperationDetails(start).JSON(),
 	}
 	if deletedName != "" {
 		entry.ResourceName = &deletedName
@@ -636,6 +677,7 @@ func (h *Handler) InitUpload(c *gin.Context) {
 	}
 
 	username := c.GetString("username")
+	middleware.SetAuditResource(c, "file", nil, name)
 	if err := h.files.CheckQuota(c.Request.Context(), username, req.TotalSize); err != nil {
 		if errors.Is(err, services.ErrQuotaExceeded) {
 			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": err.Error()})
@@ -697,8 +739,11 @@ func (h *Handler) UploadChunk(c *gin.Context) {
 		return
 	}
 
+	middleware.SetAuditResource(c, "file", nil, sess.Name)
 	release := h.throttleUploadBody(c, userID.String())
 	defer release()
+	endTransfer := sess.BeginTransfer()
+	defer endTransfer()
 
 	index, err := strconv.Atoi(c.PostForm("chunk_index"))
 	if err != nil || index < 0 || index >= sess.TotalChunks {
@@ -720,6 +765,7 @@ func (h *Handler) UploadChunk(c *gin.Context) {
 	defer src.Close()
 
 	data, err := io.ReadAll(src)
+	endTransfer()
 	if err != nil {
 		log.Printf("upload chunk %d for %s: read: %v", index, uploadID, err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "upload interrupted — please retry"})
@@ -760,6 +806,8 @@ func (h *Handler) CompleteUpload(c *gin.Context) {
 		return
 	}
 
+	middleware.SetAuditUser(c, sess.Username)
+	middleware.SetAuditResource(c, "file", nil, sess.Name)
 	if !sess.AllDispatched() {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":      "not all chunks dispatched",
@@ -779,6 +827,7 @@ func (h *Handler) CompleteUpload(c *gin.Context) {
 			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 		} else {
 			log.Printf("complete upload %s: %v", uploadID, err)
+			_ = c.Error(err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "upload failed"})
 		}
 		return
@@ -793,6 +842,7 @@ func (h *Handler) CompleteUpload(c *gin.Context) {
 		ResourceType:   strPtr("file"),
 		ResourceID:     &file.ID,
 		ResourceName:   &file.Name,
+		Details:        chunkedUploadDetails(sess, file).JSON(),
 	})
 
 	c.JSON(http.StatusCreated, newUploadResponse(file))
@@ -901,6 +951,7 @@ func (h *Handler) servePresigned(c *gin.Context, inline bool) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid presigned token"})
 		return
 	}
+	middleware.SetAuditUser(c, claim.Username)
 
 	userID, err := uuid.Parse(claim.UserID)
 	if err != nil {
@@ -1006,10 +1057,13 @@ func (h *Handler) UploadFilePresigned(c *gin.Context) {
 		return
 	}
 
+	start := time.Now()
+	middleware.SetAuditUser(c, claim.Username)
 	release := h.throttleUploadBody(c, claim.UserID)
 	defer release()
 
 	fileHeader, err := c.FormFile("file")
+	transfer := time.Since(start)
 	if err != nil {
 		if errors.Is(err, http.ErrMissingFile) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "file field is required"})
@@ -1055,6 +1109,7 @@ func (h *Handler) UploadFilePresigned(c *gin.Context) {
 		return
 	}
 
+	middleware.SetAuditResource(c, "file", nil, name)
 	src, err := fileHeader.Open()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not read uploaded file"})
@@ -1086,6 +1141,7 @@ func (h *Handler) UploadFilePresigned(c *gin.Context) {
 			return
 		}
 		log.Printf("presigned upload: %v", err)
+		_ = c.Error(err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "upload failed"})
 		return
 	}
@@ -1097,6 +1153,7 @@ func (h *Handler) UploadFilePresigned(c *gin.Context) {
 		ResourceType:   strPtr("file"),
 		ResourceID:     &file.ID,
 		ResourceName:   &file.Name,
+		Details:        models.NewUploadDetails(start, transfer, file.SizeBytes).JSON(),
 	})
 
 	c.JSON(http.StatusCreated, newUploadResponse(file))
@@ -1239,8 +1296,12 @@ func (h *Handler) UploadChunkPresigned(c *gin.Context) {
 		return
 	}
 
+	middleware.SetAuditUser(c, sess.Username)
+	middleware.SetAuditResource(c, "file", nil, sess.Name)
 	release := h.throttleUploadBody(c, claim.UserID)
 	defer release()
+	endTransfer := sess.BeginTransfer()
+	defer endTransfer()
 
 	index, err := strconv.Atoi(c.PostForm("chunk_index"))
 	if err != nil || index < 0 || index >= sess.TotalChunks {
@@ -1262,6 +1323,7 @@ func (h *Handler) UploadChunkPresigned(c *gin.Context) {
 	defer src.Close()
 
 	data, err := io.ReadAll(src)
+	endTransfer()
 	if err != nil {
 		log.Printf("presigned upload chunk %d for %s: read: %v", index, uploadID, err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "upload interrupted — please retry"})
@@ -1320,6 +1382,8 @@ func (h *Handler) CompleteUploadPresigned(c *gin.Context) {
 		return
 	}
 
+	middleware.SetAuditUser(c, sess.Username)
+	middleware.SetAuditResource(c, "file", nil, sess.Name)
 	if !sess.AllDispatched() {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":      "not all chunks dispatched",
@@ -1337,6 +1401,7 @@ func (h *Handler) CompleteUploadPresigned(c *gin.Context) {
 			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 		} else {
 			log.Printf("complete presigned upload %s: %v", uploadID, err)
+			_ = c.Error(err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "upload failed"})
 		}
 		return
@@ -1351,7 +1416,16 @@ func (h *Handler) CompleteUploadPresigned(c *gin.Context) {
 		ResourceType:   strPtr("file"),
 		ResourceID:     &file.ID,
 		ResourceName:   &file.Name,
+		Details:        chunkedUploadDetails(sess, file).JSON(),
 	})
 
 	c.JSON(http.StatusCreated, newUploadResponse(file))
+}
+
+// chunkedUploadDetails describes a finished chunked upload: the whole session
+// from init to complete, and the share of it spent actually receiving bytes.
+func chunkedUploadDetails(sess *services.UploadSession, file *models.File) models.OperationAuditDetails {
+	d := models.NewUploadDetails(sess.StartedAt(), sess.TransferDuration(), file.SizeBytes)
+	d.Chunks = sess.TotalChunks
+	return d
 }

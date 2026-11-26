@@ -49,10 +49,18 @@ type UploadSession struct {
 	createdAt time.Time
 	wg        sync.WaitGroup
 
+	// Transfer clock: total time at least one chunk of this upload was being
+	// received. Parallel chunks overlap, and a paused upload has gaps, so the
+	// wall-clock span of the session would misstate the transfer rate.
+	xferMu     sync.Mutex
+	xferActive int
+	xferSince  time.Time
+	xferTotal  time.Duration
+
 	mu         sync.Mutex
-	dispatched map[int]struct{}    // chunk indices for which a goroutine was launched
+	dispatched map[int]struct{}     // chunk indices for which a goroutine was launched
 	parts      []minio.CompletePart // indexed by chunk index; filled as goroutines complete
-	partErr    error               // first error reported by any goroutine
+	partErr    error                // first error reported by any goroutine
 }
 
 // UploadSessionStore holds active sessions and cleans up expired ones hourly.
@@ -106,6 +114,42 @@ func (s *UploadSessionStore) Delete(id uuid.UUID) {
 		return
 	}
 	v.(*UploadSession).Zero()
+}
+
+// StartedAt is when the session was created (the upload's init request).
+func (sess *UploadSession) StartedAt() time.Time { return sess.createdAt }
+
+// BeginTransfer marks a chunk as being received; call the returned func once
+// its bytes are in. Overlapping chunks are counted once.
+func (sess *UploadSession) BeginTransfer() (end func()) {
+	sess.xferMu.Lock()
+	if sess.xferActive == 0 {
+		sess.xferSince = time.Now()
+	}
+	sess.xferActive++
+	sess.xferMu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			sess.xferMu.Lock()
+			sess.xferActive--
+			if sess.xferActive == 0 {
+				sess.xferTotal += time.Since(sess.xferSince)
+			}
+			sess.xferMu.Unlock()
+		})
+	}
+}
+
+// TransferDuration is the time spent receiving chunks so far.
+func (sess *UploadSession) TransferDuration() time.Duration {
+	sess.xferMu.Lock()
+	defer sess.xferMu.Unlock()
+	d := sess.xferTotal
+	if sess.xferActive > 0 {
+		d += time.Since(sess.xferSince)
+	}
+	return d
 }
 
 // DispatchChunk records index as dispatched and increments the WaitGroup.

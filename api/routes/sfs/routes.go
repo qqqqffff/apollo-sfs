@@ -2,6 +2,7 @@ package sfs
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -70,6 +71,11 @@ func (h *Handler) requireScope(c *gin.Context, op, key string) bool {
 }
 
 func (h *Handler) audit(ctx *gin.Context, user *models.User, action string, key string) {
+	h.auditTimed(ctx, user, action, key, time.Time{})
+}
+
+// auditTimed is audit for an operation that started at start (zero: untimed).
+func (h *Handler) auditTimed(ctx *gin.Context, user *models.User, action string, key string, start time.Time) {
 	keyIDRaw, _ := ctx.Get(ctxAPIKeyID)
 	keyID, _ := keyIDRaw.(uuid.UUID)
 	resourceType := "sfs_object"
@@ -81,9 +87,18 @@ func (h *Handler) audit(ctx *gin.Context, user *models.User, action string, key 
 		ResourceType:   &resourceType,
 		ResourceID:     uuidPtrOrNil(keyID),
 		ResourceName:   &resourceName,
+		Details:        timedDetails(start),
 	}); err != nil {
 		log.Printf("sfs audit %q: %v", action, err)
 	}
+}
+
+// timedDetails renders the duration since start, or nil when untimed.
+func timedDetails(start time.Time) json.RawMessage {
+	if start.IsZero() {
+		return nil
+	}
+	return models.NewOperationDetails(start).JSON()
 }
 
 func uuidPtrOrNil(u uuid.UUID) *uuid.UUID {
@@ -319,11 +334,13 @@ func (h *Handler) Delete(c *gin.Context) {
 	}
 	snapshot := BuildMetadata(file, user, parsed.FullPath)
 	userID, _ := uuid.Parse(user.Username)
+	start := time.Now()
 	if err := h.files.Delete(c.Request.Context(), file.ID, userID, user.Username); err != nil {
+		_ = c.Error(err)
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
 		return
 	}
-	h.audit(c, user, "sfs.delete", parsed.FullPath)
+	h.auditTimed(c, user, "sfs.delete", parsed.FullPath, start)
 	c.JSON(http.StatusOK, gin.H{"metadata": snapshot})
 }
 
@@ -441,6 +458,7 @@ func (h *Handler) Move(c *gin.Context) {
 		return
 	}
 	userID, _ := uuid.Parse(user.Username)
+	start := time.Now()
 	q, tx, err := h.pool.ForUser(c.Request.Context(), userID)
 	if err != nil {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "begin tx"})
@@ -479,7 +497,7 @@ func (h *Handler) Move(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "commit"})
 		return
 	}
-	h.audit(c, user, "sfs.move", src.FullPath+" -> "+dst.FullPath)
+	h.auditTimed(c, user, "sfs.move", src.FullPath+" -> "+dst.FullPath, start)
 	c.JSON(http.StatusOK, gin.H{"metadata": BuildMetadata(file, user, dst.FullPath)})
 }
 

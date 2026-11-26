@@ -1,16 +1,20 @@
 package routes
 
 import (
+	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
 	"apollo-sfs.com/api/db"
+	"apollo-sfs.com/api/models"
+	"apollo-sfs.com/api/routes/middleware"
 	"apollo-sfs.com/api/routes/services"
 	"apollo-sfs.com/api/sanitize"
 )
@@ -148,6 +152,8 @@ func (h *Handler) CreateFolder(c *gin.Context) {
 		driveID = &did
 	}
 
+	middleware.SetAuditResource(c, "folder", nil, req.Name)
+	start := time.Now()
 	folder, err := h.folders.Create(c.Request.Context(), userID, parentID, req.Name, req.Kind, username, driveID)
 	if err != nil {
 		switch {
@@ -158,6 +164,7 @@ func (h *Handler) CreateFolder(c *gin.Context) {
 		case errors.Is(err, services.ErrDriveNotAllocated):
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		default:
+			_ = c.Error(err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "could not create folder"})
 		}
 		return
@@ -170,6 +177,7 @@ func (h *Handler) CreateFolder(c *gin.Context) {
 		ResourceType:   strPtr("folder"),
 		ResourceID:     &folder.ID,
 		ResourceName:   &folder.Name,
+		Details:        models.NewOperationDetails(start).JSON(),
 	})
 
 	c.JSON(http.StatusCreated, folder)
@@ -203,7 +211,9 @@ func (h *Handler) UpdateFolder(c *gin.Context) {
 	}
 
 	userID, _ := uuid.Parse(c.GetString("userID"))
+	previousName := h.folderName(c, folderID, userID)
 
+	start := time.Now()
 	updated, err := h.folders.Rename(c.Request.Context(), folderID, userID, req.Name)
 	if err != nil {
 		switch {
@@ -212,6 +222,7 @@ func (h *Handler) UpdateFolder(c *gin.Context) {
 		case errors.Is(err, services.ErrDuplicateFolderName):
 			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 		default:
+			_ = c.Error(err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "could not rename folder"})
 		}
 		return
@@ -225,6 +236,11 @@ func (h *Handler) UpdateFolder(c *gin.Context) {
 		ResourceType:   strPtr("folder"),
 		ResourceID:     &folderID,
 		ResourceName:   &updated.Name,
+		Details: func() json.RawMessage {
+			d := models.NewOperationDetails(start)
+			d.PreviousName = previousName
+			return d.JSON()
+		}(),
 	})
 
 	c.JSON(http.StatusOK, updated)
@@ -261,6 +277,7 @@ func (h *Handler) MoveFolder(c *gin.Context) {
 	userID, _ := uuid.Parse(c.GetString("userID"))
 	username := c.GetString("username")
 
+	start := time.Now()
 	updated, err := h.folders.Move(c.Request.Context(), folderID, targetID, userID, username)
 	if err != nil {
 		switch {
@@ -273,10 +290,23 @@ func (h *Handler) MoveFolder(c *gin.Context) {
 		case errors.Is(err, services.ErrCrossDriveMove):
 			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 		default:
+			_ = c.Error(err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "could not move folder"})
 		}
 		return
 	}
+
+	details := models.NewOperationDetails(start)
+	details.Destination = targetID.String()
+	h.logAudit(db.AuditInput{
+		TargetUsername: username,
+		ActorUsername:  username,
+		Action:         "folder_moved",
+		ResourceType:   strPtr("folder"),
+		ResourceID:     &folderID,
+		ResourceName:   &updated.Name,
+		Details:        details.JSON(),
+	})
 
 	c.JSON(http.StatusOK, updated)
 }
@@ -294,7 +324,12 @@ func (h *Handler) DeleteFolder(c *gin.Context) {
 	}
 
 	userID, _ := uuid.Parse(c.GetString("userID"))
+	name := h.folderName(c, folderID, userID)
+	if name != "" {
+		middleware.SetAuditResource(c, "folder", &folderID, name)
+	}
 
+	start := time.Now()
 	if err := h.folders.Delete(c.Request.Context(), folderID, userID); err != nil {
 		switch {
 		case errors.Is(err, services.ErrFolderNotFound):
@@ -302,10 +337,25 @@ func (h *Handler) DeleteFolder(c *gin.Context) {
 		case errors.Is(err, services.ErrFolderNotEmpty):
 			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 		default:
+			_ = c.Error(err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "could not delete folder"})
 		}
 		return
 	}
+
+	username := c.GetString("username")
+	entry := db.AuditInput{
+		TargetUsername: username,
+		ActorUsername:  username,
+		Action:         "folder_deleted",
+		ResourceType:   strPtr("folder"),
+		ResourceID:     &folderID,
+		Details:        models.NewOperationDetails(start).JSON(),
+	}
+	if name != "" {
+		entry.ResourceName = &name
+	}
+	h.logAudit(entry)
 
 	c.JSON(http.StatusOK, gin.H{"message": "folder deleted"})
 }
@@ -419,6 +469,16 @@ func (h *Handler) GetLatestFolderDriveMigration(c *gin.Context) {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+// folderName returns a folder's current name for an audit entry, or "" if it
+// can't be read (the operation itself then reports the real error).
+func (h *Handler) folderName(c *gin.Context, folderID, userID uuid.UUID) string {
+	chain, err := h.folders.GetAncestors(c.Request.Context(), folderID, userID)
+	if err != nil || len(chain) == 0 || chain[len(chain)-1].ID != folderID {
+		return ""
+	}
+	return chain[len(chain)-1].Name
+}
 
 // parseDriveFilter reads the optional ?drive=<uuid> (and ?include_unassigned)
 // query params used by the tier-first browser to scope the virtual root to a

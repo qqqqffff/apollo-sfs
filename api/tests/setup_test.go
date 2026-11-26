@@ -379,6 +379,7 @@ type stubAdminQuerier struct {
 	users              []models.User
 	user               *models.User
 	userErr            error
+	foldMatches        []models.User // FindUsersByUsernameFold; nil = just user
 	submissions        []models.InterestSubmission
 	submissionsErr     error
 	singleSub          *models.InterestSubmission
@@ -432,6 +433,15 @@ func (s *stubAdminQuerier) ListAdminUsers(_ context.Context, _ db.ListUsersFilte
 }
 func (s *stubAdminQuerier) GetUserByUsername(_ context.Context, _ string) (*models.User, error) {
 	return s.user, s.userErr
+}
+func (s *stubAdminQuerier) FindUsersByUsernameFold(_ context.Context, _ string) ([]models.User, error) {
+	if s.foldMatches != nil {
+		return s.foldMatches, nil
+	}
+	if s.user == nil {
+		return nil, nil
+	}
+	return []models.User{*s.user}, nil
 }
 func (s *stubAdminQuerier) UpdateUserQuota(_ context.Context, _ string, _ int64) error {
 	return s.updateQuotaErr

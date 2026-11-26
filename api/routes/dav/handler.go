@@ -36,6 +36,7 @@ import (
 
 	"apollo-sfs.com/api/db"
 	"apollo-sfs.com/api/models"
+	"apollo-sfs.com/api/routes/middleware"
 	"apollo-sfs.com/api/routes/services"
 	"apollo-sfs.com/api/routes/sfs"
 )
@@ -74,6 +75,7 @@ func (h *Handler) Register(r gin.IRouter, mw ...gin.HandlerFunc) {
 
 // dispatch authenticates the request and routes it by HTTP method.
 func (h *Handler) dispatch(c *gin.Context) {
+	c.Set(ctxDAVStart, time.Now())
 	switch c.Request.Method {
 	case http.MethodOptions:
 		// Answer OPTIONS before auth: Windows probes it pre-credentials.
@@ -88,6 +90,7 @@ func (h *Handler) dispatch(c *gin.Context) {
 	if !ok {
 		return
 	}
+	middleware.SetAuditUser(c, link.Username)
 
 	switch c.Request.Method {
 	case http.MethodGet, http.MethodHead:
@@ -523,6 +526,9 @@ func (h *Handler) upload(c *gin.Context, link *models.FileServerLink, user *mode
 	}
 
 	driveID := link.DriveID
+	// Upload reads the whole body before encrypting, so the moment the body
+	// hits EOF is when the transfer finished.
+	body := &timedReader{r: http.MaxBytesReader(c.Writer, c.Request.Body, maxUploadBytes), start: time.Now()}
 	file, err := h.files.Upload(c.Request.Context(), services.UploadInput{
 		Username:       link.Username,
 		UserID:         link.UserID,
@@ -530,7 +536,7 @@ func (h *Handler) upload(c *gin.Context, link *models.FileServerLink, user *mode
 		Name:           leaf,
 		IgnoreRedirect: true,
 		Source:         "file_server",
-		Reader:         http.MaxBytesReader(c.Writer, c.Request.Body, maxUploadBytes),
+		Reader:         body,
 		RequireDriveID: &driveID,
 	})
 	if err != nil {
@@ -544,13 +550,14 @@ func (h *Handler) upload(c *gin.Context, link *models.FileServerLink, user *mode
 			c.String(http.StatusConflict, "a file with this name was just created — retry to overwrite")
 		default:
 			log.Printf("dav: upload %q: %v", leaf, err)
+			_ = c.Error(err)
 			c.String(http.StatusInternalServerError, "upload failed")
 		}
 		return
 	}
 	h.links.Touch(c.Request.Context(), link.ID)
+	c.Set(ctxDAVUpload, davUpload{transfer: body.elapsed(), size: file.SizeBytes})
 	h.audit(c, link, "dav.upload", strings.Join(segments, "/"))
-	_ = file
 	if existing != nil {
 		c.Status(http.StatusNoContent) // replaced
 	} else {
@@ -632,6 +639,11 @@ func (h *Handler) audit(c *gin.Context, link *models.FileServerLink, action, pat
 	resourceType := "file_server_link"
 	resourceID := link.ID
 	resourceName := path
+	start, _ := c.Value(ctxDAVStart).(time.Time)
+	details := models.NewOperationDetails(start)
+	if u, ok := c.Value(ctxDAVUpload).(davUpload); ok {
+		details = models.NewUploadDetails(start, u.transfer, u.size)
+	}
 	if err := h.pool.InsertAuditLog(c.Request.Context(), db.AuditInput{
 		TargetUsername: link.Username,
 		ActorUsername:  link.Username,
@@ -639,7 +651,42 @@ func (h *Handler) audit(c *gin.Context, link *models.FileServerLink, action, pat
 		ResourceType:   &resourceType,
 		ResourceID:     &resourceID,
 		ResourceName:   &resourceName,
+		Details:        details.JSON(),
 	}); err != nil {
 		log.Printf("dav audit %q: %v", action, err)
 	}
+}
+
+// Context keys for the audit entry's timing (see audit).
+const (
+	ctxDAVStart  = "davStart"
+	ctxDAVUpload = "davUpload"
+)
+
+type davUpload struct {
+	transfer time.Duration
+	size     int64
+}
+
+// timedReader notes when its source is exhausted: for a streamed request body,
+// when the last byte of the upload arrived.
+type timedReader struct {
+	r     io.Reader
+	start time.Time
+	done  time.Time
+}
+
+func (t *timedReader) Read(p []byte) (int, error) {
+	n, err := t.r.Read(p)
+	if err == io.EOF && t.done.IsZero() {
+		t.done = time.Now()
+	}
+	return n, err
+}
+
+func (t *timedReader) elapsed() time.Duration {
+	if t.done.IsZero() {
+		return time.Since(t.start)
+	}
+	return t.done.Sub(t.start)
 }
